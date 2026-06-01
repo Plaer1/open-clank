@@ -28373,14 +28373,6 @@ body.notes-view .chat-container { flex: 1; min-width: 0; }
   body.notes-view .hamburger-btn {
     display: none !important;
   }
-  body.notes-view #notes-close-btn {
-    display: inline-flex !important;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    font-weight: 300;
-    line-height: 1;
-  }
 }
 /* ── Mobile notes UX ────────────────────────────────────
    Tiles become read-only previews on touch ≤768px wide.
