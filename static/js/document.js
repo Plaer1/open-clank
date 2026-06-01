@@ -2824,8 +2824,9 @@ import * as Modals from './modalManager.js';
           onAction: () => { canceled = true; },
         });
       }
-      detachedEmailDoc = _detachActiveEmailForBackground(sendDocId);
-      await _sleep(1200);
+      await _sleep(1000);
+      if (!canceled) detachedEmailDoc = _detachActiveEmailForBackground(sendDocId);
+      await _sleep(200);
       if (canceled) {
         _restoreDetachedEmailDoc(detachedEmailDoc);
         detachedEmailDoc = null;
@@ -2837,6 +2838,7 @@ import * as Modals from './modalManager.js';
       if (uiModule) {
         uiModule.showToast('Message sent', {
           duration: 2200,
+          leadingIcon: 'check',
           action: 'Undo',
           actionHint: 'undo send',
           onAction: () => { undone = true; },
@@ -2868,6 +2870,7 @@ import * as Modals from './modalManager.js';
         if (uiModule) {
           uiModule.showToast('Message sent', {
             duration: 7000,
+            leadingIcon: 'check',
             action: 'View Message',
             onAction: () => {
               import('./emailLibrary.js').then(mod => {

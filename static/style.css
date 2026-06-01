@@ -3534,6 +3534,32 @@ body.bg-pattern-sparkles {
       max-width: min(360px, calc(100vw - 32px));
     }
     .toast.show { opacity:1; transform: translateX(0); }
+    .toast .toast-checkmark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-right: 7px;
+      color: var(--green, #50fa7b);
+      vertical-align: -3px;
+      transform: scale(0.65);
+      opacity: 0;
+      animation: toastCheckPop 360ms cubic-bezier(0.2, 0.9, 0.25, 1.25) forwards;
+    }
+    .toast .toast-checkmark svg polyline {
+      stroke-dasharray: 24;
+      stroke-dashoffset: 24;
+      animation: toastCheckDraw 420ms ease-out 120ms forwards;
+    }
+    @keyframes toastCheckPop {
+      0% { opacity: 0; transform: scale(0.65); }
+      65% { opacity: 1; transform: scale(1.16); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes toastCheckDraw {
+      to { stroke-dashoffset: 0; }
+    }
     .toast.exiting {
       opacity: 0;
       transform: translateX(-120%);
@@ -10654,6 +10680,8 @@ textarea.memory-add-input {
   flex: 1;
   min-width: 0;
   max-width: 70vw;
+  container-type: inline-size;
+  container-name: docpane;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -14209,6 +14237,30 @@ body.left-dock-active {
 #email-lib-modal.email-lib-fullscreen .modal-content,
 #doclib-modal.doclib-fullscreen .doclib-modal-content {
   transition: none !important;
+}
+.modal.modal-right-docked .email-reader-header,
+.modal.modal-left-docked .email-reader-header {
+  flex-direction: column;
+  gap: 6px;
+}
+.modal.modal-right-docked .email-reader-actions,
+.modal.modal-left-docked .email-reader-actions {
+  align-self: flex-end;
+}
+.modal.modal-right-docked .email-reader-meta-row,
+.modal.modal-left-docked .email-reader-meta-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+  align-items: start;
+}
+.modal.modal-right-docked .email-reader-meta-row strong,
+.modal.modal-left-docked .email-reader-meta-row strong {
+  min-width: 0;
+}
+.modal.modal-right-docked .recipient-chip,
+.modal.modal-left-docked .recipient-chip {
+  max-width: 100%;
 }
 .archive-list {
   margin-top: 8px;
@@ -26101,6 +26153,27 @@ button .spinner-whirlpool {
   border-color: var(--accent-primary, var(--red));
   max-width: 500px;
 }
+@container docpane (max-width: 460px) {
+  .email-reader-header {
+    flex-direction: column;
+    gap: 6px;
+  }
+  .email-reader-actions {
+    align-self: flex-end;
+  }
+  .email-reader-meta-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+    align-items: start;
+  }
+  .email-reader-meta-row strong {
+    min-width: 0;
+  }
+  .recipient-chip {
+    max-width: 100%;
+  }
+}
 .email-reader-actions {
   display: flex; gap: 4px; flex-wrap: nowrap; align-items: center;
   flex-shrink: 0;
@@ -27564,6 +27637,21 @@ body.doc-find-active mark.doc-find-mark.current {
   min-width: 0;
 }
 .email-field input:focus { border-color: var(--accent, #4a9eff); }
+@container docpane (max-width: 460px) {
+  .doc-email-header .email-field {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 3px;
+    align-items: stretch;
+  }
+  .doc-email-header .email-field label {
+    min-width: 0;
+    text-align: left;
+  }
+  .doc-email-header .email-field input {
+    width: 100%;
+  }
+}
 /* Cc toggle and attach button are absolute so they don't steal width from the To input */
 .email-field .email-cc-toggle {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
