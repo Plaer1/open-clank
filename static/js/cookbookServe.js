@@ -8,6 +8,7 @@ import uiModule from './ui.js';
 import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js';
+import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -193,18 +194,19 @@ function _rerenderCachedModels() {
   list.querySelectorAll('.hwfit-cached-menu-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      // Toggle: if a dropdown for THIS button is already open, close it.
+      // Toggle: if a dropdown for THIS button is already open, close it
+      // (through its own dismiss so the Escape-stack entry goes with it).
       const existing = document.querySelector('.hwfit-cached-dropdown');
       if (existing && existing._anchor === btn) {
-        existing.remove();
-        btn.classList.remove('cookbook-menu-active');
+        if (typeof existing._dismiss === 'function') existing._dismiss();
+        else { existing.remove(); btn.classList.remove('cookbook-menu-active'); }
         return;
       }
       // Otherwise close any other open menu (and clear its anchor's active
       // state) before opening fresh.
       document.querySelectorAll('.hwfit-cached-dropdown').forEach(d => {
         if (d._anchor) d._anchor.classList.remove('cookbook-menu-active');
-        d.remove();
+        if (typeof d._dismiss === 'function') d._dismiss(); else d.remove();
       });
       const item = btn.closest('.memory-item');
       const repo = item?.dataset.repo;
@@ -215,6 +217,9 @@ function _rerenderCachedModels() {
       dropdown.className = 'hwfit-cached-dropdown';
       dropdown._anchor = btn;
       btn.classList.add('cookbook-menu-active');
+      // Shared close — used by every item, the mobile Cancel, outside-click,
+      // and the Escape arbiter (reassigned to the registry-aware close below).
+      let closeDropdown = () => { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); };
       const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
       const _serveIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
       const _retryIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
@@ -230,8 +235,7 @@ function _rerenderCachedModels() {
         div.className = 'dropdown-item-compact' + (opt.danger ? ' dropdown-item-danger' : '');
         div.innerHTML = _di(opt.icon) + '<span>' + opt.label + '</span>';
         div.addEventListener('click', () => {
-          dropdown.remove();
-          btn.classList.remove('cookbook-menu-active');
+          closeDropdown();
           if (opt.action === 'serve') item.click();
           else if (opt.action === 'delete') _deleteCachedModel(repo, item, false, m);
           else if (opt.action === 'retry') _retryCachedModel(repo, m);
@@ -264,10 +268,7 @@ function _rerenderCachedModels() {
       const cancelDiv = document.createElement('div');
       cancelDiv.className = 'dropdown-item-compact dropdown-cancel-mobile';
       cancelDiv.innerHTML = _di(_cancelIco) + '<span>Cancel</span>';
-      cancelDiv.addEventListener('click', () => {
-        dropdown.remove();
-        btn.classList.remove('cookbook-menu-active');
-      });
+      cancelDiv.addEventListener('click', () => { closeDropdown(); });
       dropdown.appendChild(cancelDiv);
       const rect = btn.getBoundingClientRect();
       dropdown.style.cssText = `position:fixed;z-index:10001;visibility:hidden;top:0;right:${window.innerWidth-rect.right}px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,0.3);font-size:12px;`;
@@ -290,8 +291,7 @@ function _rerenderCachedModels() {
         dropdown.style.top = top + 'px';
         dropdown.style.visibility = '';
       }
-      const close = (ev) => { if (!dropdown.contains(ev.target) && ev.target !== btn) { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); document.removeEventListener('click', close, true); } };
-      setTimeout(() => document.addEventListener('click', close, true), 0);
+      closeDropdown = bindMenuDismiss(dropdown, () => { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); }, (ev) => !dropdown.contains(ev.target) && ev.target !== btn);
     });
   });
 
@@ -666,10 +666,11 @@ function _rerenderCachedModels() {
       // reflects the stored presets. Standard Odysseus .dropdown look, positioned
       // fixed at the toggle and right-aligned to it.
       function _showSavedConfigMenu(anchor) {
-        document.querySelectorAll('.cookbook-saved-menu').forEach(d => d.remove());
+        document.querySelectorAll('.cookbook-saved-menu').forEach(d => { if (typeof d._dismiss === 'function') d._dismiss(); else d.remove(); });
         const modelSlots = _presetsForModel(_loadPresets(), repo);
         const dropdown = document.createElement('div');
         dropdown.className = 'dropdown cookbook-saved-menu';
+        let closeMenu = () => { dropdown.remove(); anchor.classList.remove('cookbook-menu-active'); };
         const rect = anchor.getBoundingClientRect();
         const minW = 190;
         // Cap width/height to the viewport and start hidden — we clamp the final
@@ -710,7 +711,7 @@ function _rerenderCachedModels() {
             if (e.target === del) return;
             e.stopPropagation();
             // Close the menu FIRST so it always dismisses, even if loading throws.
-            dropdown.remove();
+            closeMenu();
             _loadSlotIntoPanel(idx);
             // Confirm the click landed — loading is silent otherwise, so it was
             // unclear the settings actually changed.
@@ -751,14 +752,7 @@ function _rerenderCachedModels() {
         dropdown.style.left = `${left}px`;
         dropdown.style.top = `${top}px`;
         dropdown.style.visibility = '';
-        const close = (ev) => {
-          if (!dropdown.contains(ev.target) && ev.target !== anchor && !anchor.contains(ev.target)) {
-            dropdown.remove();
-            anchor.classList.remove('cookbook-menu-active');
-            document.removeEventListener('click', close, true);
-          }
-        };
-        setTimeout(() => document.addEventListener('click', close, true), 10);
+        closeMenu = bindMenuDismiss(dropdown, () => { dropdown.remove(); anchor.classList.remove('cookbook-menu-active'); }, (ev) => !dropdown.contains(ev.target) && ev.target !== anchor && !anchor.contains(ev.target));
       }
 
       // "Save" segment — save the current config directly.
@@ -766,7 +760,7 @@ function _rerenderCachedModels() {
       if (savedSaveBtn) {
         savedSaveBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          document.querySelectorAll('.cookbook-saved-menu').forEach(d => d.remove());
+          document.querySelectorAll('.cookbook-saved-menu').forEach(dismissOrRemove);
           await _saveCurrentConfig();
         });
       }
@@ -775,9 +769,10 @@ function _rerenderCachedModels() {
       if (savedArrowBtn) {
         savedArrowBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (document.querySelector('.cookbook-saved-menu')) {
-            document.querySelectorAll('.cookbook-saved-menu').forEach(d => d.remove());
-            savedArrowBtn.classList.remove('cookbook-menu-active');
+          const openSaved = document.querySelector('.cookbook-saved-menu');
+          if (openSaved) {
+            if (typeof openSaved._dismiss === 'function') openSaved._dismiss();
+            else { openSaved.remove(); savedArrowBtn.classList.remove('cookbook-menu-active'); }
             return;
           }
           savedArrowBtn.classList.add('cookbook-menu-active');
@@ -822,9 +817,10 @@ function _rerenderCachedModels() {
       if (_splitArrow) {
         _splitArrow.addEventListener('click', (ev) => {
           ev.stopPropagation();
-          document.querySelectorAll('.cookbook-gpu-split-menu').forEach(m => m.remove());
+          document.querySelectorAll('.cookbook-gpu-split-menu').forEach(m => { if (typeof m._dismiss === 'function') m._dismiss(); else m.remove(); });
           const menu = document.createElement('div');
           menu.className = 'cookbook-task-dropdown cookbook-gpu-split-menu';
+          let closeMenu = () => menu.remove();
           const mk = (label, cls, onClick) => {
             const it = document.createElement('div');
             it.className = 'dropdown-item-compact' + (cls ? ' ' + cls : '');
@@ -832,7 +828,7 @@ function _rerenderCachedModels() {
             it.textContent = label;
             it.addEventListener('click', (e) => {
               e.stopPropagation();
-              menu.remove();
+              closeMenu();
               if (onClick) onClick();
             });
             return it;
@@ -859,18 +855,11 @@ function _rerenderCachedModels() {
             }
             menu.style.top = top + 'px';
           }
-          const close = (e) => {
-            if (!menu.contains(e.target) && e.target !== _splitArrow) {
-              menu.remove();
-              document.removeEventListener('click', close);
-              window.removeEventListener('scroll', _scrollClose, true);
-            }
-          };
-          const _scrollClose = () => { menu.remove(); document.removeEventListener('click', close); window.removeEventListener('scroll', _scrollClose, true); };
-          setTimeout(() => {
-            document.addEventListener('click', close);
-            window.addEventListener('scroll', _scrollClose, true);
-          }, 0);
+          // Close on outside click or Escape (via the registry); also dismiss
+          // on scroll since the popup is fixed-positioned to the arrow.
+          const _scrollClose = () => closeMenu();
+          closeMenu = bindMenuDismiss(menu, () => { menu.remove(); window.removeEventListener('scroll', _scrollClose, true); }, (e) => !menu.contains(e.target) && e.target !== _splitArrow);
+          window.addEventListener('scroll', _scrollClose, true);
         });
       }
       const _withSpinner = async (btn, fn) => {

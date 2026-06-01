@@ -6,6 +6,7 @@
 
 import uiModule from './ui.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis.js';
+import { registerMenuDismiss } from './escMenuStack.js';
 
 // Human-friendly badge label for a task's internal status. Avoids surfacing
 // the word "error" in the sidebar — a server the user stopped or one that
@@ -1546,7 +1547,7 @@ export function _renderRunningTab() {
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
       menuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        document.querySelectorAll('.cookbook-task-dropdown').forEach(d => d.remove());
+        document.querySelectorAll('.cookbook-task-dropdown').forEach(d => { if (typeof d._dismiss === 'function') d._dismiss(); else d.remove(); });
 
         const dropdown = document.createElement('div');
         dropdown.className = 'cookbook-task-dropdown';
@@ -1696,7 +1697,7 @@ export function _renderRunningTab() {
           const ic = _MENU_ICONS[item.action] || '';
           div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></span><span>${item.label}</span>`;
           div.addEventListener('click', () => {
-            dropdown.remove();
+            _cleanup();
             if (item.custom) { item.custom(); return; }
             el.querySelector('.cookbook-task-action-' + item.action)?.click();
           });
@@ -1736,17 +1737,21 @@ export function _renderRunningTab() {
         // fixed position no longer matches the originating ⋮ button, so
         // it visually drifts. Matches the email kebab behaviour.
         const scrollClose = () => _cleanup();
+        let _unreg = () => {};
         const _cleanup = () => {
+          _unreg(); _unreg = () => {};
           dropdown.remove();
           document.removeEventListener('click', closeHandler);
           window.removeEventListener('scroll', scrollClose, true);
           window.visualViewport?.removeEventListener('scroll', scrollClose);
         };
+        dropdown._dismiss = _cleanup;
         setTimeout(() => {
           document.addEventListener('click', closeHandler);
           window.addEventListener('scroll', scrollClose, true);
           window.visualViewport?.addEventListener('scroll', scrollClose);
         }, 0);
+        _unreg = registerMenuDismiss(_cleanup);
       });
     }
 
