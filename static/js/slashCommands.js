@@ -1194,22 +1194,6 @@ async function _cmdToggleSidebar(args, ctx) {
   return true;
 }
 
-// ── Mode ──
-
-async function _cmdMode(args, ctx) {
-  const mode = (args[0] || '').toLowerCase();
-  if (mode !== 'agent' && mode !== 'chat') {
-    slashReply(`Current mode: ${Storage.getToggle('mode', 'chat')}. Usage: /mode &lt;agent|chat&gt;`);
-    return true;
-  }
-  const ab = document.getElementById('mode-agent-btn'), cb = document.getElementById('mode-chat-btn');
-  if (ab && cb) { ab.classList.toggle('active', mode === 'agent'); cb.classList.toggle('active', mode === 'chat'); }
-  Storage.setToggle('mode', mode);
-  document.querySelectorAll('[data-mode-tool]').forEach(b => { b.style.display = mode === 'agent' ? '' : 'none'; });
-  await typewriterReply(`Mode: ${mode}`);
-  return true;
-}
-
 // ── Settings ──
 
 async function _cmdOpen(args, ctx) {
@@ -1241,9 +1225,15 @@ async function _cmdOpen(args, ctx) {
       notes: ['tool-notes-btn', 'rail-notes'],
       tasks: ['tool-tasks-btn', 'rail-tasks'],
       library: ['tool-library-btn', 'rail-archive'],
+      documents: ['tool-library-btn', 'rail-archive'],
+      docs: ['tool-library-btn', 'rail-archive'],
       archive: ['tool-library-btn', 'rail-archive'],
+      brain: ['tool-memory-btn', 'rail-memory'],
+      memory: ['tool-memory-btn', 'rail-memory'],
+      memories: ['tool-memory-btn', 'rail-memory'],
       research: ['tool-research-btn', 'rail-research'],
       compare: ['tool-compare-btn', 'rail-compare'],
+      theme: ['tool-theme-btn', 'rail-theme'],
     };
     const ids = targets[target];
     if (ids && clickFirst(...ids)) return true;
@@ -1252,6 +1242,53 @@ async function _cmdOpen(args, ctx) {
   }
   slashReply(`I don't know how to open "${ctx.esc(target)}" yet.`);
   return true;
+}
+
+async function _cmdToolPanel(tool, args, ctx) {
+  const target = String(tool || '').toLowerCase();
+  const rest = (args || []).join(' ').trim();
+  if (target === 'cookbook') {
+    const sub = (args[0] || '').toLowerCase();
+    if (sub === 'serve') {
+      const query = args.slice(1).join(' ').trim();
+      try {
+        if (cookbookModule && typeof cookbookModule.open === 'function') {
+          await cookbookModule.open({ tab: 'Serve', serveSearch: query });
+          if (query) {
+            try {
+              const mod = await import('./cookbookServe.js');
+              if (mod && typeof mod.openServePanelForRepo === 'function') {
+                setTimeout(() => { mod.openServePanelForRepo(query).catch(() => {}); }, 80);
+              }
+            } catch (_) {}
+          }
+        } else {
+          document.getElementById('tool-cookbook-btn')?.click();
+        }
+      } catch (e) {
+        slashReply(`Could not open Cookbook Serve${e?.message ? `: ${ctx.esc(e.message)}` : ''}`);
+      }
+      return true;
+    }
+    if (sub === 'download' || sub === 'scan') {
+      await cookbookModule?.open?.({ tab: 'Download', usecase: args.slice(1).join(' ').trim() || undefined });
+      return true;
+    }
+    await cookbookModule?.open?.({ tab: 'Download', usecase: rest || undefined });
+    return true;
+  }
+  if (target === 'email') {
+    const btn = document.getElementById('rail-email') || document.getElementById('email-section-title');
+    if (btn) btn.click();
+    else slashReply('Could not open Email.');
+    return true;
+  }
+  if (target === 'settings') {
+    if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open(rest || undefined);
+    else document.getElementById('user-bar-settings')?.click();
+    return true;
+  }
+  return _cmdOpen([target], ctx);
 }
 
 async function _cmdSettings(args, ctx) {
@@ -5551,13 +5588,6 @@ const COMMANDS = {
     handler: _cmdPrompt,
     usage: '/prompt'
   },
-  mode: {
-    alias: [],
-    category: 'Settings',
-    help: 'Switch agent/chat mode',
-    handler: _cmdMode,
-    usage: '/mode agent|chat'
-  },
   theme: {
     alias: [],
     category: 'Settings',
@@ -5579,6 +5609,69 @@ const COMMANDS = {
     help: 'Open a tool panel',
     handler: _cmdOpen,
     usage: '/open Cookbook'
+  },
+  cookbook: {
+    alias: ['cook'],
+    category: 'Tools',
+    help: 'Open Cookbook; use "serve" to jump to model serving',
+    handler: (args, ctx) => _cmdToolPanel('cookbook', args, ctx),
+    usage: '/cookbook  ·  /cookbook serve qwen'
+  },
+  email: {
+    alias: ['mail', 'inbox'],
+    category: 'Tools',
+    help: 'Open Email',
+    handler: (args, ctx) => _cmdToolPanel('email', args, ctx),
+    usage: '/email'
+  },
+  notes: {
+    alias: [],
+    category: 'Tools',
+    help: 'Open Notes',
+    handler: (args, ctx) => _cmdToolPanel('notes', args, ctx),
+    usage: '/notes'
+  },
+  tasks: {
+    alias: [],
+    category: 'Tools',
+    help: 'Open Tasks',
+    handler: (args, ctx) => _cmdToolPanel('tasks', args, ctx),
+    usage: '/tasks'
+  },
+  brain: {
+    alias: ['memories'],
+    category: 'Tools',
+    help: 'Open Brain',
+    handler: (args, ctx) => _cmdToolPanel('brain', args, ctx),
+    usage: '/brain'
+  },
+  library: {
+    alias: ['docs', 'documents'],
+    category: 'Tools',
+    help: 'Open Library',
+    handler: (args, ctx) => _cmdToolPanel('library', args, ctx),
+    usage: '/library'
+  },
+  gallery: {
+    alias: ['photos'],
+    category: 'Tools',
+    help: 'Open Gallery',
+    handler: (args, ctx) => _cmdToolPanel('gallery', args, ctx),
+    usage: '/gallery'
+  },
+  research: {
+    alias: [],
+    category: 'Tools',
+    help: 'Open Deep Research',
+    handler: (args, ctx) => _cmdToolPanel('research', args, ctx),
+    usage: '/research'
+  },
+  compare: {
+    alias: [],
+    category: 'Tools',
+    help: 'Open Compare',
+    handler: (args, ctx) => _cmdToolPanel('compare', args, ctx),
+    usage: '/compare'
   },
   models: {
     alias: ['model'],
