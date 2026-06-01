@@ -32864,6 +32864,7 @@ button.cal-event-more:hover { opacity:1 !important; }
 .cal-form-bespoke input[type="time"]::-webkit-calendar-picker-indicator,
 .cal-form-bespoke input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   background-color: var(--accent, var(--red));
+  background-image: none;
   cursor: pointer;
   width: 14px; height: 14px;
 }
