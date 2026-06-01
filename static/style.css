@@ -20275,6 +20275,22 @@ body.gallery-selecting .gallery-dl-btn,
   container-name: settings-modal;
 }
 
+/* Issue #208 — anchor the Settings window to the TOP of the chat area instead
+   of vertically centering it. The base .modal uses `align-items:center`, so a
+   centered window grows and shrinks around its own midpoint when you switch
+   between tabs whose content differs in height (Add Models vs. Shortcuts,
+   etc.). That makes the in-modal nav rail — and the whole window — appear to
+   jump up and down between pages. Pinning the top edge keeps the nav rail and
+   surrounding layout visually stable; the panel only ever grows downward.
+   Desktop only: on mobile the panel is a full-height bottom sheet that is
+   already top-stable, and a margin there would push it past the viewport. The
+   drag/dock code clears this margin (sets inline margin:0) the moment a window
+   is dragged, so moving the window still works exactly as before. */
+@media (min-width: 769px) {
+  #settings-modal { align-items: flex-start; }
+  #settings-modal .settings-modal-content { margin-top: 7vh; }
+}
+
 .settings-modal-content .modal-header {
   padding: 16px 20px;
   border-bottom: 1px solid var(--border);
