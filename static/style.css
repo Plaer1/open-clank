@@ -2711,6 +2711,92 @@ body.bg-pattern-sparkles {
       opacity: 0.4;
       padding: 6px 8px 2px;
     }
+    .model-picker-list .mp-section-label:first-child {
+      padding-top: 2px;
+    }
+    /* Model name takes the slack so the endpoint label + star sit on the right. */
+    .model-picker-list .model-switch-item .mp-model-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .model-picker-list .model-switch-item .model-switch-ep {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.9em;
+      opacity: 0.45;
+    }
+    /* Keyboard navigation highlight (Arrow keys in the search box). */
+    .model-picker-list .model-switch-item.kb-active {
+      background: color-mix(in srgb, var(--red) 14%, transparent);
+    }
+    /* Inline favorite star — always visible (works on touch), filled when on. */
+    .model-picker-list .mp-fav-star {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      margin: -5px -4px -5px 2px;
+      padding: 0;
+      border: none;
+      background: none;
+      cursor: pointer;
+      color: color-mix(in srgb, var(--fg) 26%, transparent);
+      transition: color 0.15s ease, transform 0.12s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .model-picker-list .mp-fav-star:hover {
+      color: var(--fg);
+      transform: scale(1.18);
+    }
+    .model-picker-list .mp-fav-star:focus-visible {
+      outline: none;
+      color: var(--fg);
+    }
+    .model-picker-list .mp-fav-star.active {
+      color: var(--red);
+    }
+    .model-picker-list .mp-fav-star.active:hover {
+      color: var(--red);
+      opacity: 0.7;
+    }
+    .model-picker-list .mp-fav-star .mp-star-filled { display: none; }
+    .model-picker-list .mp-fav-star.active .mp-star-filled { display: inline-flex; }
+    .model-picker-list .mp-fav-star.active .mp-star-outline { display: none; }
+    /* First-run hint when a large catalog has no Recent/Favorites yet. */
+    .model-picker-list .mp-empty-hint {
+      flex-direction: column;
+      gap: 2px;
+      padding: 14px 8px;
+      text-align: center;
+    }
+    .model-picker-list .mp-empty-hint .mp-empty-title {
+      font-size: 1.05em;
+      color: color-mix(in srgb, var(--fg) 70%, transparent);
+    }
+    .model-picker-list .mp-empty-hint .mp-empty-sub {
+      font-size: 0.92em;
+      opacity: 0.7;
+    }
+    /* Comfortable touch targets on phones / narrow screens. */
+    @media (hover: none) and (pointer: coarse), (max-width: 768px) {
+      .model-picker-list .model-switch-item {
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .model-picker-list .mp-fav-star {
+        width: 30px;
+        height: 30px;
+        margin: -7px -4px -7px 2px;
+      }
+    }
     /* Overflow "+" menu */
     .overflow-wrapper {
       position: relative;
