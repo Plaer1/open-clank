@@ -20915,6 +20915,7 @@ body:not(.welcome-ready) #welcome-screen {
 .task-log-row.is-skipped .task-log-row-head { padding: 0; }
 .task-log-row.is-skipped .task-log-name { font-weight: 500; }
 .task-log-row.is-skipped .task-log-skipped-reason {
+  flex: 1 1 auto;
   margin-left: 6px;
   font-style: italic;
   opacity: 0.85;

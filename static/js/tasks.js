@@ -351,8 +351,10 @@ function _taskIcon(task) {
 
 function _taskAiMark(task) {
   const kind = task?.task_type || task?.kind || '';
-  if (kind !== 'llm') return '';
-  return '<svg class="task-ai-mark" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-label="Uses model"><path d="M12 2l2.25 6.75L21 11l-6.75 2.25L12 20l-2.25-6.75L3 11l6.75-2.25L12 2z"/></svg>';
+  const action = task?.action || '';
+  const aiAction = /(^|_)(ai|summarize|summary|draft|reply|classify|triage|audit|research|brief|skills?)($|_)/i.test(action);
+  if (!(kind === 'llm' || kind === 'research' || task?.model || task?.endpointUrl || aiAction)) return '';
+  return '<svg class="task-ai-mark" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-label="Uses model" title="Uses model"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>';
 }
 
 // ---- Custom pickers ----
@@ -2305,10 +2307,9 @@ function _renderActivityEntry(entry) {
         <div class="task-log-row-head">
           ${statusDot}
           <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
-          <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark({ task_type: entry.kind })}
+          <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark(entry)}
           ${repeatBadge}
           <span class="task-log-skipped-reason">skipped${reason ? ' — ' + _escHtml(reason) : ''}</span>
-          <span style="flex:1"></span>
           <span class="task-log-time" title="${_escHtml(tsAbs)}">${_escHtml(tsLabel)}</span>
         </div>
       </div>
@@ -2319,7 +2320,7 @@ function _renderActivityEntry(entry) {
       <div class="task-log-row-head">
         ${statusDot}
         <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
-        <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark({ task_type: entry.kind })}
+        <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark(entry)}
         ${repeatBadge}
         <span style="flex:1"></span>
         ${rightHtml}
