@@ -14403,6 +14403,7 @@ body.left-dock-active {
      overbearing on desktop; the size jump alone is enough signal. */
   border: 1px solid var(--border) !important;
   box-shadow: 0 6px 18px rgba(0,0,0,0.12) !important;
+  animation: none !important;
 }
 /* Desktop-only, ONLY on the currently-expanded email card. Nudges the title
    row down 6px / right 2px, bolds the subject, hides the timestamp from the
@@ -26071,6 +26072,13 @@ button .spinner-whirlpool {
   flex: 1;
   min-height: 0;
   font-size: 12px;
+}
+.email-card-reader-loading {
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.email-card-reader-loading .spinner-whirlpool,
+.email-card-reader-loading .ai-spinner-whirlpool {
+  opacity: 0.85;
 }
 /* Per-email unread dot in the expanded reader's title row. Background color
    stays inline (per-sender hue from _senderColor), but the dot gets a soft
