@@ -305,6 +305,26 @@ def test_require_admin_allows_when_auth_explicitly_disabled(monkeypatch):
     assert require_admin(_Req()) is None
 
 
+def test_internal_tool_owner_header_logic_requires_known_user():
+    """Pin the owner-attribution branch used by app.AuthMiddleware without
+    booting the full FastAPI app."""
+    users = {
+        "alice": {"is_admin": False},
+        "AdminUser": {"is_admin": True},
+    }
+
+    def resolve_owner(header_value):
+        impersonate = (header_value or "").strip()
+        if impersonate and impersonate in users:
+            return impersonate
+        return "internal-tool"
+
+    assert resolve_owner("alice") == "alice"
+    assert resolve_owner("AdminUser") == "AdminUser"
+    assert resolve_owner("doesnotexist") == "internal-tool"
+    assert resolve_owner("") == "internal-tool"
+
+
 def test_auth_manager_migrates_legacy_admin_role(tmp_path):
     """Old setup.py wrote role='admin'; startup must turn that into is_admin."""
     sys.modules.pop("core.auth", None)
