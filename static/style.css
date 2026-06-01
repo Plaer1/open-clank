@@ -9774,6 +9774,9 @@ details a:hover {
   z-index: 1;
   background: var(--bg);
 }
+#memory-modal .memory-tab-panel[data-memory-panel].hidden {
+  display: none;
+}
 /* Settings cards dim + mute when their toggle is OFF (matches the
    .memory-toolbar-toggle "off" treatment elsewhere). */
 #memory-modal .memory-tab-panel[data-memory-panel="settings"] .admin-card {
