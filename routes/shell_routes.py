@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,40 @@ def _require_admin(request: Request):
         raise HTTPException(403, "Admin only")
     if not auth_manager.is_admin(user):
         raise HTTPException(403, "Admin only")
+
+
+def _reject_cross_site(request: Request):
+    """Reject browser cross-site navigations to shell-touching endpoints."""
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(403, "Cross-site request rejected")
+
+
+_SSH_PORT_RE = re.compile(r"^\d{1,5}$")
+_SAFE_VENV_RE = re.compile(r"^[A-Za-z0-9_./~-]+$")
+
+
+def _ssh_base_argv(host: str, ssh_port: str | None) -> list[str]:
+    """Build an ssh argv prefix for remote probes without local-shell parsing."""
+    if not host or not str(host).strip() or str(host).lstrip().startswith("-"):
+        raise ValueError("invalid ssh host")
+    argv = ["ssh", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=no"]
+    if ssh_port and str(ssh_port).strip() not in ("", "22"):
+        port = str(ssh_port).strip()
+        if not _SSH_PORT_RE.match(port) or not (1 <= int(port) <= 65535):
+            raise ValueError("invalid ssh port")
+        argv += ["-p", port]
+    argv.append(str(host).strip())
+    return argv
+
+
+def _venv_activate_prefix(venv: str | None) -> str:
+    """Return a remote activation prefix while preserving shell expansion of ~."""
+    if not venv:
+        return ""
+    if not _SAFE_VENV_RE.match(venv):
+        raise ValueError("invalid venv path")
+    act = venv if venv.endswith("/bin/activate") else venv.rstrip("/") + "/bin/activate"
+    return f". {act} && "
 
 logger = logging.getLogger(__name__)
 
@@ -755,13 +790,12 @@ def setup_shell_routes() -> APIRouter:
         never reflected because the check only ever looked at the local host.
         """
         _require_admin(request)
+        _reject_cross_site(request)
         import importlib, importlib.metadata as importlib_metadata, shlex, json as _json
-        port_arg = ""
         if ssh_port and str(ssh_port).strip() not in ("", "22"):
             _port = str(ssh_port).strip()
-            if not _port.isdigit():
+            if not _SSH_PORT_RE.match(_port) or not (1 <= int(_port) <= 65535):
                 raise HTTPException(400, "Invalid ssh_port")
-            port_arg = f"-p {int(_port)} "
         packages = [
             # ── System ── OS binaries, not pip packages
             {"name": "tmux", "pip": "", "desc": "Required for Linux/Termux Cookbook background downloads and serves", "category": "System", "target": "remote", "kind": "system", "install_hint": "Run Cookbook server setup, or install tmux with apt/pacman/dnf/apk/zypper."},
@@ -787,20 +821,13 @@ def setup_shell_routes() -> APIRouter:
         if host and remote_names:
             try:
                 py = _package_probe_script(remote_names)
-                src = ""
-                if venv:
-                    act = venv if venv.endswith("/bin/activate") else venv.rstrip("/") + "/bin/activate"
-                    # NOT shlex.quoted: a leading ~ must stay shell-expandable on
-                    # the remote (quoting it breaks `~/venv` → activation fails →
-                    # the && short-circuits and every package reads as missing).
-                    src = f". {act} && "
+                # `venv` is validated but left unquoted so leading ~ expands on
+                # the remote; quoting it breaks ~/venv activation.
+                src = _venv_activate_prefix(venv)
                 inner = f"{src}python3 -c {shlex.quote(py)}"
-                ssh_cmd = (
-                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {port_arg}"
-                    f"{shlex.quote(host)} {shlex.quote(inner)}"
-                )
-                proc = await asyncio.create_subprocess_shell(
-                    ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                argv = _ssh_base_argv(host, ssh_port) + [inner]
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 out, _err = await asyncio.wait_for(proc.communicate(), timeout=12)
                 txt = out.decode("utf-8", errors="replace").strip()
@@ -815,6 +842,8 @@ def setup_shell_routes() -> APIRouter:
                             if isinstance(probe, dict)
                         }
                         break
+            except ValueError as e:
+                raise HTTPException(400, str(e))
             except Exception:
                 remote_status = {}
         if host and remote_system_names:
@@ -824,12 +853,9 @@ def setup_shell_routes() -> APIRouter:
                     qn = shlex.quote(name)
                     checks.append(f"if command -v {qn} >/dev/null 2>&1; then echo {qn}=1; else echo {qn}=0; fi")
                 inner = " ; ".join(checks)
-                ssh_cmd = (
-                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {port_arg}"
-                    f"{shlex.quote(host)} {shlex.quote(inner)}"
-                )
-                proc = await asyncio.create_subprocess_shell(
-                    ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                argv = _ssh_base_argv(host, ssh_port) + [inner]
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 out, _err = await asyncio.wait_for(proc.communicate(), timeout=12)
                 txt = out.decode("utf-8", errors="replace").strip()
@@ -837,6 +863,8 @@ def setup_shell_routes() -> APIRouter:
                     name, sep, value = line.strip().partition("=")
                     if sep and name in remote_system_names:
                         remote_status[name] = value == "1"
+            except ValueError as e:
+                raise HTTPException(400, str(e))
             except Exception:
                 pass
 
