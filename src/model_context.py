@@ -169,12 +169,15 @@ def get_context_length(endpoint_url: str, model: str) -> int:
     or context_window fields. Caches result per model ID.
     Falls back to DEFAULT_CONTEXT if unavailable.
     """
-    if model in _context_cache:
+    is_local = _is_local_endpoint(endpoint_url)
+    if not is_local and model in _context_cache:
         return _context_cache[model]
 
     ctx = _query_context_length(endpoint_url, model)
-    # Only cache non-default values to allow retry on next request
-    if ctx != DEFAULT_CONTEXT:
+    # Only cache non-default values to allow retry on next request.
+    # Local endpoints can restart with a different --max-model-len while keeping
+    # the same model id, so always re-query them instead of serving stale cache.
+    if not is_local and ctx != DEFAULT_CONTEXT:
         _context_cache[model] = ctx
     logger.info(f"Context length for {model}: {ctx}")
     return ctx
