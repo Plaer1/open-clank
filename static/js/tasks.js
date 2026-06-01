@@ -349,6 +349,12 @@ function _taskIcon(task) {
   return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;flex-shrink:0;position:relative;top:-4px;">${path}</svg>`;
 }
 
+function _taskAiMark(task) {
+  const kind = task?.task_type || task?.kind || '';
+  if (kind !== 'llm') return '';
+  return '<svg class="task-ai-mark" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-label="Uses model"><path d="M12 2l2.25 6.75L21 11l-6.75 2.25L12 20l-2.25-6.75L3 11l6.75-2.25L12 2z"/></svg>';
+}
+
 // ---- Custom pickers ----
 
 function _buildTimePicker(containerId, hour, minute) {
@@ -663,7 +669,7 @@ function _renderList() {
     const builtinBadge = task.is_builtin
       ? `<span class="task-builtin-badge${task.is_modified ? ' modified' : ''}" title="${task.is_modified ? 'Built-in task — edited from its default' : 'Built-in task'}">built-in${task.is_modified ? ' · edited' : ''}</span>`
       : '';
-    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${builtinBadge}<span style="flex:1;"></span>${statusBadge}`;
+    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${_taskAiMark(task)}${builtinBadge}<span style="flex:1;"></span>${statusBadge}`;
 
     // ... menu button (hover to show)
     const actionsWrap = document.createElement('div');
@@ -2298,7 +2304,8 @@ function _renderActivityEntry(entry) {
       <div class="task-log-row is-skipped" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
         <div class="task-log-row-head">
           ${statusDot}
-          <span class="task-log-name">${_escHtml(entry.taskName)}</span>
+          <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
+          <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark({ task_type: entry.kind })}
           ${repeatBadge}
           <span class="task-log-skipped-reason">skipped${reason ? ' — ' + _escHtml(reason) : ''}</span>
           <span style="flex:1"></span>
@@ -2311,7 +2318,8 @@ function _renderActivityEntry(entry) {
     <div class="task-log-row${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
       <div class="task-log-row-head">
         ${statusDot}
-        <span class="task-log-name">${_escHtml(entry.taskName)}</span>
+        <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
+        <span class="task-log-name">${_escHtml(entry.taskName)}</span>${_taskAiMark({ task_type: entry.kind })}
         ${repeatBadge}
         <span style="flex:1"></span>
         ${rightHtml}

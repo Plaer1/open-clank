@@ -20825,6 +20825,20 @@ body:not(.welcome-ready) #welcome-screen {
      title still reads in dark mode. Lightness stays adaptive. */
   color: hsl(var(--cat-hue) 60% 60%);
 }
+.task-log-task-icon {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-right: -3px;
+}
+.task-log-task-icon svg {
+  top: 0 !important;
+  opacity: 0.46 !important;
+}
+.task-log-row-head .task-ai-mark {
+  top: 0;
+  margin-left: -4px;
+}
 .task-log-repeat {
   font-size: 10px;
   font-weight: 500;
@@ -20879,7 +20893,7 @@ body:not(.welcome-ready) #welcome-screen {
   justify-content: center;
   cursor: pointer;
   position: relative;
-  top: -2px;
+  top: -3px;
 }
 .task-log-stop:hover {
   opacity: 1;
@@ -21065,7 +21079,7 @@ body:not(.welcome-ready) #welcome-screen {
 }
 .task-log-clear-cache svg {
   position: relative;
-  top: 2px;
+  top: 0;
 }
 /* Activity filter chips — toggle-out model: ON by default (solid),
    click to toggle OFF (dimmed + strikethrough) to hide that group. */
@@ -21199,6 +21213,13 @@ a.chat-link[href^="#research-"] {
    the click when hitting the inner glyph). */
 .task-card .memory-item-actions .memory-item-btn svg { pointer-events: none; }
 .task-card .task-builtin-badge { position: relative; top: -4px; }
+.task-ai-mark {
+  flex: 0 0 auto;
+  color: var(--accent, var(--red));
+  opacity: 0.78;
+  position: relative;
+  top: -4px;
+}
 /* Per-card select checkbox rides up to the title line. The "All" checkbox is
    #tasks-select-all (not .memory-select-cb), so it stays put. */
 .task-card .memory-select-cb { position: relative; top: -4px; }
