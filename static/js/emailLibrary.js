@@ -402,14 +402,25 @@ function _acct() {
 // results and __scheduled__ are deliberately not cached.
 const _libListCache = new Map();
 const _LIB_CACHE_MAX = 24;
+let _libPrewarmTimer = null;
+let _libPrewarmPromise = null;
+let _libLastPrewarmAt = 0;
 
-function _libCacheKey() {
+function _libCacheKeyFor(accountId, folder, filter, hasAttachments) {
   return [
+    accountId || '',
+    folder || '',
+    filter || '',
+    hasAttachments ? 1 : 0,
+  ].join('|');
+}
+function _libCacheKey() {
+  return _libCacheKeyFor(
     state._libAccountId || '',
     state._libFolder || '',
     state._libFilter || '',
-    state._libHasAttachments ? 1 : 0,
-  ].join('|');
+    state._libHasAttachments
+  );
 }
 function _libCacheGet(key) { return _libListCache.get(key) || null; }
 function _libCachePut(key, value) {
@@ -420,6 +431,48 @@ function _libCachePut(key, value) {
     const oldest = _libListCache.keys().next().value;
     _libListCache.delete(oldest);
   }
+}
+
+export function prewarmEmailLibrary({ delay = 2500 } = {}) {
+  if (_libPrewarmTimer || _libPrewarmPromise) return;
+  const elapsed = Date.now() - _libLastPrewarmAt;
+  if (elapsed >= 0 && elapsed < 60000) return;
+  _libPrewarmTimer = setTimeout(() => {
+    _libPrewarmTimer = null;
+    _libPrewarmPromise = _prewarmDefaultEmailView()
+      .catch(() => {})
+      .finally(() => { _libPrewarmPromise = null; });
+  }, Math.max(0, Number(delay) || 0));
+}
+
+async function _prewarmDefaultEmailView() {
+  if (state._libOpen) return;
+  _libLastPrewarmAt = Date.now();
+  const folder = 'INBOX';
+  const filter = 'all';
+  const accountId = state._libAccountId || '';
+  const ck = _libCacheKeyFor(accountId, folder, filter, false);
+  if (_libCacheGet(ck)) return;
+
+  // The accounts request is cheap and warms the account strip for first open.
+  // Then the list request warms both the client cache and the backend IMAP/read
+  // cache. Failure stays silent: no configured mail should not nag on app boot.
+  try {
+    const accountsRes = await fetch(`${API_BASE}/api/email/accounts`, { credentials: 'same-origin' });
+    if (accountsRes.ok) {
+      const accountsData = await accountsRes.json().catch(() => ({}));
+      if (Array.isArray(accountsData.accounts)) state._libAccounts = accountsData.accounts;
+    }
+  } catch (_) {}
+
+  const accountQS = accountId ? `&account_id=${encodeURIComponent(accountId)}` : '';
+  const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${accountQS}&limit=100&offset=0&filter=${filter}`, {
+    credentials: 'same-origin',
+  });
+  if (!res.ok) return;
+  const data = await res.json().catch(() => null);
+  if (!data || data.error) return;
+  _libCachePut(ck, { emails: data.emails || [], total: data.total || 0 });
 }
 function _libCacheWriteBack() {
   // After a local mutation that already updated state._libEmails
