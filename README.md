@@ -56,6 +56,8 @@ docker compose up -d --build
 ```
 Compose starts Odysseus, ChromaDB, SearXNG, and ntfy. First run does a full
 image build. Open `http://localhost:7000` after the containers are healthy.
+If port `7000` is already taken, set `APP_PORT=7001` (or another free port)
+in `.env`, recreate the container, and open `http://localhost:7001`.
 
 Cookbook remote servers use an Odysseus-owned SSH key from `./data/ssh`
 inside Docker. In **Cookbook -> Settings -> Servers**, generate/copy the
