@@ -59,6 +59,10 @@ image build. Open `http://localhost:7000` after the containers are healthy.
 If port `7000` is already taken, set `APP_PORT=7001` (or another free port)
 in `.env`, recreate the container, and open `http://localhost:7001`.
 
+> **On Apple Silicon, Docker can't use the Metal GPU** (it runs a Linux VM), so
+> Cookbook will serve models on the CPU only. For GPU-accelerated Cookbook,
+> run the app natively — see [Apple Silicon](#apple-silicon-m-series).
+
 Cookbook remote servers use an Odysseus-owned SSH key from `./data/ssh`
 inside Docker. In **Cookbook -> Settings -> Servers**, generate/copy the
 public key and add it to the remote server's `~/.ssh/authorized_keys`.
@@ -111,8 +115,12 @@ The Cookbook model catalog check should print a non-zero count. If it prints
 `0`, rebuild the Odysseus image with `docker compose build --no-cache odysseus`.
 
 ### Option 2: Manual install — Linux / macOS
-**Requirements:** Python 3.11+. On Linux/Termux, Cookbook also requires `tmux`
-for background model downloads and serves.
+**Requirements:** Python 3.11+. Cookbook also requires `tmux` for background
+model downloads and serves.
+
+> **On macOS (Apple Silicon)?** Skip the manual steps below — run
+> `./start-macos.sh` for a one-command setup. See
+> [Apple Silicon](#apple-silicon-m-series).
 
 Install system packages first:
 ```bash
@@ -124,18 +132,80 @@ sudo pacman -S tmux
 
 # Fedora
 sudo dnf install tmux
+
+# macOS (Homebrew). macOS ships no recent Python by default — install 3.11+
+# (skip the python line if you already have Python 3.11 or newer):
+brew install python@3.11 tmux
 ```
 
 Then install Odysseus:
 ```bash
 git clone https://github.com/pewdiepie-archdaemon/odysseus.git
 cd odysseus
-python3 -m venv venv
+python3 -m venv venv          # on macOS use: python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python setup.py            # creates data dirs and prints an initial admin password
 python -m uvicorn app:app --host 0.0.0.0 --port 7000
 ```
+
+#### Apple Silicon (M-series)
+
+> **On a Mac, run Odysseus natively (not in Docker) so Cookbook can use the
+> Metal GPU.** Cookbook serves models on whatever machine Odysseus runs on, and
+> Docker on macOS is a Linux VM with **no access to the GPU** — in a container
+> your Mac looks like a CPU-only Linux box.
+
+**Quick start — one command.** From a fresh clone:
+```bash
+git clone https://github.com/pewdiepie-archdaemon/odysseus.git
+cd odysseus
+./start-macos.sh
+```
+That installs what's needed via Homebrew (Python 3.11+, `tmux`, and a prebuilt
+Metal `llama-server`), sets everything up, and launches Odysseus at
+**http://127.0.0.1:7860**. Log in with the admin password it prints, open
+**Cookbook**, and it detects your GPU (`backend: metal`) and recommends GGUF
+models that fit your Mac. (MLX models aren't supported on macOS and are hidden —
+see below.) Re-run `./start-macos.sh` any time to start it again (use another
+port with `ODYSSEUS_PORT=7900 ./start-macos.sh`).
+
+**Prefer a clickable app?** After your first `./start-macos.sh`, build a
+launcher `Odysseus.app` (+ a drag-to-Applications `.dmg`) that starts the server
+and opens the UI in its own window:
+```bash
+./build-macos-app.sh          # → dist/Odysseus.app and dist/Odysseus.dmg
+```
+
+<details>
+<summary>What <code>start-macos.sh</code> does, serving engines, and manual steps</summary>
+
+`start-macos.sh` is just the manual steps wrapped up: Homebrew deps → a Python
+`venv` → `pip install -r requirements.txt` → `python setup.py` → `uvicorn` on a
+non-AirPlay port. Run them by hand if you prefer (the Linux steps above, but use
+`python3.11 -m venv` and `--port 7860`).
+
+**Serving engines on Metal** — Cookbook only recommends models it can serve here:
+- **llama.cpp** — `brew install llama.cpp` (done by `start-macos.sh`) provides a
+  prebuilt Metal `llama-server`, no compile. Without it, Cookbook builds it from
+  source on first serve, which needs `cmake` + Xcode Command Line Tools
+  (`brew install cmake && xcode-select --install`).
+- **Ollama** — `brew install ollama` is another simple Metal-accelerated option.
+- vLLM/SGLang are CUDA/ROCm-only and do **not** run on macOS.
+
+**MLX models are not supported on Apple Silicon.** Odysseus serves models via
+llama.cpp/Ollama (GGUF) and vLLM/SGLang (CUDA) — it has no MLX (`mlx_lm`)
+runtime. So MLX-only models can't be served on a Mac and are deliberately
+**hidden** from Cookbook's recommendations there; pick a GGUF build instead.
+
+**Port 7000 & AirPlay** — macOS AirPlay Receiver holds ports 7000/5000, so
+`start-macos.sh` defaults to **7860**. To use 7000, turn AirPlay Receiver off in
+System Settings → General → AirDrop & Handoff.
+
+**Build prerequisites baked in** — the `.app` wraps this repo's `venv` (it
+doesn't bundle Python), so the path is fixed at build time — rebuild if you move
+the repo.
+</details>
 
 ### Option 3: Manual install — Windows (PowerShell)
 Windows support is not actively tested. Use it with caution; Docker on Linux

@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from routes.cookbook_helpers import (
     _validate_repo_id, _validate_include, _validate_remote_host, _validate_token,
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
-    _safe_env_prefix,
+    _safe_env_prefix, _local_tooling_path_export,
     ModelDownloadRequest, ServeRequest,
 )
 
@@ -357,16 +358,22 @@ def setup_cookbook_routes() -> APIRouter:
             lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
         # Ensure pip-user scripts (e.g. hf CLI installed via --user) are on PATH
         lines.append('export PATH="$HOME/.local/bin:$PATH"')
+        # When Odysseus runs from a venv (e.g. native macOS install), put its bin
+        # on PATH so the tmux shell finds the bundled `hf`/`python3` without an
+        # activated venv. Local bash runs only — meaningless over SSH/Windows.
+        if not req.remote_host and req.platform != "windows":
+            lines.append(_local_tooling_path_export(sys.executable))
         # Best-effort install hf CLI (always). hf_transfer (Rust parallel downloader)
         # is fast but flaky on large files — it tends to crash near the end at high
         # throughput. Retries set disable_hf_transfer to fall back to the plain,
         # slower-but-reliable downloader (resumes cleanly from the .incomplete files).
-        lines.append("command -v hf >/dev/null 2>&1 || pip install --user --break-system-packages -q -U huggingface_hub 2>/dev/null || pip install -q -U huggingface_hub 2>/dev/null")
+        # Use `python3 -m pip` not `pip` — macOS has no bare `pip` command.
+        lines.append("command -v hf >/dev/null 2>&1 || python3 -m pip install --user --break-system-packages -q -U huggingface_hub 2>/dev/null || python3 -m pip install -q -U huggingface_hub 2>/dev/null")
         if req.disable_hf_transfer:
             lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
             lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
         else:
-            lines.append("python3 -c 'import hf_transfer' 2>/dev/null || pip install --user --break-system-packages -q hf_transfer 2>/dev/null || pip install -q hf_transfer 2>/dev/null")
+            lines.append("python3 -c 'import hf_transfer' 2>/dev/null || python3 -m pip install --user --break-system-packages -q hf_transfer 2>/dev/null || python3 -m pip install -q hf_transfer 2>/dev/null")
             lines.append("python3 -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
             lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
 
@@ -845,6 +852,10 @@ def setup_cookbook_routes() -> APIRouter:
             # ── Linux/Termux: bash + tmux (existing flow) ──
             runner_lines = ["#!/bin/bash"]
             runner_lines.extend(_user_shell_path_bootstrap())
+            # Put Odysseus's own venv bin on PATH (local runs only) so the serve
+            # shell resolves the bundled python3/hf, mirroring the download flow.
+            if not remote:
+                runner_lines.append(_local_tooling_path_export(sys.executable))
             runner_lines.append("export FLASHINFER_DISABLE_VERSION_CHECK=1")
             if req.hf_token:
                 runner_lines.append(f"export HF_TOKEN='{_bash_squote(req.hf_token)}'")
@@ -864,7 +875,10 @@ def setup_cookbook_routes() -> APIRouter:
                 # Jinja2 rejects (do_tojson ensure_ascii). Build it once from
                 # source if missing; keep llama-cpp-python only as a fallback.
                 runner_lines.append('# Ensure a llama.cpp server (prefer native llama-server)')
-                runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:$PATH"')
+                # Include the Homebrew bin dirs so a brew-installed llama-server /
+                # ollama is found (otherwise macOS falls back to a slow source build).
+                # /opt/homebrew = Apple Silicon, /usr/local = Intel; harmless on Linux.
+                runner_lines.append('export PATH="$HOME/.local/bin:$HOME/bin:$HOME/llama.cpp/build/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
                 runner_lines.append('if [ -d /data/data/com.termux ]; then')
                 runner_lines.append('  # Termux: no native build — use the Python bindings (CPU).')
                 runner_lines.append('  if ! python3 -c "import llama_cpp" 2>/dev/null; then')
@@ -876,17 +890,50 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  echo "Native llama-server not found — building from source (one-time, may take a few minutes)..."')
                 runner_lines.append('  mkdir -p ~/bin')
                 runner_lines.append('  cd ~ && [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp')
-                # GPU build if CUDA is present; fall back to a plain (CPU) build.
-                runner_lines.append('  cd ~/llama.cpp && { cmake -B build -DGGML_CUDA=ON 2>/dev/null || cmake -B build; } \\')
-                runner_lines.append('    && cmake --build build -j"$(nproc)" --target llama-server \\')
-                runner_lines.append('    && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+                # Build with the right accelerator: Metal on macOS (llama.cpp
+                # enables it automatically, no flag), CUDA on Linux when present,
+                # else a plain CPU build. nproc is Linux-only — fall back to
+                # `sysctl hw.ncpu` on macOS. (Tip: `brew install llama.cpp` ships
+                # a prebuilt llama-server and skips this whole source build.)
+                runner_lines.append('  NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"')
+                runner_lines.append('  if [ "$(uname -s)" = "Darwin" ]; then')
+                runner_lines.append('    command -v cmake >/dev/null 2>&1 || echo "WARNING: cmake not found — install it with: brew install cmake (or: brew install llama.cpp for a prebuilt llama-server)."')
+                # Start from a clean cache: a prior failed configure (e.g. a CUDA
+                # attempt) poisons build/CMakeCache.txt, so a plain `cmake -B build`
+                # would reuse the bad settings and fail again. CMAKE_BUILD_TYPE is
+                # explicit so the binary is optimized (Metal auto-enables on macOS).
+                runner_lines.append('    cd ~/llama.cpp && rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release \\')
+                runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
+                runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+                runner_lines.append('  else')
+                runner_lines.append('    cd ~/llama.cpp && { cmake -B build -DGGML_CUDA=ON 2>/dev/null || cmake -B build; } \\')
+                runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
+                runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+                runner_lines.append('  fi')
                 runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
                 runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
                 runner_lines.append('    echo "llama-server build failed — installing Python bindings as fallback..."')
                 runner_lines.append('    pip install --user --break-system-packages -q llama-cpp-python 2>/dev/null || pip install -q llama-cpp-python 2>/dev/null || true')
                 runner_lines.append('  fi')
                 runner_lines.append('fi')
+            elif "ollama" in req.cmd:
+                # Ollama manages its own model store and HTTP server. Just make
+                # sure the binary exists and the daemon is up before running the
+                # command (the natural serving engine on Apple Silicon / Metal).
+                runner_lines.append('if ! command -v ollama &>/dev/null; then')
+                runner_lines.append('  echo "ERROR: Ollama not found. Install it (macOS: brew install ollama, or https://ollama.com/download), then launch again."')
+                runner_lines.append('  exit 127')
+                runner_lines.append('fi')
+                runner_lines.append('if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then')
+                runner_lines.append('  echo "Starting ollama server..."; (ollama serve >/dev/null 2>&1 &)')
+                runner_lines.append('  for _ in 1 2 3 4 5 6 7 8 9 10; do curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done')
+                runner_lines.append('fi')
             elif "vllm serve" in req.cmd:
+                # vLLM is CUDA/ROCm-only and does not run on macOS at all.
+                runner_lines.append('if [ "$(uname -s)" = "Darwin" ]; then')
+                runner_lines.append('  echo "ERROR: vLLM does not run on macOS. Use Ollama or llama.cpp (Metal) instead."')
+                runner_lines.append('  exit 1')
+                runner_lines.append('fi')
                 # Put ~/.local/bin on PATH first — without a venv, vllm installs
                 # there via --user and the non-login serve shell otherwise can't
                 # find the `vllm` CLI ("command not found"). Mirrors llama.cpp above.
