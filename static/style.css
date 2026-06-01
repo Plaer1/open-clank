@@ -1251,21 +1251,21 @@ body.bg-pattern-sparkles {
        for ~700ms), the .list-item children cascade in one after another,
        same feel as the chat input's tools menu. Each row springs in
        from a tiny offset below + scaled-down, staggered by nth-child. */
-    .section.section-just-expanded .list-item {
+    .section.section-just-expanded :is(.list-item, .models-row) {
       animation: section-domino-in 0.36s cubic-bezier(0.22, 1.61, 0.36, 1) backwards;
     }
-    .section.section-just-expanded .list-item:nth-child(1)  { animation-delay: 0.04s; }
-    .section.section-just-expanded .list-item:nth-child(2)  { animation-delay: 0.08s; }
-    .section.section-just-expanded .list-item:nth-child(3)  { animation-delay: 0.12s; }
-    .section.section-just-expanded .list-item:nth-child(4)  { animation-delay: 0.16s; }
-    .section.section-just-expanded .list-item:nth-child(5)  { animation-delay: 0.20s; }
-    .section.section-just-expanded .list-item:nth-child(6)  { animation-delay: 0.24s; }
-    .section.section-just-expanded .list-item:nth-child(7)  { animation-delay: 0.28s; }
-    .section.section-just-expanded .list-item:nth-child(8)  { animation-delay: 0.32s; }
-    .section.section-just-expanded .list-item:nth-child(9)  { animation-delay: 0.36s; }
-    .section.section-just-expanded .list-item:nth-child(10) { animation-delay: 0.40s; }
-    .section.section-just-expanded .list-item:nth-child(11) { animation-delay: 0.44s; }
-    .section.section-just-expanded .list-item:nth-child(12) { animation-delay: 0.48s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(1)  { animation-delay: 0.04s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(2)  { animation-delay: 0.08s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(3)  { animation-delay: 0.12s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(4)  { animation-delay: 0.16s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(5)  { animation-delay: 0.20s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(6)  { animation-delay: 0.24s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(7)  { animation-delay: 0.28s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(8)  { animation-delay: 0.32s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(9)  { animation-delay: 0.36s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(10) { animation-delay: 0.40s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(11) { animation-delay: 0.44s; }
+    .section.section-just-expanded :is(.list-item, .models-row):nth-child(12) { animation-delay: 0.48s; }
     @keyframes section-domino-in {
       0%   { opacity: 0; transform: translateY(8px) translateX(-4px) scale(0.92); }
       60%  { opacity: 1; }
@@ -1279,21 +1279,21 @@ body.bg-pattern-sparkles {
        nth-last-child so the BOTTOM item leaves first and the cascade
        rolls upward — mirrors the "stacked deck" feeling of the open
        animation reversed. */
-    .section.section-just-collapsing .list-item {
+    .section.section-just-collapsing :is(.list-item, .models-row) {
       animation: section-domino-out 0.22s ease-in forwards;
     }
-    .section.section-just-collapsing .list-item:nth-last-child(1)  { animation-delay: 0.00s; }
-    .section.section-just-collapsing .list-item:nth-last-child(2)  { animation-delay: 0.025s; }
-    .section.section-just-collapsing .list-item:nth-last-child(3)  { animation-delay: 0.05s; }
-    .section.section-just-collapsing .list-item:nth-last-child(4)  { animation-delay: 0.075s; }
-    .section.section-just-collapsing .list-item:nth-last-child(5)  { animation-delay: 0.10s; }
-    .section.section-just-collapsing .list-item:nth-last-child(6)  { animation-delay: 0.125s; }
-    .section.section-just-collapsing .list-item:nth-last-child(7)  { animation-delay: 0.15s; }
-    .section.section-just-collapsing .list-item:nth-last-child(8)  { animation-delay: 0.175s; }
-    .section.section-just-collapsing .list-item:nth-last-child(9)  { animation-delay: 0.20s; }
-    .section.section-just-collapsing .list-item:nth-last-child(10) { animation-delay: 0.225s; }
-    .section.section-just-collapsing .list-item:nth-last-child(11) { animation-delay: 0.25s; }
-    .section.section-just-collapsing .list-item:nth-last-child(12) { animation-delay: 0.275s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(1)  { animation-delay: 0.00s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(2)  { animation-delay: 0.025s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(3)  { animation-delay: 0.05s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(4)  { animation-delay: 0.075s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(5)  { animation-delay: 0.10s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(6)  { animation-delay: 0.125s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(7)  { animation-delay: 0.15s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(8)  { animation-delay: 0.175s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(9)  { animation-delay: 0.20s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(10) { animation-delay: 0.225s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(11) { animation-delay: 0.25s; }
+    .section.section-just-collapsing :is(.list-item, .models-row):nth-last-child(12) { animation-delay: 0.275s; }
     @keyframes section-domino-out {
       0%   { opacity: 1; transform: translateY(0)   translateX(0)   scale(1); }
       100% { opacity: 0; transform: translateY(6px) translateX(-3px) scale(0.94); }
