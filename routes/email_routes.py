@@ -1285,17 +1285,24 @@ def setup_email_routes():
             logger.debug(f"mark-seen after cached read failed uid={uid}: {e}")
 
     @router.get("/read/{uid}")
-    async def read_email_by_uid(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+    async def read_email_by_uid(
+        uid: str,
+        folder: str = Query("INBOX"),
+        account_id: str | None = Query(None),
+        mark_seen: bool = Query(True),
+        owner: str = Depends(require_owner),
+    ):
         """Read email body. Cached for 30m, sync IMAP work runs in a thread."""
         ck = _read_cache_key(account_id, folder, uid, owner=owner)
         cached = _read_cache_get(ck)
         if cached is not None:
-            try:
-                _asyncio.create_task(_asyncio.to_thread(_mark_email_seen_sync, uid, folder, account_id, owner))
-            except RuntimeError:
-                pass
+            if mark_seen:
+                try:
+                    _asyncio.create_task(_asyncio.to_thread(_mark_email_seen_sync, uid, folder, account_id, owner))
+                except RuntimeError:
+                    pass
             return cached
-        result = await _asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner)
+        result = await _asyncio.to_thread(_read_email_sync, uid, folder, account_id, owner, mark_seen)
         if result and not result.get("error"):
             _read_cache_put(ck, result)
         return result
