@@ -17874,8 +17874,12 @@ body.gallery-selecting .gallery-dl-btn,
 .cookbook-gpu-clear:disabled { opacity: 0.4; cursor: wait; }
 /* GPU probe popup — per-GPU process list with kill buttons */
 .cookbook-gpu-popup {
-  position: absolute;
-  z-index: 240;
+  /* Fixed positioning (relative to viewport) so we never get pulled into
+     a scrolling/transform stacking context from an ancestor. Z-index has
+     to clear the cookbook modal (260) and the rest of the high-z UI
+     layers (themed-confirm and various overlays sit around 9000-10000). */
+  position: fixed;
+  z-index: 10010;
   min-width: 280px;
   max-width: 420px;
   background: var(--panel, #1a1a1a);

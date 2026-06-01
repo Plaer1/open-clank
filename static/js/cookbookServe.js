@@ -938,9 +938,24 @@ function _rerenderCachedModels() {
           document.body.appendChild(popup);
           panel._gpuProbe.popup = popup;
 
+          // Position below the button using viewport coords (popup is
+          // position:fixed). Measure the popup AFTER it's in the DOM so
+          // we get the real rendered size, then clamp both axes so the
+          // popup stays fully visible — GPU buttons near the right edge
+          // of the modal previously anchored the popup mostly off-screen.
           const r = anchorBtn.getBoundingClientRect();
-          popup.style.left = `${Math.max(8, r.left)}px`;
-          popup.style.top  = `${r.bottom + 4 + window.scrollY}px`;
+          const vw = window.innerWidth  || document.documentElement.clientWidth;
+          const vh = window.innerHeight || document.documentElement.clientHeight;
+          const pw = popup.offsetWidth  || 320;
+          const ph = popup.offsetHeight || 200;
+          let left = r.left;
+          let top  = r.bottom + 4;
+          // Push left so the popup doesn't overflow the right edge.
+          if (left + pw > vw - 8) left = Math.max(8, vw - pw - 8);
+          // If there isn't room below, render above the button instead.
+          if (top + ph > vh - 8) top = Math.max(8, r.top - ph - 4);
+          popup.style.left = `${left}px`;
+          popup.style.top  = `${top}px`;
 
           popup.querySelector('.cookbook-gpu-popup-close')?.addEventListener('click', _closeProbePopup);
           popup.querySelectorAll('.cookbook-gpu-kill').forEach(btn => {
