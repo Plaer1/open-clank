@@ -2718,7 +2718,7 @@ body.bg-pattern-sparkles {
     .model-picker-list .mp-section-label:first-child {
       padding-top: 2px;
     }
-    /* Model name takes the slack so the endpoint label + star sit on the right. */
+    /* Model name takes the slack so the endpoint label + favorite dot sit on the right. */
     .model-picker-list .model-switch-item .mp-model-name {
       flex: 1 1 auto;
       min-width: 0;
@@ -2739,41 +2739,42 @@ body.bg-pattern-sparkles {
     .model-picker-list .model-switch-item.kb-active {
       background: color-mix(in srgb, var(--red) 14%, transparent);
     }
-    /* Inline favorite star — always visible (works on touch), filled when on. */
-    .model-picker-list .mp-fav-star {
+    /* Inline favorite dot — always visible (works on touch), active when on. */
+    .model-picker-list .mp-fav-dot {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 24px;
+      width: 30px;
       height: 24px;
-      margin: -5px -4px -5px 2px;
+      margin: -5px 0 -5px 0;
       padding: 0;
       border: none;
       background: none;
       cursor: pointer;
-      color: color-mix(in srgb, var(--fg) 26%, transparent);
-      transition: color 0.15s ease, transform 0.12s ease;
+      color: color-mix(in srgb, var(--fg) 22%, transparent);
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1;
+      transition: color 0.15s ease, opacity 0.15s ease, transform 0.12s ease;
       -webkit-tap-highlight-color: transparent;
     }
-    .model-picker-list .mp-fav-star:hover {
-      color: var(--fg);
-      transform: scale(1.18);
+    .model-picker-list .mp-fav-dot:hover {
+      color: color-mix(in srgb, var(--fg) 68%, transparent);
+      transform: scale(1.15);
     }
-    .model-picker-list .mp-fav-star:focus-visible {
+    .model-picker-list .mp-fav-dot:focus-visible {
       outline: none;
-      color: var(--fg);
+      color: color-mix(in srgb, var(--fg) 68%, transparent);
     }
-    .model-picker-list .mp-fav-star.active {
-      color: var(--red);
+    .model-picker-list .mp-fav-dot.active {
+      color: var(--accent, var(--red));
+      opacity: 1;
     }
-    .model-picker-list .mp-fav-star.active:hover {
-      color: var(--red);
-      opacity: 0.7;
+    .model-picker-list .mp-fav-dot.active:hover {
+      color: var(--accent, var(--red));
+      opacity: 0.72;
     }
-    .model-picker-list .mp-fav-star .mp-star-filled { display: none; }
-    .model-picker-list .mp-fav-star.active .mp-star-filled { display: inline-flex; }
-    .model-picker-list .mp-fav-star.active .mp-star-outline { display: none; }
     /* First-run hint when a large catalog has no Recent/Favorites yet. */
     .model-picker-list .mp-empty-hint {
       flex-direction: column;
@@ -2795,10 +2796,10 @@ body.bg-pattern-sparkles {
         padding-top: 8px;
         padding-bottom: 8px;
       }
-      .model-picker-list .mp-fav-star {
+      .model-picker-list .mp-fav-dot {
         width: 30px;
         height: 30px;
-        margin: -7px -4px -7px 2px;
+        margin: -7px 0 -7px 0;
       }
     }
     /* Overflow "+" menu */

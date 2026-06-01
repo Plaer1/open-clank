@@ -11,7 +11,7 @@ const API_BASE = window.location.origin;
 // ── Recent + Favorites persistence ──
 // Recent is auto-tracked (last 5 picks, most-recent-first) and lives in its
 // own key. Favorites is the SAME key the sidebar Models section uses, so a
-// star toggled here shows up there and vice-versa.
+// favorite toggled here shows up there and vice-versa.
 const RECENT_KEY = 'odysseus-model-recent';
 const FAVORITES_KEY = 'odysseus-model-favorites';
 const RECENT_MAX = 5;
@@ -50,11 +50,6 @@ function _toggleFavorite(mid) {
   } catch { /* sidebar not present */ }
   return i < 0; // true when now favorited
 }
-
-// Filled star (favorited) + outline star (not) — CSS toggles which shows.
-const _STAR_SVG =
-  '<svg class="mp-star-outline" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>'
-  + '<svg class="mp-star-filled" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
 
 // ── Shared keyboard nav for model pickers ──
 function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
@@ -200,6 +195,12 @@ function _initModelPickerDropdown() {
           url: item.url,
           endpointId: item.endpoint_id,
           epName: item.endpoint_name || '',
+          providerText: [
+            item.endpoint_name || '',
+            item.category || '',
+            item.host || '',
+            item.url || '',
+          ].filter(Boolean).join(' '),
           stale: isLocalDead,
           staleReason: isLocalDead ? (probeResult.error || 'not responding') : '',
         });
@@ -277,22 +278,22 @@ function _initModelPickerDropdown() {
       epSpan.textContent = _epDisplay;
       row.appendChild(epSpan);
 
-      // Inline favorite star — toggles favorite, never picks the model.
-      const star = document.createElement('button');
-      star.type = 'button';
-      star.className = 'mp-fav-star' + (favs.includes(m.mid) ? ' active' : '');
-      const _setStarState = (on) => {
-        star.classList.toggle('active', on);
-        star.title = on ? 'Remove from favorites' : 'Add to favorites';
-        star.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
-        star.setAttribute('aria-pressed', on ? 'true' : 'false');
+      // Inline favorite dot — toggles favorite, never picks the model.
+      const favDot = document.createElement('button');
+      favDot.type = 'button';
+      favDot.className = 'mp-fav-dot' + (favs.includes(m.mid) ? ' active' : '');
+      favDot.textContent = '●';
+      const _setFavState = (on) => {
+        favDot.classList.toggle('active', on);
+        favDot.title = on ? 'Remove from favorites' : 'Add to favorites';
+        favDot.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
+        favDot.setAttribute('aria-pressed', on ? 'true' : 'false');
       };
-      star.innerHTML = _STAR_SVG;
-      _setStarState(favs.includes(m.mid));
-      star.addEventListener('click', (e) => {
+      _setFavState(favs.includes(m.mid));
+      favDot.addEventListener('click', (e) => {
         e.stopPropagation();
         const nowFav = _toggleFavorite(m.mid);
-        _setStarState(nowFav);
+        _setFavState(nowFav);
         // Keep our in-memory copy aligned so a follow-up re-render is correct.
         const idx = favs.indexOf(m.mid);
         if (nowFav && idx < 0) favs.push(m.mid);
@@ -300,14 +301,14 @@ function _initModelPickerDropdown() {
         if (uiModule && uiModule.showToast) uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
         // In browse mode the Favorites section membership changed — rebuild
         // (cheap: Recent + Favorites). In search mode the row stays put, so
-        // the in-place star update above is enough.
+        // the in-place favorite update above is enough.
         if (!q) {
           const st = listEl.scrollTop;
           _populate('');
           listEl.scrollTop = st;
         }
       });
-      row.appendChild(star);
+      row.appendChild(favDot);
 
       row.addEventListener('click', () => _pick(m));
       listEl.appendChild(row);
@@ -316,7 +317,12 @@ function _initModelPickerDropdown() {
     // ── Search mode: flat, filtered results across the whole catalog ──
     if (q) {
       const matches = all.filter(m =>
-        m.mid.toLowerCase().includes(q) || m.display.toLowerCase().includes(q));
+        [
+          m.mid,
+          m.display,
+          m.epName,
+          m.providerText,
+        ].filter(Boolean).join(' ').toLowerCase().includes(q));
       if (matches.length === 0) _addEmpty('No matching models');
       else matches.forEach(_addRow);
       return;
@@ -352,7 +358,7 @@ function _initModelPickerDropdown() {
       hint.className = 'model-switch-empty mp-empty-hint';
       hint.innerHTML =
         '<span class="mp-empty-title">Search ' + all.length + ' models</span>'
-        + '<span class="mp-empty-sub">Picks land in Recent · tap ☆ to favorite</span>';
+        + '<span class="mp-empty-sub">Picks land in Recent · tap the dot to favorite</span>';
       listEl.appendChild(hint);
     }
   }
@@ -441,6 +447,7 @@ function _initModelPickerDropdown() {
           url: item.url || detail.url || '',
           endpointId: item.endpoint_id || detail.endpointId || '',
           epName: item.endpoint_name || detail.endpointName || '',
+          providerText: [item.endpoint_name || detail.endpointName || '', item.url || detail.url || ''].filter(Boolean).join(' '),
         };
         break;
       }
@@ -452,6 +459,7 @@ function _initModelPickerDropdown() {
         url: detail.url,
         endpointId: detail.endpointId || '',
         epName: detail.endpointName || '',
+        providerText: [detail.endpointName || '', detail.url || ''].filter(Boolean).join(' '),
       };
     }
     if (match) await _pick(match);
