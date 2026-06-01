@@ -491,7 +491,7 @@ def setup_shell_routes() -> APIRouter:
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     @router.get("/api/cookbook/packages")
-    async def list_packages(host: str | None = None, ssh_port: str | None = None, venv: str | None = None):
+    async def list_packages(request: Request, host: str | None = None, ssh_port: str | None = None, venv: str | None = None):
         """Check which optional packages are installed.
 
         Local-target packages are checked in-process. Remote-target packages
@@ -499,7 +499,14 @@ def setup_shell_routes() -> APIRouter:
         server over SSH, inside its venv — otherwise installing on a remote box
         never reflected because the check only ever looked at the local host.
         """
+        _require_admin(request)
         import importlib, shlex, json as _json
+        port_arg = ""
+        if ssh_port and str(ssh_port).strip() not in ("", "22"):
+            _port = str(ssh_port).strip()
+            if not _port.isdigit():
+                raise HTTPException(400, "Invalid ssh_port")
+            port_arg = f"-p {int(_port)} "
         packages = [
             # ── System ── OS binaries, not pip packages
             {"name": "tmux", "pip": "", "desc": "Required for Linux/Termux Cookbook background downloads and serves", "category": "System", "target": "remote", "kind": "system", "install_hint": "Run Cookbook server setup, or install tmux with apt/pacman/dnf/apk/zypper."},
@@ -539,9 +546,8 @@ def setup_shell_routes() -> APIRouter:
                     # the && short-circuits and every package reads as missing).
                     src = f". {act} && "
                 inner = f"{src}python3 -c {shlex.quote(py)}"
-                pf = f"-p {ssh_port} " if ssh_port and ssh_port not in ("", "22") else ""
                 ssh_cmd = (
-                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {pf}"
+                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {port_arg}"
                     f"{shlex.quote(host)} {shlex.quote(inner)}"
                 )
                 proc = await asyncio.create_subprocess_shell(
@@ -564,9 +570,8 @@ def setup_shell_routes() -> APIRouter:
                     qn = shlex.quote(name)
                     checks.append(f"if command -v {qn} >/dev/null 2>&1; then echo {qn}=1; else echo {qn}=0; fi")
                 inner = " ; ".join(checks)
-                pf = f"-p {ssh_port} " if ssh_port and ssh_port not in ("", "22") else ""
                 ssh_cmd = (
-                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {pf}"
+                    f"ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no {port_arg}"
                     f"{shlex.quote(host)} {shlex.quote(inner)}"
                 )
                 proc = await asyncio.create_subprocess_shell(
