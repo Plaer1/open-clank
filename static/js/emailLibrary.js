@@ -1821,9 +1821,13 @@ function _prefetchAdjacentEmails(card, count = 3) {
 async function _toggleCardPreview(card, em) {
   const grid = card.closest('.doclib-grid');
   const gridRect = grid?.getBoundingClientRect?.();
+  const modal = document.getElementById('email-lib-modal');
+  const modalContent = card.closest('.modal-content');
+  const modalRect = modalContent?.getBoundingClientRect?.();
   const currentRect = card.getBoundingClientRect();
   const stableOpenHeight = Math.max(
     currentRect.height || 0,
+    (modalRect?.height || 0) - 84,
     Math.min(Math.max(260, window.innerHeight * 0.56), gridRect?.height || window.innerHeight)
   );
 
@@ -1832,7 +1836,8 @@ async function _toggleCardPreview(card, em) {
     card.classList.remove('email-card-expanded');
     card.classList.remove('doclib-card-expanded');
     card.style.minHeight = '';
-    document.getElementById('email-lib-modal')?.classList.remove('email-reading');
+    modal?.classList.remove('email-reading');
+    modal?.style.removeProperty('--email-reading-modal-min-h');
     const reader = card.querySelector('.email-card-reader');
     if (reader) reader.remove();
     return;
@@ -1860,7 +1865,10 @@ async function _toggleCardPreview(card, em) {
   // Class hook on the modal so the header-hide / padding rules work on
   // browsers without :has() support (Firefox mobile) — the :has() versions
   // below stay as the desktop path.
-  document.getElementById('email-lib-modal')?.classList.add('email-reading');
+  if (modal && modalRect?.height) {
+    modal.style.setProperty('--email-reading-modal-min-h', `${Math.round(modalRect.height)}px`);
+  }
+  modal?.classList.add('email-reading');
 
   // Show loading reader with whirlpool spinner
   const reader = document.createElement('div');

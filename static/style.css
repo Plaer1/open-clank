@@ -14396,6 +14396,9 @@ body.left-dock-active {
   display: flex !important;
   flex: 1 1 auto !important;
 }
+#email-lib-modal.email-reading .doclib-modal-content {
+  min-height: var(--email-reading-modal-min-h, auto);
+}
 #email-lib-modal .doclib-card.doclib-card-expanded {
   flex: 1 1 auto !important;
   height: 100% !important;
