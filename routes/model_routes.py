@@ -909,6 +909,34 @@ def setup_model_routes(model_discovery):
         require_model_list = _truthy(require_models)
         should_probe = require_model_list or not _truthy(skip_probe)
 
+        # Dedupe: if an endpoint with the same base_url already exists and
+        # is reachable by the caller (shared or owned by them), return it
+        # instead of creating a duplicate row. Fixes "Scan for Servers"
+        # re-adding manually-added endpoints under their host:port name.
+        from src.auth_helpers import get_current_user as _gcu_dedup
+        _caller = _gcu_dedup(request) or None
+        _db_dedup = SessionLocal()
+        try:
+            existing = (
+                _db_dedup.query(ModelEndpoint)
+                .filter(ModelEndpoint.base_url == base_url)
+                .filter((ModelEndpoint.owner.is_(None)) | (ModelEndpoint.owner == _caller))
+                .order_by(ModelEndpoint.owner.desc())  # prefer owned over shared
+                .first()
+            )
+            if existing:
+                return {
+                    "id": existing.id,
+                    "name": existing.name,
+                    "base_url": existing.base_url,
+                    "models": json.loads(existing.cached_models) if existing.cached_models else [],
+                    "online": True,
+                    "status": "online",
+                    "existing": True,
+                }
+        finally:
+            _db_dedup.close()
+
         # Quick model list fetch (1s timeout — if endpoint is slow, it'll update on next refresh)
         _probe_timeout = 3 if (":11434" in base_url or "ollama" in base_url.lower()) else 1
         model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=_probe_timeout) if should_probe else []

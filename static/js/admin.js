@@ -952,8 +952,10 @@ function initEndpointForm() {
           msg.textContent = 'No model servers found. Make sure vLLM, llama.cpp, SGLang, or Ollama is running. Docker users may need OLLAMA_HOST=0.0.0.0:11434.';
           msg.className = 'admin-error';
         } else {
-          // Auto-add each discovered endpoint
+          // Auto-add each discovered endpoint. Server dedupes on base_url
+          // and returns `existing: true` for already-registered ones.
           let added = 0;
+          let skipped = 0;
           for (const item of items) {
             const base = item.url.replace('/chat/completions', '').replace(/\/$/, '');
             const fd = new FormData();
@@ -961,12 +963,18 @@ function initEndpointForm() {
             fd.append('skip_probe', 'false');
             const r = await fetch('/api/model-endpoints', { method: 'POST', body: fd });
             if (r.ok) {
-              added++;
-              try { const dd = await r.json(); if (dd && dd.id) _recentlyAddedEpId = String(dd.id); } catch (_) {}
+              try {
+                const dd = await r.json();
+                if (dd && dd.existing) { skipped++; }
+                else { added++; if (dd && dd.id) _recentlyAddedEpId = String(dd.id); }
+              } catch (_) { added++; }
             }
           }
           const totalModels = items.reduce((n, i) => n + (i.models ? i.models.length : 0), 0);
-          msg.innerHTML = `Found ${items.length} server${items.length !== 1 ? 's' : ''} with ${totalModels} model${totalModels !== 1 ? 's' : ''}` + (added ? ` — added ${added} new` : ' (already added)');
+          const parts = [`Found ${items.length} server${items.length !== 1 ? 's' : ''} with ${totalModels} model${totalModels !== 1 ? 's' : ''}`];
+          if (added) parts.push(`added ${added} new`);
+          if (skipped) parts.push(`${skipped} already added`);
+          msg.innerHTML = parts.join(' — ');
           msg.className = 'admin-success';
           loadEndpoints();
         }
