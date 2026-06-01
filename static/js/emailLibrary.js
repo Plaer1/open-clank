@@ -453,7 +453,7 @@ export function openEmailLibrary(opts = {}) {
   const existing = document.getElementById('email-lib-modal');
   if (existing) existing.remove();
   if (state._libEscHandler) {
-    document.removeEventListener('keydown', state._libEscHandler);
+    document.removeEventListener('keydown', state._libEscHandler, true);
     state._libEscHandler = null;
   }
   state._libOpen = true;
@@ -958,11 +958,13 @@ export function openEmailLibrary(opts = {}) {
 
   // ESC to close + Arrow nav + Delete on the selected / currently-expanded email.
   state._libEscHandler = (e) => {
+    const modal = document.getElementById('email-lib-modal');
+    if (!modal || modal.classList.contains('hidden')) return;
     if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
       if (state._selectMode) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation?.();
         state._selectMode = false;
         state._selectedUids.clear();
         _updateBulkBar();
@@ -995,7 +997,7 @@ export function openEmailLibrary(opts = {}) {
       }
     }
   };
-  document.addEventListener('keydown', state._libEscHandler);
+  document.addEventListener('keydown', state._libEscHandler, true);
 
   _loadAccounts();
   _loadFolders();
@@ -1047,7 +1049,7 @@ export function closeEmailLibrary() {
   if (modal) modal.remove();
   _clearEmailDocumentSplit();
   if (state._libEscHandler) {
-    document.removeEventListener('keydown', state._libEscHandler);
+    document.removeEventListener('keydown', state._libEscHandler, true);
     state._libEscHandler = null;
   }
   state._libOpen = false;
