@@ -2747,7 +2747,7 @@ body.bg-pattern-sparkles {
       justify-content: center;
       width: 30px;
       height: 24px;
-      margin: -5px -6px -5px 6px;
+      margin: -5px -8px -5px 8px;
       padding: 0;
       border: none;
       background: none;
@@ -2799,7 +2799,7 @@ body.bg-pattern-sparkles {
       .model-picker-list .mp-fav-dot {
         width: 30px;
         height: 30px;
-        margin: -7px -6px -7px 6px;
+        margin: -7px -8px -7px 8px;
       }
     }
     /* Overflow "+" menu */
