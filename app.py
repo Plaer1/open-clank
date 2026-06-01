@@ -926,65 +926,6 @@ async def startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
-    # Auto-detect Ollama — run in background to avoid blocking startup. In Docker,
-    # localhost is the container, so also try host.docker.internal.
-    async def _detect_ollama():
-        try:
-            import httpx
-            raw_candidates = [
-                os.getenv("OLLAMA_BASE_URL", ""),
-                os.getenv("OLLAMA_URL", ""),
-                "http://localhost:11434/v1",
-                "http://host.docker.internal:11434/v1",
-            ]
-            candidates = []
-            for raw in raw_candidates:
-                base = (raw or "").strip().rstrip("/")
-                if not base:
-                    continue
-                if base.endswith("/api"):
-                    base = base[:-4].rstrip("/")
-                if not base.endswith("/v1"):
-                    base = base + "/v1"
-                if base not in candidates:
-                    candidates.append(base)
-
-            found_base = ""
-            async with httpx.AsyncClient() as client:
-                for base in candidates:
-                    try:
-                        r = await client.get(base + "/models", timeout=2)
-                        if r.status_code == 200:
-                            found_base = base
-                            break
-                    except Exception:
-                        continue
-            if not found_base:
-                return
-            from core.database import SessionLocal, ModelEndpoint
-            db = SessionLocal()
-            try:
-                existing = None
-                for base in candidates:
-                    existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base).first()
-                    if existing:
-                        break
-                if not existing:
-                    host = found_base.replace("http://", "").replace("https://", "").split("/")[0]
-                    ep = ModelEndpoint(
-                        id=str(uuid.uuid4())[:8],
-                        name="Ollama" if host.startswith("localhost") else f"Ollama ({host})",
-                        base_url=found_base,
-                        is_enabled=True,
-                    )
-                    db.add(ep)
-                    db.commit()
-                    logger.info(f"Auto-added Ollama endpoint ({found_base})")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.debug(f"Ollama auto-detect: {e}")
-    _startup_tasks.append(asyncio.create_task(_detect_ollama()))
     logger.info("Application startup complete")
 
 @app.on_event("shutdown")
