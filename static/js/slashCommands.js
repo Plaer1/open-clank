@@ -1607,36 +1607,6 @@ async function _cmdEvent(args, ctx) {
   return true;
 }
 
-async function _cmdRemind(args, ctx) {
-  // Accepts "/remind me at 15:00 to call mom", "/remind in 30m check oven",
-  // "/remind tomorrow 9am standup". Shares _parseTimeSpec with /event — the
-  // parser strips "me", "at", "in", "to" stop words.
-  const raw = args.join(' ').trim();
-  if (!raw) { slashReply('Usage: /remind me at 15:00 to call mom  ·  /remind in 30m check oven'); return true; }
-  const parsed = _parseTimeSpec(raw);
-  if (!parsed || !parsed.rest) { slashReply(`Could not parse time from: ${ctx.esc(raw)}`); return true; }
-  const start = parsed.date;
-  const end = new Date(start.getTime() + 30 * 60 * 1000); // reminders default to 30m block
-  const body = {
-    summary: parsed.rest,
-    dtstart: _toLocalIso(start),
-    dtend: _toLocalIso(end),
-    all_day: false,
-  };
-  const res = await fetch(`${API_BASE}/api/calendar/events`, {
-    method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (res.ok) {
-    await typewriterReply(`Reminder set: ${ctx.esc(parsed.rest)} — ${start.toLocaleString()}`);
-  } else {
-    const err = await res.text().catch(() => '');
-    slashReply(`Failed to set reminder${err ? `: ${ctx.esc(err.slice(0,200))}` : ''}`);
-  }
-  return true;
-}
-
 // ── Shell (user command execution) ──
 
 async function _cmdShell(args, ctx) {
@@ -5480,14 +5450,6 @@ const COMMANDS = {
     handler: _cmdTodo,
     noUserBubble: true,
     usage: '/todo Your task  ·  /todo list',
-  },
-  remind: {
-    alias: ['rem'],
-    category: 'Productivity',
-    help: 'Create a note reminder',
-    handler: _cmdRemind,
-    noUserBubble: true,
-    usage: '/remind me at 15:00 to call mom  ·  /remind in 30m check oven',
   },
   event: {
     alias: ['ev'],
