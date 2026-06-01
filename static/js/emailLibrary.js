@@ -449,27 +449,12 @@ export function initEmailLibrary(config) {
 export function isOpen() { return state._libOpen; }
 
 export function openEmailLibrary(opts = {}) {
+  // Force-clean any stale state from previous attempts
   const existing = document.getElementById('email-lib-modal');
-  if (existing) {
-    existing.classList.remove('hidden');
-    existing.style.display = 'block';
-    state._libOpen = true;
-    if (window.innerWidth <= 768) {
-      document.getElementById('sidebar')?.classList.add('hidden');
-      document.getElementById('sidebar-backdrop')?.classList.remove('visible');
-    }
-    document.body.classList.add('email-front');
-    if (Object.prototype.hasOwnProperty.call(opts, 'account_id')) {
-      state._libAccountId = opts.account_id || null;
-      _publishActiveAccount();
-    }
-    if (opts.folder) state._libFolder = opts.folder;
-    state._libPendingExpandUid = opts.uid || null;
-    _loadAccounts();
-    _loadFolders();
-    _loadEmailReminderBellVisibility();
-    _loadEmails({ preserveCurrent: true });
-    return;
+  if (existing) existing.remove();
+  if (state._libEscHandler) {
+    document.removeEventListener('keydown', state._libEscHandler);
+    state._libEscHandler = null;
   }
   state._libOpen = true;
   // On mobile the sidebar overlays content — close it so the email view isn't
@@ -973,8 +958,6 @@ export function openEmailLibrary(opts = {}) {
 
   // ESC to close + Arrow nav + Delete on the selected / currently-expanded email.
   state._libEscHandler = (e) => {
-    const modal = document.getElementById('email-lib-modal');
-    if (!modal || modal.classList.contains('hidden')) return;
     if (e.key === 'Escape') {
       if (state._selectMode) {
         e.preventDefault();
@@ -1061,8 +1044,12 @@ function _renderAccountsStrip() {
 
 export function closeEmailLibrary() {
   const modal = document.getElementById('email-lib-modal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) modal.remove();
   _clearEmailDocumentSplit();
+  if (state._libEscHandler) {
+    document.removeEventListener('keydown', state._libEscHandler);
+    state._libEscHandler = null;
+  }
   state._libOpen = false;
   // If the /email route collapsed the wide sidebar to make room for
   // the fullscreen modal, re-expand it now that the modal is gone.
@@ -1307,7 +1294,7 @@ async function _refreshUnreadBadge() {
   } catch (_) { _syncUnreadTabBadge(0); }
 }
 
-async function _loadEmails({ force = false, preserveCurrent = false } = {}) {
+async function _loadEmails({ force = false } = {}) {
   const seq = ++_libLoadSeq;
   state._libLoading = true;
   const accountAtStart = state._libAccountId || '';
@@ -1349,8 +1336,6 @@ async function _loadEmails({ force = false, preserveCurrent = false } = {}) {
     _renderGrid();
     const stats = document.getElementById('email-lib-stats');
     if (stats) stats.textContent = `${state._libTotal} emails`;
-  } else if (preserveCurrent && state._libEmails.length) {
-    sp = null;
   } else {
     grid.innerHTML = '';
     sp = spinnerModule.createWhirlpool(28);
