@@ -21237,8 +21237,11 @@ a.chat-link[href^="#research-"] {
   .task-card .task-state-badge {
     width: 20px;
     min-width: 20px;
+    height: 20px;
+    min-height: 20px;
     padding-left: 0;
     padding-right: 0;
+    box-sizing: border-box;
     justify-content: center;
   }
   .task-card .task-state-badge .task-state-label {
