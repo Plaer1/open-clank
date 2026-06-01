@@ -386,9 +386,9 @@ function _rerenderCachedModels() {
         : _isMetal()
         // Diffusers (diffusion_server.py) is CUDA-only — omit it on Metal.
         ? [['llamacpp','llama.cpp'],['ollama','Ollama']]
-        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['diffusers','Diffusers']];
+        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
-      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
+      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
       panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', _nextAvailablePort()))}" /></label>`;
@@ -1512,7 +1512,7 @@ export async function _fetchCachedModels() {
     const data = await res.json();
     _dlWp.destroy();
 
-    const ready = data.models.filter(m => m.status === 'ready' && !m.size.includes('MB'));
+    const ready = data.models.filter(m => m.status === 'ready' && (m.backend === 'ollama' || !m.size.includes('MB')));
     const downloading = data.models.filter(m => m.status === 'downloading');
     const allModels = [...ready, ...downloading];
     _cachedAllModels = allModels;
@@ -1541,7 +1541,8 @@ export async function _fetchCachedModels() {
     for (const m of allModels) {
       const n = (m.repo_id || '').toLowerCase();
       let tag = 'other';
-      if (m.is_diffusion || /flux|sdxl|stable-diffusion|z-image|qwen-image|diffusion|dreamshar/i.test(n)) tag = 'image';
+      if (m.backend === 'ollama' || m.is_ollama) tag = 'llm';
+      else if (m.is_diffusion || /flux|sdxl|stable-diffusion|z-image|qwen-image|diffusion|dreamshar/i.test(n)) tag = 'image';
       else if (/whisper|stt|asr/i.test(n)) tag = 'stt';
       else if (/tts|cosyvoice|parler/i.test(n)) tag = 'tts';
       else if (/embed|bge|minilm|e5-/i.test(n)) tag = 'embedding';
@@ -1552,6 +1553,10 @@ export async function _fetchCachedModels() {
       m._family = '';
       for (const [re, fam] of _families) {
         if (re.test(n)) { m._family = fam; _familyMap[fam] = (_familyMap[fam] || 0) + 1; break; }
+      }
+      if ((m.backend === 'ollama' || m.is_ollama) && !m._family) {
+        m._family = 'ollama';
+        _familyMap.ollama = (_familyMap.ollama || 0) + 1;
       }
     }
 

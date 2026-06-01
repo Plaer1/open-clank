@@ -710,6 +710,10 @@ def setup_cookbook_routes() -> APIRouter:
                     entry["is_local_dir"] = True
                 if m.get("is_gguf"):
                     entry["is_gguf"] = True
+                if m.get("backend"):
+                    entry["backend"] = m.get("backend")
+                if m.get("is_ollama"):
+                    entry["is_ollama"] = True
                 models.append(entry)
         except Exception as e:
             logger.warning(f"Failed to parse cached models: {e}")
