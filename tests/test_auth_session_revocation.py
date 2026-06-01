@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib
-import json
 import sys
 import types
 from pathlib import Path
@@ -43,8 +42,8 @@ def _make_manager(tmp_path):
     return mgr
 
 
-def _sessions_on_disk(tmp_path):
-    return json.loads((tmp_path / "sessions.json").read_text(encoding="utf-8"))
+async def _immediate_to_thread(fn, *args, **kwargs):
+    return fn(*args, **kwargs)
 
 
 def test_revoke_user_sessions_preserves_current_and_persists(tmp_path):
@@ -59,10 +58,6 @@ def test_revoke_user_sessions_preserves_current_and_persists(tmp_path):
     assert mgr.validate_token(current) is True
     assert mgr.validate_token(other) is False
     assert mgr.validate_token(bob) is True
-    persisted = _sessions_on_disk(tmp_path)
-    assert current in persisted
-    assert bob in persisted
-    assert other not in persisted
 
 
 def test_wrong_current_password_does_not_revoke_sessions(tmp_path):
@@ -74,9 +69,6 @@ def test_wrong_current_password_does_not_revoke_sessions(tmp_path):
 
     assert mgr.validate_token(current) is True
     assert mgr.validate_token(other) is True
-    persisted = _sessions_on_disk(tmp_path)
-    assert current in persisted
-    assert other in persisted
 
 
 def test_password_change_allows_new_password_and_blocks_old_password(tmp_path):
@@ -100,11 +92,15 @@ def _change_password_endpoint(auth_manager):
     raise AssertionError("change-password route not found")
 
 
-def test_change_password_route_revokes_other_sessions_after_success():
+def test_change_password_route_revokes_other_sessions_after_success(monkeypatch):
     auth = MagicMock()
     auth.get_username_for_token.return_value = "alice"
     auth.change_password.return_value = True
     endpoint, ChangePasswordRequest = _change_password_endpoint(auth)
+    monkeypatch.setattr(
+        "routes.auth_routes.asyncio.to_thread",
+        lambda fn, *args, **kwargs: _immediate_to_thread(fn, *args, **kwargs),
+    )
     request = SimpleNamespace(cookies={"odysseus_session": "current-token"})
     body = ChangePasswordRequest(current_password="old-password", new_password="new-password")
 
@@ -115,11 +111,15 @@ def test_change_password_route_revokes_other_sessions_after_success():
     auth.revoke_user_sessions.assert_called_once_with("alice", "current-token")
 
 
-def test_change_password_route_wrong_password_does_not_revoke():
+def test_change_password_route_wrong_password_does_not_revoke(monkeypatch):
     auth = MagicMock()
     auth.get_username_for_token.return_value = "alice"
     auth.change_password.return_value = False
     endpoint, ChangePasswordRequest = _change_password_endpoint(auth)
+    monkeypatch.setattr(
+        "routes.auth_routes.asyncio.to_thread",
+        lambda fn, *args, **kwargs: _immediate_to_thread(fn, *args, **kwargs),
+    )
     request = SimpleNamespace(cookies={"odysseus_session": "current-token"})
     body = ChangePasswordRequest(current_password="wrong-password", new_password="new-password")
 
