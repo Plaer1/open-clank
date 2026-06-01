@@ -5650,7 +5650,7 @@ const COMMANDS = {
 // ── Legacy aliases ────────────────────────────────────────────────
 // Maps old flat command names to { parent, sub } so `/new` still works.
 
-const LEGACY_ALIASES = {
+export const LEGACY_ALIASES = {
   'new':         { parent: 'session', sub: 'new' },
   'create':      { parent: 'session', sub: 'new' },
   'delete':      { parent: 'session', sub: 'delete' },
@@ -5950,7 +5950,7 @@ export function clearSetupMode(preservePendingState = false) {
   }
 }
 
-export { handleSlashCommand, handleSetupInput, handleSetupWizard, slashReply, typewriterReply };
+export { handleSlashCommand, handleSetupInput, handleSetupWizard, slashReply, typewriterReply, COMMANDS };
 
 const slashCommands = {
   initSlashCommands,
