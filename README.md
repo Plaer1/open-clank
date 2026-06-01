@@ -73,9 +73,18 @@ serve engines and Python CLIs are stored in `./data/local`, mounted as
 
 After downloading a model, open **Cookbook -> Serve**, pick the cached model,
 and launch it. When the server answers `/v1/models`, Odysseus adds it to the
-chat model picker automatically. For NVIDIA GPUs in Docker, install the NVIDIA
-Container Toolkit and add `gpus: all` to the `odysseus` service if `nvidia-smi`
-is not visible inside the container.
+chat model picker automatically. For NVIDIA / AMD GPUs in Docker, install
+the host runtime (NVIDIA Container Toolkit or ROCm drivers) and enable the
+matching overlay via `COMPOSE_FILE` in `.env`:
+
+```bash
+# NVIDIA
+COMPOSE_FILE=docker-compose.yml:docker/gpu.nvidia.yml
+# AMD ROCm
+COMPOSE_FILE=docker-compose.yml:docker/gpu.amd.yml
+```
+
+Verify with `docker compose exec odysseus nvidia-smi -L` (or `rocm-smi`).
 
 The default Docker image is intentionally slim. For Python-based serve engines,
 use **Cookbook -> Dependencies** to install vLLM, SGLang, llama-cpp-python, or
