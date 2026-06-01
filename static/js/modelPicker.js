@@ -294,6 +294,9 @@ function _initModelPickerDropdown() {
         e.stopPropagation();
         const nowFav = _toggleFavorite(m.mid);
         _setFavState(nowFav);
+        favDot.classList.remove('pulse');
+        void favDot.offsetWidth;
+        favDot.classList.add('pulse');
         // Keep our in-memory copy aligned so a follow-up re-render is correct.
         const idx = favs.indexOf(m.mid);
         if (nowFav && idx < 0) favs.push(m.mid);
