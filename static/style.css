@@ -3458,6 +3458,33 @@ body.bg-pattern-sparkles {
       border-color: var(--accent-primary, var(--red));
       background: color-mix(in srgb, var(--accent-primary, var(--red)) 12%, var(--bg));
     }
+    pre .use-code {
+      position:absolute; right:42px; top:6px;
+      background:var(--bg); color:var(--fg);
+      border:1px solid var(--border); border-radius:6px;
+      width:28px; height:28px; padding:0; cursor:pointer;
+      opacity:0; transition: opacity .15s, color .15s, border-color .15s;
+      display:flex; align-items:center; justify-content:center;
+    }
+    pre .use-code.bottom { top:auto; bottom:6px; }
+    pre:hover .use-code { opacity:0.7; }
+    pre .use-code:hover { opacity:1; }
+    pre .use-code.used {
+      opacity: 1;
+      color: var(--color-save-green, #4caf50);
+      border-color: var(--color-save-green, #4caf50);
+      background: color-mix(in srgb, var(--color-save-green, #4caf50) 18%, var(--bg));
+      animation: code-copy-pulse 0.36s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .setup-trigger-link, .setup-clickable-provider, .setup-clickable-code {
+      transition: color 0.15s ease, opacity 0.15s ease;
+    }
+    .setup-trigger-link:hover,
+    .setup-clickable-provider:hover,
+    .setup-clickable-code:hover {
+      color: var(--accent, var(--red)) !important;
+      opacity: 0.9;
+    }
 
     /* Tapping the code body (not a button) toggles the overlay buttons off so
        they stop covering the text on touch screens. Tap again to bring back. */
