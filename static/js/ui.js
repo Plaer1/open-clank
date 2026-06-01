@@ -29,6 +29,7 @@ function _targetEl(target) {
 const SPACE_CARD_SELECTOR = [
   '#email-lib-modal .doclib-card',
   '#doclib-modal .doclib-card',
+  '#doclib-modal .doclib-chat-row',
   '#memory-modal .doclib-card',
   '#tasks-modal .task-card',
   '#tasks-modal .task-log-row',
@@ -90,7 +91,11 @@ function _activateSpaceCard(card) {
       return true;
     }
   }
+  card.dataset.spaceToggle = '1';
   card.click();
+  setTimeout(() => {
+    try { delete card.dataset.spaceToggle; } catch {}
+  }, 0);
   return true;
 }
 
