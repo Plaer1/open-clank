@@ -1422,17 +1422,17 @@ async function _cmdMemorySearch(args, ctx) {
   return true;
 }
 
-// ── Note (quick memory shortcut) ──
+// ── Note (quick Notes shortcut) ──
 
 async function _cmdNote(args, ctx) {
   const text = args.join(' ');
   if (!text) { slashReply('Usage: /note Your note here'); return true; }
-  const res = await fetch(`${API_BASE}/api/memory/add`, {
+  const res = await fetch(`${API_BASE}/api/notes`, {
     method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, category: 'note', source: 'user' })
+    body: JSON.stringify({ title: text, content: '', note_type: 'note', source: 'slash' })
   });
-  if (res.ok) await typewriterReply(`Note saved: ${ctx.esc(text)}`);
+  if (res.ok) await typewriterReply(`Note added: ${ctx.esc(text)}`);
   else slashReply('Failed to save note');
   return true;
 }
@@ -5347,7 +5347,7 @@ async function _cmdHelp(args, ctx) {
       categories[cat].push(`  ${usage.padEnd(21)}${desc}`);
     }
   }
-  const order = ['Getting started', 'Tours', 'Settings', 'Memory', 'Productivity', 'AI Tools'];
+  const order = ['Getting started', 'Tours', 'Chats', 'Settings', 'Memory', 'Productivity', 'AI Tools'];
   let lines = [];
   for (const cat of order) {
     if (categories[cat] && categories[cat].length) {
@@ -5365,7 +5365,7 @@ async function _cmdHelp(args, ctx) {
     }
   }
   lines.push('Tip: /<command> --help for details');
-  lines.push('Unix aliases: /rm /mv /cd /ls /cp /cat /man /stat /tar /mkdir /curl /df /fsck /bind /status');
+  lines.push('Shortcuts: /new /rename /fork /web /bash /memories /forget');
   slashReply(`<pre style="line-height:1.7">${lines.join('\n')}</pre>`);
   return true;
 }
@@ -5373,29 +5373,28 @@ async function _cmdHelp(args, ctx) {
 // ── Command registry ──────────────────────────────────────────────
 // Each top-level key is a command group.  Flat commands have a handler
 // directly; grouped commands use `subs`.  `default` is the sub run
-// when the command is invoked bare (e.g. `/session` -> list).
+// when the command is invoked bare (e.g. `/chats` -> info).
 
 const COMMANDS = {
-  session: {
-    alias: ['s'],
-    category: 'Session',
-    hidden: true,
+  chats: {
+    alias: ['chat', 'session', 'sessions', 's'],
+    category: 'Chats',
     help: 'Manage chat sessions',
     default: 'info',
     subs: {
-      'new':         { handler: _cmdSessionNew,         alias: ['create','mkdir'], help: 'Create new session',          usage: '/session new [name]' },
-      'delete':      { handler: _cmdSessionDelete,      alias: ['del','rm'],  help: 'Delete session',                 usage: '/session delete [id]' },
-      'archive':     { handler: _cmdSessionArchive,     alias: ['tar'],       help: 'Archive session',                usage: '/session archive [id]' },
-      'rename':      { handler: _cmdSessionRename,      alias: ['mv'],        help: 'Rename current session',         usage: '/session rename Name' },
-      'important':   { handler: _cmdSessionImportant,   alias: ['star'],      help: 'Mark as important',              usage: '/session important' },
-      'unimportant': { handler: _cmdSessionUnimportant, alias: ['unstar'],    help: 'Unmark important',               usage: '/session unimportant' },
-      'fork':        { handler: _cmdSessionFork,        alias: ['cp'],        help: 'Fork session (keep first N msgs)', usage: '/session fork [N]' },
-      'truncate':    { handler: _cmdSessionTruncate,    alias: [],            help: 'Delete older messages, keep last N', usage: '/session truncate N' },
-      'switch':      { handler: _cmdSessionSwitch,      alias: ['goto','cd'], help: 'Switch to session by name/id',   usage: '/session switch name' },
-      'sort':        { handler: _cmdSessionSort,        alias: [],            help: 'Auto-sort into folders',         usage: '/session sort' },
-      'info':        { handler: _cmdSessionInfo,        alias: ['stat'],      help: 'Show session details',           usage: '/session info' },
-      'clear':       { handler: _cmdSessionClear,       alias: [],            help: 'Clear chat display',             usage: '/session clear' },
-      'export':      { handler: _cmdSessionExport,      alias: ['cat'],       help: 'Download as markdown',           usage: '/session export' }
+      'new':         { handler: _cmdSessionNew,         alias: ['create','mkdir'], help: 'Create new chat',             usage: '/chats new [name]' },
+      'delete':      { handler: _cmdSessionDelete,      alias: ['del','rm'],       help: 'Delete chat',                 usage: '/chats delete [id]' },
+      'archive':     { handler: _cmdSessionArchive,     alias: ['tar'],            help: 'Archive chat',                usage: '/chats archive [id]' },
+      'rename':      { handler: _cmdSessionRename,      alias: ['mv'],             help: 'Rename current chat',         usage: '/chats rename Name' },
+      'important':   { handler: _cmdSessionImportant,   alias: ['pin'],            help: 'Mark as important',           usage: '/chats important' },
+      'unimportant': { handler: _cmdSessionUnimportant, alias: ['unpin'],          help: 'Unmark important',            usage: '/chats unimportant' },
+      'fork':        { handler: _cmdSessionFork,        alias: ['cp'],             help: 'Fork chat (keep first N msgs)', usage: '/chats fork [N]' },
+      'truncate':    { handler: _cmdSessionTruncate,    alias: [],                 help: 'Delete older messages, keep last N', usage: '/chats truncate N' },
+      'switch':      { handler: _cmdSessionSwitch,      alias: ['goto','cd'],      help: 'Switch to chat by name/id',    usage: '/chats switch name' },
+      'sort':        { handler: _cmdSessionSort,        alias: [],                 help: 'Auto-sort into folders',      usage: '/chats sort' },
+      'info':        { handler: _cmdSessionInfo,        alias: ['stat'],           help: 'Show chat details',           usage: '/chats info' },
+      'clear':       { handler: _cmdSessionClear,       alias: [],                 help: 'Clear chat display',          usage: '/chats clear' },
+      'export':      { handler: _cmdSessionExport,      alias: ['cat'],            help: 'Download as markdown',        usage: '/chats export' }
     }
   },
   toggle: {
@@ -5621,14 +5620,6 @@ const COMMANDS = {
     handler: _cmdCompact,
     usage: '/compact'
   },
-  tts: {
-    alias: ['speak'],
-    category: 'Utility',
-    hidden: true,
-    help: 'Text-to-speech',
-    handler: _cmdTts,
-    usage: '/tts text'
-  },
   sh: {
     alias: ['exec', 'run', 'shell'],
     category: 'Utility',
@@ -5680,25 +5671,25 @@ const COMMANDS = {
 // Maps old flat command names to { parent, sub } so `/new` still works.
 
 export const LEGACY_ALIASES = {
-  'new':         { parent: 'session', sub: 'new' },
-  'create':      { parent: 'session', sub: 'new' },
-  'delete':      { parent: 'session', sub: 'delete' },
-  'del':         { parent: 'session', sub: 'delete' },
-  'archive':     { parent: 'session', sub: 'archive' },
-  'rename':      { parent: 'session', sub: 'rename' },
-  'important':   { parent: 'session', sub: 'important' },
-  'star':        { parent: 'session', sub: 'important' },
-  'unimportant': { parent: 'session', sub: 'unimportant' },
-  'unstar':      { parent: 'session', sub: 'unimportant' },
-  'fork':        { parent: 'session', sub: 'fork' },
-  'truncate':    { parent: 'session', sub: 'truncate' },
-  'sessions':    { parent: 'session', sub: 'info' },
-  'switch':      { parent: 'session', sub: 'switch' },
-  'goto':        { parent: 'session', sub: 'switch' },
-  'sort':        { parent: 'session', sub: 'sort' },
-  'info':        { parent: 'session', sub: 'info' },
-  'clear':       { parent: 'session', sub: 'clear' },
-  'export':      { parent: 'session', sub: 'export' },
+  'new':         { parent: 'chats', sub: 'new' },
+  'create':      { parent: 'chats', sub: 'new' },
+  'delete':      { parent: 'chats', sub: 'delete' },
+  'del':         { parent: 'chats', sub: 'delete' },
+  'archive':     { parent: 'chats', sub: 'archive' },
+  'rename':      { parent: 'chats', sub: 'rename' },
+  'important':   { parent: 'chats', sub: 'important' },
+  'star':        { parent: 'chats', sub: 'important' },
+  'unimportant': { parent: 'chats', sub: 'unimportant' },
+  'unstar':      { parent: 'chats', sub: 'unimportant' },
+  'fork':        { parent: 'chats', sub: 'fork' },
+  'truncate':    { parent: 'chats', sub: 'truncate' },
+  'sessions':    { parent: 'chats', sub: 'info' },
+  'switch':      { parent: 'chats', sub: 'switch' },
+  'goto':        { parent: 'chats', sub: 'switch' },
+  'sort':        { parent: 'chats', sub: 'sort' },
+  'info':        { parent: 'chats', sub: 'info' },
+  'clear':       { parent: 'chats', sub: 'clear' },
+  'export':      { parent: 'chats', sub: 'export' },
   'web':         { parent: 'toggle', sub: 'web' },
   'bash':        { parent: 'toggle', sub: 'bash' },
   'research':    { parent: 'toggle', sub: 'research' },
@@ -5707,14 +5698,14 @@ export const LEGACY_ALIASES = {
   'memories':    { parent: 'memory', sub: 'list' },
   'forget':      { parent: 'memory', sub: 'delete' },
   // Linux-style aliases
-  'rm':          { parent: 'session', sub: 'delete' },
-  'mv':          { parent: 'session', sub: 'rename' },
-  'cd':          { parent: 'session', sub: 'switch' },
-  'cp':          { parent: 'session', sub: 'fork' },
-  'cat':         { parent: 'session', sub: 'export' },
-  'stat':        { parent: 'session', sub: 'info' },
-  'tar':         { parent: 'session', sub: 'archive' },
-  'mkdir':       { parent: 'session', sub: 'new' },
+  'rm':          { parent: 'chats', sub: 'delete' },
+  'mv':          { parent: 'chats', sub: 'rename' },
+  'cd':          { parent: 'chats', sub: 'switch' },
+  'cp':          { parent: 'chats', sub: 'fork' },
+  'cat':         { parent: 'chats', sub: 'export' },
+  'stat':        { parent: 'chats', sub: 'info' },
+  'tar':         { parent: 'chats', sub: 'archive' },
+  'mkdir':       { parent: 'chats', sub: 'new' },
   'status':      { parent: 'toggle', sub: '_show' }
 };
 

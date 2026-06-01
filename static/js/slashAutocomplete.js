@@ -9,14 +9,14 @@ const MAX_VISIBLE = 12;
 
 // Flatten the registry into a searchable list of leaf entries. Each entry is
 // either a top-level command or a "cmd sub" pair (so subcommands get their
-// own row when relevant — /toggle web, /session new, etc).
+// own row when relevant — /toggle web, /chats new, etc).
 // Commands intentionally excluded from the autocomplete popup (pure easter
 // eggs with no productivity value, or internal machinery).
 const EXCLUDED = new Set(['flip','roll','8ball','fortune','odyssey','ascii']);
 
 // Important legacy aliases to promote to their own rows in the popup. These
 // are the short forms people will actually type (/new, /clear, /web, etc.)
-// rather than the full /session new, /toggle web equivalents.
+// rather than the full /chats new, /toggle web equivalents.
 const PROMOTED_ALIASES = new Set([
   'new','clear','rename','fork','export','archive','important','star',
   'web','bash','research','doc',
@@ -30,6 +30,7 @@ function _flatten() {
   // 1. Top-level commands and their subcommands from COMMANDS
   for (const [name, def] of Object.entries(COMMANDS)) {
     if (EXCLUDED.has(name)) continue;
+    if (def.hidden) continue;
     if (def.handler) {
       seen.add(`/${name}`);
       out.push({
@@ -43,6 +44,7 @@ function _flatten() {
     if (def.subs) {
       for (const [sub, sdef] of Object.entries(def.subs)) {
         if (sub.startsWith('_')) continue;
+        if (sdef.hidden) continue;
         const tok = `/${name} ${sub}`;
         seen.add(tok);
         out.push({
