@@ -265,7 +265,9 @@ body.bg-pattern-sparkles {
       transform: translateY(calc(-50% - 2px));
       font-size: 0.75em;
       line-height: 1;
-      color: color-mix(in srgb, var(--fg) 40%, transparent);
+      /* 70% mix keeps the chat title clearly above the WCAG AA 4.5:1
+         contrast threshold (40% only reached ~2.8:1). */
+      color: color-mix(in srgb, var(--fg) 70%, transparent);
       white-space: nowrap;
       display: flex;
       align-items: center;
@@ -2550,7 +2552,9 @@ body.bg-pattern-sparkles {
       background: none;
       border: 1px solid transparent;
       border-radius: 4px;
-      color: color-mix(in srgb, var(--fg) 40%, transparent);
+      /* 65% mix lifts the model label above the WCAG AA 4.5:1 threshold
+         against the dark chat-bar (40% only reached ~2.9:1). */
+      color: color-mix(in srgb, var(--fg) 65%, transparent);
       cursor: pointer;
       white-space: nowrap;
       transition: background 0.15s, color 0.15s, border-color 0.15s;
@@ -9610,7 +9614,8 @@ details a:hover {
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
-  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  /* 65% keeps this description text above WCAG AA 4.5:1 (50% was ~3.9:1). */
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
 }
 
 .memory-add-row {
@@ -11151,6 +11156,17 @@ textarea.memory-add-input {
 }
 #doc-language-icon:empty { display: none; }
 #doc-language-icon svg { display: block; }
+
+/* Visually hidden but available to assistive tech (screen readers, axe).
+   Use for content that should be announced/structural but not painted —
+   e.g. the persistent page <h1>. */
+.a11y-visually-hidden {
+  position: absolute !important;
+  width: 1px !important; height: 1px !important;
+  padding: 0 !important; margin: -1px !important;
+  overflow: hidden !important; clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important; border: 0 !important;
+}
 
 /* ── Custom language type picker (replaces visible chrome of native <select>
    — <option>s can't render SVG). Hidden select stays as the source of truth. */
@@ -12929,7 +12945,9 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   font-weight: 500;
 }
 .admin-toggle-sub {
-  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  /* 65% mix keeps this helper text above WCAG AA 4.5:1 on the dark panel
+     (50% only reached ~3.9:1). */
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
   font-size: 11px;
   margin-top: 2px;
 }
@@ -29699,7 +29717,9 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
 }
 .notes-empty-msg {
   text-align: center;
-  opacity: 0.4;
+  /* 0.4 dropped this empty-state text to ~2.8:1; 0.65 keeps it readable
+     (WCAG AA) while staying visibly secondary. */
+  opacity: 0.65;
   padding: 30px 20px;
   font-size: 11px;
 }
