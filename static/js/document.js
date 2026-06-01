@@ -2806,6 +2806,7 @@ import * as Modals from './modalManager.js';
     let sendSpinner = null;
     let origBtnHtml = '';
     let detachedEmailDoc = null;
+    let slowSendTimer = null;
     if (btn) {
       btn.disabled = true;
       origBtnHtml = btn.innerHTML;
@@ -2851,7 +2852,10 @@ import * as Modals from './modalManager.js';
         if (uiModule) uiModule.showToast('Send undone');
         return;
       }
-      if (uiModule) uiModule.showToast('Sending...', 15000);
+      if (uiModule) uiModule.showToast('Sending...', 3500);
+      slowSendTimer = setTimeout(() => {
+        if (uiModule) uiModule.showToast('Still sending in background...', 12000);
+      }, 2000);
 
       const activeAccountId = await _resolveComposeSendAccountId();
       const res = await fetch(`${API_BASE}/api/email/send`, {
@@ -2866,6 +2870,10 @@ import * as Modals from './modalManager.js';
         }),
       });
       const data = await res.json();
+      if (slowSendTimer) {
+        clearTimeout(slowSendTimer);
+        slowSendTimer = null;
+      }
       if (data.success) {
         if (uiModule) {
           uiModule.showToast('Message sent', {
@@ -2932,6 +2940,10 @@ import * as Modals from './modalManager.js';
         if (uiModule) uiModule.showError(data.error || 'Failed to send');
       }
     } catch (e) {
+      if (slowSendTimer) {
+        clearTimeout(slowSendTimer);
+        slowSendTimer = null;
+      }
       _restoreDetachedEmailDoc(detachedEmailDoc);
       detachedEmailDoc = null;
       if (uiModule) uiModule.showError(e?.message ? `Failed to send email: ${e.message}` : 'Failed to send email');
