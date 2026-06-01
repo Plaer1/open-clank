@@ -9675,6 +9675,66 @@ details a:hover {
   min-height: 0;
 }
 .memory-tab-panel.hidden { display: none; }
+/* Browse: bounded flex column so #memory-list gets remaining height (not 0px).
+   height:min(78vh,max-content) gives a definite cap when long, natural height
+   when short. flex-basis:auto (not 0) on the list avoids collapse in auto-sized
+   parents. Toolbar siblings are flex-shrink:0; only #memory-list grows. */
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="browse"]:not(.hidden)
+) {
+  display: flex;
+  flex-direction: column;
+  max-height: 78vh;
+  height: min(78vh, max-content);
+  overflow: hidden;
+}
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="browse"]:not(.hidden)
+) .modal-header,
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="browse"]:not(.hidden)
+) .memory-tabs {
+  flex: 0 0 auto;
+}
+#memory-modal .memory-modal-content:has(
+  .memory-tab-panel[data-memory-panel="browse"]:not(.hidden)
+) .memory-modal-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] > .admin-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] > .admin-card > *:not(#memory-list):not(#memory-suggestions-body) {
+  flex: 0 0 auto;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] #memory-list:not(.hidden),
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] #memory-suggestions-body:not(.hidden) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="browse"] #memory-suggestions-body:not(.hidden) .memory-suggestions-header {
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
 /* Settings cards dim + mute when their toggle is OFF (matches the
    .memory-toolbar-toggle "off" treatment elsewhere). */
 #memory-modal .memory-tab-panel[data-memory-panel="settings"] .admin-card {
