@@ -14,9 +14,12 @@ from typing import Dict, Any
 try:
     import fcntl
     import pty
-except ImportError:
+except ImportError as exc:
     fcntl = None
     pty = None
+    _PTY_IMPORT_ERROR = exc
+else:
+    _PTY_IMPORT_ERROR = None
 
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -43,6 +46,8 @@ def _require_admin(request: Request):
 
 logger = logging.getLogger(__name__)
 
+PTY_SUPPORTED = pty is not None and fcntl is not None and hasattr(os, "setsid")
+
 
 def _find_line_break(buf):
     """Find next line terminator in buffer. Returns (index, separator_length) or (-1, 0)."""
@@ -63,6 +68,7 @@ EXEC_TIMEOUT = 30  # seconds — shorter than agent's 60s
 STREAM_TIMEOUT = 120  # default for short commands
 MAX_OUTPUT = 200_000  # truncate limit
 TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
+PTY_UNSUPPORTED_ERROR = "pty_unsupported"
 
 
 class ShellExecRequest(BaseModel):
@@ -102,9 +108,12 @@ async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, An
 
 async def _generate_pty(cmd: str, timeout: int, request: Request):
     """Run command in a pseudo-TTY so tqdm/progress bars work natively."""
-    if pty is None or fcntl is None:
-        yield f"data: {json.dumps({'stream': 'stderr', 'data': 'PTY streaming is not available on Windows'})}\n\n"
-        yield f"data: {json.dumps({'exit_code': -1})}\n\n"
+    if not PTY_SUPPORTED:
+        msg = "PTY streaming is not supported on this platform"
+        if _PTY_IMPORT_ERROR:
+            msg += f": {_PTY_IMPORT_ERROR}"
+        yield f"data: {json.dumps({'stream': 'stderr', 'data': msg, 'error': PTY_UNSUPPORTED_ERROR})}\n\n"
+        yield f"data: {json.dumps({'exit_code': -1, 'error': PTY_UNSUPPORTED_ERROR})}\n\n"
         return
 
     loop = asyncio.get_event_loop()
