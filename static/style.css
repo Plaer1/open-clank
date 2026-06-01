@@ -4596,6 +4596,21 @@ body.bg-pattern-sparkles {
       background-color: inherit;
     }
     .modal-header:active { cursor:grabbing; }
+    /* Edge/corner window resize (windowResize.js). While a resize is in
+       progress, suppress text selection and force the active resize cursor
+       across the whole document so it does not flicker as the pointer passes
+       over child elements mid-drag. */
+    body.window-resizing-active { user-select:none !important; }
+    body.window-resizing-active * { cursor:inherit !important; }
+    /* Suppress only TRANSITIONS while resizing so the edge tracks the cursor
+       crisply. We deliberately do NOT toggle `animation` here: toggling
+       animation off→on re-triggers the modal open-animation (a scale-in) on
+       mouseup, which both mis-measures the final size and visibly "pops" the
+       window. windowResize.js instead kills the one-shot open animation inline
+       once, in begin(). */
+    .window-resizing {
+      transition:none !important;
+    }
     /* Cookbook's modal-content is var(--bg) (inline) instead of the default
        var(--panel), so its sticky header — which defaults to var(--panel) —
        read as a different-coloured band. Match the header to the cookbook
