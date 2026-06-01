@@ -623,8 +623,8 @@ function _renderList() {
     card.className = 'memory-item task-card' + (task.status === 'paused' ? ' task-paused' : '');
     card.dataset.id = task.id;
 
-    // Title row: icon + name (left); paused badge, chevron (expanded only) +
-    // status dot (right). Click to expand.
+    // Title row: icon + name (left); status pill + chevron/actions (right).
+    // The status pill replaces the old dot and doubles as pause/resume.
     const titleRow = document.createElement('div');
     titleRow.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;';
     const statusBadge = task.status === 'paused'
@@ -635,7 +635,7 @@ function _renderList() {
     const builtinBadge = task.is_builtin
       ? `<span class="task-builtin-badge${task.is_modified ? ' modified' : ''}" title="${task.is_modified ? 'Built-in task — edited from its default' : 'Built-in task'}">built-in${task.is_modified ? ' · edited' : ''}</span>`
       : '';
-    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${builtinBadge}<span style="flex:1;"></span>${statusBadge}${_statusDot(task.status)}`;
+    titleRow.innerHTML = `${_taskIcon(task)}<span class="memory-item-title">${_esc(task.name)}</span>${builtinBadge}<span style="flex:1;"></span>${statusBadge}`;
 
     // ... menu button (hover to show)
     const actionsWrap = document.createElement('div');
