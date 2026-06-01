@@ -33,6 +33,74 @@ function _taskBadge(task) {
   return { text: _statusLabel(task.status, task.type), cls: 'cookbook-task-' + task.status };
 }
 
+function _shouldOfferCrashReport(task) {
+  if (!task) return false;
+  if (task._unreachable && task.type === 'serve') return true;
+  return ['error', 'crashed', 'failed'].includes(task.status);
+}
+
+function _redactCrashReportText(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, '$1[redacted]')
+    .replace(/\b(hf_[A-Za-z0-9]{16,})\b/g, '[redacted-hf-token]')
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, '[redacted-api-key]')
+    .replace(/\b(xox[baprs]-[A-Za-z0-9-]{16,})\b/g, '[redacted-slack-token]')
+    .replace(/\b(AIza[0-9A-Za-z_-]{20,})\b/g, '[redacted-google-key]')
+    .replace(/\b((?:HF_TOKEN|HUGGING_FACE_HUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|BRAVE_API_KEY|TAVILY_API_KEY|SERPER_API_KEY|GOOGLE_API_KEY|API_KEY|TOKEN|PASSWORD)\s*=\s*)(['"]?)[^\s'"\\]+/gi, '$1$2[redacted]')
+    .replace(/\b(--(?:api-key|token|hf-token|password)\s+)([^\s]+)/gi, '$1[redacted]');
+}
+
+function _lastLines(text, count = 160) {
+  const clean = _redactCrashReportText(text || '').trimEnd();
+  if (!clean) return '(no captured output)';
+  return clean.split('\n').slice(-count).join('\n');
+}
+
+function _codeFence(text) {
+  return String(text || '').replace(/```/g, '` ` `');
+}
+
+function _taskHostLabel(task) {
+  if (!task?.remoteHost) return 'local';
+  return task.remoteHost + (task.sshPort ? `:${task.sshPort}` : '');
+}
+
+function _taskPort(task) {
+  const cmd = task?.payload?._cmd || '';
+  const match = cmd.match(/--port\s+(\d+)/);
+  return match ? match[1] : '';
+}
+
+function _buildCrashReport(task, outputText) {
+  const capturedOutput = outputText || task?.output || '';
+  const cmd = _redactCrashReportText(task?.payload?._cmd || '');
+  const diag = _diagnose(capturedOutput);
+  const started = task?.ts ? new Date(task.ts).toISOString() : '';
+  const report = [
+    '## Odysseus Cookbook crash report',
+    '',
+    'Please review this report for secrets before posting it publicly.',
+    '',
+    '### Task',
+    `- ID: \`${task?.sessionId || task?.id || 'unknown'}\``,
+    `- Type: \`${task?.type || 'unknown'}\``,
+    `- Status: \`${task?._unreachable ? 'unreachable' : (task?.status || 'unknown')}\``,
+    `- Model/repo: \`${task?.payload?.repo_id || task?.name || 'unknown'}\``,
+    `- Host: \`${_taskHostLabel(task)}\``,
+  ];
+  if (task?.platform) report.push(`- Platform: \`${task.platform}\``);
+  if (started) report.push(`- Started: \`${started}\``);
+  const port = _taskPort(task);
+  if (port) report.push(`- Port: \`${port}\``);
+  if (diag?.message) report.push(`- Diagnosis: ${diag.message}`);
+  if (cmd) {
+    report.push('', '### Command', '```bash', _codeFence(cmd), '```');
+  }
+  report.push('', '### Last captured output', '```text', _codeFence(_lastLines(capturedOutput)), '```');
+  return report.join('\n');
+}
+
 // Shared state/functions injected by init()
 let _envState;
 let _sshCmd;
@@ -1660,6 +1728,13 @@ export function _renderRunningTab() {
             _copyText(tmuxAttach);
           }});
         }
+        if (_shouldOfferCrashReport(task)) {
+          items.push({ label: 'Copy crash report', action: 'copy-crash-report', custom: () => {
+            const out = (el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
+            _copyText(_buildCrashReport(task, out));
+            uiModule.showToast('Copied crash report');
+          }});
+        }
         // Copy the last 50 lines of the task's output/log.
         items.push({ label: 'Copy last 50 lines', action: 'copy-log', custom: () => {
           const out = (el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
@@ -1683,6 +1758,7 @@ export function _renderRunningTab() {
           'register-endpoint': '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
           save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/>',
           'copy-tmux': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+          'copy-crash-report': '<path d="M10.3 2.3 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.3a2 2 0 0 0-3.4 0z"/><path d="M12 8v5M12 17h.01"/>',
           'copy-log': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
           kill: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
           cancel: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
