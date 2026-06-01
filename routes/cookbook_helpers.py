@@ -225,6 +225,15 @@ def _append_serve_preflight_exit_lines(runner_lines: list[str], *, keep_shell_op
     runner_lines.append('fi')
 
 
+def _append_serve_exit_code_lines(runner_lines: list[str], *, keep_shell_open: bool) -> None:
+    """Append serve-runner lines that preserve and report the command exit code."""
+    runner_lines.append('ODYSSEUS_CMD_EXIT=$?')
+    if keep_shell_open:
+        runner_lines.append('echo ""; echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="; exec "${SHELL:-/bin/bash}"')
+    else:
+        runner_lines.append('echo ""; echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="')
+
+
 class ModelDownloadRequest(BaseModel):
     repo_id: str
     include: str | None = None  # glob pattern e.g. "*Q4_K_M*"

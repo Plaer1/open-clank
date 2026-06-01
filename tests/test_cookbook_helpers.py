@@ -2,6 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from routes.cookbook_helpers import (
+    _append_serve_exit_code_lines,
     _append_serve_preflight_exit_lines,
     _local_tooling_path_export,
     _safe_env_prefix,
@@ -80,3 +81,14 @@ def test_serve_preflight_failure_keeps_tmux_pane_visible():
     assert 'echo "=== Process exited with code $ODYSSEUS_PREFLIGHT_EXIT ==="' in script
     assert 'exec "${SHELL:-/bin/bash}"' in script
     assert "exit 127" not in script
+
+
+def test_serve_runner_preserves_command_exit_code():
+    """The serve wrapper must capture `$?` before any echo resets it."""
+    runner_lines = ["vllm serve Qwen/Qwen3.6-35B-A3B-NVFP4 --host 0.0.0.0 --port 8000"]
+    _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
+    script = "\n".join(runner_lines)
+
+    assert "ODYSSEUS_CMD_EXIT=$?" in script
+    assert 'echo "=== Process exited with code $ODYSSEUS_CMD_EXIT ==="' in script
+    assert 'echo "=== Process exited with code $? ==="' not in script
