@@ -64,6 +64,8 @@ DEFAULT_SETTINGS = {
     "research_model": "",
     "research_search_provider": "",
     "research_max_tokens": 16384,
+    "research_extraction_timeout_seconds": 90,
+    "research_extraction_concurrency": 3,
     "agent_max_tool_calls": 0,
     "agent_input_token_budget": 6000,
     "agent_stream_timeout_seconds": 300,

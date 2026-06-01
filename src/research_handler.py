@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 RESEARCH_DATA_DIR = Path("data/deep_research")
 
 
+def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, n))
+
+
 class ResearchHandler:
     """Handles research service operations with iterative deep research."""
 
@@ -165,6 +173,8 @@ class ResearchHandler:
         max_rounds: int = 20,
         search_provider: str = None,
         category: str = None,
+        extraction_timeout: int = None,
+        extraction_concurrency: int = None,
         owner: str = "",
     ) -> dict:
         """Start research as a background task. Returns task info dict.
@@ -222,6 +232,8 @@ class ResearchHandler:
                         max_rounds=max_rounds,
                         search_provider=search_provider,
                         category=category,
+                        extraction_timeout=extraction_timeout,
+                        extraction_concurrency=extraction_concurrency,
                     ),
                     timeout=hard_timeout,
                 )
@@ -592,6 +604,8 @@ class ResearchHandler:
         max_rounds: int = 20,
         search_provider: str = None,
         category: str = None,
+        extraction_timeout: int = None,
+        extraction_concurrency: int = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
@@ -627,6 +641,18 @@ class ResearchHandler:
 
             from src.settings import get_setting
             _max_report_tokens = int(get_setting("research_max_tokens", 16384))
+            _extraction_timeout = _bounded_int(
+                extraction_timeout if extraction_timeout is not None else get_setting("research_extraction_timeout_seconds", 90),
+                default=90,
+                minimum=15,
+                maximum=600,
+            )
+            _extraction_concurrency = _bounded_int(
+                extraction_concurrency if extraction_concurrency is not None else get_setting("research_extraction_concurrency", 3),
+                default=3,
+                minimum=1,
+                maximum=12,
+            )
 
             researcher = DeepResearcher(
                 llm_endpoint=llm_endpoint,
@@ -636,6 +662,8 @@ class ResearchHandler:
                 min_rounds=min(3, max_rounds),
                 max_time=max_time,
                 max_report_tokens=_max_report_tokens,
+                extraction_timeout=_extraction_timeout,
+                extraction_concurrency=_extraction_concurrency,
                 progress_callback=progress_callback,
                 search_provider=search_provider,
                 category=category,

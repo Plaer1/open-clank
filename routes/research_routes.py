@@ -299,6 +299,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         endpoint_id: Optional[str] = None
         model: Optional[str] = None
         max_time: int = Field(default=300, ge=60, le=1800)
+        extraction_timeout: Optional[int] = Field(default=None, ge=15, le=600)
+        extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
         category: Optional[str] = None
 
     @router.post("/api/research/start")
@@ -401,6 +403,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,
+            extraction_timeout=body.extraction_timeout,
+            extraction_concurrency=body.extraction_concurrency,
             owner=user,
         )
         return {"session_id": session_id, "status": "running", "query": body.query}
