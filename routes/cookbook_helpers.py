@@ -148,15 +148,39 @@ def _local_tooling_path_export(executable: str) -> str:
     return f'export PATH="{esc}:$PATH"'
 
 
-def _pip_install_fallback_chain(package: str, *, python_cmd: str = "python3 -m pip", upgrade: bool = False) -> str:
-    """Build a bash pip install fallback chain.
+def _pip_install_attempt(pip_cmd: str) -> str:
+    """Wrap a single pip install command so its exit status survives the
+    fallback chain and its stderr is visible in the tmux log on failure.
 
-    Try the active interpreter/environment first. `--user` is invalid inside
-    many venvs, so only attempt the --user fallback when NOT inside a venv.
+    Without this wrapper, `pip … 2>&1 | tail -5` returns ``tail``'s exit
+    code (0), masking pip's real failure and preventing the next fallback
+    from running.  The generated snippet captures all output to a temp
+    file, prints the last 5 lines on failure (so the Cookbook log panel
+    shows useful diagnostics), cleans up, and exits with pip's original
+    status.
+    """
+    return (
+        "bash -c '"
+        f'_out=$(mktemp) && {pip_cmd} >"$_out" 2>&1; _rc=$?; '
+        'tail -5 "$_out"; rm -f "$_out"; exit $_rc'
+        "'"
+    )
+
+
+def _pip_install_fallback_chain(package: str, *, python_cmd: str = "python3 -m pip", upgrade: bool = False) -> str:
+    """Build a bash pip install fallback chain that surfaces errors.
+
+    Try the active interpreter/environment first. ``--user`` is invalid
+    inside many venvs, so only attempt the ``--user`` fallback when NOT
+    inside a venv.
+
+    Each attempt is wrapped via :func:`_pip_install_attempt` so pip's real
+    exit code is preserved (no ``| tail`` masking) and the last 5 lines of
+    pip output appear in the Cookbook log on failure.
     """
     upgrade_flag = " -U" if upgrade else ""
-    base = f"{python_cmd} install -q{upgrade_flag} {package} 2>/dev/null"
-    user = f"{python_cmd} install --user --break-system-packages -q{upgrade_flag} {package} 2>/dev/null"
+    base = _pip_install_attempt(f"{python_cmd} install -q{upgrade_flag} {package}")
+    user = _pip_install_attempt(f"{python_cmd} install --user --break-system-packages -q{upgrade_flag} {package}")
     # Derive the python executable for the venv detection check.
     # Must use the same interpreter that pip belongs to; hardcoding
     # python3 breaks when pip lives in a venv that only has "python".
@@ -169,8 +193,13 @@ def _pip_install_fallback_chain(package: str, *, python_cmd: str = "python3 -m p
     else:
         python_exe = "python3"
     venv_check = f'{python_exe} -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)"'
-    # venv_check exits 0 (true) when IN a venv; --user is only valid outside one.
-    return f"{base} || {{ {venv_check} || {user}; }}"
+    # Negated: `! venv_check` succeeds (exit 0) when NOT in a venv → `&&` tries
+    # --user.  When IN a venv `! venv_check` fails → `&&` skips --user and the
+    # group exits non-zero, propagating the base-install failure instead of
+    # masking it as success (the `|| { venv_check || … }` shape from #903
+    # swallowed the exit code because venv_check's exit-0 became the group's
+    # result).
+    return f"{base} || {{ ! {venv_check} && {user}; }}"
 
 
 def _cached_model_scan_script(model_dirs: list[str] | None = None) -> str:
