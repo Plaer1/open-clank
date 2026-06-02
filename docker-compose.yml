@@ -76,6 +76,20 @@ services:
     environment:
       - SEARXNG_BASE_URL=http://localhost:8080/
       - SEARXNG_SECRET=${SEARXNG_SECRET:-}
+    # The official searxng image runs as the non-root `searxng` user, but its
+    # entrypoint still needs to chown /etc/searxng on first boot, drop privs via
+    # su-exec, and (with our wrapper above) write settings.yml into the named
+    # volume. Without these capabilities the wrapper aborts at the redirection
+    # with EACCES and the container fails its healthcheck with permission
+    # errors during setup. Mirrors the cap set recommended by the upstream
+    # searxng-docker compose file. See issue #721.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/', timeout=5).read(1)\""]
       interval: 5s
