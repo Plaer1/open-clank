@@ -193,6 +193,8 @@ export function _renderGpuToggles(system) {
         if (quantSel) {
           if (count <= 1) {
             quantSel.value = 'Q4_K_M'; // RAM or 1 GPU -> Q4 sweet spot
+          } else if (String(system?.backend || '').toLowerCase() === 'rocm') {
+            quantSel.value = 'Q4_K_M'; // ROCm default stays GGUF/local-safe; AWQ is explicit only
           } else {
             quantSel.value = 'AWQ-4bit'; // Multi-GPU -> AWQ for vLLM
           }

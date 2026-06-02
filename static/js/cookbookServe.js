@@ -41,6 +41,48 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 
 let _cachedAllModels = [];
 
+function _repoLooksAwqLike(model, repo) {
+  const q = String(model?.quant || '').toUpperCase();
+  const n = `${repo || ''} ${model?.repo_id || ''} ${model?.name || ''} ${model?.path || ''}`.toLowerCase();
+  return /^AWQ|^GPTQ/.test(q) || q === 'FP8' || /\b(awq|gptq|fp8)\b/i.test(n);
+}
+
+function _repoLooksGgufLike(model, repo) {
+  const q = String(model?.quant || '').toUpperCase();
+  const n = `${repo || ''} ${model?.repo_id || ''} ${model?.name || ''} ${model?.path || ''}`.toLowerCase();
+  return !!model?.is_gguf || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || n.includes('gguf');
+}
+
+function _serveBackendWarning(model, repo, backend, fields = {}) {
+  const awqLike = _repoLooksAwqLike(model, repo);
+  const ggufLike = _repoLooksGgufLike(model, repo);
+  if (awqLike && (backend === 'llamacpp' || backend === 'ollama')) {
+    return {
+      title: 'AWQ needs vLLM or SGLang',
+      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. llama.cpp and Ollama need GGUF files, so this backend cannot serve it. Choose vLLM/SGLang on a CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama.',
+    };
+  }
+  if (awqLike && _isMetal() && (backend === 'vllm' || backend === 'sglang')) {
+    return {
+      title: 'AWQ is not a unified-memory path',
+      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. AWQ is for vLLM/SGLang on CUDA/ROCm-style GPU servers, not local unified-memory llama.cpp/Ollama serving. For unified memory, download a GGUF model and use llama.cpp/Ollama.',
+    };
+  }
+  if (awqLike && fields.unified_mem) {
+    return {
+      title: 'AWQ is not a unified-memory path',
+      body: 'This model looks like AWQ/GPTQ/FP8 safetensors, but unified-memory local serving expects GGUF. Use vLLM/SGLang on a compatible GPU server, or download a GGUF version for llama.cpp/Ollama.',
+    };
+  }
+  if (ggufLike && (backend === 'vllm' || backend === 'sglang')) {
+    return {
+      title: 'GGUF needs llama.cpp or Ollama',
+      body: 'This model looks like GGUF. vLLM/SGLang expect HuggingFace safetensors-style repos. Choose llama.cpp/Ollama for GGUF, or download a safetensors model for vLLM/SGLang.',
+    };
+  }
+  return null;
+}
+
 function _hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
@@ -324,12 +366,6 @@ function _rerenderCachedModels() {
         c.style.alignItems = '';
       });
 
-      // Capture grid height
-      const _tb = list.closest('.admin-card')?.querySelector('.memory-toolbar');
-      const _tbH = _tb ? _tb.offsetHeight : 0;
-      list.style.minHeight = (list.offsetHeight + _tbH) + 'px';
-      list.style.maxHeight = (list.offsetHeight + _tbH) + 'px';
-
       const shortName = repo.split('/').pop();
       const _es = _envState;
       // The venv set per-server in Settings (server.envPath). Used as the venv
@@ -350,8 +386,13 @@ function _rerenderCachedModels() {
         ? _byRepo[repo]
         : (_lastUsed || (_isLegacyFlat ? _allSs : {}));
       const detectedBackend = _detectBackend(m).backend;
-      const defaultBackend = detectedBackend;
-      const savedMatchesBackend = (ss.backend || 'vllm') === detectedBackend;
+      const _allowedBackends = new Set(_isWindows()
+        ? ['llamacpp']
+        : (_isMetal() ? ['llamacpp', 'ollama'] : ['vllm', 'sglang', 'llamacpp', 'ollama', 'diffusers']));
+      const defaultBackend = (ss._forceBackend && ss.backend && _allowedBackends.has(ss.backend))
+        ? ss.backend
+        : detectedBackend;
+      const savedMatchesBackend = !!ss._forceBackend || (ss.backend || 'vllm') === detectedBackend;
       const sv = (k, def) => (ss[k] !== undefined && savedMatchesBackend) ? ss[k] : def;
       const defaultTp = defaultBackend === 'llamacpp' ? '1' : sv('tp', '1');
       const detectedGpuIds = _allGpuIds(_getGpuToggleTotal?.());
@@ -1200,7 +1241,16 @@ function _rerenderCachedModels() {
           if (el.type === 'checkbox') serveState[el.dataset.field] = el.checked;
           else serveState[el.dataset.field] = el.value;
         });
-        serveState.backend = (_detectBackend(m).backend) || serveState.backend || 'vllm';
+        serveState.backend = serveState.backend || (_detectBackend(m).backend) || 'vllm';
+        const backendWarning = _serveBackendWarning(m, repo, serveState.backend, serveState);
+        if (backendWarning) {
+          await window.styledConfirm(backendWarning.body, {
+            title: backendWarning.title,
+            confirmText: 'Edit settings',
+            cancelText: 'Close',
+          });
+          return;
+        }
         // Save in the { _byRepo, _lastUsed } schema — no legacy flat keys at
         // the root so per-model state doesn't leak between models.
         try {

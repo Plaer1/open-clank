@@ -260,10 +260,29 @@ export function _detectBackend(model) {
   const q = (model.quant || '').toUpperCase();
   const sysBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const isRocm = sysBackend === 'rocm';
+  const isAppleSilicon = ['metal', 'mps', 'apple'].includes(sysBackend);
+  const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
+  if (!isAppleSilicon && (/\bmlx\b|mlx-|_mlx/i.test(_nm) || q.startsWith('MLX'))) {
+    return { backend: 'unsupported', label: 'Unsupported' };
+  }
+  const isAwqLike = /^AWQ|^GPTQ|^NVFP4/.test(q) || q === 'FP8' || /\b(awq|gptq|fp8|nvfp4)\b/i.test(_nm);
+  const isGgufLike = model.is_gguf || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf');
 
   // Image gen models → diffusers
   if (model.is_image_gen || model.is_diffusion || model._tag === 'image') {
     return { backend: 'diffusers', label: 'Diffusers' };
+  }
+
+  // AWQ / GPTQ / FP8 are safetensors GPU-serving formats. Never route them
+  // through llama.cpp/Ollama just because the host is Mac/Windows; those engines
+  // need GGUF. The UI will warn/block on Metal where vLLM/SGLang aren't viable.
+  if (isAwqLike) {
+    return { backend: 'vllm', label: 'vLLM' };
+  }
+
+  // GGUF → llama.cpp/Ollama-compatible.
+  if (isGgufLike) {
+    return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
   // Windows → default to llama.cpp (no vLLM support on Windows)
@@ -275,19 +294,6 @@ export function _detectBackend(model) {
   // don't run on macOS; AWQ/GPTQ/FP8 (vLLM-only) models are already filtered out
   // of metal Cookbook results, so llama.cpp is always the right engine here.
   if (['metal', 'mps', 'apple'].includes(sysBackend)) {
-    return { backend: 'llamacpp', label: 'llama.cpp' };
-  }
-
-  // AWQ / GPTQ / FP8 → vLLM
-  if (/^AWQ|^GPTQ/.test(q) || q === 'FP8') {
-    return { backend: 'vllm', label: 'vLLM' };
-  }
-
-  // GGUF → llama.cpp. Match the quant tag OR a gguf hint in the repo/path/name:
-  // a raw .gguf file often has no quant field, which made it fall through to the
-  // vLLM default below.
-  const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
-  if (model.is_gguf || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf')) {
     return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
@@ -1020,6 +1026,16 @@ function _wireTabEvents(body) {
   // Download input
   const dlBtn = document.getElementById('cookbook-dl-btn');
   const dlInput = document.getElementById('cookbook-dl-repo');
+  const dlCardToggle = document.getElementById('cookbook-download-card-toggle');
+  const dlCardBody = document.getElementById('cookbook-download-card-body');
+  const dlCardArrow = document.getElementById('cookbook-download-card-arrow');
+  if (dlCardToggle && dlCardBody) {
+    dlCardToggle.addEventListener('click', () => {
+      const isOpen = dlCardBody.style.display !== 'none';
+      dlCardBody.style.display = isOpen ? 'none' : 'block';
+      if (dlCardArrow) dlCardArrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+    });
+  }
   if (dlBtn && dlInput) {
     function _stripHfUrl(input) {
       let repo = input.trim();
@@ -1099,8 +1115,12 @@ function _wireTabEvents(body) {
   if (hfToggle && hfList) {
     let _loaded = false;
     // Per-server VRAM cache so we don't re-probe on every expand
-    const _vramCache = {};
-    async function _getSelectedServerVram() {
+    const _hwCache = {};
+    function _hfModelLooksAwqLike(m) {
+      const text = `${m?.repo_id || ''} ${(m?.tags || []).join(' ')}`.toLowerCase();
+      return /\b(awq|gptq|fp8|4bit|int4)\b/.test(text);
+    }
+    async function _getSelectedServerHw() {
       // Prefer the "What Fits" dropdown (the main control that shows hardware);
       // fall back to the download dropdown. This is the server the list ranks for.
       const dlSrv = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
@@ -1117,7 +1137,7 @@ function _wireTabEvents(body) {
         }
       }
       const cacheKey = host || 'local';
-      if (_vramCache[cacheKey] !== undefined) return _vramCache[cacheKey];
+      if (_hwCache[cacheKey]) return _hwCache[cacheKey];
       // Fetch system info for this server from hwfit
       try {
         const qp = new URLSearchParams();
@@ -1127,13 +1147,13 @@ function _wireTabEvents(body) {
         const r = await fetch(`/api/hwfit/system?${qp}`);
         if (r.ok) {
           const sys = await r.json();
-          const v = sys?.gpu_vram_gb || 0;
-          _vramCache[cacheKey] = v;
-          return v;
+          const hw = { vram: sys?.gpu_vram_gb || 0, backend: String(sys?.backend || '').toLowerCase() };
+          _hwCache[cacheKey] = hw;
+          return hw;
         }
       } catch {}
-      _vramCache[cacheKey] = 0;
-      return 0;
+      _hwCache[cacheKey] = { vram: 0, backend: '' };
+      return _hwCache[cacheKey];
     }
     async function _loadLatest() {
       // Match the Dependencies loader: whirlpool spinner + text label so the
@@ -1152,7 +1172,8 @@ function _wireTabEvents(body) {
       } catch {
         hfList.innerHTML = '<div class="hwfit-loading">Scanning models…</div>';
       }
-      const vram = await _getSelectedServerVram();
+      const hwInfo = await _getSelectedServerHw();
+      const vram = hwInfo.vram || 0;
       try {
         let lastErr = '';
         const _fetchLatest = async (v) => {
@@ -1167,6 +1188,9 @@ function _wireTabEvents(body) {
         // fewer), fall back to the unfiltered trending list so something shows.
         if (!models.length && vram > 0) {
           models = await _fetchLatest(0);
+        }
+        if (['rocm', 'metal', 'mps', 'apple', 'generic', 'cpu'].includes(hwInfo.backend)) {
+          models = models.filter(m => !_hfModelLooksAwqLike(m));
         }
         if (!models.length) {
           // Distinguish "the HF API failed" from "nothing matched" so an outage
@@ -1351,10 +1375,12 @@ function _renderRecipes() {
   // Search group
   html += '<div class="cookbook-group" data-backend-group="Search" style="flex:0 0 auto;">';
   html += '<div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;">';
-  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
+  html += '<button type="button" id="cookbook-download-card-toggle" style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;width:100%;background:transparent;border:0;padding:0;color:inherit;text-align:left;cursor:pointer;">';
   html += '<h2 style="margin:0;padding:0;line-height:1;">Download</h2>';
-  html += '</div>';
-  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
+  html += '<span id="cookbook-download-card-arrow" style="margin-left:auto;display:inline-block;transition:transform 0.15s;font-size:13px;line-height:1;">\u25B8</span>';
+  html += '</button>';
+  html += '<div id="cookbook-download-card-body" style="display:none;">';
+  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download directly from Scan, or paste a HuggingFace model link.</p>';
   html += '<div class="hwfit-container" id="hwfit-container">';
 
   // Section 1: Settings
@@ -1383,7 +1409,7 @@ function _renderRecipes() {
   // silently sending downloads to the wrong server. An empty selection means Local; the user
   // chooses a remote server explicitly via the dropdown.
 
-  // Download input
+  // Manual download input
   html += `<div style="margin-top:7px;margin-bottom:2px;display:flex;gap:4px;align-items:center;">`;
   if (_es.servers.length > 1) {
     html += `<select class="cookbook-field-input hwfit-dl-server" id="hwfit-dl-server" style="height:28px;position:relative;top:0px;">`;
@@ -1399,7 +1425,7 @@ function _renderRecipes() {
   html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">Download</button>`;
   html += `</div>`;
   // Latest HF models that fit — collapsible card list
-  html += `<div style="margin-top:2px;position:relative;top:-8px;">`;
+  html += `<div style="margin-top:5px;position:relative;top:-3px;">`;
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
   html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
   html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">\u25B8</span>`;
@@ -1411,7 +1437,7 @@ function _renderRecipes() {
   html += `</div>`;
 
   // Search section
-  html += '</div></div></div>';
+  html += '</div></div></div></div>';
   html += '<div class="cookbook-group" data-backend-group="Search">';
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
