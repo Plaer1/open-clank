@@ -38,7 +38,8 @@ from routes.cookbook_helpers import (
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
     _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
     _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, ModelDownloadRequest, ServeRequest,
+    _ollama_bind_from_cmd, _pip_install_fallback_chain, _venv_safe_local_pip_install_cmd,
+    ModelDownloadRequest, ServeRequest,
 )
 
 _HF_TOKEN_STATUS_SNIPPET = (
@@ -819,6 +820,11 @@ def setup_cookbook_routes() -> APIRouter:
         # many downstream `"engine" in req.cmd` membership checks can't hit
         # `TypeError: argument of type 'NoneType'` (a 500 instead of a clean 400).
         req.cmd = _validate_serve_cmd(req.cmd) or ""
+        req.cmd = _venv_safe_local_pip_install_cmd(
+            req.cmd,
+            local=not bool(req.remote_host),
+            in_venv=sys.prefix != sys.base_prefix,
+        )
         is_pip_install = bool(req.cmd and "pip install" in req.cmd)
         if is_pip_install:
             # PEP-508-style package spec — letters, digits, `.-_` for the
