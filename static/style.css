@@ -33129,7 +33129,7 @@ button.cal-view-btn {
   line-height: 11px;
   padding: 0 4px;
   border-radius: 3px;
-  color: #fff;
+  color: var(--cal-event-fg, #fff);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -33355,7 +33355,7 @@ button.cal-view-btn {
   font-weight: 500;
   padding: 2px 5px;
   border-radius: 3px;
-  color: var(--fg);
+  color: var(--cal-event-fg, var(--fg));
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
