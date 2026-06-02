@@ -1,8 +1,7 @@
-"""Regression tests for the services.search provider copy.
+"""Regression tests for the canonical services.search provider implementation.
 
-The UI search routes import services.search, while agent/deep-research paths
-still import src.search. Keep the service-side copy aligned with the safer
-provider guards already present in src.search.
+The old src.search provider path aliases this module; these tests pin the
+behavior at the single implementation point.
 """
 
 import sys
