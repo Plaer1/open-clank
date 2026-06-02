@@ -522,6 +522,9 @@ export function clearRightDock(modal, cx, cy, dockClass) {
   if (!modal.classList.contains(dockClass)) return;
   modal.classList.remove(dockClass);
   clearDockSide(side, modal);
+  if (side === 'left' && !_hasOtherDockedWindow('left', modal)) {
+    _clearEmailDocSplitGeometry();
+  }
   delete content._dockSide;
   _disconnectLeftDockObservers(content);
   const snap = content._preDockSnapshot;
@@ -579,8 +582,10 @@ export function suspendDock(modal) {
   const nodes = _resolveDockNodes(modal);
   if (!nodes || !nodes.content) return null;
   const content = nodes.content;
+  const hadEmailSnapLeft = modal.classList.contains('email-snap-left');
   const side = content._dockSide
     || (modal.classList.contains('modal-left-docked') ? 'left'
+        : modal.classList.contains('email-snap-left') ? 'left'
         : modal.classList.contains('modal-right-docked') ? 'right' : null);
   if (!side) return null;
   // Stop the close-watcher from tearing the dock fully down when `.hidden`
@@ -592,6 +597,19 @@ export function suspendDock(modal) {
   }
   // Release the body push + restore the sidebar so the chat fills the width.
   clearDockSide(side, modal);
+  if (side === 'left') {
+    _disconnectLeftDockObservers(content);
+  }
+  if (hadEmailSnapLeft) {
+    modal.classList.remove('email-snap-left');
+    _clearEmailDocSplitGeometry();
+    delete content._dockSide;
+    delete content._dockSuspended;
+    return null;
+  }
+  if (side === 'left' && !_hasOtherDockedWindow('left', modal)) {
+    _clearEmailDocSplitGeometry();
+  }
   if (content._preDockSnapshot?.collapsedSidebar && !_hasAnyOtherDockedWindow(modal)) {
     _expandSidebarFromRail();
   }
