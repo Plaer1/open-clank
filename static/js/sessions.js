@@ -616,6 +616,10 @@ function createSessionItem(s) {
       return;
     }
     dropdown.style.display = 'none';
+    if (!await uiModule.styledConfirm('Delete this session?', { confirmText: 'Delete', danger: true })) {
+      _forceSidebarOpen();
+      return;
+    }
     // Optimistic: remove from UI immediately
     const sessionEl = document.querySelector(`.list-item[data-session-id="${s.id}"]`);
     if (sessionEl) sessionEl.remove();
@@ -1871,12 +1875,7 @@ export function setCurrentSessionId(id) {
 }
 
 // Session list keyboard navigation: arrows to move, Delete to delete
-function _onSessionListKeydown(e) {
-  // Bail out when the user is typing inside a field (e.g. inline rename input)
-  // — otherwise Backspace bubbles up and deletes the whole chat. See #1007.
-  const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-
+async function _onSessionListKeydown(e) {
   const item = e.target.closest('.list-item[data-session-id]');
   if (!item) return;
 
@@ -1904,6 +1903,8 @@ function _onSessionListKeydown(e) {
       uiModule.showToast('Unfavorite before deleting');
       return;
     }
+    const ok = await uiModule.styledConfirm('Delete this session?', { confirmText: 'Delete', danger: true });
+    if (!ok) return;
     _sessionListFocused = true;
     (async () => {
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
