@@ -512,11 +512,23 @@ class UploadHandler:
         existing_key = None
         with self._index_lock:
             existing_files = self._load_upload_index()
+            stale_keys = []
             for key, info in existing_files.items():
                 if info.get("hash") == file_hash and info.get("owner") == owner:
-                    existing_key = key
-                    existing_file = info
-                    break
+                    stored_path = info.get("path")
+                    if stored_path and os.path.exists(stored_path) and self._inside_upload_dir(stored_path):
+                        existing_key = key
+                        existing_file = info
+                        break
+                    stale_keys.append(key)
+            if stale_keys:
+                for key in stale_keys:
+                    existing_files.pop(key, None)
+                try:
+                    self._atomic_write_json(uploads_db_path, existing_files)
+                    logger.info("Removed %d stale upload index entries for missing duplicates", len(stale_keys))
+                except Exception as e:
+                    logger.warning(f"Failed to remove stale upload index entries: {e}")
         if existing_file:
             logger.info(f"Duplicate file upload detected: {original_filename} -> {existing_file['id']}")
 
