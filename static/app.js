@@ -1564,6 +1564,8 @@ function initializeEventListeners() {
       saveToggleState(st);
       agentBtn.classList.toggle('active', mode === 'agent');
       chatBtn.classList.toggle('active', mode === 'chat');
+      agentBtn.setAttribute('aria-pressed', String(mode === 'agent'));
+      chatBtn.setAttribute('aria-pressed', String(mode === 'chat'));
       // Slide the pill to the active button
       const toggle = agentBtn.closest('.mode-toggle');
       if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
@@ -1621,11 +1623,13 @@ function initializeEventListeners() {
     const chk = el(checkboxId);
     if (chk) chk.checked = saved;
     btn.classList.toggle('active', saved);
+    btn.setAttribute('aria-pressed', String(saved));
     btn.addEventListener('click', () => {
       const curMode = (loadToggleState().mode) || 'chat';
       const chk = el(checkboxId);
       chk.checked = !chk.checked;
       btn.classList.toggle('active', chk.checked);
+      btn.setAttribute('aria-pressed', String(chk.checked));
       saveToolPref(stateKey, curMode, chk.checked);
       showToolToggleToast(stateKey, chk.checked);
       if (chk.checked) _showToolSplash(stateKey);
