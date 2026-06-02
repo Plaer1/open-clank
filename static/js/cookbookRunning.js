@@ -136,6 +136,7 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 const TASK_POLL_INTERVAL_MS = 3000;       // delay between reconnect-loop iterations
 const BG_MONITOR_INTERVAL_MS = 10000;     // background task status poll
 const STALE_PROGRESS_MS = 5 * 60 * 1000;  // download with no progress this long = stale
+const STARTUP_STALE_PROGRESS_MS = 45 * 1000; // 0%-forever startup stall: retry much sooner
 
 // ── Phase detection (mirrors Python _parse_serve_phase in cookbook_routes.py) ──
 // Single source of truth for serve task status. KEEP IN SYNC with the Python version.
@@ -2071,10 +2072,13 @@ async function _reconnectTask(el, task) {
             // stale speed/ETA — so keying off speed masked real stalls (that's why a
             // 97%-stuck download went undetected). Bytes are the honest signal; fall
             // back to %/aggregate only when no byte counter is present.
-            const _STALE_TIMEOUT = STALE_PROGRESS_MS;
             const _byteMatches = [...snapshot.matchAll(/([\d.]+\s?[KMGT])B?\s*\/\s*[\d.]+\s?[KMGT]B?/gi)];
             const _bytes = _byteMatches.length ? _byteMatches[_byteMatches.length - 1][1].replace(/\s/g, '') : null;
             const curProgress = _bytes || (_dlAgg != null ? String(_dlAgg) : (lastPct || '0'));
+            const _fetchPctMatches = [...snapshot.matchAll(/Fetching\s+\d+\s+files:\s*(\d+)%/g)];
+            const _fetchPct = _fetchPctMatches.length ? parseInt(_fetchPctMatches[_fetchPctMatches.length - 1][1]) : null;
+            const _startupStalled = !_bytes && ((_dlAgg === 0) || (_fetchPct === 0)) && curProgress === '0';
+            const _STALE_TIMEOUT = _startupStalled ? STARTUP_STALE_PROGRESS_MS : STALE_PROGRESS_MS;
             if (!el._lastProgress) { el._lastProgress = curProgress; el._lastProgressTime = Date.now(); }
             if (curProgress !== el._lastProgress) {
               el._lastProgress = curProgress;
@@ -2095,7 +2099,7 @@ async function _reconnectTask(el, task) {
             } else if (Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT && !task._autoRestarted) {
               task._autoRestarted = true;
               _updateTask(task.sessionId, { _autoRestarted: true });
-              badge.textContent = 'stale — restarting';
+              badge.textContent = _startupStalled ? '0% stall — retrying' : 'stale — restarting';
               badge.className = 'cookbook-task-status cookbook-task-error';
               _showCookbookNotif(true);
               try {
@@ -2144,8 +2148,6 @@ async function _reconnectTask(el, task) {
             // so on a resumed download it reflects the true overall progress,
             // whereas completed/totalFiles only see this session's files (→ 0%).
             // Take the higher of the two so resume doesn't read as 0%.
-            const _fetchPctMatches = [...snapshot.matchAll(/Fetching\s+\d+\s+files:\s*(\d+)%/g)];
-            const _fetchPct = _fetchPctMatches.length ? parseInt(_fetchPctMatches[_fetchPctMatches.length - 1][1]) : null;
             if (_dlAgg != null) {
               // Real aggregate byte progress — most accurate; take the max of all signals.
               let pct = _dlAgg;
