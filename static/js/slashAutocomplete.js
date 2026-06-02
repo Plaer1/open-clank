@@ -18,7 +18,7 @@ const EXCLUDED = new Set(['flip','roll','8ball','fortune','odyssey','ascii']);
 // are the short forms people will actually type (/new, /clear, /web, etc.)
 // rather than the full /chats new, /toggle web equivalents.
 const PROMOTED_ALIASES = new Set([
-  'new','clear','rename','fork','export','archive','important','star',
+  'new','clear','rename','fork','export','archive','favorite','unfavorite',
   'web','bash','research','doc',
   'memories','forget',
 ]);

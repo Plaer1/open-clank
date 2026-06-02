@@ -10203,6 +10203,12 @@ textarea.memory-add-input {
   height: 20px;
   min-height: 0;
   box-sizing: border-box;
+  position: relative;
+  top: -4px;
+}
+.task-state-badge svg {
+  position: relative;
+  top: -1px;
 }
 .task-status-badge:hover {
   filter: brightness(1.08) saturate(1.15);
@@ -21253,6 +21259,7 @@ a.chat-link[href^="#research-"] {
   }
   .task-card .task-card-run-btn {
     margin-right: 1px !important;
+    top: 0;
   }
 }
 
@@ -34765,7 +34772,7 @@ body.theme-frosted .modal {
 .slash-autocomplete-popup {
   position: fixed;
   z-index: 9000;
-  background: var(--bg-elev-2, #1a1a1a);
+  background: var(--panel, var(--bg));
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
@@ -34793,8 +34800,8 @@ body.theme-frosted .modal {
   white-space: nowrap;
   overflow: hidden;
 }
-.slash-ac-row:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
-.slash-ac-row-sel  { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+.slash-ac-row:hover { background-color: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+.slash-ac-row-sel  { background-color: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
 .slash-ac-token {
   font-family: 'Fira Code', ui-monospace, monospace;
   color: var(--accent, var(--red));
