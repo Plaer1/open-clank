@@ -1075,6 +1075,7 @@ var _searchKeyFields = {
 async function initSearchSettings() {
   var provSel = el('set-searchProvider');
   var countSel = el('set-searchResultCount');
+  var countCustomInput = el('set-searchResultCountCustom');
   var urlInput = el('set-searchUrl');
   var urlRow = el('set-searchUrlRow');
   var keyInput = el('set-searchApiKey');
@@ -1106,14 +1107,36 @@ async function initSearchSettings() {
     loadKeyForProvider(prov);
   }
 
+  function updateCountDisplay() {
+    var val = _settings.search_result_count || 5;
+    var presets = ['3', '5', '10', '20'];
+    if (presets.includes(String(val))) {
+      countSel.value = String(val);
+      countCustomInput.style.display = 'none';
+    } else {
+      countSel.value = 'custom';
+      countCustomInput.value = Math.max(1, Math.min(100, val));
+      countCustomInput.style.display = 'block';
+    }
+  }
+
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     _settings = await res.json();
     if (_settings.search_provider) provSel.value = _settings.search_provider;
-    if (_settings.search_result_count) countSel.value = String(_settings.search_result_count);
+    updateCountDisplay();
     if (_settings.search_url) urlInput.value = _settings.search_url;
     if (_settings.google_pse_cx) cxInput.value = _settings.google_pse_cx;
   } catch (e) { console.warn('Failed to load search settings', e); }
+
+  countSel.addEventListener('change', function() {
+    if (this.value === 'custom') {
+      countCustomInput.style.display = 'block';
+      countCustomInput.focus();
+    } else {
+      countCustomInput.style.display = 'none';
+    }
+  });
 
   updateVisibility();
 
@@ -1142,9 +1165,20 @@ async function initSearchSettings() {
   async function saveSearch() {
     try {
       var prov = provSel.value;
+      var resultCount;
+      if (countSel.value === 'custom') {
+        var customVal = parseInt(countCustomInput.value, 10);
+        if (isNaN(customVal) || customVal < 1 || customVal > 100) {
+          resultCount = _settings.search_result_count || 5;
+        } else {
+          resultCount = customVal;
+        }
+      } else {
+        resultCount = parseInt(countSel.value, 10);
+      }
       var payload = {
         search_provider: prov,
-        search_result_count: parseInt(countSel.value, 10),
+        search_result_count: resultCount,
         search_url: urlInput.value.trim(),
         google_pse_cx: cxInput.value.trim(),
       };
