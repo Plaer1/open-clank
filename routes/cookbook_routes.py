@@ -149,6 +149,15 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "clear Cookbook GPU selection or choose available GPUs", "op": "settings", "field": "gpus", "value": ""}],
             ),
             (
+                r"Failed to infer device type|NVML Shared Library Not Found|No module named 'amdsmi'|platform is not available",
+                "vLLM could not find a supported GPU (CUDA or ROCm). "
+                "This machine may have integrated or unsupported graphics only.",
+                [
+                    {"label": "switch to llama.cpp (CPU/Metal, works without a discrete GPU)", "op": "manual"},
+                    {"label": "switch to Ollama (CPU/Metal, works without a discrete GPU)", "op": "manual"},
+                ],
+            ),
+            (
                 r"vllm.*command not found|No module named vllm|ERROR: vLLM is not installed",
                 "vLLM is not installed or not in PATH on this server.",
                 [{"label": "install vLLM in Cookbook Dependencies", "op": "dependency", "package": "vllm"}],
