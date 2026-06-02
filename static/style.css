@@ -838,7 +838,7 @@ body.bg-pattern-sparkles {
     #tile-ghost.visible { opacity: 1; transform: scale(1); }
     /* Bottom dock — chip per minimized modal */
     #minimized-dock {
-      position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+      position: fixed; bottom: var(--composer-clearance, 12px); left: 50%; transform: translateX(-50%);
       display: flex; gap: 6px; flex-wrap: wrap;
       max-width: calc(100vw - 24px);
       padding: 4px;
@@ -4901,7 +4901,7 @@ body.bg-pattern-sparkles {
     /* Bottom dock for minimized modals */
     #modal-dock {
       position:fixed;
-      bottom:0;
+      bottom:var(--composer-clearance, 0px);
       left:0;
       right:0;
       display:flex;
