@@ -14577,6 +14577,7 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
     z-index: 260 !important;
     margin-top: 0 !important;
     transform: none !important;
+    border-left: none !important;
   }
 }
 
