@@ -35,6 +35,9 @@ from routes.model_routes import (
     _truthy,
     _speech_settings_using_endpoint,
     _clear_speech_settings_for_endpoint,
+    _endpoint_settings_using_endpoint,
+    _clear_endpoint_settings_for_endpoint,
+    _clear_user_pref_endpoint_refs,
     _PROVIDER_CURATED,
 )
 from src.llm_core import ANTHROPIC_MODELS
@@ -65,6 +68,74 @@ def test_clear_speech_endpoint_settings_resets_tts_and_stt():
         "stt_provider": "disabled",
         "stt_model": "base",
     }
+
+
+def test_endpoint_cleanup_removes_primary_and_fallback_references():
+    settings = {
+        "default_endpoint_id": "dead",
+        "default_model": "primary",
+        "default_model_fallbacks": [
+            {"endpoint_id": "dead", "model": "fallback-a"},
+            {"endpoint_id": "keep", "model": "fallback-b"},
+        ],
+        "utility_model_fallbacks": [{"endpoint_id": "dead", "model": "utility"}],
+        "vision_model_fallbacks": [{"endpoint_id": "dead", "model": "vision"}],
+        "stt_provider": "endpoint:dead",
+        "stt_model": "whisper",
+    }
+
+    assert _endpoint_settings_using_endpoint(settings, "dead", include_speech=True) == [
+        "Default Model",
+        "Default Model Fallbacks",
+        "Utility Model Fallbacks",
+        "Vision Model Fallbacks",
+        "Speech to Text",
+    ]
+    assert _clear_endpoint_settings_for_endpoint(settings, "dead", include_speech=True) == [
+        "Default Model",
+        "Default Model Fallbacks",
+        "Utility Model Fallbacks",
+        "Vision Model Fallbacks",
+        "Speech to Text",
+    ]
+    assert settings["default_endpoint_id"] == ""
+    assert settings["default_model"] == ""
+    assert settings["default_model_fallbacks"] == [
+        {"endpoint_id": "keep", "model": "fallback-b"},
+    ]
+    assert settings["utility_model_fallbacks"] == []
+    assert settings["vision_model_fallbacks"] == []
+    assert settings["stt_provider"] == "disabled"
+    assert settings["stt_model"] == "base"
+
+
+def test_endpoint_cleanup_updates_scoped_and_legacy_user_prefs():
+    scoped = {
+        "_users": {
+            "alice": {
+                "utility_endpoint_id": "dead",
+                "utility_model": "utility",
+                "vision_model_fallbacks": [{"endpoint_id": "dead", "model": "vision"}],
+            },
+            "bob": {
+                "default_endpoint_id": "keep",
+                "default_model": "chat",
+            },
+        },
+    }
+    assert _clear_user_pref_endpoint_refs(scoped, "dead") == 1
+    assert scoped["_users"]["alice"] == {
+        "utility_endpoint_id": "",
+        "utility_model": "",
+        "vision_model_fallbacks": [],
+    }
+    assert scoped["_users"]["bob"]["default_endpoint_id"] == "keep"
+
+    legacy = {
+        "default_model_fallbacks": [{"endpoint_id": "dead", "model": "chat"}],
+    }
+    assert _clear_user_pref_endpoint_refs(legacy, "dead") == 1
+    assert legacy["default_model_fallbacks"] == []
 
 
 # ── _match_provider_curated ──
