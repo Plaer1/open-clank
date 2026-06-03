@@ -1083,6 +1083,20 @@ function _wireTabEvents(body) {
   }
 
   // Latest HF models that fit — collapsible card list
+  // Foldable Download admin-card — h2 "Download" doubles as the chevron
+  // toggle; collapses the entire card body (description + input + HF list).
+  // State persisted to localStorage so the fold sticks across reloads.
+  const dlFold = document.getElementById('cookbook-dl-tab-fold');
+  const dlFoldBody = document.getElementById('cookbook-dl-tab-fold-body');
+  const dlFoldChevron = document.getElementById('cookbook-dl-tab-chevron');
+  if (dlFold && dlFoldBody && dlFoldChevron) {
+    dlFold.addEventListener('click', () => {
+      const folded = dlFoldBody.style.display === 'none';
+      dlFoldBody.style.display = folded ? '' : 'none';
+      dlFoldChevron.textContent = folded ? '▾' : '▸';
+      try { localStorage.setItem('cookbook_dl_tab_folded_v1', folded ? '0' : '1'); } catch {}
+    });
+  }
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
   const hfList = document.getElementById('cookbook-hf-latest-list');
@@ -1342,9 +1356,14 @@ function _renderRecipes() {
   // Search group
   html += '<div class="cookbook-group" data-backend-group="Search" style="flex:0 0 auto;">';
   html += '<div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;">';
-  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">Download</h2>';
+  // Foldable Download admin-card: clicking the h2 header collapses the
+  // entire card body (description + download input + HF latest section).
+  // State persisted to localStorage so the fold survives reloads.
+  const _dlTabFolded = (() => { try { return localStorage.getItem('cookbook_dl_tab_folded_v1') === '1'; } catch { return false; } })();
+  html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
+  html += `<h2 id="cookbook-dl-tab-fold" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
   html += '</div>';
+  html += `<div id="cookbook-dl-tab-fold-body" style="${_dlTabFolded ? 'display:none;' : ''}">`;
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
   html += '<div class="hwfit-container" id="hwfit-container">';
 
@@ -1400,6 +1419,7 @@ function _renderRecipes() {
   html += `</div>`;
   html += `<div id="cookbook-hf-latest-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
   html += `</div>`;
+  html += `</div>`;  // /#cookbook-dl-tab-fold-body (whole Download card body)
 
   // Search section
   html += '</div></div></div>';
@@ -1417,13 +1437,22 @@ function _renderRecipes() {
    // remains, which uses its own settings panel). Vision (multimodal) stays.
   html += '<option value="multimodal">Vision</option></select>';
   html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
-  // Quant (Q4/Q8/…) lives next to the search now.
+  // Quant (Q4/Q8/…) lives next to the search now. Default is "All" so the
+  // list shows the best-scoring quant for every model instead of silently
+  // filtering to Q4 (which used to be the implicit default).
   html += '<select class="cookbook-field-input hwfit-quant" id="hwfit-quant" style="height:28px;">';
+  html += '<option value="" selected>All</option>';
   html += '<option value="Q4_K_M">Q4</option><option value="Q8_0">Q8</option>';
   html += '<option value="Q6_K">Q6</option><option value="Q5_K_M">Q5</option>';
   html += '<option value="Q3_K_M">Q3</option><option value="Q2_K">Q2</option>';
-  html += '<option value="AWQ-4bit">AWQ</option><option value="FP8">FP8</option>';
-  html += '<option value="">Native</option></select>';
+  html += '<option value="AWQ-4bit">AWQ</option><option value="FP8">FP8</option></select>';
+  // Ctx slider — ported from origin/main. Lets you target a context length
+  // for fit estimates; the hwfit ranking uses _ctxValue() to factor that into
+  // VRAM math, so dragging this re-sorts the list toward models that fit
+  // your chosen ctx.
+  html += '<label class="hwfit-ctx-control" title="Context length for fit estimates. Lower it to find more models that could fit your hardware.">';
+  html += '<span>Ctx</span><input type="range" id="hwfit-context" min="0" max="5" step="1" value="3" />';
+  html += '<output id="hwfit-context-label">50k</output></label>';
   html += '</div>';
   html += '<div class="hwfit-toolbar" style="margin-top:7px;">';
   html += '<select class="cookbook-field-input hwfit-server-select" id="hwfit-server-select" style="height:28px;min-width:88px;position:relative;top:0px;">';

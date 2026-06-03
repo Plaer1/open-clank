@@ -153,14 +153,31 @@ export function _renderGpuToggles(system) {
   }
   const validCounts = _validTpCounts(poolSize);
   const maxGpu = validCounts.length ? validCounts[validCounts.length - 1] : 0;
+  // Commit the data layer to maxGpu on initial render so it matches the
+  // visual highlight. Before this, _activeCount stayed undefined → no
+  // gpu_count param sent → backend's fallback could rank against RAM on
+  // mixed-resource boxes ("tightest" sorted by RAM instead of GPU).
+  if (container._activeCount === undefined && validCounts.length) {
+    container._activeCount = maxGpu;
+  }
   html += '<button class="hwfit-gpu-btn" data-count="0" title="CPU / RAM only">RAM</button>';
   const hasExplicitCount = typeof container._activeCount === 'number';
   for (const n of validCounts) {
     const text = n === 1 ? 'GPU' : n + ' GPU';
-    const isActive = hasExplicitCount ? (n === container._activeCount) : (container._activeCount === undefined && n === maxGpu);
+    const isActive = hasExplicitCount && n === container._activeCount;
     html += `<button class="hwfit-gpu-btn${isActive ? ' active' : ''}" data-count="${n}" title="${n} GPU${n > 1 ? 's' : ''}">${text}</button>`;
   }
+  // Also mark the RAM button active when the user explicitly chose RAM (0)
+  // — the loop above only handles GPU buttons.
+  if (container._activeCount === 0) {
+    const ramBtn = container.querySelector('.hwfit-gpu-btn[data-count="0"]');
+    // (we just set innerHTML so we re-mark below after assignment)
+  }
   container.innerHTML = html;
+  if (container._activeCount === 0) {
+    const ramBtn = container.querySelector('.hwfit-gpu-btn[data-count="0"]');
+    if (ramBtn) ramBtn.classList.add('active');
+  }
 
   // Pool dropdown: switch pools, reset the count to the new pool's max, rebuild.
   const sel = container.querySelector('#hwfit-gpu-group');
@@ -188,9 +205,12 @@ export function _renderGpuToggles(system) {
       } else {
         btn.classList.add('active');
         container._activeCount = count;
-        // Auto-set quant based on hardware selection
+        // Auto-suggest a quant based on hardware selection — but ONLY when the
+        // user has already picked a specific quant. When they're on "All"
+        // (value === ""), leave them on All: toggling a GPU shouldn't silently
+        // yank them out of the All view they wanted to see.
         const quantSel = document.getElementById('hwfit-quant');
-        if (quantSel) {
+        if (quantSel && quantSel.value !== '') {
           if (count <= 1) {
             quantSel.value = 'Q4_K_M'; // RAM or 1 GPU -> Q4 sweet spot
           } else {
@@ -211,8 +231,33 @@ export function _renderGpuToggles(system) {
 // reload paints instantly, then we refresh in the background and swap.
 const _SCAN_CACHE_KEY = 'hwfit_scan_cache_v1';
 const _MANUAL_HW_KEY = 'hwfit_manual_hardware_v1';
+const _CTX_KEY = 'hwfit_target_context_v1';
+const _CTX_PRESETS = [8192, 16384, 32768, 50000, 131072, 0]; // 0 = model max
 const _SCAN_CACHE_MAX = 12;            // keep the newest N signatures
 const _SCAN_CACHE_TTL = 6 * 3600 * 1000; // 6 h — hardware rarely changes
+
+// Ctx slider helpers (ported from origin/main). The slider picks an INDEX into
+// _CTX_PRESETS; _ctxValue() resolves it to a token count (0 = "Max"). The label
+// next to the slider re-renders to "8k" / "16k" / … / "Max".
+function _ctxLabel(value) {
+  const n = Number(value) || 0;
+  if (!n) return 'Max';
+  return n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
+}
+function _ctxValue() {
+  const slider = document.getElementById('hwfit-context');
+  const idx = Math.max(0, Math.min(_CTX_PRESETS.length - 1, Number(slider?.value ?? 3) || 0));
+  return _CTX_PRESETS[idx] || 0;
+}
+function _syncCtxControl() {
+  const slider = document.getElementById('hwfit-context');
+  const label = document.getElementById('hwfit-context-label');
+  if (!slider) return;
+  const saved = localStorage.getItem(_CTX_KEY);
+  const savedIdx = saved == null ? 3 : _CTX_PRESETS.indexOf(Number(saved));
+  slider.value = String(savedIdx >= 0 ? savedIdx : 3);
+  if (label) label.textContent = _ctxLabel(_ctxValue());
+}
 
 function _manualHwState() {
   try {
@@ -749,6 +794,13 @@ export function _hwfitRenderList(el, models) {
   const sortSel = document.getElementById('hwfit-sort');
   const currentSort = sortSel?.value || 'score';
   const isReversed = sortSel?.dataset.reverse === '1';
+  // Active budget for the Fit column label \u2014 make it obvious whether the
+  // ranking is against GPU or RAM so "tightest" can't be ambiguous on a
+  // mixed-resource box.
+  const tc = document.getElementById('hwfit-gpu-toggles');
+  const _budget = (tc && typeof tc._activeCount === 'number')
+    ? (tc._activeCount === 0 ? 'RAM' : (tc._activeCount === 1 ? 'GPU' : tc._activeCount + ' GPU'))
+    : null;
   let html = '<div class="hwfit-row hwfit-header">';
   for (const col of _hwfitColumns) {
     const sortable = col.key ? ' hwfit-sortable' : '';
@@ -760,7 +812,10 @@ export function _hwfitRenderList(el, models) {
       arrow = isReversed ? ' \u25B2' : ' \u25BC';
     }
     const dataAttr = col.key ? ` data-sort="${col.key}"` : '';
-    html += `<span class="hwfit-col ${col.cls}${sortable}${active}"${dataAttr}>${col.label}${arrow}</span>`;
+    const label = (col.cls === 'hwfit-fit' && _budget)
+      ? `${col.label} <span style="font-size:0.75em;opacity:0.6;font-weight:normal;">(${_budget})</span>`
+      : col.label;
+    html += `<span class="hwfit-col ${col.cls}${sortable}${active}"${dataAttr}>${label}${arrow}</span>`;
   }
   html += '</div>';
   for (const m of models) {
@@ -1082,11 +1137,40 @@ export function _hwfitInit() {
   const uc = document.getElementById('hwfit-usecase');
   const sort = document.getElementById('hwfit-sort');
   const qpref = document.getElementById('hwfit-quant');
+  const ctx = document.getElementById('hwfit-context');
+  const ctxLabel = document.getElementById('hwfit-context-label');
   const search = document.getElementById('hwfit-search');
   const remote = document.getElementById('hwfit-host');
+  _syncCtxControl();
   if (uc) uc.addEventListener('change', () => _hwfitFetch());
   if (sort) sort.addEventListener('change', () => _hwfitFetch());
   if (qpref) qpref.addEventListener('change', () => _hwfitFetch());
+  if (ctx && !ctx.dataset.bound) {
+    ctx.dataset.bound = '1';
+    ctx.addEventListener('input', () => {
+      if (ctxLabel) ctxLabel.textContent = _ctxLabel(_ctxValue());
+    });
+    ctx.addEventListener('change', () => {
+      const targetCtx = _ctxValue();
+      try { localStorage.setItem(_CTX_KEY, String(targetCtx)); } catch {}
+      // Ctx drag affects sort mode: a specific ctx target (anything < Max)
+      // implies the user is hunting for "what fits at this context length",
+      // so re-rank by fit (lowest first). Dragging back to Max means no
+      // ctx constraint → go back to the default score-based ranking.
+      const sortSel = document.getElementById('hwfit-sort');
+      if (sortSel) {
+        if (targetCtx) {
+          sortSel.value = 'fit';
+          sortSel.dataset.reverse = '1';
+        } else {
+          sortSel.value = 'score';
+          sortSel.dataset.reverse = '';
+        }
+      }
+      _hwfitCache = null;
+      _hwfitFetch();
+    });
+  }
   // Rescan — force a fresh hardware probe (bypasses the per-host cache).
   const rescan = document.getElementById('hwfit-rescan');
   if (rescan && !rescan.dataset.bound) {

@@ -5,7 +5,7 @@ import re
 QUANT_HIERARCHY = ["Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"]
 
 QUANT_BPP = {
-    "F32": 4.0, "F16": 2.0, "BF16": 2.0, "FP8": 1.0,
+    "F32": 4.0, "F16": 2.0, "BF16": 2.0, "FP8": 1.0, "INT8": 1.0, "NVFP4": 0.5,
     "Q8_0": 1.05, "Q6_K": 0.80, "Q5_K_M": 0.68,
     "Q4_K_M": 0.58, "Q4_0": 0.58, "Q3_K_M": 0.48, "Q2_K": 0.37,
     "AWQ-4bit": 0.50, "AWQ-8bit": 1.0,
@@ -14,7 +14,7 @@ QUANT_BPP = {
 }
 
 QUANT_SPEED_MULT = {
-    "F16": 0.6, "BF16": 0.6, "FP8": 0.85,
+    "F16": 0.6, "BF16": 0.6, "FP8": 0.85, "INT8": 0.85, "NVFP4": 1.1,
     "Q8_0": 0.8, "Q6_K": 0.95, "Q5_K_M": 1.0,
     "Q4_K_M": 1.15, "Q4_0": 1.15, "Q3_K_M": 1.25, "Q2_K": 1.35,
     "AWQ-4bit": 1.2, "AWQ-8bit": 0.85,
@@ -23,16 +23,20 @@ QUANT_SPEED_MULT = {
 }
 
 QUANT_QUALITY_PENALTY = {
-    "F16": 0.0, "BF16": 0.0, "FP8": 0.0,
-    "Q8_0": 0.0, "Q6_K": -1.0, "Q5_K_M": -2.0,
+    "F16": 0.0, "BF16": 0.0, "FP8": 0.0, "INT8": 0.0, "NVFP4": -0.5,
+    "Q8_0": -0.5, "Q6_K": -1.5, "Q5_K_M": -2.5,
     "Q4_K_M": -5.0, "Q4_0": -5.0, "Q3_K_M": -8.0, "Q2_K": -12.0,
-    "AWQ-4bit": -3.0, "AWQ-8bit": 0.0,
-    "GPTQ-Int4": -3.0, "GPTQ-Int8": 0.0,
-    "mlx-4bit": -4.0, "mlx-8bit": 0.0, "mlx-6bit": -1.0,
+    # Bare "AWQ" and "AWQ-8bit" used to be 0.0 (tied with FP8). In practice
+    # AWQ-anything is a calibrated reconstruction, not raw 8-bit weights —
+    # there's a small but real quality loss vs FP8. Give them a slight
+    # penalty so FP8 wins when both fit. AWQ-4bit stays heavier.
+    "AWQ": -1.0, "AWQ-4bit": -4.0, "AWQ-8bit": -1.0,
+    "GPTQ": -1.0, "GPTQ-Int4": -4.0, "GPTQ-Int8": -1.0,
+    "mlx-4bit": -4.0, "mlx-8bit": -0.5, "mlx-6bit": -1.5,
 }
 
 QUANT_BYTES_PER_PARAM = {
-    "F16": 2.0, "BF16": 2.0, "FP8": 1.0,
+    "F16": 2.0, "BF16": 2.0, "FP8": 1.0, "INT8": 1.0, "NVFP4": 0.5,
     "Q8_0": 1.0, "Q6_K": 0.75, "Q5_K_M": 0.625,
     "Q4_K_M": 0.5, "Q4_0": 0.5, "Q3_K_M": 0.375, "Q2_K": 0.25,
     "AWQ-4bit": 0.5, "AWQ-8bit": 1.0,
@@ -41,12 +45,21 @@ QUANT_BYTES_PER_PARAM = {
 }
 
 # Pre-quantized formats that should NOT go through the GGUF quant hierarchy
-PREQUANTIZED_PREFIXES = ("AWQ-", "GPTQ-", "mlx-", "FP8")
+PREQUANTIZED_PREFIXES = ("AWQ-", "GPTQ-", "mlx-", "FP8", "INT8", "NVFP4")
 
 
 def is_prequantized(model):
     q = model.get("quantization", "")
-    return any(q.startswith(p) for p in PREQUANTIZED_PREFIXES)
+    name = (model.get("name") or "").lower()
+    fmt = (model.get("format") or "").lower()
+    text = f"{name} {fmt}"
+    return (
+        "nvfp4" in text
+        or re.search(r"(^|[-_/])fp8($|[-_/\s])", text) is not None
+        or (not (model.get("is_gguf") or model.get("gguf_sources")) and re.search(r"(^|[-_/])(?:int)?8bit($|[-_/\s])", text) is not None)
+        or any(x in text for x in ("awq", "gptq", "mlx"))
+        or any(q.startswith(p) for p in PREQUANTIZED_PREFIXES)
+    )
 
 
 def params_b(model):

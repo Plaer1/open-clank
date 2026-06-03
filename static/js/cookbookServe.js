@@ -391,7 +391,8 @@ function _rerenderCachedModels() {
       panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
-      panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', _nextAvailablePort()))}" /></label>`;
+      const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
+      panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', defaultPort))}" /></label>`;
       const _activeGpus = (defaultGpus || '').split(',').map(s => s.trim()).filter(Boolean);
       const detectedGpuCount = Number(_getGpuToggleTotal?.() || 0);
       const _gpuMax = Math.max(detectedGpuCount || 8, ...(_activeGpus.map(Number).filter(n => !isNaN(n)).map(n => n + 1)));
@@ -405,7 +406,9 @@ function _rerenderCachedModels() {
       // Row 2: Core settings
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp">`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
-      panelHtml += `<label>${_l('Context','Max tokens per request. Lower = less VRAM')}<input type="text" class="hwfit-sf" data-field="ctx" value="${esc(sv('ctx', '8192'))}" /></label>`;
+      // ctx resets to the model's max on every panel open (the real ctx slider
+      // lives in the Scan/Download toolbar — see cookbook.js .hwfit-ctx-control).
+      panelHtml += `<label>${_l('Context','Max tokens per request — resets to the model max on every open. Lower = less VRAM')}<input type="text" class="hwfit-sf" data-field="ctx" value="${esc(m.context_length || m.context || '8192')}" /></label>`;
       panelHtml += `<label>${_l('GPU','Which GPU to use. Leave empty for default')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','CPU swap space in GB. Leave empty to omit (removed in newer vLLM)')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;

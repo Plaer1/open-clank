@@ -169,6 +169,9 @@ export function _parseServePhase(snapshot) {
   if (flat.includes('Application startup complete')) {
     return { phase: 'ready', status: 'ready' };
   }
+  if (/Ollama API ready on port\s+\d+/i.test(flat)) {
+    return { phase: 'ready', status: 'ready' };
+  }
   // HTTP access logs (e.g. GET /v1/models 200 OK) mean the server is up
   if (/(?:GET|POST)\s+\/[^\s]*\s+HTTP\/[\d.]+"\s*\d{3}/.test(flat)) {
     return { phase: 'idle', status: 'ready' };
@@ -2295,15 +2298,24 @@ async function _reconnectTask(el, task) {
         if (task.type === 'serve' && !task._endpointAdded && !task._endpointAddInFlight && task._serveReady) {
           task._endpointAddInFlight = true;
           const rawHost = task.remoteHost || 'localhost';
-          const host = rawHost.includes('@') ? rawHost.split('@').pop() : rawHost;
+          let host = rawHost.includes('@') ? rawHost.split('@').pop() : rawHost;
           const portMatch = task.payload?._cmd?.match(/--port[=\s]+(\d+)/)
             || task.payload?._cmd?.match(/(?:^|\s)-p[=\s]+(\d+)/)
             || snapshot.match(/Uvicorn running on\D*?:(\d+)/i)
             || snapshot.match(/running on\D*?:(\d+)/i)
             || snapshot.match(/listening on\D*?:(\d+)/i)
             || snapshot.match(/port[:=\s]+(\d+)/i);
-          const port = portMatch ? portMatch[1] : '8000';
-          const baseUrl = `http://${host}:${port}/v1`;
+          let port = portMatch ? portMatch[1] : '8000';
+          let baseUrl = `http://${host}:${port}/v1`;
+          const ollamaUrlMatch = snapshot.match(/Ollama API ready on port\s+\d+:\s*(http:\/\/[^\s]+)/i);
+          if (ollamaUrlMatch) {
+            try {
+              const u = new URL(ollamaUrlMatch[1]);
+              host = u.hostname || host;
+              port = u.port || '11434';
+              baseUrl = `${u.origin}/v1`;
+            } catch {}
+          }
           fetch('/api/model-endpoints', { credentials: 'same-origin' })
             .then(r => r.json())
             .then(async (eps) => {
@@ -2642,10 +2654,21 @@ async function _pollBackgroundStatus() {
       if (localTask && localTask._endpointAdded) continue;
 
       const rawHost = localTask?.remoteHost || t.remote || 'localhost';
-      const host = rawHost.includes('@') ? rawHost.split('@').pop() : (rawHost === 'local' ? 'localhost' : rawHost);
-      const portMatch = localTask?.payload?._cmd?.match(/--port\s+(\d+)/);
-      const port = portMatch ? portMatch[1] : '8000';
-      const baseUrl = `http://${host}:${port}/v1`;
+      let host = rawHost.includes('@') ? rawHost.split('@').pop() : (rawHost === 'local' ? 'localhost' : rawHost);
+      const portMatch = localTask?.payload?._cmd?.match(/--port\s+(\d+)/)
+        || localTask?.payload?._cmd?.match(/OLLAMA_HOST=[^\s:]+:(\d+)/);
+      let port = portMatch ? portMatch[1] : '8000';
+      let baseUrl = `http://${host}:${port}/v1`;
+      const snapshot = t.output || localTask?.output || '';
+      const ollamaUrlMatch = snapshot.match(/Ollama API ready on port\s+\d+:\s*(http:\/\/[^\s]+)/i);
+      if (ollamaUrlMatch) {
+        try {
+          const u = new URL(ollamaUrlMatch[1]);
+          host = u.hostname || host;
+          port = u.port || '11434';
+          baseUrl = `${u.origin}/v1`;
+        } catch {}
+      }
       const _isDiffusion = localTask?.payload?._cmd?.includes('diffusion_server');
 
       _updateTask(t.session_id, { _serveReady: true, _endpointAdded: true });

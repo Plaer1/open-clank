@@ -27,6 +27,56 @@ import spinnerModule from './spinner.js';
 
 // ── Error diagnosis ──
 
+function _openCookbookDependencies(pkgName = '') {
+  const cookbook = window.cookbookModule;
+  if (cookbook && typeof cookbook.open === 'function') {
+    cookbook.open({ tab: 'Dependencies' });
+  } else {
+    document.getElementById('tool-cookbook-btn')?.click();
+  }
+
+  const wanted = String(pkgName || '').toLowerCase();
+  const tryHighlight = (attempt = 0) => {
+    const modal = document.getElementById('cookbook-modal');
+    const tab = modal?.querySelector('.cookbook-tab[data-backend="Dependencies"]');
+    if (tab && !tab.classList.contains('active')) tab.click();
+
+    const rows = [...document.querySelectorAll('#cookbook-deps-list [data-pkg-name]')];
+    if (!rows.length) {
+      if (attempt < 45) setTimeout(() => tryHighlight(attempt + 1), 100);
+      return;
+    }
+    if (!wanted) return;
+    const row = rows.find(r => {
+      const name = (r.dataset.pkgName || '').toLowerCase();
+      const pip = (r.dataset.depPip || '').toLowerCase();
+      return name === wanted || pip.includes(wanted) || wanted.includes(name);
+    });
+    if (row) {
+      row.scrollIntoView({ block: 'center' });
+      row.classList.add('cookbook-pkg-flash');
+      setTimeout(() => row.classList.remove('cookbook-pkg-flash'), 1800);
+    }
+  };
+  tryHighlight();
+}
+
+function _openServeEditFromDiagnosis(panel, fields = null) {
+  const task = panel?.closest?.('.cookbook-task');
+  if (!task) return;
+  task.dispatchEvent(new CustomEvent('cookbook:edit-serve', { bubbles: true, detail: { fields } }));
+}
+
+function _openCpuServeEdit(panel) {
+  _openServeEditFromDiagnosis(panel, {
+    backend: 'llamacpp',
+    gpus: '',
+    tp: '1',
+    gpu_mem: '0.80',
+    _forceBackend: true,
+  });
+}
+
 // Infer the gated base repo that single-file checkpoints need configs from
 function _inferBaseRepo(text) {
   if (!text) return null;
@@ -70,17 +120,12 @@ export const ERROR_PATTERNS = [
   },
   {
     pattern: /not divisible by weight quantization|quantization block/i,
-    message: 'Model quantization format incompatible with this vLLM version. Try a different quant (AWQ) or update vLLM.',
+    message: 'FP8 MoE quantization is incompatible with this tensor-parallel split.',
+    suggestion: 'Suggested action: retry with a lower tensor-parallel size, such as TP=4 or TP=2. If it still fails, use a non-FP8/GGUF version of the model.',
     fixes: [
-      { label: 'Update vLLM on server', action: (panel) => {
-        const taskEl = panel.closest('.cookbook-task');
-        const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
-        const host = task?.remoteHost || '';
-        const prefix = _buildEnvPrefix();
-        const pipCmd = prefix ? prefix + ' pip install -U vllm' : 'pip install -U vllm';
-        const cmd = host ? _sshCmd(host, pipCmd) : pipCmd;
-        _launchServeTask('update-vllm', 'pip-update', cmd);
-      }},
+      { label: 'Retry with TP=4', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '4') },
+      { label: 'Retry with TP=2', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '2') },
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
     ],
   },
   {
@@ -218,6 +263,7 @@ export const ERROR_PATTERNS = [
     pattern: /vllm.*command not found|No module named vllm/i,
     message: 'vLLM is not installed or not in PATH.',
     fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('vllm') },
       { label: 'Check environment is set', action: (panel) => {
         const el = panel.querySelector('[data-field="env_type"]');
         if (el) { el.focus(); el.style.borderColor = 'var(--red)'; }
@@ -226,9 +272,19 @@ export const ERROR_PATTERNS = [
   },
   {
     pattern: /sglang.*command not found|No module named sglang|SGLang is not installed/i,
-    message: 'SGLang is not installed or not in PATH. Open Cookbook → Dependencies and install sglang on this server.',
+    message: 'SGLang is not installed or not in PATH.',
     fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('sglang') },
       { label: 'Copy install command', action: () => _copyText('python3 -m pip install "sglang[all]"') },
+    ],
+  },
+  {
+    pattern: /No accelerator \(CUDA, XPU, HPU, NPU, MUSA, MPS\) is available|Triton is not supported on current platform/i,
+    message: 'SGLang needs a visible GPU/accelerator on this server.',
+    suggestion: 'Suggested action: switch this serve config to llama.cpp for CPU/local serving, or choose a GPU server.',
+    fixes: [
+      { label: 'Switch to llama.cpp', action: (panel) => _openCpuServeEdit(panel) },
+      { label: 'Choose GPU server', action: (panel) => _openServeEditFromDiagnosis(panel) },
     ],
   },
   {
@@ -241,8 +297,12 @@ export const ERROR_PATTERNS = [
   },
   {
     pattern: /torch\.cuda\.is_available\(\).*False|No CUDA runtime/i,
-    message: 'CUDA not available in this environment.',
-    fixes: [],
+    message: 'vLLM needs a visible CUDA/ROCm GPU.',
+    suggestion: 'Suggested action: switch this serve config to llama.cpp for CPU/local serving, or choose a GPU server.',
+    fixes: [
+      { label: 'Switch to llama.cpp', action: (panel) => _openCpuServeEdit(panel) },
+      { label: 'Choose GPU server', action: (panel) => _openServeEditFromDiagnosis(panel) },
+    ],
   },
   {
     pattern: /Engine core initialization failed/i,
@@ -295,17 +355,20 @@ export const ERROR_PATTERNS = [
   },
   {
     pattern: /Either a revision or a version must be specified|transformers\.integrations\.hub_kernels|kernels\/layer/i,
-    message: 'vLLM/Transformers kernel package mismatch.',
+    message: 'Transformers/kernels package mismatch.',
     fixes: [
-      { label: 'Update vLLM/Transformers/kernels', action: (panel) => {
+      { label: 'Repair kernel package', action: (panel) => {
         const taskEl = panel.closest('.cookbook-task');
         const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
         const host = task?.remoteHost || '';
         const prefix = _buildEnvPrefix();
-        const pipCmd = prefix ? prefix + ' python3 -m pip install -U vllm transformers kernels' : 'python3 -m pip install -U vllm transformers kernels';
+        const pipCmd = prefix
+          ? prefix + ' python3 -m pip install --user --break-system-packages "kernels<0.15"'
+          : 'python3 -m pip install --user --break-system-packages "kernels<0.15"';
         const cmd = host ? _sshCmd(host, pipCmd) : pipCmd;
-        _launchServeTask('update-vllm-stack', 'pip-update', cmd);
+        _launchServeTask('repair-kernels', 'pip-update', cmd);
       }},
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('sglang') },
     ],
   },
   {
@@ -319,13 +382,24 @@ export const ERROR_PATTERNS = [
     pattern: /llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'/i,
     message: 'llama-cpp-python server is not installed. Run: pip install "llama-cpp-python[server]"',
     fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('llama_cpp') },
       { label: 'Copy install command', action: () => _copyText('pip install "llama-cpp-python[server]"') },
+    ],
+  },
+  {
+    pattern: /CUDA Toolkit not found|Unable to find cudart library|missing:\s*CUDA_CUDART/i,
+    message: 'llama.cpp found nvcc, but the CUDA runtime library is missing.',
+    suggestion: 'Suggested action: relaunch with the updated runner so llama.cpp builds CPU-only, or install a complete CUDA toolkit/runtime on this server for GPU llama.cpp.',
+    fixes: [
+      { label: 'Edit serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('llama_cpp') },
     ],
   },
   {
     pattern: /No module named ['"]?torch|No module named ['"]?diffusers|diffusers.*command not found/i,
     message: 'Diffusion serving needs PyTorch and diffusers. Install diffusers from Cookbook → Dependencies.',
     fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('diffusers') },
       { label: 'Copy install command', action: () => _copyText('python3 -m pip install "diffusers[torch]"') },
     ],
   },
@@ -402,10 +476,32 @@ export function _diagnose(text) {
   return null;
 }
 
+function _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText) {
+  const lines = ['## Odysseus Cookbook troubleshooting'];
+  if (task) {
+    lines.push(
+      '',
+      '### Task',
+      `- ID: ${task.sessionId || task.id || 'unknown'}`,
+      `- Type: ${task.type || 'unknown'}`,
+      `- Status: ${task.status || 'unknown'}`,
+      `- Model: ${task.payload?.repo_id || task.name || 'unknown'}`,
+      `- Host: ${task.remoteHost || 'local'}${task.sshPort ? `:${task.sshPort}` : ''}`,
+    );
+  }
+  lines.push('', '### Diagnosis', diagnosis?.message || '(none)');
+  if (suggestionText) lines.push('', '### Suggested action', suggestionText.replace(/^Suggested action:\s*/i, ''));
+  const cmd = task?.payload?._cmd || '';
+  if (cmd) lines.push('', '### Launch command', '```bash', cmd, '```');
+  if (sourceText) lines.push('', '### Captured output', '```text', String(sourceText).trim(), '```');
+  return lines.join('\n');
+}
+
 export function _showDiagnosis(panel, diagnosis, sourceText) {
-  if (panel._lastDiagMsg === diagnosis.message) return;
-  if (panel._diagDismissed === diagnosis.message) return; // stay dismissed until new error
+  const wasCollapsed = panel._lastDiagMsg === diagnosis.message && panel._diagCollapsed;
+  if (panel._diagDismissed === diagnosis.message) return;
   panel._lastDiagMsg = diagnosis.message;
+  panel._diagCollapsed = !!wasCollapsed;
 
   let diag = panel.querySelector('.cookbook-diagnosis');
   if (!diag) {
@@ -417,57 +513,116 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   }
   diag.classList.remove('hidden');
   diag.innerHTML = '';
+  const taskEl = panel?.closest?.('.cookbook-task');
+  const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
+  const fixes = [...(diagnosis.fixes || [])];
+  if (task?.type === 'serve' && task.payload?._cmd && !fixes.some(f => f.label === 'Edit serve')) {
+    fixes.push({ label: 'Edit serve', action: (p) => _openServeEditFromDiagnosis(p) });
+  }
+  const suggestionText = diagnosis.suggestion || (fixes.length
+    ? `Suggested action: ${fixes[0].label}.`
+    : 'Suggested action: copy the error and adjust the serve settings.');
 
-  const header = document.createElement('div');
-  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
+  // Simplified diagnosis card: just the error message + suggestion + fix
+  // button(s). Removed the fold toggle, copy button, and × dismiss — they
+  // made the card noisy without earning their keep. _diagCollapsed is kept
+  // as a stub so callers don't have to change.
+  panel._diagCollapsed = false;
 
+  const body = document.createElement('div');
+  body.className = 'cookbook-diag-body';
   const msg = document.createElement('div');
   msg.className = 'cookbook-diag-message';
   msg.textContent = diagnosis.message;
-  header.appendChild(msg);
+  body.appendChild(msg);
+  const suggestion = document.createElement('div');
+  suggestion.className = 'cookbook-diag-suggestion';
+  suggestion.textContent = suggestionText;
+  body.appendChild(suggestion);
+  diag.appendChild(body);
 
-  const dismiss = document.createElement('button');
-  dismiss.className = 'close-btn';
-  dismiss.style.cssText = 'width:16px;height:16px;font-size:9px;flex-shrink:0;';
-  dismiss.textContent = '\u2715';
-  dismiss.addEventListener('click', () => { panel._diagDismissed = diagnosis.message; _clearDiagnosis(panel); });
-  header.appendChild(dismiss);
+  const runFix = async (fix, button, busyLabel = fix.label, onStart = null, onDone = null) => {
+    if (!fix || !button || button.dataset.busy) return;
+    button.dataset.busy = '1';
+    const _orig = button.textContent;
+    const wp = spinnerModule.createWhirlpool(12);
+    wp.element.style.cssText = 'display:inline-block;vertical-align:middle;width:12px;height:12px;margin-right:5px;';
+    button.textContent = '';
+    button.appendChild(wp.element);
+    const _lbl = document.createElement('span');
+    _lbl.textContent = busyLabel;
+    _lbl.style.verticalAlign = 'middle';
+    button.appendChild(_lbl);
+    try {
+      if (typeof onStart === 'function') onStart();
+      await fix.action(panel, sourceText);
+    } catch (err) {
+      console.error('[cookbook] diagnosis fix failed', err);
+    } finally {
+      if (button.isConnected) {
+        try { wp.destroy(); } catch {}
+        button.textContent = _orig;
+        delete button.dataset.busy;
+      }
+      if (typeof onDone === 'function') onDone();
+    }
+  };
 
-  diag.appendChild(header);
-
-  if (diagnosis.fixes && diagnosis.fixes.length) {
+  if (fixes.length) {
     const row = document.createElement('div');
     row.className = 'cookbook-diag-fixes';
-    for (const fix of diagnosis.fixes) {
-      const btn = document.createElement('button');
-      btn.className = 'cookbook-btn cookbook-diag-btn';
-      btn.textContent = fix.label;
-      btn.addEventListener('click', async () => {
-        if (btn.dataset.busy) return;
-        btn.dataset.busy = '1';
-        // Spinner feedback while the fix runs (kill + relaunch takes a moment).
-        const _orig = btn.textContent;
-        const wp = spinnerModule.createWhirlpool(12);
-        wp.element.style.cssText = 'display:inline-block;vertical-align:middle;width:12px;height:12px;margin-right:5px;';
-        btn.textContent = '';
-        btn.appendChild(wp.element);
-        const _lbl = document.createElement('span');
-        _lbl.textContent = _orig;
-        _lbl.style.verticalAlign = 'middle';
-        btn.appendChild(_lbl);
-        try {
-          await fix.action(panel, sourceText);
-        } catch (e) {
-          console.error('[cookbook] diagnosis fix failed', e);
-        } finally {
-          // Retries animate the whole card away (button goes with it). For fixes
-          // that leave the card in place, restore the label.
-          if (btn.isConnected) { try { wp.destroy(); } catch {} btn.textContent = _orig; delete btn.dataset.busy; }
-        }
-      });
-      row.appendChild(btn);
+
+    if (fixes.length <= 3) {
+      for (const fix of fixes) {
+        const btn = document.createElement('button');
+        btn.className = 'cookbook-btn cookbook-diag-btn';
+        btn.type = 'button';
+        btn.textContent = fix.label;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          runFix(fix, btn);
+        });
+        row.appendChild(btn);
+      }
+      body.appendChild(row);
+      return;
     }
-    diag.appendChild(row);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'cookbook-diag-actions';
+
+    const trigger = document.createElement('button');
+    trigger.className = 'cookbook-btn cookbook-diag-action-trigger';
+    trigger.type = 'button';
+    trigger.textContent = 'Actions';
+    trigger.appendChild(document.createTextNode(' ▾'));
+    wrap.appendChild(trigger);
+
+    const menu = document.createElement('div');
+    menu.className = 'dropdown cookbook-diag-menu hidden';
+    for (const fix of fixes) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = fix.label;
+      item.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (item.dataset.busy || trigger.dataset.busy) return;
+        item.dataset.busy = '1';
+        await runFix(fix, trigger, fix.label, () => menu.classList.add('hidden'), () => delete item.dataset.busy);
+      });
+      menu.appendChild(item);
+    }
+    wrap.appendChild(menu);
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (trigger.dataset.busy) return;
+      document.querySelectorAll('.cookbook-diag-menu').forEach(m => {
+        if (m !== menu) m.classList.add('hidden');
+      });
+      menu.classList.toggle('hidden');
+    });
+    row.appendChild(wrap);
+    body.appendChild(row);
   }
 }
 

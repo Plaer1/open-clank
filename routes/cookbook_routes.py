@@ -905,6 +905,7 @@ def setup_cookbook_routes() -> APIRouter:
             # Show whether the HF token reached this server (masked) — a gated
             # model vLLM has to download will be denied without it.
             runner_lines.append(_HF_TOKEN_STATUS_SNIPPET)
+            handled_ollama_serve = False
             # Auto-install inference engine if missing
             if "llama_cpp" in req.cmd or "llama-server" in req.cmd:
                 # Prefer the NATIVE llama-server binary — its minja templating
@@ -978,17 +979,48 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  fi')
                 runner_lines.append('fi')
             elif "ollama" in req.cmd:
-                # Ollama manages its own model store and HTTP server. Just make
-                # sure the binary exists and the daemon is up before running the
-                # command (the natural serving engine on Apple Silicon / Metal).
+                handled_ollama_serve = True
+                _ollama_port = "11434"
+                _ollama_match = re.search(r"OLLAMA_HOST=[^\s:]+:(\d+)", req.cmd)
+                if _ollama_match:
+                    _ollama_port = _ollama_match.group(1)
+                # Ollama can be a host binary, a system service, or a Docker
+                # container. If the HTTP API is already reachable, the model is
+                # already served and we should not require a host `ollama` CLI.
+                runner_lines.append(f'ODYSSEUS_OLLAMA_PORT="{_ollama_port}"')
+                runner_lines.append('ODYSSEUS_OLLAMA_URL=""')
+                runner_lines.append('for _ody_ollama_port in "$ODYSSEUS_OLLAMA_PORT" 11434; do')
+                runner_lines.append('  [ -z "$_ody_ollama_port" ] && continue')
+                runner_lines.append('  for _ody_ollama_host in 127.0.0.1 localhost host.docker.internal; do')
+                runner_lines.append('    _ody_ollama_url="http://${_ody_ollama_host}:${_ody_ollama_port}"')
+                runner_lines.append('    if curl -sf "$_ody_ollama_url/api/tags" >/dev/null 2>&1; then')
+                runner_lines.append('      ODYSSEUS_OLLAMA_URL="$_ody_ollama_url"')
+                runner_lines.append('      ODYSSEUS_OLLAMA_PORT="$_ody_ollama_port"')
+                runner_lines.append('      break 2')
+                runner_lines.append('    fi')
+                runner_lines.append('  done')
+                runner_lines.append('done')
+                runner_lines.append('if [ -n "$ODYSSEUS_OLLAMA_URL" ]; then')
+                runner_lines.append('  if [ "$ODYSSEUS_OLLAMA_PORT" != "' + _ollama_port + '" ]; then')
+                runner_lines.append('    echo "[odysseus] Selected Ollama port ' + _ollama_port + ' was not reachable; using running Ollama on port ${ODYSSEUS_OLLAMA_PORT}."')
+                runner_lines.append('  fi')
+                runner_lines.append('  echo "[odysseus] Ollama API ready on port ${ODYSSEUS_OLLAMA_PORT}: ${ODYSSEUS_OLLAMA_URL}"')
+                runner_lines.append('  echo "[odysseus] This task is monitoring an existing Ollama server; stopping it here will not stop an external Docker/system service."')
+                runner_lines.append('  exec bash -i')
+                runner_lines.append('fi')
                 runner_lines.append('if ! command -v ollama &>/dev/null; then')
-                runner_lines.append('  echo "ERROR: Ollama not found. Install it (macOS: brew install ollama, or https://ollama.com/download), then launch again."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  echo "ERROR: Ollama not found and no Ollama API is reachable on 127.0.0.1, localhost, or host.docker.internal (ports ${ODYSSEUS_OLLAMA_PORT}/11434)."')
+                runner_lines.append('  echo "Install Ollama, start an Ollama service/container on this server, or pick the port where it is already listening."')
+                runner_lines.append('  echo')
+                runner_lines.append('  echo "=== Process exited with code 127 ==="')
+                runner_lines.append('  exec bash -i')
                 runner_lines.append('fi')
-                runner_lines.append('if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then')
-                runner_lines.append('  echo "Starting ollama server..."; (ollama serve >/dev/null 2>&1 &)')
-                runner_lines.append('  for _ in 1 2 3 4 5 6 7 8 9 10; do curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break; sleep 1; done')
-                runner_lines.append('fi')
+                runner_lines.append('echo "Starting ollama server on 0.0.0.0:${ODYSSEUS_OLLAMA_PORT}..."')
+                runner_lines.append('OLLAMA_HOST="0.0.0.0:${ODYSSEUS_OLLAMA_PORT}" ollama serve')
+                runner_lines.append('_ody_exit=$?')
+                runner_lines.append('echo')
+                runner_lines.append('echo "=== Process exited with code ${_ody_exit} ==="')
+                runner_lines.append('exec bash -i')
             elif "vllm serve" in req.cmd:
                 # vLLM is CUDA/ROCm-only and does not run on macOS at all.
                 runner_lines.append('if [ "$(uname -s)" = "Darwin" ]; then')
@@ -1016,18 +1048,19 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
 
-            _append_serve_preflight_exit_lines(
-                runner_lines,
-                keep_shell_open=not local_windows,
-            )
-            runner_lines.append(req.cmd)
-            if local_windows:
-                # Detached background process — no interactive shell to keep open.
-                # Print the exit marker the status poller looks for, then stop.
-                _append_serve_exit_code_lines(runner_lines, keep_shell_open=False)
-            else:
-                # Keep shell open after exit so user can see errors
-                _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
+            if not handled_ollama_serve:
+                _append_serve_preflight_exit_lines(
+                    runner_lines,
+                    keep_shell_open=not local_windows,
+                )
+                runner_lines.append(req.cmd)
+                if local_windows:
+                    # Detached background process — no interactive shell to keep open.
+                    # Print the exit marker the status poller looks for, then stop.
+                    _append_serve_exit_code_lines(runner_lines, keep_shell_open=False)
+                else:
+                    # Keep shell open after exit so user can see errors
+                    _append_serve_exit_code_lines(runner_lines, keep_shell_open=True)
 
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.sh"
             runner_path.write_text("\n".join(runner_lines) + "\n", encoding="utf-8")
@@ -1692,10 +1725,14 @@ def setup_cookbook_routes() -> APIRouter:
 
             if vram_gb > 0 and needed_vram is not None and needed_vram > vram_gb:
                 continue
-            # Skip if no size info — without a size we can't tell if it's a real
-            # full-weight model or a tiny adapter, so we'd rather drop it
-            if est_vram is None:
-                continue
+            # Unknown-size models (e.g. MiniMax-M2.7, DeepSeek-V4-Flash) have no
+            # "NB" in the repo id, so the regex above can't extract their
+            # param count. Previously we dropped them entirely, which made
+            # brand-new flagship releases silently vanish from this list even
+            # on rigs with hundreds of GB of VRAM. Adapters/LoRAs are already
+            # filtered by _is_excluded(), so what falls through here is
+            # overwhelmingly full models — keep them, just without a size
+            # badge (the frontend handles needed_vram_gb=null gracefully).
 
             out.append({
                 "repo_id": repo_id,

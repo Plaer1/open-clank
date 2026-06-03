@@ -10203,6 +10203,12 @@ textarea.memory-add-input {
   height: 20px;
   min-height: 0;
   box-sizing: border-box;
+  position: relative;
+  top: -4px;
+}
+.task-state-badge svg {
+  position: relative;
+  top: -1px;
 }
 .task-status-badge:hover {
   filter: brightness(1.08) saturate(1.15);
@@ -18498,6 +18504,85 @@ body.gallery-selecting .gallery-dl-btn,
   display: block;
   margin-top: 2px;
 }
+/* Ctx slider — ported from origin/main. Sits in the Scan/Download toolbar
+   next to the quant dropdown. Drives _ctxValue() in cookbook-hwfit.js. */
+.hwfit-ctx-control {
+  height: 28px;
+  min-width: 134px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 11px;
+}
+.hwfit-ctx-control span {
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.75;
+}
+/* Editor-style slider (same look as the gallery editor sliders): thin pill
+   rail that fattens on interaction, circular red thumb that grows on hover. */
+.hwfit-ctx-control input[type="range"] {
+  width: 64px;
+  min-width: 64px;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: color-mix(in srgb, var(--fg) 25%, transparent);
+  border-radius: 999px;
+  accent-color: var(--red);
+  cursor: pointer;
+  transition: height 0.15s ease;
+}
+.hwfit-ctx-control input[type="range"]:hover,
+.hwfit-ctx-control input[type="range"]:focus,
+.hwfit-ctx-control input[type="range"]:active {
+  height: 10px;
+}
+.hwfit-ctx-control input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--red);
+  border: none;
+  cursor: pointer;
+  transition: width 0.12s ease, height 0.12s ease;
+}
+.hwfit-ctx-control input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--red);
+  border: none;
+  cursor: pointer;
+  transition: width 0.12s ease, height 0.12s ease;
+}
+.hwfit-ctx-control input[type="range"]:hover::-webkit-slider-thumb,
+.hwfit-ctx-control input[type="range"]:focus::-webkit-slider-thumb,
+.hwfit-ctx-control input[type="range"]:active::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+}
+.hwfit-ctx-control input[type="range"]:hover::-moz-range-thumb,
+.hwfit-ctx-control input[type="range"]:focus::-moz-range-thumb,
+.hwfit-ctx-control input[type="range"]:active::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+}
+.hwfit-ctx-control output {
+  min-width: 28px;
+  text-align: right;
+  color: var(--fg);
+  font-weight: 600;
+}
 .hwfit-sf {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -21253,6 +21338,7 @@ a.chat-link[href^="#research-"] {
   }
   .task-card .task-card-run-btn {
     margin-right: 1px !important;
+    top: 0;
   }
 }
 
@@ -34765,7 +34851,7 @@ body.theme-frosted .modal {
 .slash-autocomplete-popup {
   position: fixed;
   z-index: 9000;
-  background: var(--bg-elev-2, #1a1a1a);
+  background: var(--panel, var(--bg));
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
@@ -34793,8 +34879,8 @@ body.theme-frosted .modal {
   white-space: nowrap;
   overflow: hidden;
 }
-.slash-ac-row:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
-.slash-ac-row-sel  { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+.slash-ac-row:hover { background-color: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+.slash-ac-row-sel  { background-color: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
 .slash-ac-token {
   font-family: 'Fira Code', ui-monospace, monospace;
   color: var(--accent, var(--red));
