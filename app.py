@@ -690,7 +690,16 @@ app.include_router(setup_note_routes(task_scheduler))
 
 # Email
 from routes.email_routes import setup_email_routes
-app.include_router(setup_email_routes())
+email_router = setup_email_routes()
+app.include_router(email_router)
+
+# Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
+# api_token scopes (todos:read|write, email:read|draft|send) so external
+# Codex sessions can only touch the data the user explicitly allowed. Mounted
+# AFTER email so the codex_routes can borrow the email router for shared
+# search/threading helpers.
+from routes.codex_routes import setup_codex_routes
+app.include_router(setup_codex_routes(email_router=email_router))
 
 from routes.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
