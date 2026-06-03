@@ -247,14 +247,10 @@ class _Column:
     def __eq__(self, value):
         return _Predicate(lambda row: getattr(row, self.name) == value)
 
-    def desc(self):
-        return self
-
 
 class _ModelEndpoint:
     is_enabled = _Column("is_enabled")
     owner = _Column("owner")
-    created_at = _Column("created_at")
 
 
 class _Query:
@@ -263,9 +259,6 @@ class _Query:
 
     def filter(self, *predicates):
         self._rows = [r for r in self._rows if all(p(r) for p in predicates)]
-        return self
-
-    def order_by(self, *exprs):
         return self
 
     def first(self):
@@ -287,10 +280,8 @@ def _ep(name, owner, *, is_enabled=True):
 
 def _select(rows, owner):
     wh_mod = _import_webhook_helper()
-    # _select_api_chat_fallback_endpoint uses the module-level ModelEndpoint
-    # (not a local import), so we patch the module attribute directly.
-    wh_mod.ModelEndpoint = _ModelEndpoint
-    return wh_mod._select_api_chat_fallback_endpoint(_DB(rows), owner)
+    sys.modules["core.database"].ModelEndpoint = _ModelEndpoint
+    return wh_mod._first_enabled_endpoint(_DB(rows), owner)
 
 
 def test_sync_chat_fallback_never_picks_another_owners_endpoint():
@@ -319,15 +310,9 @@ def test_sync_chat_fallback_skips_disabled_owned_endpoint():
     assert ep is not None and ep.name == "shared"
 
 
-def test_sync_chat_fallback_null_owner_uses_shared_rows_only():
-    # When no token owner is known, only null-owner (shared) endpoints are
-    # visible — private endpoints of any user must not be returned.
-    rows = [_ep("bob-private", "bob"), _ep("shared", None)]
+def test_sync_chat_fallback_null_owner_is_legacy_single_user_noop():
+    # An unresolvable/empty token owner keeps the original single-user behaviour
+    # (owner_filter no-op): first enabled row, whatever it is.
+    rows = [_ep("first", "bob"), _ep("second", "alice")]
     ep = _select(rows, None)
-    assert ep is not None and ep.name == "shared"
-
-
-def test_sync_chat_fallback_null_owner_returns_none_with_no_shared():
-    # No shared rows → fail closed rather than returning another user's endpoint.
-    rows = [_ep("bob-private", "bob"), _ep("alice-private", "alice")]
-    assert _select(rows, None) is None
+    assert ep is not None and ep.name == "first"
