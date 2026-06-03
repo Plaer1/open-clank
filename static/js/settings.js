@@ -3093,7 +3093,6 @@ const INTG_TYPES = {
   carddav: { label: 'CardDAV', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
   email:   { label: 'Email',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
   mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
-  codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m8 9 3 3-3 3"/><path d="M13 15h3"/></svg>' },
   vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
 };
 
@@ -3114,7 +3113,7 @@ async function initUnifiedIntegrations() {
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
       fetch('/api/calendar/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -3122,7 +3121,6 @@ async function initUnifiedIntegrations() {
       fetch('/api/email/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/mcp/servers', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
-      fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
     ]);
     const items = [];
     // API integrations
@@ -3166,13 +3164,6 @@ async function initUnifiedIntegrations() {
     for (const srv of mcpList) {
       const statusText = srv.needs_oauth ? 'needs auth' : srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : srv.status === 'error' ? 'error' : 'disconnected';
       items.push({ type: 'mcp', id: srv.id || srv.name, name: srv.name || 'MCP Server', detail: statusText, enabled: srv.is_enabled !== false, data: srv });
-    }
-    for (const tok of (Array.isArray(tokenRes) ? tokenRes : [])) {
-      const scopes = tok.scopes || [];
-      const isCodex = (tok.name || '').toLowerCase().includes('codex') || scopes.some(s => String(s || '').startsWith('todos:') || String(s || '').startsWith('email:') || String(s || '').startsWith('documents:'));
-      if (!isCodex) continue;
-      const detail = `${tok.token_prefix || 'token'}... - ${scopes.join(', ') || 'chat'}`;
-      items.push({ type: 'codex', id: tok.id, name: tok.name || 'Codex Agent', detail, enabled: true, data: tok });
     }
     // Vaultwarden removed as an integration option.
     return items;
@@ -3245,7 +3236,6 @@ async function initUnifiedIntegrations() {
           }
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'codex') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
@@ -3262,7 +3252,6 @@ async function initUnifiedIntegrations() {
     else if (type === 'contacts' || type === 'carddav') showCardDavForm();
     else if (type === 'email') showEmailForm(editId);
     else if (type === 'mcp') showMcpForm(editId);
-    else if (type === 'codex') showCodexForm(editId);
     else if (type === 'vault') showVaultForm();
   }
 
@@ -4313,245 +4302,6 @@ async function initUnifiedIntegrations() {
     }
   }
 
-  async function showCodexForm(editId) {
-    let tokens = [];
-    try {
-      const tokRes = await fetch('/api/tokens', { credentials: 'same-origin' });
-      if (tokRes.ok) tokens = await tokRes.json();
-    } catch (_) {}
-
-    const toolScopes = [
-      { key: 'todos:read', label: 'Todos', detail: 'Read notes and checklists' },
-      { key: 'todos:write', label: 'Todos write', detail: 'Create, update, delete, and toggle todo items' },
-      { key: 'documents:read', label: 'Documents', detail: 'Read documents when a Codex document API is enabled' },
-      { key: 'documents:write', label: 'Documents write', detail: 'Create and update draft documents' },
-      { key: 'email:read', label: 'Email', detail: 'Read email when a Codex email API is enabled' },
-      { key: 'email:draft', label: 'Email drafts', detail: 'Create email reply drafts without sending' },
-      { key: 'email:send', label: 'Email send', detail: 'Send email directly' },
-      { key: 'calendar:read', label: 'Calendar', detail: 'Read calendar events when enabled' },
-      { key: 'calendar:write', label: 'Calendar write', detail: 'Create and update calendar events' },
-      { key: 'memory:read', label: 'Memory', detail: 'Read memory when enabled' },
-      { key: 'memory:write', label: 'Memory write', detail: 'Write memory when enabled' },
-    ];
-    const codexTokens = (Array.isArray(tokens) ? tokens : []).filter(tok => {
-      const scopes = tok.scopes || [];
-      return (tok.name || '').toLowerCase().includes('codex') || scopes.some(s => String(s || '').startsWith('todos:') || String(s || '').startsWith('email:') || String(s || '').startsWith('documents:'));
-    });
-    const current = codexTokens.find(t => String(t.id) === String(editId));
-    const scopeToggles = (t) => {
-      const scopes = new Set(t.scopes || []);
-      return toolScopes.map(scope => `
-        <label class="settings-row" style="align-items:flex-start;gap:10px;">
-          <span class="settings-label" style="padding-top:2px;">${esc(scope.label)}</span>
-          <span style="display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;">
-            <label class="admin-switch" style="margin-left:0;flex-shrink:0;"><input type="checkbox" class="uf-codex-scope" data-token-id="${esc(t.id)}" data-scope="${esc(scope.key)}" ${scopes.has(scope.key) ? 'checked' : ''}><span class="admin-slider"></span></label>
-            <span style="font-size:11px;line-height:1.35;opacity:0.62;">${esc(scope.detail)}</span>
-          </span>
-        </label>`).join('');
-    };
-    const tokenRows = codexTokens.length ? codexTokens.map(t => `
-      <div class="uf-codex-token" data-token-id="${esc(t.id)}" style="border:1px solid var(--border);border-radius:6px;padding:9px 10px;margin-top:8px;">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12px;font-weight:600;">${esc(t.name || 'Codex Agent')}</div>
-            <div style="font-size:10px;opacity:0.52;">${esc(t.token_prefix || 'token')}...${t.last_used_at ? ` · Last used ${new Date(t.last_used_at).toLocaleDateString()}` : ' · Never used'}</div>
-          </div>
-          <button class="admin-btn-delete uf-codex-revoke" data-token-id="${esc(t.id)}">Revoke</button>
-        </div>
-        <div style="font-size:11px;font-weight:600;opacity:0.62;margin-bottom:4px;">Tool access</div>
-        ${scopeToggles(t)}
-        <div class="uf-codex-scope-msg" data-token-id="${esc(t.id)}" style="font-size:11px;min-height:14px;"></div>
-      </div>`).join('') : '<div style="opacity:0.45;font-size:11px;padding:8px 0;">No Codex tokens yet.</div>';
-    const origin = window.location.origin || '';
-	const setupForToken = (token) => `export ODYSSEUS_URL=${origin}
-export ODYSSEUS_API_TOKEN='${token}'
-mkdir -p ~/plugins
-curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/codex/plugin.zip" -o /tmp/odysseus-codex-plugin.zip
-python3 -m zipfile -e /tmp/odysseus-codex-plugin.zip ~/plugins
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-p = Path.home() / ".agents" / "plugins" / "marketplace.json"
-p.parent.mkdir(parents=True, exist_ok=True)
-if p.exists():
-    data = json.loads(p.read_text())
-else:
-    data = {"name": "personal", "interface": {"displayName": "Personal"}, "plugins": []}
-
-data.setdefault("name", "personal")
-data.setdefault("interface", {}).setdefault("displayName", "Personal")
-plugins = data.setdefault("plugins", [])
-entry = {
-    "name": "odysseus",
-    "source": {"source": "local", "path": "./plugins/odysseus"},
-    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
-    "category": "Productivity",
-}
-data["plugins"] = [item for item in plugins if item.get("name") != "odysseus"] + [entry]
-p.write_text(json.dumps(data, indent=2) + "\\n")
-PY
-codex plugin add odysseus@personal
-python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`;
-    const setupPlaceholder = `Add an agent to generate a one-time token and copy the full setup commands.`;
-
-    formEl.innerHTML = `
-      <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px">${current ? 'Codex Agent' : 'Add Codex Agent'}</h2>
-        <div class="settings-col">
-          <div style="font-size:11px;line-height:1.45;opacity:0.68;margin-bottom:4px;">Create a Codex agent token, then toggle exactly which Odysseus tools it can use.</div>
-          <div style="font-size:11px;line-height:1.45;padding:8px 10px;border:1px solid var(--border);border-left:3px solid var(--accent, var(--red));border-radius:6px;background:rgba(0,0,0,0.06);">
-            <div style="font-weight:600;margin-bottom:4px;">Codex setup</div>
-            <div style="opacity:0.68;margin-bottom:6px;">Odysseus ships a Codex plugin in <code>integrations/codex</code>. <a href="/api/codex/plugin.zip" style="color:var(--accent,var(--red));">Download plugin bundle</a>, then set this instance URL and the token shown after adding an agent in the terminal where Codex runs.</div>
-            <pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.45;"><code id="uf-codex-setup-code">${esc(setupPlaceholder)}</code></pre>
-            <button class="admin-btn-sm" id="uf-codex-copy-setup" style="margin-top:6px;opacity:0.55;">Copy setup</button>
-          </div>
-          <div class="settings-row"><label class="settings-label">Name</label><input id="uf-codex-name" class="settings-input" value="${esc(current?.name || 'Codex Agent')}" placeholder="Codex Agent"></div>
-          <div class="settings-row" style="margin-top:4px">
-            <button class="admin-btn-sm" id="uf-codex-create">Add Agent</button>
-            <button class="admin-btn-sm" id="uf-codex-cancel" style="opacity:0.7">Cancel</button>
-            <span id="uf-codex-msg" style="font-size:11px"></span>
-          </div>
-          <div id="uf-codex-reveal" style="display:none;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,0.08);">
-            <div style="font-size:11px;opacity:0.65;margin-bottom:4px;">Copy this token now. It will not be shown again. New agents start with chat only; use Configure access before testing todos or email.</div>
-            <code id="uf-codex-token" style="display:block;word-break:break-all;font-size:11px;"></code>
-            <button class="admin-btn-sm" id="uf-codex-copy-token" style="margin-top:6px;">Copy token</button>
-            <button class="admin-btn-sm" id="uf-codex-configure" style="display:none;margin-top:6px;">Configure access</button>
-          </div>
-          <div style="font-size:11px;font-weight:600;opacity:0.62;margin-top:8px;">Agents</div>
-          <div id="uf-codex-token-list">${tokenRows}</div>
-        </div>
-      </div>`;
-
-    el('uf-codex-cancel')?.addEventListener('click', () => { formEl.style.display = 'none'; });
-    el('uf-codex-create')?.addEventListener('click', async () => {
-      const msg = el('uf-codex-msg');
-      const name = el('uf-codex-name').value.trim();
-      if (!name) { msg.textContent = 'Name required'; msg.style.color = 'var(--red)'; return; }
-      const fd = new FormData();
-      fd.append('name', name);
-      fd.append('scopes', 'chat');
-      try {
-        const r = await fetch('/api/tokens', { method: 'POST', credentials: 'same-origin', body: fd });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.detail || 'Failed');
-        el('uf-codex-token').textContent = d.token || '';
-        el('uf-codex-reveal').style.display = '';
-        const configureBtn = el('uf-codex-configure');
-        if (configureBtn) {
-          configureBtn.dataset.tokenId = d.id || '';
-          configureBtn.style.display = '';
-        }
-        const setupBtn = el('uf-codex-copy-setup');
-        if (setupBtn) {
-          setupBtn.dataset.token = d.token || '';
-          setupBtn.style.opacity = '';
-        }
-        const setupCode = el('uf-codex-setup-code');
-        if (setupCode) setupCode.textContent = setupForToken(d.token || '');
-        msg.textContent = 'Created. Configure access before testing tools.';
-        msg.style.color = 'var(--green, #50fa7b)';
-        await renderList();
-      } catch (err) {
-        msg.textContent = err?.message || 'Failed';
-        msg.style.color = 'var(--red)';
-      }
-    });
-    const _copyCodexToken = async (text) => {
-      const value = String(text || '');
-      if (!value) return false;
-      if (navigator.clipboard && window.isSecureContext) {
-        try {
-          await navigator.clipboard.writeText(value);
-          return true;
-        } catch (_) {}
-      }
-      const ta = document.createElement('textarea');
-      ta.value = value;
-      ta.setAttribute('readonly', 'readonly');
-      ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;z-index:-1;';
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      ta.setSelectionRange(0, value.length);
-      let ok = false;
-      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
-      ta.remove();
-      return ok;
-    };
-    const _selectTextFallback = (text, containerId) => {
-      const code = document.createElement('pre');
-      code.textContent = text;
-      code.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-size:10px;margin:6px 0 0;';
-      el(containerId)?.appendChild(code);
-      const range = document.createRange();
-      range.selectNodeContents(code);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-    };
-    el('uf-codex-copy-setup')?.addEventListener('click', async () => {
-      const token = el('uf-codex-copy-setup')?.dataset.token || '';
-      const btn = el('uf-codex-copy-setup');
-      if (!token) {
-        if (btn) {
-          btn.textContent = 'Add agent first';
-          setTimeout(() => { const latest = el('uf-codex-copy-setup'); if (latest) latest.textContent = 'Copy setup'; }, 1600);
-        }
-        return;
-      }
-      const setup = setupForToken(token);
-      const ok = await _copyCodexToken(setup);
-      if (!btn) return;
-      btn.textContent = ok ? 'Copied setup' : 'Select setup';
-      if (!ok) _selectTextFallback(setup, 'uf-codex-reveal');
-      setTimeout(() => { const latest = el('uf-codex-copy-setup'); if (latest) latest.textContent = 'Copy setup'; }, 1600);
-    });
-    el('uf-codex-copy-token')?.addEventListener('click', async () => {
-      const token = el('uf-codex-token')?.textContent || '';
-      const ok = await _copyCodexToken(token);
-      const btn = el('uf-codex-copy-token');
-      if (!btn) return;
-      btn.textContent = ok ? 'Copied token' : 'Select token';
-      if (!ok) _selectTextFallback(token, 'uf-codex-reveal');
-      setTimeout(() => { const latest = el('uf-codex-copy-token'); if (latest) latest.textContent = 'Copy token'; }, 1600);
-    });
-    el('uf-codex-configure')?.addEventListener('click', async () => {
-      await showCodexForm(el('uf-codex-configure')?.dataset.tokenId || null);
-    });
-    formEl.querySelectorAll('.uf-codex-revoke').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!await window.styledConfirm('Revoke this Codex token? Terminal agents using it will lose access.', { confirmText: 'Revoke', danger: true })) return;
-        await fetch(`/api/tokens/${btn.dataset.tokenId}`, { method: 'DELETE', credentials: 'same-origin' });
-        await showCodexForm(null);
-        await renderList();
-      });
-    });
-    formEl.querySelectorAll('.uf-codex-scope').forEach(cb => {
-      cb.addEventListener('change', async () => {
-        const tokenId = cb.dataset.tokenId;
-        const panel = formEl.querySelector(`.uf-codex-token[data-token-id="${CSS.escape(tokenId)}"]`);
-        const msg = formEl.querySelector(`.uf-codex-scope-msg[data-token-id="${CSS.escape(tokenId)}"]`);
-        const scopes = Array.from(panel.querySelectorAll('.uf-codex-scope:checked')).map(input => input.dataset.scope);
-        try {
-          const r = await fetch(`/api/tokens/${tokenId}`, {
-            method: 'PATCH',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scopes }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.detail || 'Failed');
-          if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; }
-          await renderList();
-        } catch (err) {
-          cb.checked = !cb.checked;
-          if (msg) { msg.textContent = err?.message || 'Failed'; msg.style.color = 'var(--red)'; }
-        }
-      });
-    });
-  }
-
   // ── Add button with type picker ──
   if (addBtn) {
     addBtn.addEventListener('click', () => {
@@ -4569,7 +4319,6 @@ python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`;
                 <option value="carddav">Contacts (CardDAV)</option>
                 <option value="email">Email (IMAP/SMTP)</option>
                 <option value="mcp">MCP Tool Server</option>
-                <option value="codex">Codex Agent</option>
               </select>
             </div>
           </div>
