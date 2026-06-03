@@ -527,6 +527,9 @@ export async function _hwfitFetch(fresh = false) {
       if (useCase) params.set('use_case', useCase);
       if (quantPref) params.set('quant', quantPref);
       if (targetCtx) params.set('ctx', String(targetCtx));
+      // Fit-only filter — set by the dot in the Fit column header.
+      const _fitOnly = (() => { try { return localStorage.getItem('hwfit_fit_only_v1') === '1'; } catch { return false; } })();
+      if (_fitOnly) params.set('fit_only', '1');
     }
     const endpoint = isImageMode ? `/api/hwfit/image-models?${params}` : `/api/hwfit/models?${params}`;
     const res = await fetch(endpoint);
@@ -888,9 +891,15 @@ export function _hwfitRenderList(el, models) {
       arrow = isReversed ? ' \u25B2' : ' \u25BC';
     }
     const dataAttr = col.key ? ` data-sort="${col.key}"` : '';
-    const label = (col.cls === 'hwfit-fit' && _budget)
-      ? `${col.label} <span style="font-size:0.75em;opacity:0.6;font-weight:normal;">(${_budget})</span>`
-      : col.label;
+    // Fit column gets a small dot to its left that toggles "show only models
+    // that fit" — replaces the old Fits On/Off button next to the toolbar.
+    let label = col.label;
+    if (col.cls === 'hwfit-fit') {
+      const _fitOnly = (() => { try { return localStorage.getItem('hwfit_fit_only_v1') === '1'; } catch { return false; } })();
+      label = `<span class="hwfit-fit-dot${_fitOnly ? ' active' : ''}" title="${_fitOnly ? 'Showing only models that fit. Click to also show too-tight rows.' : 'Click to show only models that fit your hardware.'}" data-fit-dot>●</span>${col.label}`;
+      // (Budget tag removed — the GPU/RAM/N-GPU suffix next to "Fit" was noise;
+      // the toggle row already shows which budget is active.)
+    }
     html += `<span class="hwfit-col ${col.cls}${sortable}${active}"${dataAttr}>${label}${arrow}</span>`;
   }
   html += '</div>';
@@ -910,9 +919,31 @@ export function _hwfitRenderList(el, models) {
     const dlDot = (_cachedModelIds && (_cachedModelIds.has(m.name) || [..._cachedModelIds].some(id => id === m.name?.split('/').pop()))) ? '<span class="hwfit-dl-dot" title="Downloaded">\u25CF</span>' : '';
     html += `<div class="hwfit-row" data-model="${esc(m.name)}">`;
     html += `<span class="hwfit-col hwfit-fit" style="color:${fitColor}">${esc(fitLabel)}</span>`;
-    html += `<span class="hwfit-col hwfit-name">${modelLogo(m.name)}${esc(m.name?.split('/').pop() || m.name)}${moeBadge}${imgBadge}${dlDot}</span>`;
+    // Append quant to the title when it's not already in the repo name. The
+    // suffix strips quant-parts the name already contains — e.g. for
+    // QuantTrio/MiniMax-M2-AWQ + quant=AWQ-4bit we just show "(4bit)", not
+    // "(AWQ-4bit)". DeepSeek-V4-Flash + FP4-MoE-Mixed keeps the full tag
+    // (none of those parts are in the repo id).
+    const _short = m.name?.split('/').pop() || m.name || '';
+    const _quantTag = (m.quant || '').trim();
+    const _lowerShort = _short.toLowerCase();
+    let _quantSuffix = '';
+    if (_quantTag) {
+      const _parts = _quantTag.split(/[-_]/).filter(Boolean);
+      const _remaining = _parts.filter(p => !_lowerShort.includes(p.toLowerCase()));
+      if (_remaining.length && _remaining.length < _parts.length + 1) {  // at least one part is new
+        let _display = _remaining.join('-');
+        if (_display.length > 9) _display = _display.slice(0, 9) + '…';
+        _quantSuffix = ` <span class="hwfit-name-quant" title="${esc(_quantTag)} — full storage format">(${esc(_display)})</span>`;
+      }
+    }
+    html += `<span class="hwfit-col hwfit-name">${modelLogo(m.name)}${esc(_short)}${_quantSuffix}${moeBadge}${imgBadge}${dlDot}</span>`;
     html += `<span class="hwfit-col hwfit-c-params">${esc(pcount)}</span>`;
-    html += `<span class="hwfit-col hwfit-c-quant">${esc(m.quant || '?')}</span>`;
+    // Truncate the Quant cell to 9 chars + ellipsis so long tags like
+    // "FP4-MoE-Mixed" don't push neighboring columns. Full tag stays in title.
+    const _qRaw = m.quant || '?';
+    const _qShort = _qRaw.length > 9 ? _qRaw.slice(0, 9) + '…' : _qRaw;
+    html += `<span class="hwfit-col hwfit-c-quant" title="${esc(_qRaw)}">${esc(_qShort)}</span>`;
     html += `<span class="hwfit-col hwfit-c-vram">${vramLabel}</span>`;
     html += `<span class="hwfit-col hwfit-c-ctx">${m.is_image_gen ? '\u2014' : ctx}</span>`;
     html += `<span class="hwfit-col hwfit-c-speed">${m.is_image_gen ? '\u2014' : tps + ' t/s'}</span>`;
@@ -934,7 +965,26 @@ export function _hwfitRenderList(el, models) {
   });
   // Clickable header columns → sort (click again to toggle direction)
   el.querySelectorAll('.hwfit-header .hwfit-sortable').forEach(col => {
-    col.addEventListener('click', () => {
+    col.addEventListener('click', (e) => {
+      // The little dot inside the Fit header is its own toggle (fit-only
+      // filter), don't let it fall through to a sort click.
+      if (e.target.closest('[data-fit-dot]')) {
+        const on = !e.target.classList.contains('active');
+        try { localStorage.setItem('hwfit_fit_only_v1', on ? '1' : '0'); } catch {}
+        // Un-toggling the fit filter (off → showing too-tight rows again) is
+        // typically because the user wants to see the LARGE models they can't
+        // run yet — re-sort by VRAM descending so the biggest surface first.
+        if (!on) {
+          const sortSel = document.getElementById('hwfit-sort');
+          if (sortSel) {
+            sortSel.value = 'vram';
+            sortSel.dataset.reverse = '0';   // descending (biggest first)
+          }
+        }
+        _hwfitCache = null;
+        _hwfitFetch();
+        return;
+      }
       const sortKey = col.dataset.sort;
       if (!sortKey) return;
       const sel = document.getElementById('hwfit-sort');
@@ -1018,7 +1068,16 @@ export function _expandModelRow(row, modelData) {
   if (modelData.is_image_gen) {
     html += `<div style="font-size:10px;opacity:0.5;margin-top:4px;">${esc((modelData.capabilities || []).join(' \u00B7 ') || '')}${modelData.description ? ' \u2014 ' + esc(modelData.description) : ''}</div>`;
   } else if (_requiresAcceleratorBackend(modelData)) {
-    html += `<div class="hwfit-panel-note">This is a safetensors GPU-serving format. Use vLLM/SGLang with a visible CUDA/ROCm accelerator, or pick a GGUF download for llama.cpp/Ollama.</div>`;
+    // Only show the "needs CUDA/ROCm" note when the host doesn't already have
+    // one. With a visible CUDA/ROCm accelerator the note is noise — the user
+    // can already serve the model and reading the warning on every row makes
+    // the panel feel like everything's broken.
+    const _sys = _hwfitCache?.system || {};
+    const _backend = (_sys.backend || '').toLowerCase();
+    const _hasGpuAccel = !!_sys.has_gpu && (_backend === 'cuda' || _backend === 'rocm');
+    if (!_hasGpuAccel) {
+      html += `<div class="hwfit-panel-note">This is a safetensors GPU-serving format. Use vLLM/SGLang with a visible CUDA/ROCm accelerator, or pick a GGUF download for llama.cpp/Ollama.</div>`;
+    }
   }
   html += `</div>`;
 
@@ -1243,14 +1302,14 @@ export function _hwfitInit() {
       const targetCtx = _ctxValue();
       try { localStorage.setItem(_CTX_KEY, String(targetCtx)); } catch {}
       // Ctx drag affects sort mode: a specific ctx target (anything < Max)
-      // implies the user is hunting for "what fits at this context length",
-      // so re-rank by fit (lowest first). Dragging back to Max means no
-      // ctx constraint → go back to the default score-based ranking.
+      // implies "what runs at this context length" — sort by VRAM ascending
+      // so the cheapest-fitting models surface first. Dragging back to Max
+      // releases the constraint → go back to the default score ranking.
       const sortSel = document.getElementById('hwfit-sort');
       if (sortSel) {
         if (targetCtx) {
-          sortSel.value = 'fit';
-          sortSel.dataset.reverse = '1';
+          sortSel.value = 'vram';
+          sortSel.dataset.reverse = '1';   // ascending = smallest VRAM first
         } else {
           sortSel.value = 'score';
           sortSel.dataset.reverse = '';

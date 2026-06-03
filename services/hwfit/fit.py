@@ -564,7 +564,7 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
             })
         if use_case == "image_gen":
             sort_fn = SORT_KEYS.get(sort, SORT_KEYS["score"])
-            results.sort(key=sort_fn, reverse=(sort != "vram"))
+            results.sort(key=sort_fn, reverse=True)  # see main path below
             return results[:limit]
 
     # If user picked a native prequantized format, filter to only those models.
@@ -661,7 +661,10 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
         # explicitly asked for a Fit-only view.
         results = [r for r in results if r.get("fit_level") != "too_tight"]
     sort_fn = SORT_KEYS.get(sort, SORT_KEYS["score"])
-    # vram ascending (smallest first), everything else descending (biggest first)
-    results.sort(key=sort_fn, reverse=(sort != "vram"))
+    # Always sort descending then truncate top-N so each column shows the
+    # global highest by that metric. Before, vram was special-cased
+    # ascending → truncate kept the 50 SMALLEST models and "highest VRAM"
+    # could never appear, breaking the column-click toggle.
+    results.sort(key=sort_fn, reverse=True)
     results = results[:limit]
     return results

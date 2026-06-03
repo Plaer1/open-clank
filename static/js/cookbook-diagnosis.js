@@ -23,6 +23,44 @@ import {
   // browser loads it once. See cookbook-hwfit.js.
 } from './cookbook.js';
 import uiModule from './ui.js';
+
+// Tiny HTML-escape — keeps the file standalone instead of leaning on a
+// shared helper that may not be exported from this module's import surface.
+function _diagEsc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Pick an icon for a diagnosis-action button based on the label. The icon
+// renders on the LEFT of the button text. Keeps the strokes consistent
+// across the set so they read as one family.
+function _diagFixIcon(label) {
+  const l = String(label || '').toLowerCase();
+  const _svg = (path) => `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="cookbook-diag-btn-ico" aria-hidden="true">${path}</svg>`;
+  if (l.startsWith('retry') || l.includes('relaunch') || l.includes('restart')) {
+    // Circular-arrow refresh
+    return _svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>');
+  }
+  if (l.startsWith('copy')) {
+    return _svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>');
+  }
+  if (l.startsWith('edit')) {
+    return _svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>');
+  }
+  if (l.startsWith('open') || l.includes('dependencies')) {
+    return _svg('<path d="M14 3h7v7"/><path d="M21 3l-9 9"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>');
+  }
+  if (l.startsWith('install') || l.includes('upgrade')) {
+    return _svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
+  }
+  if (l.startsWith('kill') || l.startsWith('stop')) {
+    return _svg('<rect x="6" y="6" width="12" height="12" rx="1"/>');
+  }
+  if (l.startsWith('switch') || l.includes('use ')) {
+    return _svg('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>');
+  }
+  // Default: lightbulb (generic "suggestion")
+  return _svg('<path d="M9 21h6"/><path d="M12 17v4"/><path d="M12 3a6 6 0 0 0-4 10.5c1 1 1.5 2 1.5 3.5h5c0-1.5.5-2.5 1.5-3.5A6 6 0 0 0 12 3Z"/>');
+}
 import spinnerModule from './spinner.js';
 
 // ── Error diagnosis ──
@@ -577,7 +615,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
         const btn = document.createElement('button');
         btn.className = 'cookbook-btn cookbook-diag-btn';
         btn.type = 'button';
-        btn.textContent = fix.label;
+        btn.innerHTML = _diagFixIcon(fix.label) + '<span class="cookbook-diag-btn-label">' + _diagEsc(fix.label) + '</span>';
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           runFix(fix, btn);
@@ -603,7 +641,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
     for (const fix of fixes) {
       const item = document.createElement('button');
       item.type = 'button';
-      item.textContent = fix.label;
+      item.innerHTML = _diagFixIcon(fix.label) + '<span class="cookbook-diag-btn-label">' + _diagEsc(fix.label) + '</span>';
       item.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (item.dataset.busy || trigger.dataset.busy) return;

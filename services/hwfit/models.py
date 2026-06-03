@@ -13,6 +13,13 @@ QUANT_BPP = {
     "AWQ-4bit": 0.50, "AWQ-8bit": 1.0,
     "GPTQ-Int4": 0.50, "GPTQ-Int8": 1.0,
     "mlx-4bit": 0.55, "mlx-8bit": 1.0, "mlx-6bit": 0.75,
+    # DeepSeek-V4-style mixed: MoE experts in FP4 (bulk), attention + non-
+    # expert dense in FP8, embeddings/LM head in BF16. By weight count the
+    # experts dominate so the effective BPP sits closer to FP4 than FP8.
+    # Empirical: DeepSeek-V4-Flash 284B / 156 GB ≈ 0.55 B/param.
+    "FP4-MoE-Mixed": 0.55,
+    # FP8-Mixed = the *-Base variants (MoE experts also FP8, not FP4).
+    "FP8-Mixed": 1.0,
 }
 
 QUANT_SPEED_MULT = {
@@ -24,6 +31,8 @@ QUANT_SPEED_MULT = {
     "AWQ-4bit": 1.2, "AWQ-8bit": 0.85,
     "GPTQ-Int4": 1.2, "GPTQ-Int8": 0.85,
     "mlx-4bit": 1.15, "mlx-8bit": 0.85, "mlx-6bit": 1.0,
+    "FP4-MoE-Mixed": 1.10,  # slightly slower than pure FP4 because of mixed-dtype dispatch
+    "FP8-Mixed": 0.85,
 }
 
 QUANT_QUALITY_PENALTY = {
@@ -39,6 +48,11 @@ QUANT_QUALITY_PENALTY = {
     "AWQ": -1.0, "AWQ-4bit": -4.0, "AWQ-8bit": -1.0,
     "GPTQ": -1.0, "GPTQ-Int4": -4.0, "GPTQ-Int8": -1.0,
     "mlx-4bit": -4.0, "mlx-8bit": -0.5, "mlx-6bit": -1.5,
+    # DeepSeek-V4 mixed: only MoE experts at FP4 (the rest is FP8/BF16),
+    # so the realized quality is much closer to FP8 than to pure FP4 —
+    # the activation-sensitive layers stay high-precision. ~0 penalty.
+    "FP4-MoE-Mixed": -0.5,
+    "FP8-Mixed": 0.0,
 }
 
 QUANT_BYTES_PER_PARAM = {
@@ -50,6 +64,8 @@ QUANT_BYTES_PER_PARAM = {
     "AWQ-4bit": 0.5, "AWQ-8bit": 1.0,
     "GPTQ-Int4": 0.5, "GPTQ-Int8": 1.0,
     "mlx-4bit": 0.5, "mlx-8bit": 1.0, "mlx-6bit": 0.75,
+    "FP4-MoE-Mixed": 0.55,
+    "FP8-Mixed": 1.0,
 }
 
 # Pre-quantized formats that should NOT go through the GGUF quant hierarchy.
@@ -57,6 +73,7 @@ QUANT_BYTES_PER_PARAM = {
 PREQUANTIZED_PREFIXES = (
     "AWQ-", "GPTQ-", "mlx-", "FP8", "FP4", "NVFP4", "MXFP4", "NF4",
     "INT4", "INT8", "W4A16", "W8A8", "W8A16",
+    "FP4-MoE-Mixed", "FP8-Mixed",
 )
 
 

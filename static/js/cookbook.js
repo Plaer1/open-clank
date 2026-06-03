@@ -18,6 +18,7 @@ import {
   _launchServeTask, _serveAutoFix, _serveAutoRetry, _serveAutoRetryReplace, _serveAutoRetryRemove,
   _startBackgroundMonitor, _syncFromServer,
   _retryDownload, _nextAvailablePort, _processQueue,
+  _selfHealStaleTasks,
 } from './cookbookRunning.js';
 
 import {
@@ -641,6 +642,13 @@ async function _fetchDependencies() {
       const winBlocked = !isLocal && _isWindows() && _winUnsupported.has(pkg.name);
       const note = pkg.status_note ? `<div class="memory-item-meta" style="font-size:10px;opacity:0.65;margin-top:3px;">${esc(pkg.status_note)}</div>` : '';
       const updateNote = pkg.installed && pkg.pip_update_available === false && pkg.update_note ? `<div class="memory-item-meta" style="font-size:10px;opacity:0.55;margin-top:3px;">${esc(pkg.update_note)}</div>` : '';
+      // Inline "Rebuild" tag for the llama_cpp row only. Styled as a
+      // .cookbook-dep-tag so it matches the LLM category tag's pill look,
+      // and lives to the LEFT of the category tag (clear affordance before
+      // the row "value").
+      const _rebuildBtn = (pkg.name === 'llama_cpp')
+        ? `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild" id="cookbook-rebuild-engine" title="Clear the cached llama.cpp build so the next serve recompiles from source (use after installing a CUDA/ROCm toolkit to turn a CPU-only build into a GPU build).">Rebuild</button>`
+        : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
         + `<div class="cookbook-dep-info">`
         + `<div class="memory-item-title">${esc(pkg.name)}</div>`
@@ -648,6 +656,7 @@ async function _fetchDependencies() {
         + note
         + updateNote
         + `</div>`
+        + _rebuildBtn
         + `<span class="cookbook-dep-tag cookbook-dep-cat">${esc(pkg.category)}</span>`
         + _statusTag(pkg, isLocal, isSystemDep, winBlocked)
         + `</div>`;
@@ -1237,6 +1246,10 @@ function _wireTabEvents(body) {
       const folded = dlFoldBody.style.display === 'none';
       dlFoldBody.style.display = folded ? '' : 'none';
       dlFoldChevron.textContent = folded ? '▾' : '▸';
+      // Toggle is-folded class on the h2 so the line under it only shows when
+      // the section is collapsed (the body's content normally provides
+      // separation; with no body visible, the line gives the h2 definition).
+      dlFold.classList.toggle('is-folded', !folded);
       try { localStorage.setItem('cookbook_dl_tab_folded_v1', folded ? '0' : '1'); } catch {}
     });
   }
@@ -1456,7 +1469,7 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   html += `<span class="cookbook-server-title" style="display:flex;align-items:center;gap:6px;width:100%;font-size:13px;font-weight:600;margin-bottom:4px;">`;
   html += `${esc(_srvTitle)}`;
   html += _pIco ? `<span class="cookbook-srv-platform" title="${esc(s.platform || '')}" style="display:inline-flex;align-items:center;opacity:0.55;">${_pIco}</span>` : '';
-  html += `<span class="cookbook-srv-test-msg" style="font-size:10px;font-weight:400;opacity:0.55;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;top:2px;"></span>`;
+  html += `<span class="cookbook-srv-test-msg" style="font-size:10px;font-weight:400;opacity:0.55;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;top:1px;"></span>`;
   if (isNew) {
     // New server: Cancel (discard) sits top-right; the default toggle only makes
     // sense once the server is saved.
@@ -1535,7 +1548,7 @@ function _renderRecipes() {
   // State persisted to localStorage so the fold survives reloads.
   const _dlTabFolded = (() => { try { return localStorage.getItem('cookbook_dl_tab_folded_v1') === '1'; } catch { return false; } })();
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
-  html += `<h2 id="cookbook-dl-tab-fold" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
+  html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
   html += '</div>';
   html += `<div id="cookbook-dl-tab-fold-body" style="${_dlTabFolded ? 'display:none;' : ''}">`;
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
@@ -1605,36 +1618,43 @@ function _renderRecipes() {
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Scans your hardware for what models you can run. Hardware is cached; hit the scan button to re-probe after changing GPUs.</p>';
   html += '<div class="hwfit-toolbar" style="margin-top:9px;">';
   html += '<select class="cookbook-field-input hwfit-usecase" id="hwfit-usecase" style="height:28px;">';
-  html += '<option value="">Type</option><option value="general">General</option><option value="coding">Coding</option>';
+  html += '<option value="general" selected>Standard</option><option value="coding">Coding</option>';
   html += '<option value="reasoning">Reasoning</option><option value="chat">Chat</option>';
   // Image tab removed — text→image gen is gone from this build (only inpaint
    // remains, which uses its own settings panel). Vision (multimodal) stays.
   html += '<option value="multimodal">Vision</option></select>';
-  html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
-  // Quant (Q4/Q8/…) lives next to the search now. Default is "All" so the
-  // list shows the best-scoring quant for every model instead of silently
-  // filtering to Q4 (which used to be the implicit default).
-  html += '<select class="cookbook-field-input hwfit-quant" id="hwfit-quant" style="height:28px;">';
-  html += '<option value="" selected>All</option>';
-  html += '<option value="Q4_K_M">Q4</option><option value="Q8_0">Q8</option>';
-  html += '<option value="Q6_K">Q6</option><option value="Q5_K_M">Q5</option>';
-  html += '<option value="Q3_K_M">Q3</option><option value="Q2_K">Q2</option>';
-  html += '<option value="AWQ-4bit">AWQ</option><option value="FP8">FP8</option><option value="FP4">FP4</option><option value="NVFP4">NVFP4</option></select>';
-  // Engine filter — show only models whose serve engine matches. Composes
-  // with quant / type / search filters.
+  // Engine sits next to the type filter so the "what category / which serving
+  // path" filters live together; Quant + Context are storage-format and budget
+  // levers, grouped to the right.
+  html += '<span class="hwfit-engine-wrap">';
   html += '<select class="cookbook-field-input hwfit-engine" id="hwfit-engine" style="height:28px;" title="Filter by serving engine">';
   html += '<option value="">Engine</option>';
   html += '<option value="llamacpp">llama.cpp</option>';
   html += '<option value="vllm">vLLM</option>';
   html += '<option value="sglang">SGLang</option>';
   html += '</select>';
-  html += '<span class="hwfit-help-chip" title="Higher numbers usually mean better quality, but they need more memory. Lower numbers fit on more hardware.">?</span>';
+  html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-engine-help" title="Rule of thumb: GGUF on single GPU / CPU+RAM → llama.cpp (or Ollama). Safetensors on multi-GPU NVIDIA → vLLM. SGLang is a vLLM-class alternative, sometimes faster on big-MoE / long-context.">?</span>';
+  html += '</span>';
+  // Quant (Q4/Q8/…). Default is "All" so the list shows the best-scoring
+  // quant for every model instead of silently filtering to Q4.
+  html += '<span class="hwfit-quant-wrap">';
+  html += '<select class="cookbook-field-input hwfit-quant" id="hwfit-quant" style="height:28px;">';
+  html += '<option value="" selected>Quant: All</option>';
+  html += '<option value="Q4_K_M">Q4</option><option value="Q8_0">Q8</option>';
+  html += '<option value="Q6_K">Q6</option><option value="Q5_K_M">Q5</option>';
+  html += '<option value="Q3_K_M">Q3</option><option value="Q2_K">Q2</option>';
+  html += '<option value="AWQ-4bit">AWQ</option><option value="FP8">FP8</option><option value="FP4">FP4</option><option value="NVFP4">NVFP4</option></select>';
+  html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-quant-help" title="Lower quant tiers (Q2/Q3/Q4 / AWQ-4bit) are smaller, faster, and cheaper to run, at some quality loss. Higher tiers (Q8 / FP8 / FP16 / BF16) preserve more quality but need more VRAM. “All” shows the best-scoring quant per model — pick a specific one to filter.">?</span>';
+  html += '</span>';
   // Ctx slider — lets you target a context length for fit estimates; the
   // hwfit ranking uses _ctxValue() to factor that into VRAM math, so
   // dragging this re-sorts the list toward models that fit your chosen ctx.
   html += '<label class="hwfit-ctx-control" title="Context length for fit estimates. Lower it to find more models that could fit your hardware.">';
-  html += '<span>Ctx</span><span class="hwfit-help-chip hwfit-help-chip-inline" title="Context length. Lower it to find more models that could fit your hardware; raise it when you need longer chats or documents.">?</span><input type="range" id="hwfit-context" min="0" max="5" step="1" value="3" />';
+  html += '<span>Context</span><span class="hwfit-help-chip hwfit-help-chip-inline" title="Context length. Lower it to find more models that could fit your hardware; raise it when you need longer chats or documents.">?</span><input type="range" id="hwfit-context" min="0" max="5" step="1" value="3" />';
   html += '<output id="hwfit-context-label">50k</output></label>';
+  // Search lives at the far right of the toolbar so the controls (Type/Quant/
+  // Engine/Context) read as a row of compact filters followed by free-text.
+  html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
   html += '</div>';
   html += '<div class="hwfit-toolbar" style="margin-top:7px;">';
   html += '<select class="cookbook-field-input hwfit-server-select" id="hwfit-server-select" style="height:28px;min-width:88px;position:relative;top:0px;">';
@@ -1643,7 +1663,7 @@ function _renderRecipes() {
   html += '<div class="hwfit-gpu-toggles" id="hwfit-gpu-toggles"></div>';
   // Scan/refresh button (icon-only) where the quant dropdown used to sit.
   html += '<button type="button" class="hwfit-gpu-btn" id="hwfit-rescan" title="Re-scan hardware" style="flex-shrink:0;position:relative;top:-3px;left:-1px;">↻ RESCAN</button>';
-  html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-manual-btn" id="hwfit-hw-manual-btn" title="Set hardware manually" style="flex-shrink:0;position:relative;top:-3px;left:-1px;">EDIT</button>';
+  html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-manual-btn" id="hwfit-hw-manual-btn" title="Set hardware manually" style="flex-shrink:0;position:relative;top:-3px;left:-1px;display:inline-flex;align-items:center;gap:3px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>EDIT</button>';
   // Sort state — the clickable column headers read/write this (pewds' original
   // sort paradigm). Newest is reachable by clicking the Model column header.
   html += '<select class="cookbook-field-input hwfit-sort" id="hwfit-sort" style="display:none">';
@@ -1663,6 +1683,16 @@ function _renderRecipes() {
   html += '</div>';
   html += '<div id="hwfit-hw-row" style="display:none;align-items:center;gap:4px;margin-top:3px;padding-top:2px;"><span style="font-size:10px;padding:2px 8px;border-radius:10px;background:color-mix(in srgb, var(--fg) 8%, transparent);color:var(--fg);opacity:0.7;white-space:nowrap;flex-shrink:0;position:relative;top:-1px;">Detected hardware</span><div class="hwfit-hw" id="hwfit-hw" style="flex:1;"></div></div>';
   html += '<div class="hwfit-list" id="hwfit-list"></div>';
+  // Footer: link to the public discussion where users can request additions
+  // to the curated model list. Sits below the list so it reads as a callout
+  // after browsing, not a header.
+  html += '<div class="hwfit-list-footer" style="margin-top:8px;padding-top:6px;border-top:1px solid color-mix(in srgb, var(--border) 50%, transparent);font-size:9.5px;opacity:0.65;text-align:right;">'
+       + 'Don\'t see a model? '
+       + '<a href="https://github.com/pewdiepie-archdaemon/odysseus/discussions/1962" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;display:inline-flex;align-items:center;gap:4px;vertical-align:middle;">'
+       + 'Request it →'
+       + '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0;"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>'
+       + '</a>'
+       + '</div>';
 
   html += '</div></div>';
 
@@ -1707,7 +1737,8 @@ function _renderRecipes() {
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
   html += '<h2 style="margin:0;padding:0;line-height:1;">Dependencies</h2>';
-  html += '<button class="cookbook-field-input" id="cookbook-rebuild-engine" title="Clear the cached llama.cpp build so the next serve recompiles from source (use after installing a CUDA/ROCm toolkit to turn a CPU-only build into a GPU build)." style="height:24px;font-size:10px;padding:0 8px;cursor:pointer;width:auto;">Rebuild llama.cpp</button>';
+  // Rebuild llama.cpp button moved into the llama_cpp dep row (see _depRow);
+  // having it in the title polluted the section header.
   html += '<span style="font-size:10px;opacity:0.5;margin-left:auto;">Server</span>';
   html += '<select class="cookbook-field-input" id="hwfit-deps-server" style="height:28px;min-width:70px;">';
   html += _buildServerOpts(false);
@@ -1746,7 +1777,7 @@ function _renderRecipes() {
 
   // ── Servers block ───────────────────────────────────────────────────
   html += '<div class="admin-card" style="flex:0 0 auto;display:flex;flex-direction:column;">';
-  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;margin-top:-8px;">';
+  html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;margin-top:-4px;">';
   html += '<h2 style="margin:0;padding:0;line-height:1;">Servers</h2>';
   // Reuse the calendar +New pill: spinning plus, label fades in idea uses
    // the same `.cal-add-btn-text` rules, so styling stays consistent.
@@ -1893,6 +1924,11 @@ export async function open(opts) {
   _rendered = true;
   _clearCookbookNotif();
   _renderRunningTab();
+  // Self-heal: revive any download tasks whose tmux session is still alive
+  // but were persisted as done/error (covers the "restarted server while a
+  // big multi-shard download was in flight" case — the task survived in
+  // tmux, the cookbook just lost track of it).
+  try { _selfHealStaleTasks({ oneShot: true }); } catch {}
   if (_content) {
     // Put the panel in its entering state before it becomes visible. On
     // mobile, showing first and adding the class a frame later can paint the
