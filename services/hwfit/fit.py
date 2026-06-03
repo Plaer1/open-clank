@@ -61,7 +61,7 @@ CONTEXT_TARGET = {
 
 
 def _lookup_bandwidth(gpu_name):
-    if not gpu_name:
+    if not isinstance(gpu_name, str) or not gpu_name:
         return None
     gn = gpu_name.lower()
     for key in _BW_KEYS_SORTED:
@@ -280,10 +280,14 @@ def _native_quant(model):
         return "FP8"
     if "gptq" in text:
         m = re.search(r"(?:gptq|int|w)(?:[-_]?)(\d{1,2})(?:bit)?", text)
-        return f"GPTQ-{m.group(1)}bit" if m else "GPTQ"
+        # Canonical catalog label is "GPTQ-Int4"/"GPTQ-Int8" (see models.py
+        # QUANT_BPP / QUANT_QUALITY_PENALTY keys); "GPTQ-4bit" misses both
+        # maps, so BPP and the quality penalty silently fall to defaults.
+        return f"GPTQ-Int{m.group(1)}" if m else "GPTQ-Int4"
     if "awq" in text:
         m = re.search(r"(?:awq|int|w)(?:[-_]?)(\d{1,2})(?:bit)?", text)
-        return f"AWQ-{m.group(1)}bit" if m else "AWQ"
+        # Catalog keys are "AWQ-4bit"/"AWQ-8bit"; bare "AWQ" misses the maps.
+        return f"AWQ-{m.group(1)}bit" if m else "AWQ-4bit"
     if "mlx" in text:
         m = re.search(r"mlx[-_]?(\d{1,2})bit", text)
         return f"mlx-{m.group(1)}bit" if m else native_quant
@@ -571,6 +575,8 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
 
     system_backend = (system.get("backend") or "").lower()
     apple_silicon = system_backend in ("mps", "metal", "apple")
+    rocm = system_backend == "rocm"
+
     # Consumer AMD Radeon (RDNA, gfx10/11/12): the practical local serving path
     # is GGUF via llama.cpp. vLLM/SGLang on ROCm are validated for datacenter
     # Instinct (CDNA, gfx9xx) but are unreliable on consumer RDNA — AWQ kernels
@@ -587,6 +593,14 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
         # MLX needs the mlx_lm runtime, which Odysseus does not generate serve
         # commands for. Hide it on every backend, including Metal.
         if native_q.startswith("mlx-") or "mlx" in (m.get("name") or "").lower():
+            continue
+
+        # ROCm support for vLLM/SGLang quantized safetensors is too brittle to
+        # recommend blindly in the default scan. Keep AWQ/GPTQ/FP8 discoverable
+        # only when the user explicitly picks that format from the quant filter;
+        # otherwise prefer GGUF/Q* entries that Odysseus can route through
+        # llama.cpp/Ollama without pretending "fits VRAM" means "servable".
+        if rocm and is_prequantized(m) and not filter_native:
             continue
 
         # On Apple Silicon the only serving engines are llama.cpp and Ollama,
