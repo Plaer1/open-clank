@@ -102,6 +102,16 @@ def test_pairing_payload_shape():
     assert p == {"v": 1, "host": "192.168.1.9", "port": 7000, "token": "ody_x"}
 
 
+@pytest.mark.parametrize("payload", ["[]", '{"users": []}'])
+def test_find_admin_user_ignores_invalid_auth_shape(tmp_path, monkeypatch, payload):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "auth.json").write_text(payload)
+    monkeypatch.chdir(tmp_path)
+
+    assert P.find_admin_user() is None
+
+
 # --- admin-only gate: a bearer/non-admin caller is rejected ----------------
 
 def _admin_mgr(is_admin):
