@@ -537,7 +537,8 @@ app.include_router(setup_admin_wipe_routes(session_manager))
 
 # Memory
 from routes.memory_routes import setup_memory_routes
-app.include_router(setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector))
+memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
+app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
@@ -600,7 +601,8 @@ logger.info("STT service initialized (provider managed via settings)")
 
 # Documents (artifacts/canvas)
 from routes.document_routes import setup_document_routes
-app.include_router(setup_document_routes(session_manager, upload_handler))
+document_router = setup_document_routes(session_manager, upload_handler)
+app.include_router(document_router)
 
 # Signatures (reusable image stamps)
 from routes.signature_routes import setup_signature_routes
@@ -627,7 +629,8 @@ app.include_router(setup_assistant_routes(task_scheduler))
 
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
-app.include_router(setup_calendar_routes())
+calendar_router = setup_calendar_routes()
+app.include_router(calendar_router)
 
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
@@ -698,8 +701,14 @@ app.include_router(email_router)
 # Codex sessions can only touch the data the user explicitly allowed. Mounted
 # AFTER email so the codex_routes can borrow the email router for shared
 # search/threading helpers.
-from routes.codex_routes import setup_codex_routes
-app.include_router(setup_codex_routes(email_router=email_router))
+from routes.codex_routes import setup_codex_routes, setup_claude_routes
+app.include_router(setup_codex_routes(
+    email_router=email_router,
+    memory_router=memory_router,
+    calendar_router=calendar_router,
+    document_router=document_router,
+))
+app.include_router(setup_claude_routes())
 
 from routes.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())

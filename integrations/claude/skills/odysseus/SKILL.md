@@ -1,20 +1,20 @@
 ---
 name: odysseus
-description: Use when the user asks Codex to read or write Odysseus data from a terminal Codex session through the scoped Codex Agent API. Requires ODYSSEUS_URL and ODYSSEUS_API_TOKEN.
+description: Use when the user asks Claude Code to read or write Odysseus data (todos, email, calendar, memory, documents) through the scoped Claude Agent API. Requires ODYSSEUS_URL and ODYSSEUS_API_TOKEN.
 ---
 
 # Odysseus
 
-Use this skill when a user asks to interact with Odysseus from Codex.
+Use this skill when a user asks to interact with Odysseus from Claude Code.
 
 ## Configuration
 
 Expect these environment variables:
 
 - `ODYSSEUS_URL`: Base URL for the user's Odysseus instance, for example `http://127.0.0.1:7000`.
-- `ODYSSEUS_API_TOKEN`: Scoped API token created in Odysseus Settings > Integrations > Add Integration > Codex Agent.
+- `ODYSSEUS_API_TOKEN`: Scoped API token created in Odysseus Settings > Integrations > Add Integration > Claude Agent.
 
-If either value is missing, do not guess credentials. Tell the user to create a Codex Agent token in Odysseus Settings and expose both values to the terminal session.
+If either value is missing, do not guess credentials. Tell the user to create a Claude Agent token in Odysseus Settings and expose both values to the terminal session.
 
 ## When to use what
 
@@ -27,7 +27,7 @@ If the user says "reminder" + a time, default to TODO with due_date. Only switch
 
 ## Safety
 
-- All Odysseus data access MUST go through the scoped HTTP API under `/api/codex/*`.
+- All Odysseus data access MUST go through the scoped HTTP API under `/api/codex/*` (the canonical scope-gated agent API, shared by all agent integrations).
 - Check `/api/codex/capabilities` before using a tool surface.
 - Treat `403` as an intentional Settings restriction. Do not work around it.
 - Do not use SSH, Docker, direct Python imports, SQLite queries, MCP internals, browser cookies, or local files to read/write Odysseus user data.
@@ -37,7 +37,7 @@ If the user says "reminder" + a time, default to TODO with due_date. Only switch
 
 ## Todos
 
-The Codex API supports todos/checklists:
+The scoped agent API supports todos/checklists:
 
 - `GET /api/codex/todos`
 - `POST /api/codex/todos`
@@ -45,9 +45,9 @@ The Codex API supports todos/checklists:
 Use the bundled helper script when available:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py capabilities
-python3 integrations/codex/scripts/odysseus_api.py todos list
-python3 integrations/codex/scripts/odysseus_api.py todos add "Follow up"
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py capabilities
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py todos list
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py todos add "Follow up"
 ```
 
 Supported todo actions are `list`, `add`, `update`, `delete`, and `toggle_item`.
@@ -55,14 +55,14 @@ Supported todo actions are `list`, `add`, `update`, `delete`, and `toggle_item`.
 **Reminders (todos with a due date)** — the backend parses natural language. Send `due_date` in the body via the generic POST so the time becomes a structured reminder, NOT a literal substring inside the title. The `todos add TITLE` shortcut only sets the title, so use the POST form for anything with a time:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/todos '{"action":"add","title":"Call dentist","due_date":"tomorrow at 5pm"}'
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py POST /api/codex/todos '{"action":"add","title":"Call dentist","due_date":"tomorrow at 5pm"}'
 ```
 
 The backend accepts both ISO timestamps and natural language like `"tomorrow 5pm"`, `"next Monday 9am"`, `"in 2 hours"`. It anchors to the user's timezone.
 
 ## Email
 
-The Codex API supports scoped email reads:
+The scoped agent API supports email reads:
 
 - `GET /api/codex/emails?folder=INBOX&limit=10&offset=0&filter=all`
 - `GET /api/codex/emails/{uid}?folder=INBOX`
@@ -70,11 +70,11 @@ The Codex API supports scoped email reads:
 Use the bundled helper script when available:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py emails list 5
-python3 integrations/codex/scripts/odysseus_api.py emails read UID
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py emails list 5
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py emails read UID
 ```
 
-If `/api/codex/capabilities` does not show `email.read: true`, do not inspect email. Ask the user to enable Email read in the Codex Agent settings.
+If `/api/codex/capabilities` does not show `email.read: true`, do not inspect email. Ask the user to enable Email read in the Claude Agent settings.
 
 ## Memory
 
@@ -83,8 +83,8 @@ If `/api/codex/capabilities` does not show `email.read: true`, do not inspect em
 - `DELETE /api/codex/memory/{memory_id}` — remove a memory entry. Requires `memory:write`.
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py GET /api/codex/memory
-python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/memory '{"text":"User prefers SI units","category":"preference"}'
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py GET /api/codex/memory
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py POST /api/codex/memory '{"text":"User prefers SI units","category":"preference"}'
 ```
 
 ## Calendar
@@ -107,4 +107,4 @@ python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/memory '{"tex
 
 ## Forbidden Bypass Pattern
 
-If you are about to reach the Odysseus host/container, import app internals, query the database, or call MCP helper modules directly, stop. Those paths bypass Odysseus Settings and token scopes. Ask the user to enable the relevant Codex Agent tool toggle instead.
+If you are about to reach the Odysseus host/container, import app internals, query the database, or call MCP helper modules directly, stop. Those paths bypass Odysseus Settings and token scopes. Ask the user to enable the relevant Claude Agent tool toggle instead.
