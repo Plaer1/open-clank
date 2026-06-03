@@ -37,27 +37,36 @@ def _get_db_session():
 
 # core/__init__ pulls in models/session_manager which import many ORM names from
 # core.database; under conftest's sqlalchemy stubs the real module can't load.
-# A __getattr__ module resolves ANY requested name to a MagicMock, while keeping
-# our real get_db_session/ApiToken for the mint test.
+# A __getattr__ module resolves any non-dunder name to a MagicMock, while keeping
+# our real get_db_session/ApiToken for the mint test. Dunder names (e.g. __all__)
+# are NOT auto-resolved — the next test file does `from core.database import *`,
+# which would otherwise see a MagicMock where a list-of-str is required.
 class _DBStub(types.ModuleType):
     def __getattr__(self, name):  # noqa: D401
+        if name.startswith("__"):
+            raise AttributeError(name)
         return MagicMock()
 
 
 _db = _DBStub("core.database")
 _db.get_db_session = _get_db_session
 _db.ApiToken = _ApiToken
-sys.modules["core.database"] = _db  # overwrite any minimal stub from a sibling test
 
-for _name, _attrs in {
-    "core.auth": {"AuthManager": MagicMock()},
-    "src.endpoint_resolver": {"build_chat_url": (lambda u: u)},
-}.items():
-    if _name not in sys.modules:
-        _mm = types.ModuleType(_name)
-        for _k, _v in _attrs.items():
-            setattr(_mm, _k, _v)
-        sys.modules[_name] = _mm
+
+@pytest.fixture(autouse=True)
+def _companion_pairing_stubs(monkeypatch):
+    monkeypatch.setitem(sys.modules, "core.database", _db)
+    for _name, _attrs in {
+        "core.auth": {"AuthManager": MagicMock()},
+        "src.endpoint_resolver": {"build_chat_url": (lambda u: u)},
+    }.items():
+        if _name not in sys.modules:
+            _mm = types.ModuleType(_name)
+            for _k, _v in _attrs.items():
+                setattr(_mm, _k, _v)
+            sys.modules[_name] = _mm
+        monkeypatch.setitem(sys.modules, _name, sys.modules[_name])
+
 
 from fastapi import HTTPException  # noqa: E402
 
