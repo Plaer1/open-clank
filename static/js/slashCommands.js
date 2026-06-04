@@ -5880,7 +5880,9 @@ async function handleSlashCommand(input) {
   let args = parts.slice(1);
   const ctx = _makeCtx();
   let _userShown = false;
-  function _showUser() { if (!_userShown) { _userShown = true; _addMessage('user', input); _persistMsg('user', input); } }
+  // Tag the echoed command with source:'slash' so it renders in the transcript
+  // but is excluded from LLM context (get_context_messages), like the replies.
+  function _showUser() { if (!_userShown) { _userShown = true; _addMessage('user', input); _persistMsg('user', input, { source: 'slash' }); } }
 
   try {
     // --- Check for --help / -h on any command ---
