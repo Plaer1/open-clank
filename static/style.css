@@ -35736,3 +35736,96 @@ body.theme-frosted .modal {
      is already ≥16px and never zoomed — leave it so we don't shrink it. */
   .doc-email-richbody.doc-font-m { font-size: 16px !important; }
 }
+
+/* ── Cookbook Schedule modal (feature-flagged) ─────────────────────── */
+.cookbook-schedule-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 10000;
+}
+.cookbook-schedule-modal {
+  background: var(--bg-secondary, #1e1e22);
+  color: var(--text-primary, #e6e6e6);
+  border: 1px solid var(--border, #2d2d33);
+  border-radius: 12px; width: min(560px, 92vw); max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5);
+}
+.cookbook-schedule-modal-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--border, #2d2d33);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.cookbook-schedule-close {
+  background: transparent; border: none; color: inherit;
+  font-size: 22px; line-height: 1; cursor: pointer; padding: 0 6px;
+}
+.cookbook-schedule-modal-body { padding: 16px 18px; overflow-y: auto; }
+.cookbook-schedule-section { margin-bottom: 16px; }
+.cookbook-schedule-section-label {
+  display: block; font-size: 12px; opacity: .7;
+  margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em;
+}
+.cookbook-schedule-slot {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+}
+.cookbook-schedule-slot input[type="time"] {
+  background: var(--bg-primary, #131316); color: inherit;
+  border: 1px solid var(--border, #2d2d33); border-radius: 6px;
+  padding: 6px 8px; font: inherit;
+}
+.cookbook-schedule-slot-remove {
+  background: transparent; border: 1px solid var(--border, #2d2d33);
+  color: inherit; border-radius: 6px; width: 28px; height: 28px;
+  cursor: pointer; font-size: 18px; line-height: 1;
+}
+.cookbook-schedule-add-slot {
+  background: transparent; color: var(--accent, #6aa8ff);
+  border: 1px dashed var(--border, #2d2d33); border-radius: 6px;
+  padding: 6px 10px; cursor: pointer; font: inherit; margin-top: 4px;
+}
+.cookbook-schedule-days {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;
+}
+.cookbook-schedule-day {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 10px; border: 1px solid var(--border, #2d2d33);
+  border-radius: 999px; cursor: pointer; font-size: 13px;
+  user-select: none;
+}
+.cookbook-schedule-day input { display: none; }
+.cookbook-schedule-day.active {
+  background: var(--accent, #6aa8ff); color: #fff;
+  border-color: var(--accent, #6aa8ff);
+}
+.cookbook-schedule-day-quickset {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.cookbook-schedule-day-quickset button {
+  background: transparent; color: var(--text-secondary, #aaa);
+  border: 1px solid var(--border, #2d2d33); border-radius: 6px;
+  padding: 4px 8px; cursor: pointer; font-size: 12px;
+}
+.cookbook-schedule-until { display: flex; gap: 16px; flex-wrap: wrap; }
+.cookbook-schedule-until label {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.cookbook-schedule-until-date {
+  background: var(--bg-primary, #131316); color: inherit;
+  border: 1px solid var(--border, #2d2d33); border-radius: 6px;
+  padding: 4px 8px;
+}
+.cookbook-schedule-error {
+  color: #ff6b6b; background: rgba(255,107,107,.08);
+  border: 1px solid rgba(255,107,107,.3); border-radius: 6px;
+  padding: 8px 12px; font-size: 13px;
+}
+.cookbook-schedule-modal-footer {
+  padding: 12px 18px; border-top: 1px solid var(--border, #2d2d33);
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+/* Mobile (Firefox + others): single-column slot rows + larger touch targets. */
+@media (max-width: 600px) {
+  .cookbook-schedule-modal { width: 96vw; }
+  .cookbook-schedule-day { padding: 8px 14px; font-size: 14px; }
+}

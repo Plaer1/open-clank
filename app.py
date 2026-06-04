@@ -640,6 +640,14 @@ app.include_router(setup_shell_routes())
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
 
+# Cookbook scheduler — calendar-driven serve windows.
+# Feature-flagged on the `cookbook_scheduler_enabled` setting (default
+# off); disabling the setting silences the reconciler and the API
+# refuses requests. Delete this block + src/cookbook_scheduler.py +
+# routes/cookbook_schedule_routes.py to remove the feature entirely.
+from routes.cookbook_schedule_routes import setup_cookbook_schedule_routes
+app.include_router(setup_cookbook_schedule_routes())
+
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
@@ -1061,6 +1069,14 @@ async def _startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
+
+    # Cookbook scheduler reconcile loop. Internally checks the
+    # cookbook_scheduler_enabled setting on every tick, so leaving this
+    # task running with the feature disabled costs ~one settings lookup
+    # per minute. Remove this line to dispose of the feature.
+    from src.cookbook_scheduler import reconcile_loop as _cookbook_reconcile_loop
+    _startup_tasks.append(asyncio.create_task(_cookbook_reconcile_loop()))
+
     logger.info("Application startup complete")
 
 async def _shutdown_event():
