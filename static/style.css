@@ -35829,3 +35829,29 @@ body.theme-frosted .modal {
   .cookbook-schedule-modal { width: 96vw; }
   .cookbook-schedule-day { padding: 8px 14px; font-size: 14px; }
 }
+
+/* Launch+Schedule paired button group. The ° button is a tiny icon
+   button glued to the right side of Launch with a thin divider. */
+.hwfit-serve-launch-group {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+}
+.hwfit-serve-launch-group .hwfit-serve-launch {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  margin-right: 0 !important;
+}
+.hwfit-serve-launch-group .hwfit-serve-schedule {
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  border-left: 1px solid rgba(255,255,255,.18) !important;
+  padding: 0 8px !important;
+  min-width: 26px;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+}
+.hwfit-serve-launch-group .hwfit-serve-schedule svg {
+  flex-shrink: 0;
+}

@@ -201,16 +201,18 @@
   }
 
   // Click-binding: any .hwfit-serve-schedule button inside a serve
-  // panel opens the modal with the panel's current config.
-  document.addEventListener("click", (e) => {
+  // panel routes to the STANDARD calendar event-creation form, with the
+  // model's name pre-filled as the event title and a `cookbook:` YAML
+  // block in the description. The event lands on the auto-created
+  // "Cookbook" calendar so the reconciler picks it up. The custom
+  // openModal() above is kept as a fallback in case the calendar
+  // module hasn't loaded.
+  document.addEventListener("click", async (e) => {
     const btn = e.target.closest && e.target.closest(".hwfit-serve-schedule");
     if (!btn) return;
     e.preventDefault();
     e.stopPropagation();
 
-    // Reach into the serve panel to read current config. cookbookServe.js
-    // stores the active config on the panel root via data attributes
-    // that we read here without coupling further.
     const panel = btn.closest("[data-cookbook-serve-panel]") || btn.closest(".doclib-card-expanded") || btn.closest(".doclib-card");
     const ds = panel ? panel.dataset || {} : {};
     const config = {
@@ -221,7 +223,47 @@
       host: ds.host || "",
       port: ds.port ? Number(ds.port) : undefined,
     };
-    openModal(config);
+
+    // Ensure the Cookbook calendar exists and is configured. Returns
+    // the href to feed into the event form.
+    btn.disabled = true;
+    let calHref = "";
+    try {
+      const r = await fetch("/api/cookbook/schedule/ensure-calendar", {
+        method: "POST", credentials: "same-origin",
+      });
+      if (r.ok) {
+        const data = await r.json();
+        calHref = data.href || "";
+      }
+    } catch (_) {}
+    btn.disabled = false;
+
+    // Build the cookbook: YAML block that goes into the event description.
+    // The reconciler parses this to know HOW to launch when the window
+    // opens. If only the title is set, the reconciler title-matches
+    // against saved presets.
+    const yamlLines = ["cookbook:"];
+    for (const k of ["preset", "repo_id", "cmd", "host", "port"]) {
+      if (config[k]) yamlLines.push(`  ${k}: ${config[k]}`);
+    }
+    if (yamlLines.length === 1 && config.title) {
+      yamlLines.push(`  preset: ${config.title}`);
+    }
+    const draft = {
+      summary: config.title,
+      description: yamlLines.join("\n"),
+      rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",  // default: weekdays
+      calendar_href: calHref,
+    };
+
+    if (typeof window.cookbookOpenScheduleForm === "function") {
+      window.cookbookOpenScheduleForm(draft);
+    } else {
+      // Fallback to the legacy in-house modal if the calendar module
+      // hasn't loaded for some reason.
+      openModal(config);
+    }
   });
 
   // Reveal Schedule buttons once we confirm the feature is enabled.

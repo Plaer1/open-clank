@@ -205,4 +205,62 @@ def setup_cookbook_schedule_routes() -> APIRouter:
         from src.cookbook_scheduler import _reconcile_once
         return await _reconcile_once()
 
+    @router.post("/ensure-calendar")
+    async def ensure_calendar(request: Request):
+        """Ensure a calendar named \"Cookbook\" exists for the current user
+        and is registered as the scheduler calendar in settings. Idempotent.
+
+        Used by the Schedule button so the user never has to pick: the
+        first click creates the calendar and wires it up; subsequent
+        clicks return the existing href.
+        """
+        require_admin(request)
+        from src.settings import get_setting, _save_settings, _load_settings
+        existing = get_setting("cookbook_schedule_calendar_href", "") or ""
+        # Verify the saved href still exists in /api/calendar/calendars
+        # (the user might have deleted the calendar manually) by hitting
+        # the list endpoint loopback.
+        import httpx
+        from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+        headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
+        live: list = []
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get("http://localhost:7000/api/calendar/calendars", headers=headers)
+                live = (r.json() or {}).get("calendars", []) if r.status_code < 400 else []
+        except Exception:
+            live = []
+        if existing and any(c.get("href") == existing for c in live):
+            match = next(c for c in live if c.get("href") == existing)
+            return {"ok": True, "href": existing, "name": match.get("name"), "created": False}
+        # No usable cookbook calendar — see if one named "Cookbook" already
+        # exists (perhaps from a previous setup), else create a fresh one.
+        match = next((c for c in live if (c.get("name") or "").lower() == "cookbook"), None)
+        if match:
+            href = match.get("href")
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r = await c.post(
+                        "http://localhost:7000/api/calendar/calendars",
+                        params={"name": "Cookbook", "color": "#3b82f6"},
+                        headers=headers,
+                    )
+                    data = r.json() if r.content else {}
+            except Exception as exc:
+                raise HTTPException(500, f"create calendar failed: {exc}")
+            if not data.get("ok"):
+                raise HTTPException(500, f"create calendar failed: {data}")
+            href = data.get("id") or ""
+        if not href:
+            raise HTTPException(500, "no href returned from calendar create")
+        # Persist into settings (bypasses DEFAULT_SETTINGS guard by using
+        # _load/_save directly since we know this key is whitelisted).
+        s = _load_settings()
+        s["cookbook_schedule_calendar_href"] = href
+        if not s.get("cookbook_scheduler_enabled"):
+            s["cookbook_scheduler_enabled"] = True
+        _save_settings(s)
+        return {"ok": True, "href": href, "name": "Cookbook", "created": True}
+
     return router
