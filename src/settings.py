@@ -159,12 +159,6 @@ DEFAULT_SETTINGS = {
         "admin_panel": "ctrl+shift+u",
         "cancel": "escape",
     },
-    # Cookbook scheduler (calendar-driven serve windows). Off by default;
-    # the inline card in the Cookbook tab flips this. When true, the
-    # reconciler at src/cookbook_scheduler.py reads events from the
-    # designated calendar and auto-launches/kills serves.
-    "cookbook_scheduler_enabled": False,
-    "cookbook_schedule_calendar_href": "",
 }
 
 DEFAULT_FEATURES = {

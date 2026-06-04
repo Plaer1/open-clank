@@ -744,14 +744,7 @@ function _rerenderCachedModels() {
       // pushes Cancel + Launch to the right.
       panelHtml += `<span class="hwfit-serve-actions-spacer"></span>`;
       panelHtml += `<button class="cookbook-btn hwfit-serve-cancel" type="button" title="Close this configuration panel">Cancel</button>`;
-      // Launch + Schedule pair. The little ° button sits flush against
-      // Launch and opens the calendar event-creation form pre-filled
-      // with this model's config. Hidden until cookbookSchedule.js
-      // confirms the scheduler feature flag is on.
-      panelHtml += `<span class="hwfit-serve-launch-group">`;
       panelHtml += `<button class="cookbook-btn hwfit-serve-launch"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;flex-shrink:0;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Launch</button>`;
-      panelHtml += `<button class="cookbook-btn hwfit-serve-schedule" type="button" title="Schedule this model on a recurring window" aria-label="Schedule" style="display:none;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg></button>`;
-      panelHtml += `</span>`;
       panelHtml += `</div>`;
       panelHtml += `</div>`;
 
