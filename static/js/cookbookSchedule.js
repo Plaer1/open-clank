@@ -241,4 +241,175 @@
   // Also re-check whenever a serve panel expands.
   const obs = new MutationObserver(() => refreshScheduleButtonVisibility());
   obs.observe(document.body, { childList: true, subtree: true });
+
+  // ── Settings card injected at the top of the Cookbook tab ─────────────
+  // Lives here (not in settings.js) so the whole feature is in one file.
+  // When you delete cookbookSchedule.js, this UI vanishes with it.
+
+  async function fetchSettings() {
+    try {
+      const r = await fetch("/api/auth/settings", { credentials: "same-origin" });
+      if (!r.ok) return {};
+      return await r.json();
+    } catch (_) { return {}; }
+  }
+
+  async function saveSettings(body) {
+    try {
+      const r = await fetch("/api/auth/settings", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return r.ok;
+    } catch (_) { return false; }
+  }
+
+  async function fetchCalendars() {
+    try {
+      const r = await fetch("/api/calendar/calendars", { credentials: "same-origin" });
+      if (!r.ok) return [];
+      const d = await r.json();
+      // Endpoint shape varies — accept either an array or { calendars: [...] }.
+      const list = Array.isArray(d) ? d : (d.calendars || []);
+      return list.map(c => ({
+        href: c.href || c.url || c.id || "",
+        name: c.display_name || c.name || c.summary || c.href || "Calendar",
+      })).filter(c => c.href);
+    } catch (_) { return []; }
+  }
+
+  async function fetchUpcoming() {
+    try {
+      const r = await fetch("/api/cookbook/schedule/upcoming?hours=24", { credentials: "same-origin" });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (_) { return null; }
+  }
+
+  function buildCardHtml(s, calendars, upcoming) {
+    const enabled = !!s.cookbook_scheduler_enabled;
+    const calHref = s.cookbook_schedule_calendar_href || "";
+    const events = (upcoming && upcoming.events) || [];
+    const running = events.filter(e => e.status === "running" || e.status === "adopted").length;
+    const skipped = events.filter(e => e.status === "skipped" || e.status === "failed").length;
+    let statusLine = "";
+    if (!enabled) {
+      statusLine = "Scheduler is off. Toggle on to start launching models on a schedule.";
+    } else if (!calHref) {
+      statusLine = "Pick a calendar — events on it become serve windows.";
+    } else if (events.length === 0) {
+      statusLine = "Enabled. No scheduled windows in the next 24h.";
+    } else {
+      const parts = [`${events.length} scheduled in next 24h`];
+      if (running) parts.push(`${running} running now`);
+      if (skipped) parts.push(`${skipped} skipped`);
+      statusLine = parts.join(" · ");
+    }
+    const calOptions = ['<option value="">— pick a calendar —</option>']
+      .concat(calendars.map(c => `<option value="${esc(c.href)}"${c.href === calHref ? " selected" : ""}>${esc(c.name)}</option>`))
+      .join("");
+    return `
+      <div class="cookbook-schedule-card" style="border:1px solid var(--border,#2d2d33);border-radius:10px;padding:12px 14px;margin:8px 0 14px;background:var(--bg-secondary,#1a1a1e);">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;font-size:13px;">
+            <input type="checkbox" class="cookbook-sched-enabled" ${enabled ? "checked" : ""} />
+            Cookbook scheduler <span style="opacity:.55;font-weight:400;font-size:11px;">(beta)</span>
+          </label>
+          <span class="cookbook-sched-status" style="opacity:.7;font-size:12px;flex:1;min-width:200px;">${esc(statusLine)}</span>
+          <button type="button" class="cookbook-sched-reconcile cookbook-btn" style="font-size:11px;padding:4px 8px;" title="Force the reconciler to run now">Reconcile now</button>
+        </div>
+        <div class="cookbook-sched-calrow" style="margin-top:10px;display:${enabled ? "flex" : "none"};align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="font-size:12px;opacity:.7;">Schedule calendar</label>
+          <select class="cookbook-sched-calendar" style="background:var(--bg-primary,#131316);color:inherit;border:1px solid var(--border,#2d2d33);border-radius:6px;padding:4px 8px;min-width:220px;">${calOptions}</select>
+          <span class="cookbook-sched-save-msg" style="font-size:11px;opacity:0;transition:opacity .2s;color:var(--green,#50fa7b);">Saved</span>
+        </div>
+      </div>`;
+  }
+
+  async function renderCard() {
+    const body = document.querySelector("#cookbook-modal .cookbook-body");
+    if (!body) return;
+    // Skip if cookbook modal is hidden — wait until next open.
+    const modal = document.getElementById("cookbook-modal");
+    if (modal && modal.classList.contains("hidden")) return;
+    let existing = body.querySelector(".cookbook-schedule-card");
+
+    const [s, cals, upcoming] = await Promise.all([fetchSettings(), fetchCalendars(), fetchUpcoming()]);
+    const html = buildCardHtml(s, cals, upcoming);
+
+    if (existing) {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = html;
+      existing.replaceWith(tmp.firstElementChild);
+    } else {
+      const tmp = document.createElement("div");
+      tmp.innerHTML = html;
+      body.insertBefore(tmp.firstElementChild, body.firstChild);
+    }
+    wireCard();
+  }
+
+  function wireCard() {
+    const card = document.querySelector(".cookbook-schedule-card");
+    if (!card || card.dataset.wired === "1") return;
+    card.dataset.wired = "1";
+
+    const enabledChk = card.querySelector(".cookbook-sched-enabled");
+    const calSel = card.querySelector(".cookbook-sched-calendar");
+    const reconcileBtn = card.querySelector(".cookbook-sched-reconcile");
+    const saveMsg = card.querySelector(".cookbook-sched-save-msg");
+    const calRow = card.querySelector(".cookbook-sched-calrow");
+
+    function flashSaved() {
+      if (!saveMsg) return;
+      saveMsg.style.opacity = "1";
+      setTimeout(() => { saveMsg.style.opacity = "0"; }, 1500);
+    }
+
+    enabledChk.addEventListener("change", async () => {
+      _enabledCache = null; // bust cache
+      await saveSettings({ cookbook_scheduler_enabled: enabledChk.checked });
+      calRow.style.display = enabledChk.checked ? "flex" : "none";
+      flashSaved();
+      // Toggle Schedule buttons immediately + refresh card status.
+      refreshScheduleButtonVisibility();
+      setTimeout(renderCard, 200);
+    });
+
+    calSel.addEventListener("change", async () => {
+      await saveSettings({ cookbook_schedule_calendar_href: calSel.value });
+      flashSaved();
+      setTimeout(renderCard, 300);
+    });
+
+    reconcileBtn.addEventListener("click", async () => {
+      reconcileBtn.disabled = true;
+      reconcileBtn.textContent = "Reconciling…";
+      try {
+        await fetch("/api/cookbook/schedule/reconcile-now", { method: "POST", credentials: "same-origin" });
+      } catch (_) {}
+      reconcileBtn.disabled = false;
+      reconcileBtn.textContent = "Reconcile now";
+      renderCard();
+    });
+  }
+
+  // Re-render the card whenever the cookbook modal becomes visible.
+  function watchCookbookOpen() {
+    const modal = document.getElementById("cookbook-modal");
+    if (!modal) return;
+    let lastHidden = modal.classList.contains("hidden");
+    const mo = new MutationObserver(() => {
+      const nowHidden = modal.classList.contains("hidden");
+      if (lastHidden && !nowHidden) renderCard();
+      lastHidden = nowHidden;
+    });
+    mo.observe(modal, { attributes: true, attributeFilter: ["class"] });
+    // Also render on first open if modal is already visible at load time.
+    if (!lastHidden) renderCard();
+  }
+  document.addEventListener("DOMContentLoaded", watchCookbookOpen);
+  // Settings tab may load AFTER DOMContentLoaded; recheck once.
+  setTimeout(watchCookbookOpen, 500);
 })();
