@@ -19281,6 +19281,11 @@ body.gallery-selecting .gallery-dl-btn,
   background: color-mix(in srgb, var(--fg) 7%, transparent);
   font-size: 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent);
+  /* Pin the row so flex parents + Firefox mobile can't squeeze its height to 0,
+     which hides the type pill + model name and leaves only the sub-line +
+     output visible. */
+  flex-shrink: 0;
+  min-height: 32px;
 }
 .cookbook-task-type {
   text-transform: uppercase;

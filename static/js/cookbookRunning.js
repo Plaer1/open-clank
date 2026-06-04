@@ -124,6 +124,14 @@ async function _openDownloadForGgufTask(task) {
 function _terminalServeDiagnosis(task, outputText) {
   const out = String(outputText || task?.output || '');
   if (!task || task.type !== 'serve' || !['stopped', 'error', 'crashed', 'failed'].includes(task.status) || !out.trim()) return null;
+  // Pip tasks (Reinstall vLLM, Upgrade torch, etc.) ride on the serve task
+  // type so they get a tmux session + show up in Running tab — but they are
+  // NOT serve invocations. Their output is pip's own; the generic
+  // "Serve stopped before the model became reachable" message + Edit-serve
+  // fix make no sense. Bail so the panel just shows pip's output.
+  const _isPipTask = ((task.payload?.repo_id || '').startsWith('pip-'))
+    || /python3? -m pip\b/.test(task.payload?._cmd || '');
+  if (_isPipTask) return null;
   if (_serveTaskLooksAwqOnLocalBackend(task, out)) {
     return {
       message: 'AWQ/GPTQ/FP8 cannot be served through llama.cpp/Ollama unified-memory mode.',
@@ -249,7 +257,7 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 
 // Polling / timeout intervals
 const TASK_POLL_INTERVAL_MS = 3000;       // delay between reconnect-loop iterations
-const BG_MONITOR_INTERVAL_MS = 10000;     // background task status poll
+const BG_MONITOR_INTERVAL_MS = 5000;      // background task status poll
 const STALE_PROGRESS_MS = 5 * 60 * 1000;  // download with no progress this long = stale
 const STARTUP_STALE_PROGRESS_MS = 45 * 1000; // 0%-forever startup stall: retry much sooner
 
@@ -523,6 +531,26 @@ function _serveOutputLooksReady(task) {
 
 function _normalizeTaskForDisplay(task) {
   if (!task || typeof task !== 'object') return task;
+  // Pip tasks (Reinstall vLLM / Upgrade torch / etc.) ride on the serve task
+  // type so they get tmux + the Running tab. They are NOT serves — their
+  // "ready" markers are pip's `Successfully installed` / `Requirement already
+  // satisfied`, not "Application startup complete".
+  const _isPipTask = ((task.payload?.repo_id || '').startsWith('pip-'))
+    || /python3? -m pip\b/.test(task.payload?._cmd || '');
+  if (_isPipTask) {
+    // Override stale status: any pip task whose output carries pip's own
+    // success markers gets displayed as `done` regardless of what's in
+    // localStorage. Old pre-fix runs landed in error/stopped state and
+    // stuck there even after we taught the rest of the flow about pip
+    // tasks — this is the catch-all that flips them to Finished on render.
+    const out = String(task.output || '');
+    const ranOk = /Successfully installed|Requirement already (?:satisfied|up-to-date)/i.test(out)
+      && !/error:|ERROR:/.test(out.slice(-1024));
+    if (ranOk && task.status !== 'done' && task.status !== 'running') {
+      return { ...task, status: 'done' };
+    }
+    return task;
+  }
   if (task.type === 'serve' && task.status === 'done' && !_serveOutputLooksReady(task)) {
     return { ...task, status: 'error' };
   }
@@ -2409,7 +2437,7 @@ async function _reconnectTask(el, task) {
       if (data.exit_code !== 0) {
         failCount++;
         if (failCount < 5) {
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => setTimeout(r, 3000));
           continue;
         }
         try {
@@ -2430,7 +2458,15 @@ async function _reconnectTask(el, task) {
         }
 
         const lastOutput = output.textContent || '';
-        const diag = _diagnose(lastOutput);
+        // Pip tasks (Reinstall vLLM / Upgrade torch / etc.) must skip the
+        // generic serve `_diagnose` step. Their output is pip's own and the
+        // error patterns there (torch ABI traceback, "No module named torch",
+        // etc.) are routinely matched against the previous tmux scrollback,
+        // tagging a clean pip success as a crashed serve. Detection is the
+        // same shape as the looksSuccessful branch below.
+        const _isPipTaskDiag = ((task.payload?.repo_id || '').startsWith('pip-'))
+          || /python3? -m pip\b/.test(task.payload?._cmd || '');
+        const diag = _isPipTaskDiag ? null : _diagnose(lastOutput);
         if (diag) {
           let diagEl = el.querySelector('.cookbook-diagnosis');
           if (!diagEl) {
@@ -2447,14 +2483,40 @@ async function _reconnectTask(el, task) {
         } else {
           const downloadLooksSuccessful = !lastOutput.includes('DOWNLOAD_FAILED')
             && (lastOutput.includes('DONE') || lastOutput.includes('100%') || lastOutput.includes('/snapshots/') || lastOutput.includes('Download complete') || lastOutput.includes('DOWNLOAD_OK'));
+          // Pip install / reinstall tasks are launched via _launchServeTask (so
+          // they show up in the Running tab + use tmux) but they aren't real
+          // serves — the cmd is `python3 -m pip ...` and the success markers
+          // are pip's own. Without this branch, a successful reinstall ends
+          // with no "Uvicorn running on" line and gets mis-flagged as a crashed
+          // serve.
+          const _isPipTask = ((task.payload?.repo_id || '').startsWith('pip-'))
+            || /python3? -m pip\b/.test(task.payload?._cmd || '');
+          const pipLooksSuccessful = _isPipTask
+            && /Successfully installed|Requirement already (?:satisfied|up-to-date)/i.test(lastOutput)
+            && !/error:|ERROR:/.test(lastOutput.slice(-1024));
           const serveLooksReady = task.type === 'serve' && _serveOutputLooksReady({ ...task, output: lastOutput });
-          const looksSuccessful = task.type === 'download' ? downloadLooksSuccessful : serveLooksReady;
+          const looksSuccessful = task.type === 'download'
+            ? downloadLooksSuccessful
+            : (_isPipTask ? pipLooksSuccessful : serveLooksReady);
           if (!lastOutput.trim() || !looksSuccessful) {
             _updateTask(task.sessionId, { status: 'crashed' });
             el.dataset.status = 'crashed';
             const badge = el.querySelector('.cookbook-task-status');
             if (badge) { badge.textContent = _statusLabel('crashed', task.type); badge.className = 'cookbook-task-status cookbook-task-crashed'; }
-            if (task.type === 'serve') {
+            if (_isPipTask) {
+              // Pip tasks: don't run the serve diagnosis (which would yell
+              // "Serve stopped before the model became reachable"). Show a
+              // pip-tailored message; the user can read pip's own error output
+              // directly above.
+              const _ranOk = /Successfully installed|Requirement already (?:satisfied|up-to-date)/i.test(lastOutput);
+              if (!_ranOk) {
+                _showDiagnosis(el, {
+                  message: 'Pip install did not finish with a success marker. Check the output for the underlying error.',
+                  suggestion: 'Suggested action: copy the troubleshooting bundle. Common causes: missing build deps, network blip, mismatched torch ABI.',
+                  fixes: [],
+                }, lastOutput);
+              }
+            } else if (task.type === 'serve') {
               const diag = _diagnose(lastOutput) || {
                 message: _serveTaskLooksAwqOnLocalBackend(task, lastOutput)
                   ? 'AWQ/GPTQ/FP8 cannot be served through llama.cpp/Ollama unified-memory mode.'
@@ -2533,6 +2595,28 @@ async function _reconnectTask(el, task) {
             }
             _showCookbookNotif(true);
           } else {
+            // Strong completion markers — `DOWNLOAD_OK` is emitted by our
+            // downloader wrapper AFTER the model snapshot is on disk, and
+            // `/snapshots/` only appears once HF has resolved the cached
+            // tree. Either is conclusive. Finalize as done immediately, skip
+            // the 30s debounce — the debounce only exists to guard against
+            // ambiguous markers (bare "100%" / "Download complete") which can
+            // appear mid-stream during multi-file downloads.
+            const _strongDone = task.type === 'download'
+              && (lastOutput.includes('DOWNLOAD_OK') || lastOutput.includes('/snapshots/'));
+            if (_strongDone) {
+              _updateTask(task.sessionId, { status: 'done', _doneConfirmAt: null, _lastStatusFlipAt: Date.now() });
+              el.dataset.status = 'done';
+              const badge = el.querySelector('.cookbook-task-status');
+              if (badge) { badge.textContent = _statusLabel('done', task.type); badge.className = 'cookbook-task-status cookbook-task-done'; }
+              const _chk = el.querySelector('.cookbook-task-check'); if (_chk) _chk.style.display = '';
+              const _sb = el.querySelector('.cookbook-task-serve-btn'); if (_sb) _sb.style.display = '';
+              _showCookbookNotif();
+              _refreshDepsAfterInstall(task);
+              _renderRunningTab();
+              _processQueue();
+              break;
+            }
             // Debounce the done flip. Tmux capture-pane can fail transiently
             // (network blip, ssh reconnect), and the verify has-session right
             // above can briefly report dead even when the session is in the
@@ -2559,7 +2643,7 @@ async function _reconnectTask(el, task) {
                     stillAlive = pData.exit_code === 0;
                   } catch { /* network blip — treat as inconclusive, prefer running */ stillAlive = true; }
                   if (stillAlive) {
-                    _updateTask(task.sessionId, { status: 'running', _doneConfirmAt: null });
+                    _updateTask(task.sessionId, { status: 'running', _doneConfirmAt: null, _lastStatusFlipAt: Date.now() });
                     const _el = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"]`);
                     if (_el) {
                       _el.dataset.status = 'running';
@@ -2571,7 +2655,7 @@ async function _reconnectTask(el, task) {
                     }
                     return;
                   }
-                  _updateTask(task.sessionId, { status: 'done', _doneConfirmAt: null });
+                  _updateTask(task.sessionId, { status: 'done', _doneConfirmAt: null, _lastStatusFlipAt: Date.now() });
                   const _el = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"]`);
                   if (_el) {
                     _el.dataset.status = 'done';
@@ -2596,8 +2680,14 @@ async function _reconnectTask(el, task) {
 
       const snapshot = (data.stdout || '').trim();
       if (snapshot) {
+        // Only auto-scroll to bottom if the user was already there. When
+        // they've scrolled up to read earlier output, leave their position
+        // alone so a fresh snapshot doesn't yank them back to the tail.
+        // 40px tolerance covers sub-pixel rounding + the moment between
+        // releasing the scrollbar and the next poll arriving.
+        const _atBottom = (output.scrollHeight - output.scrollTop - output.clientHeight) < 40;
         output.textContent = snapshot;
-        output.scrollTop = output.scrollHeight;
+        if (_atBottom) output.scrollTop = output.scrollHeight;
 
         // Live status parsing for download tasks
         if (task.type === 'download') {
@@ -3153,16 +3243,27 @@ export async function _selfHealStaleTasks(opts = {}) {
     // itself fires every 10s, so this almost always fires too, but the
     // guard keeps a fast manual call from doubling up).
     const now = Date.now();
-    if (now - _selfHealLastTs < 8000) return;
+    if (now - _selfHealLastTs < 4000) return;
     _selfHealLastTs = now;
   }
   const tasks = _loadTasks();
-  const candidates = tasks.filter(t =>
-    t.type === 'download'
-    && ['done', 'error', 'crashed', 'stopped'].includes(t.status)
-    && t.sessionId
-    && !String(t.sessionId).startsWith('queue-')
-  );
+  const candidates = tasks.filter(t => {
+    if (t.type !== 'download') return false;
+    if (!['done', 'error', 'crashed', 'stopped'].includes(t.status)) return false;
+    if (!t.sessionId || String(t.sessionId).startsWith('queue-')) return false;
+    // Finished downloads with strong completion markers (DOWNLOAD_OK or HF
+    // /snapshots/ resolution) are demonstrably done — do not flip them back
+    // to running just because the tmux session is still alive (e.g., a
+    // long-lived shell that hosted the download or a flapping SSH that
+    // reports the session as up). This was the main source of finished↔
+    // downloading oscillation on a flaky connection.
+    if (t.status === 'done' && /DOWNLOAD_OK|\/snapshots\//.test(t.output || '')) return false;
+    // Cooldown: never flip the same task more than once every 45s. A flapping
+    // SSH connection used to drive the badge back-and-forth on every probe
+    // cycle; this enforces a stable view between flaps.
+    if (t._lastStatusFlipAt && (Date.now() - t._lastStatusFlipAt < 45000)) return false;
+    return true;
+  });
   if (!candidates.length) return;
   let flipped = 0;
   for (const t of candidates) {
@@ -3180,6 +3281,7 @@ export async function _selfHealStaleTasks(opts = {}) {
         if (ft && ft.status !== 'running') {
           ft.status = 'running';
           ft._selfHealed = true;
+          ft._lastStatusFlipAt = Date.now();
           _saveTasks(fresh);
           flipped++;
           const _el = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);

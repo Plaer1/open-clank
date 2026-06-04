@@ -998,6 +998,21 @@ def setup_cookbook_routes() -> APIRouter:
         else:
             # ── Linux/Termux: bash + tmux (existing flow) ──
             runner_lines = ["#!/bin/bash"]
+            # Mirror every line of stdout+stderr into a persistent log file
+            # on the host running the serve. This is the file tail_serve_output
+            # reads when the tmux pane has been overwritten by the post-crash
+            # bash prompt — without it, the agent's diagnostic tool sees the
+            # neofetch banner instead of the actual Python traceback.
+            # We save the original fds to 3/4 so we can RESTORE them before
+            # `exec ${SHELL}` at the end of the script. Without that restore,
+            # the post-crash interactive shell's neofetch banner ALSO gets
+            # teed into the log file and `tail -N` returns ONLY the banner —
+            # the actual traceback ends up earlier than the tail window.
+            runner_lines.append("mkdir -p /tmp/odysseus-tmux 2>/dev/null || true")
+            runner_lines.append("exec 3>&1 4>&2")
+            runner_lines.append(
+                f"exec > >(tee -a /tmp/odysseus-tmux/{session_id}.log) 2>&1"
+            )
             runner_lines.extend(_user_shell_path_bootstrap())
             runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
             # Put Odysseus's own venv bin on PATH (local runs only) so the serve
@@ -1940,6 +1955,151 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"models": out}
 
+    # Rate-limit for the orphan-tmux adoption sweep. The UI polls
+    # tasks/status every ~3s; we don't want to SSH every host on every
+    # poll. 20s is fast enough that a model the agent launched in the
+    # background shows up "almost immediately" in the UI without being
+    # wasteful.
+    _last_orphan_sweep_ts = [0.0]
+    _ORPHAN_SWEEP_MIN_INTERVAL_S = 20.0
+
+    def _maybe_sweep_orphans(tasks: list, state: dict) -> None:
+        """Scan each configured cookbook server for `serve-*` tmux sessions
+        the cookbook doesn't know about and adopt them into state.tasks.
+
+        Writes are conditional: if no orphans are found, nothing is touched.
+        Rate-limited so polling UIs don't trigger SSH on every refresh.
+        """
+        import time as _time
+        import subprocess
+        logger.info(f"_maybe_sweep_orphans: entered, last_ts={_last_orphan_sweep_ts[0]}")
+        now = _time.monotonic()
+        if now - _last_orphan_sweep_ts[0] < _ORPHAN_SWEEP_MIN_INTERVAL_S:
+            logger.info(f"_maybe_sweep_orphans: rate-limited, {now - _last_orphan_sweep_ts[0]:.1f}s since last")
+            return
+        _last_orphan_sweep_ts[0] = now
+
+        env = state.get("env") if isinstance(state, dict) else {}
+        servers = env.get("servers") if isinstance(env, dict) else []
+        logger.info(f"orphan sweep starting: {len(servers) if isinstance(servers, list) else 0} server(s), known_sids={len([t for t in tasks if isinstance(t, dict) and t.get('sessionId')])}")
+        if not isinstance(servers, list):
+            return
+
+        known_sids = {
+            t.get("sessionId") for t in tasks
+            if isinstance(t, dict) and t.get("sessionId")
+        }
+
+        adopted_any = False
+        for srv in servers:
+            if not isinstance(srv, dict):
+                continue
+            host = (srv.get("host") or "").strip()
+            if not host:
+                continue  # local-only entry; the /proc scan handles it
+            if not _REMOTE_HOST_RE.match(host):
+                continue
+            sport = str(srv.get("port") or "").strip()
+            ssh_base = ["ssh", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=no"]
+            if sport and sport != "22":
+                if not _SSH_PORT_RE.match(sport):
+                    continue
+                ssh_base.extend(["-p", sport])
+
+            try:
+                ls = subprocess.run(
+                    ssh_base + [host, "tmux ls 2>/dev/null"],
+                    timeout=6, capture_output=True, text=True,
+                )
+            except Exception:
+                continue
+            for line in (ls.stdout or "").splitlines():
+                sid = line.split(":", 1)[0].strip()
+                if not sid or not _SESSION_ID_RE.match(sid):
+                    continue
+                # Only adopt sessions that LOOK like model serves; ignore
+                # bare numeric tmux sessions and unrelated work.
+                if not (sid.startswith("serve-") or sid.startswith("cookbook-")):
+                    continue
+                if sid in known_sids:
+                    continue
+                # Skip zombie / idle-shell sessions. A tmux session left
+                # over from a crashed vllm just shows a bash prompt —
+                # adopting it would pollute the UI with "running" tasks
+                # that aren't actually serving anything. pane_current_command
+                # is the foreground process in the pane right now; only
+                # real model serves leave a python/vllm/etc. process there.
+                try:
+                    pc = subprocess.run(
+                        ssh_base + [host, "tmux", "list-panes", "-t", sid,
+                                    "-F", "#{pane_current_command}"],
+                        timeout=4, capture_output=True, text=True,
+                    )
+                    cur = (pc.stdout or "").strip().splitlines()
+                except Exception:
+                    cur = []
+                LIVE_PROCS = {"python", "python3", "vllm", "llama-server",
+                              "llama_cpp_main", "sglang", "lmdeploy",
+                              "ollama", "node", "uvicorn"}
+                if not any(c in LIVE_PROCS for c in cur):
+                    continue
+                # Try to recover a plausible repo_id + port from the
+                # pane buffer. Cheap heuristic — if we can't, register
+                # with placeholder fields; the UI still shows it.
+                try:
+                    cap = subprocess.run(
+                        ssh_base + [host, "tmux", "capture-pane", "-t", sid, "-p", "-S", "-300"],
+                        timeout=6, capture_output=True, text=True,
+                    )
+                    pane = cap.stdout or ""
+                except Exception:
+                    pane = ""
+                import re as _re_orphan
+                # vLLM banner: "model   /path/...". Falls back to the
+                # raw vllm-serve command if the banner already scrolled.
+                m_model = _re_orphan.search(r"model\s+(\S+)", pane)
+                model = m_model.group(1) if m_model else ""
+                if not model:
+                    m_serve = _re_orphan.search(r"vllm\s+serve\s+(\S+)", pane)
+                    model = m_serve.group(1) if m_serve else f"adopted:{sid}"
+                m_port = _re_orphan.search(r"--port\s+(\d+)", pane)
+                port = int(m_port.group(1)) if m_port else 0
+
+                import time as _t2
+                tasks.append({
+                    "id": sid,
+                    "sessionId": sid,
+                    "name": model.split("/")[-1] if "/" in model else model,
+                    "type": "serve",
+                    "status": "running",
+                    "output": f"Auto-adopted from orphan tmux session on {host}. "
+                              "Open the task to see live output.",
+                    "ts": int(_t2.time() * 1000),
+                    "payload": {
+                        "repo_id": model,
+                        "remote_host": host,
+                        "_cmd": "(orphan tmux session — original launch cmd unknown)",
+                        "port": port,
+                    },
+                    "remoteHost": host,
+                    "sshPort": sport,
+                    "platform": "linux",
+                    "_serveReady": False,
+                    "_endpointAdded": False,
+                    "_adoptedExternally": True,
+                })
+                known_sids.add(sid)
+                adopted_any = True
+                logger.info(f"auto-adopted orphan tmux session {sid!r} on {host}")
+
+        if adopted_any:
+            try:
+                from core.atomic_io import atomic_write_json
+                state["tasks"] = tasks
+                atomic_write_json(_cookbook_state_path, state)
+            except Exception as e:
+                logger.warning(f"orphan sweep: state write failed: {e}")
+
     @router.get("/api/cookbook/tasks/status")
     async def cookbook_tasks_status(request: Request):
         """Check status of all active cookbook tmux sessions.
@@ -1993,6 +2153,7 @@ def setup_cookbook_routes() -> APIRouter:
 
         # Load saved tasks from cookbook state
         tasks = []
+        state = {}
         if _cookbook_state_path.exists():
             try:
                 state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
@@ -2003,6 +2164,21 @@ def setup_cookbook_routes() -> APIRouter:
                     tasks = list(saved_tasks.values())
             except Exception:
                 pass
+
+        # Orphan-tmux auto-adoption sweep. When the agent (or anyone)
+        # SSH-launches a `serve-*` tmux session — usually because
+        # serve_model rejected `source ... && vllm ...` or because of a
+        # manual relaunch via tmux send-keys — that session is invisible
+        # to the cookbook UI even though it's a live model server. The
+        # sweep finds those orphans on each configured remote host and
+        # writes them into state.tasks with _adoptedExternally=True, so
+        # they show up in the UI on the next poll without anyone having
+        # to remember to call adopt_served_model. Rate-limited via the
+        # module-level _last_orphan_sweep so we don't SSH every 3s.
+        try:
+            _maybe_sweep_orphans(tasks, state)
+        except Exception as _sweep_e:
+            logger.warning(f"orphan sweep failed (non-fatal): {_sweep_e!r}")
 
         results = []
         for task in tasks:
@@ -2063,7 +2239,12 @@ def setup_cookbook_routes() -> APIRouter:
                 if _tport and _tport != "22":
                     ssh_base.extend(["-p", str(_tport)])
                 check_cmd = ssh_base + [remote, "tmux", "has-session", "-t", session_id]
-                capture_cmd = ssh_base + [remote, "tmux", "capture-pane", "-t", session_id, "-p", "-S", "-50"]
+                # Capture 500 lines (was 50) so a Python traceback survives
+                # the post-crash neofetch banner + bash prompt that otherwise
+                # fills the visible tail. Without this, output_tail ends up
+                # as just "Locale: C / Ubuntu_Odysseus ❯" and the agent
+                # can't diagnose the actual error.
+                capture_cmd = ssh_base + [remote, "tmux", "capture-pane", "-t", session_id, "-p", "-S", "-500"]
             elif IS_WINDOWS:
                 # LOCAL Windows task: launched as a detached process (no tmux).
                 # Liveness comes from the <session>.pid file, output from the
@@ -2072,7 +2253,7 @@ def setup_cookbook_routes() -> APIRouter:
                 capture_cmd = None
             else:
                 check_cmd = ["tmux", "has-session", "-t", session_id]
-                capture_cmd = ["tmux", "capture-pane", "-t", session_id, "-p", "-S", "-50"]
+                capture_cmd = ["tmux", "capture-pane", "-t", session_id, "-p", "-S", "-500"]
 
             local_win_task = (not remote) and IS_WINDOWS
 

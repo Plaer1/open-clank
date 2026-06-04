@@ -613,6 +613,20 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
       panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('KV Cache','vLLM --kv-cache-dtype. auto uses the model/runtime default; fp8 reduces KV memory for long context.')}<select class="hwfit-sf" data-field="vllm_kv_cache_dtype" style="height:32px;">${vllmKvCacheOpts}</select></label>`;
+      // Attention backend selector — pin the kernel impl. Default `auto` lets
+      // vLLM pick FlashInfer (which JITs on first use and breaks on older
+      // system nvcc) → FlashAttention → xformers. Forcing FLASH_ATTN skips
+      // the JIT entirely, fixing the `nvcc fatal: Unsupported gpu
+      // architecture 'compute_89'` failure mode on Ada / Hopper hosts.
+      const vllmAttnBackendOpts = ['auto', 'FLASH_ATTN', 'XFORMERS', 'FLASHINFER', 'TORCH_SDPA']
+        .map(b => `<option value="${b === 'auto' ? '' : b}"${(sv('vllm_attn_backend','') === (b === 'auto' ? '' : b)) ? ' selected' : ''}>${b}</option>`).join('');
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('Attention','vLLM VLLM_ATTENTION_BACKEND. auto = vLLM picks (often FLASHINFER, which JITs and can fail on old nvcc). FLASH_ATTN skips the JIT entirely.')}<select class="hwfit-sf" data-field="vllm_attn_backend" style="height:32px;">${vllmAttnBackendOpts}</select></label>`;
+      // Free-text env-vars field. Anything pasted here is prepended to the
+      // launch command verbatim. Use for CUDACXX, PATH overrides, NCCL_*
+      // tuning, or any other KEY=VALUE pair that doesn't have a dedicated
+      // field. After the venv activate runs, $VIRTUAL_ENV / $PATH / etc. are
+      // already exported so they expand correctly here.
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang" style="flex:1 1 100%;">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). Example: CUDACXX=$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc — points flashinfer at the venv-bundled nvcc when the system one is too old for your GPU.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(sv('extra_env',''))}" placeholder="CUDACXX=/path/to/nvcc NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Row 2b: Diffusers settings
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
@@ -1643,6 +1657,35 @@ function _rerenderCachedModels() {
       // Launch button
       panel.querySelector('.hwfit-serve-launch').addEventListener('click', async (ev) => {
         const _launchBtn = ev.currentTarget;
+        // Immediate visual feedback. The GPU probe + backend-warning prompt
+        // below can take ~1-2s before the task UI shows up, leaving the
+        // button looking dead. Drop in the same whirlpool spinner the rest of
+        // the cookbook uses (Probe GPUs, dependency installs, etc.) right
+        // away; restored on any early-return / failure path below.
+        const _origBtnHtml = _launchBtn.innerHTML;
+        const _origBtnDisabled = _launchBtn.disabled;
+        let _launchingWp = null;
+        const _restoreLaunchBtn = () => {
+          try { _launchingWp?.destroy?.(); } catch {}
+          _launchingWp = null;
+          _launchBtn.innerHTML = _origBtnHtml;
+          _launchBtn.disabled = _origBtnDisabled;
+        };
+        _launchBtn.disabled = true;
+        _launchBtn.innerHTML = '';
+        const _launchingWrap = document.createElement('span');
+        _launchingWrap.className = 'hwfit-serve-launching';
+        _launchingWrap.style.cssText = 'display:inline-flex;align-items:center;gap:6px;';
+        _launchingWp = spinnerModule.createWhirlpool(18);
+        if (_launchingWp?.element) {
+          _launchingWp.element.style.margin = '0';
+          _launchingWp.element.style.transform = 'translateY(-2px)';
+          _launchingWrap.appendChild(_launchingWp.element);
+        }
+        const _launchingLabel = document.createElement('span');
+        _launchingLabel.textContent = 'Launching…';
+        _launchingWrap.appendChild(_launchingLabel);
+        _launchBtn.appendChild(_launchingWrap);
         // Final safety net: never launch with ctx beyond the model's trained
         // limit (or the absolute sanity ceiling when the limit is unknown). A
         // stale preset or typo (e.g. 16000000) overflows and, with a quantized
@@ -1650,7 +1693,14 @@ function _rerenderCachedModels() {
         // command (then we respect their literal text).
         if (!_cmdManuallyEdited) _clampCtx(true);
         if (!_cmdManuallyEdited) updateCmd();
-        const launchCmd = _cmdTextarea ? _cmdTextarea.value.trim() : panel._cmd;
+        // Pasted commands often carry hidden newlines / CRs / tabs from copies
+        // out of model cards or wrapped help text. The backend cmd allowlist
+        // rejects \n / \r outright (`Invalid characters in cmd`), so collapse
+        // all whitespace to single spaces before launch — same effect as the
+        // user manually re-flowing the textarea, no behavior change.
+        const _rawLaunchCmd = _cmdTextarea ? _cmdTextarea.value : panel._cmd;
+        const launchCmd = String(_rawLaunchCmd || '').replace(/\s+/g, ' ').trim();
+        if (_cmdTextarea && _cmdTextarea.value !== launchCmd) _cmdTextarea.value = launchCmd;
         const serveState = {};
         panel.querySelectorAll('.hwfit-sf').forEach(el => {
           if (el.type === 'checkbox') serveState[el.dataset.field] = el.checked;
@@ -1659,6 +1709,7 @@ function _rerenderCachedModels() {
         serveState.backend = serveState.backend || (_detectBackend(m).backend) || 'vllm';
         const backendWarning = _serveBackendWarning(m, repo, serveState.backend, serveState);
         if (backendWarning) {
+          _restoreLaunchBtn();
           await window.styledConfirm(backendWarning.body, {
             title: backendWarning.title,
             confirmText: 'Edit settings',
@@ -1689,7 +1740,7 @@ function _rerenderCachedModels() {
                 `No GPU detected on ${_probeHost ? _probeHost : 'this host'}. ${serveState.backend.toUpperCase()} needs a visible CUDA/ROCm accelerator to start — launching now will most likely crash early.\n\nLaunch anyway?`,
                 { title: 'No GPU detected', confirmText: 'Launch anyway', cancelText: 'Cancel', danger: true },
               );
-              if (!_proceed) return;
+              if (!_proceed) { _restoreLaunchBtn(); return; }
             }
           } catch {
             // Network / probe failure — don't block. Better to let the launch
