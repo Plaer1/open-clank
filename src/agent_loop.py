@@ -1387,6 +1387,7 @@ async def stream_agent_loop(
     owner: Optional[str] = None,
     relevant_tools: Optional[Set[str]] = None,
     fallbacks: Optional[List[tuple]] = None,
+    workspace: Optional[str] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -1553,6 +1554,27 @@ async def stream_agent_loop(
         compact=_is_api_model,
         owner=owner,
     )
+    if workspace:
+        # PREPEND (not append) so it dominates the large base prompt — appended
+        # at the end, small models ignored it and asked the user for code. The
+        # folder IS the project; the agent must explore it, not ask.
+        _ws_note = (
+            f"## ACTIVE WORKSPACE — READ FIRST\n"
+            f"The user is working in this folder: {workspace}\n"
+            f"It IS the project. bash/python run with cwd set here and "
+            f"read_file/write_file are confined to it (paths outside are rejected).\n"
+            f"When the user says \"the code\" / \"this project\" / \"the workspace\" "
+            f"or asks to review/find/edit something WITHOUT a path, they mean THIS "
+            f"folder. Do NOT ask the user for code or a path, and do NOT read a file "
+            f"literally named \"workspace\". ALWAYS start by exploring it yourself: "
+            f"run `bash` → `git ls-files` (or `ls -R`) to see the files, then "
+            f"read_file the relevant ones by path RELATIVE to the workspace."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _ws_note + "\n\n" + (messages[0].get("content") or "")
+        else:
+            messages.insert(0, {"role": "system", "content": _ws_note})
+        logger.info("[workspace] active for this turn: %s", workspace)
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
@@ -2117,6 +2139,7 @@ async def stream_agent_loop(
                         disabled_tools=disabled_tools,
                         owner=owner,
                         progress_cb=_push_progress,
+                        workspace=workspace,
                     )
                 finally:
                     # Sentinel so the drainer knows to stop.
