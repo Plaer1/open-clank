@@ -8,6 +8,10 @@ had before the block — present, absent, or carrying a parent-package attribute
 Use ``clear_module`` to drop a single module from both ``sys.modules`` and its
 parent-package attribute (e.g. before forcing a fresh import inside the block).
 
+Use ``clear_fake_database_modules`` to evict a *stubbed* ``core.database`` (and
+its companion ``src.database``) that another test left in import state, without
+touching a real ``core.database`` loaded from disk.
+
 Background: importing ``routes.session_routes`` also sets ``session_routes`` on
 the parent ``routes`` package object. A ``from routes import session_routes``
 or ``import routes.session_routes as X`` statement resolves through that parent
@@ -58,6 +62,35 @@ def _restore_one(dotted_name, saved_mod, saved_attr):
 def clear_module(dotted_name):
     """Remove a module from sys.modules and its parent-package attribute."""
     _restore_one(dotted_name, _ABSENT, _ABSENT)
+
+
+def clear_fake_database_modules():
+    """Evict a *stubbed* ``core.database`` (and ``src.database``) from import state.
+
+    Test-only. Some tests install a fake ``core.database`` — a stub module with
+    no on-disk ``__file__`` — into ``sys.modules`` and onto the ``core`` package.
+    A later test that needs the real database module must evict that stub first,
+    or its ``import core.database`` resolves to the fake.
+
+    This is deliberately conservative and mirrors the per-file helpers it
+    replaces:
+
+    * It acts only when ``core.database`` is a fake/stub, detected by a missing
+      string ``__file__``. A real ``core.database`` loaded from disk is left
+      untouched, as is the case where nothing is cached.
+    * When it does act, it also drops the cached ``src.database`` entry.
+    * It removes the ``core.database`` parent-package attribute only when that
+      attribute is the same fake object being evicted.
+    """
+    parent = sys.modules.get("core")
+    attr = getattr(parent, "database", None) if parent is not None else None
+    mod = sys.modules.get("core.database") or attr
+    if mod is None or isinstance(getattr(mod, "__file__", None), str):
+        return
+    sys.modules.pop("core.database", None)
+    sys.modules.pop("src.database", None)
+    if parent is not None and attr is mod:
+        delattr(parent, "database")
 
 
 @contextmanager

@@ -4,9 +4,17 @@ import types
 
 import pytest
 
-from tests.helpers.import_state import clear_module, preserve_import_state
+from tests.helpers.import_state import (
+    clear_fake_database_modules,
+    clear_module,
+    preserve_import_state,
+)
 
 _SENTINEL = "tests._import_state_test_sentinel"
+
+# Names touched by clear_fake_database_modules — snapshot/restore these so the
+# tests never leak into the real core/src packages.
+_DB_NAMES = ("core", "core.database", "src", "src.database")
 
 
 def test_absent_module_is_removed_after_block():
@@ -139,3 +147,106 @@ def test_parent_attr_restored_correctly_when_parent_also_preserved():
     finally:
         sys.modules.pop("_fake_istate_parent", None)
         sys.modules.pop("_fake_istate_parent.child", None)
+
+
+def test_clear_fake_database_removes_stub_core_database():
+    with preserve_import_state(*_DB_NAMES):
+        fake_core = types.ModuleType("core")
+        fake_db = types.ModuleType("core.database")  # no __file__ => a stub
+        fake_core.database = fake_db
+        sys.modules["core"] = fake_core
+        sys.modules["core.database"] = fake_db
+
+        clear_fake_database_modules()
+
+        assert "core.database" not in sys.modules
+        assert not hasattr(fake_core, "database")
+
+
+def test_clear_fake_database_preserves_real_core_database():
+    with preserve_import_state(*_DB_NAMES):
+        fake_core = types.ModuleType("core")
+        real_db = types.ModuleType("core.database")
+        real_db.__file__ = "/somewhere/core/database.py"  # looks on-disk
+        fake_core.database = real_db
+        sys.modules["core"] = fake_core
+        sys.modules["core.database"] = real_db
+
+        clear_fake_database_modules()
+
+        assert sys.modules["core.database"] is real_db
+        assert fake_core.database is real_db
+
+
+def test_clear_fake_database_drops_src_database_when_core_is_fake():
+    with preserve_import_state(*_DB_NAMES):
+        fake_core = types.ModuleType("core")
+        fake_db = types.ModuleType("core.database")
+        fake_core.database = fake_db
+        sys.modules["core"] = fake_core
+        sys.modules["core.database"] = fake_db
+        sys.modules["src.database"] = types.ModuleType("src.database")
+
+        clear_fake_database_modules()
+
+        assert "src.database" not in sys.modules
+
+
+def test_clear_fake_database_leaves_src_database_when_core_is_real():
+    with preserve_import_state(*_DB_NAMES):
+        fake_core = types.ModuleType("core")
+        real_db = types.ModuleType("core.database")
+        real_db.__file__ = "/somewhere/core/database.py"
+        fake_core.database = real_db
+        sys.modules["core"] = fake_core
+        sys.modules["core.database"] = real_db
+        src_db = types.ModuleType("src.database")
+        sys.modules["src.database"] = src_db
+
+        clear_fake_database_modules()
+
+        assert sys.modules["src.database"] is src_db
+
+
+def test_clear_fake_database_keeps_parent_attr_pointing_elsewhere():
+    """When the cached core.database is a stub but the `database` attr on the
+    core package points at a *different* object, the attr is left intact —
+    only the same fake object is unlinked."""
+    with preserve_import_state(*_DB_NAMES):
+        fake_core = types.ModuleType("core")
+        cached_fake = types.ModuleType("core.database")  # the stub in sys.modules
+        other = types.ModuleType("core.database")  # parent attr points here
+        fake_core.database = other
+        sys.modules["core"] = fake_core
+        sys.modules["core.database"] = cached_fake
+
+        clear_fake_database_modules()
+
+        assert "core.database" not in sys.modules
+        assert fake_core.database is other
+
+
+def test_clear_fake_database_uses_parent_attr_when_not_in_sys_modules():
+    """A stub reachable only via the core package's `database` attribute (not in
+    sys.modules) is still detected and unlinked from the parent."""
+    with preserve_import_state(*_DB_NAMES):
+        sys.modules.pop("core.database", None)
+        fake_core = types.ModuleType("core")
+        fake_db = types.ModuleType("core.database")
+        fake_core.database = fake_db
+        sys.modules["core"] = fake_core
+
+        clear_fake_database_modules()
+
+        assert not hasattr(fake_core, "database")
+
+
+def test_clear_fake_database_noop_when_nothing_cached():
+    with preserve_import_state(*_DB_NAMES):
+        sys.modules.pop("core.database", None)
+        fake_core = types.ModuleType("core")  # no `database` attr
+        sys.modules["core"] = fake_core
+
+        clear_fake_database_modules()  # must not raise
+
+        assert "core.database" not in sys.modules
