@@ -1957,7 +1957,19 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
             )
             db.add(note)
             db.commit()
-            return {"response": f"Note created: \"{title or '(untitled)'}\" (id: {note.id[:8]})", "exit_code": 0}
+            # Return note_id so the chat-side renderer can build a real
+            # "View note" button that opens the notes modal at this id.
+            # Previously the create response only included a prose
+            # confirmation; the model would type "View note" as a markdown
+            # link with no target, leaving the user with a click that
+            # did nothing and uncertainty about whether the note was made.
+            return {
+                "response": f"Note created: \"{title or '(untitled)'}\" (id: {note.id[:8]})",
+                "note_id": note.id,
+                "note_title": title or "",
+                "open_url": f"/#open=notes&note={note.id}",
+                "exit_code": 0,
+            }
 
         elif action == "update":
             note_id = args.get("id", "")

@@ -299,8 +299,31 @@ async function _updateEvent(uid, data) {
 }
 
 async function _deleteEvent(uid) {
-  const backup = _allEvents[uid];
-  delete _allEvents[uid];
+  // Multiple "sibling" UIDs may need to vanish optimistically:
+  //   1. The exact uid the user clicked.
+  //   2. If the user clicked a RECURRING occurrence (uid contains "::"),
+  //      the server deletes the master + every occurrence — so we strip
+  //      the master uid AND every "master::*" expansion from the
+  //      client-side caches too. Without this, deleting one day of a
+  //      multi-day recurring task only removed THAT day visually; the
+  //      other days kept rendering until the next full refresh.
+  //   3. If the user clicked the master, strip every "master::*"
+  //      expansion (same prefix scan).
+  const masterUid = uid.includes('::') ? uid.split('::')[0] : uid;
+  const backups = {};
+  const _matches = (k) => k === uid || k === masterUid || k.startsWith(masterUid + '::');
+
+  for (const k of Object.keys(_allEvents)) {
+    if (_matches(k)) {
+      backups[k] = _allEvents[k];
+      delete _allEvents[k];
+    }
+  }
+  if (Array.isArray(_events)) {
+    _events = _events.filter(e => !(e && _matches(e.uid || '')));
+  }
+  if (_open) _render();
+  _updateBadge && _updateBadge();
   const isRecurring = uid.includes('::');
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}`, {
     method: 'DELETE', credentials: 'same-origin',
@@ -313,7 +336,11 @@ async function _deleteEvent(uid) {
       _saveCache && _saveCache();
     }
   }).catch((e) => {
-    if (backup) _allEvents[uid] = backup;
+    // Server rejected — restore every uid we optimistically stripped.
+    for (const [k, ev] of Object.entries(backups)) {
+      _allEvents[k] = ev;
+      if (Array.isArray(_events)) _events.push(ev);
+    }
     if (window.uiModule) window.uiModule.showError('Failed to delete event: ' + (e?.message || 'unknown'));
     if (_open) _render();
   });
@@ -980,7 +1007,39 @@ async function _renderMonth() {
       const startColInt = Math.round(startCol);
       const endColInt = Math.round(endCol);
       const span = endColInt - startColInt + 1;
-      h += `<div class="cal-multiday" style="--col:${startColInt};--span:${span};--slot:${barSlot};background:${_calColor(md)};--cal-event-fg:${_calEventFg(md)}" draggable="true" data-uid="${_e(md.uid)}" title="${_e(md.summary)}">${_e(md.summary)}</div>`;
+      // Proportional offsets for timed events that span across midnight
+      // (e.g. 8 PM Mon → 5 AM Tue). Without this, an overnight serve
+      // window visually fills the ENTIRE next day even when it only
+      // covers a few hours. All-day events keep the full-day shape.
+      // Bar visually spans from column (col+startFrac) to (col+span-1+endFrac),
+      // so a 8 PM→5 AM run shows ~17% of day 1 + ~21% of day 2, not 200%.
+      let startFrac = 0;
+      let endFrac = 1;
+      if (!md.all_day) {
+        try {
+          const sIso = md.dtstart || '';
+          const eIso = md.dtend || '';
+          const sDate = sIso ? new Date(sIso) : null;
+          const eDate = eIso ? new Date(eIso) : null;
+          // First-visible-day fraction (0 = midnight start). Clamp to 0
+          // when the event started before this row, so the bar still
+          // starts at the row's left edge.
+          if (sDate && !isNaN(sDate) && mdStart >= rowStart) {
+            const midnight = new Date(sDate); midnight.setHours(0, 0, 0, 0);
+            startFrac = Math.max(0, Math.min(1, (sDate - midnight) / 86400000));
+          }
+          if (eDate && !isNaN(eDate) && mdEnd <= rowEnd) {
+            const midnight = new Date(eDate); midnight.setHours(0, 0, 0, 0);
+            endFrac = Math.max(0, Math.min(1, (eDate - midnight) / 86400000));
+            // CalDAV end-times are exclusive: an event ending at exactly
+            // 00:00 on day N really ended at end-of-day N-1, so endFrac=0
+            // would visually paint a zero-width slice. Snap to a small
+            // visible minimum (5% of a day) so the bar still registers.
+            if (endFrac === 0) endFrac = 1;
+          }
+        } catch (_) { startFrac = 0; endFrac = 1; }
+      }
+      h += `<div class="cal-multiday" style="--col:${startColInt};--span:${span};--slot:${barSlot};--start-frac:${startFrac.toFixed(4)};--end-frac:${endFrac.toFixed(4)};background:${_calColor(md)};--cal-event-fg:${_calEventFg(md)}" draggable="true" data-uid="${_e(md.uid)}" title="${_e(md.summary)}">${_e(md.summary)}</div>`;
       barSlot++;
     }
     h += '</div>';
@@ -2688,6 +2747,28 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
         <option value="FREQ=YEARLY" ${existing?.rrule === 'FREQ=YEARLY' ? 'selected' : ''}>Yearly</option>
       </select>
       <textarea id="cal-f-desc" placeholder="Description" class="cal-input" rows="2">${_e(existing?.description || '')}</textarea>
+      ${(() => {
+        // Cookbook-task back-link. When the description carries a
+        // "cookbook_task_id: <id>" marker (set by cookbookSchedule.js
+        // when the user ticks "Create event in calendar"), render an
+        // Open-task button so the user can jump straight to the
+        // source task in the Tasks tab.
+        const _ct = (existing?.description || '').match(/cookbook_task_id:\s*([A-Za-z0-9_-]+)/);
+        if (!_ct) return '';
+        return `<div class="cal-form-row cal-form-cookbook-link" style="align-items:center;gap:8px;">
+          <button type="button" id="cal-f-open-task" data-task-id="${_e(_ct[1])}"
+            style="display:inline-flex;align-items:center;gap:6px;background:transparent;
+                   color:var(--accent,var(--red));border:1px solid var(--border);
+                   border-radius:6px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 11l3 3L22 4"/>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+            <span>Open in Tasks</span>
+          </button>
+          <span style="font-size:11px;opacity:0.5;">Linked to a Cookbook scheduled task</span>
+        </div>`;
+      })()}
       <div class="cal-form-row" style="align-items:center;gap:8px;">
         <label style="font-size:11px;display:flex;align-items:center;gap:4px;"><svg class="cal-remind-bell" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span style="opacity:0.5;">Reminder</span></label>
         <select id="cal-f-remind" class="cal-input" style="flex:1;">
@@ -2736,6 +2817,19 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
 
   document.getElementById('cal-f-allday')?.addEventListener('change', (e) => {
     document.getElementById('cal-time-row').style.display = e.target.checked ? 'none' : '';
+  });
+  // Open-task back-link button — dynamically imports the tasks module
+  // so the linkage works even if the user is opening the calendar
+  // before they've touched the Tasks tab in this session.
+  document.getElementById('cal-f-open-task')?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const taskId = e.currentTarget?.dataset?.taskId || '';
+    try {
+      const m = await import('/static/js/tasks.js');
+      const openTasks = m.openTasks || m.default?.openTasks;
+      if (typeof openTasks === 'function') { openTasks(taskId); return; }
+    } catch (_) {}
+    document.getElementById('tool-tasks-btn')?.click();
   });
   // Keep end date >= start date
   document.getElementById('cal-f-date')?.addEventListener('change', () => {

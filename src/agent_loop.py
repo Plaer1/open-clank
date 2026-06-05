@@ -2348,6 +2348,19 @@ async def stream_agent_loop(
                 _anchor = f"\n\n[Open in Deep Research](#research-{_rsid})\n"
                 yield 'data: ' + json.dumps({"delta": _anchor}) + '\n\n'
 
+            # Same pattern for notes: when manage_notes creates a note
+            # and returns note_id, drop a `[View note](#note-<id>)` link
+            # into the stream so chatRenderer's click handler routes to
+            # the new openNote() in notes.js — opens the notes panel and
+            # scrolls/flashes the matching card. Without this, the agent
+            # would write "View note" as a phrase with no target.
+            _nid = result.get("note_id")
+            if _nid and block.tool_type == "manage_notes":
+                _title = (result.get("note_title") or "").strip()
+                _label = f"View note: {_title}" if _title else "View note"
+                _anchor = f"\n\n[{_label}](#note-{_nid})\n"
+                yield 'data: ' + json.dumps({"delta": _anchor}) + '\n\n'
+
             # Save for history persistence
             tool_event = {
                 "round": round_num,
