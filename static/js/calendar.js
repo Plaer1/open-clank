@@ -328,7 +328,11 @@ async function _deleteEvent(uid) {
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}`, {
     method: 'DELETE', credentials: 'same-origin',
   }).then(r => {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // 404 = the event was already deleted by another session/device. That's
+    // exactly the state we want, so treat it as success — don't restore the
+    // row, otherwise the user can never clear stale cached events that were
+    // deleted from desktop while mobile was open (and vice versa).
+    if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
     if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
@@ -3426,6 +3430,44 @@ function _loadCache() {
 // reflect), refetch the visible range, re-render if open, and update the badge.
 window.addEventListener('calendar-refresh', () => {
   _allEvents = {};
+  _fetchedRanges = [];
+  const range = (_view === 'year')
+    ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
+    : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+  _fetchEvents(range[0], range[1], /*force*/ true)
+    .then(() => { if (_open) _render(); _updateBadge(); })
+    .catch(() => {});
+});
+
+// Cross-session catch-up: when the tab/app becomes visible again (you alt-tab
+// back, the mobile app comes to the foreground, or you switch back from
+// another browser session), drop the range cache and re-fetch. Without this,
+// a delete or add on desktop never propagates to the still-open mobile tab
+// until the user does a full reload — so stale events sit there undeletable
+// (they 404 on the server). Triggers on every visibility change but the
+// fetch is cheap and already de-duped by _fetchPromise on line ~120.
+let _lastVisRefetchAt = 0;
+const _VIS_REFETCH_MIN_MS = 10 * 1000;  // throttle if user is rapidly tab-flipping
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  const now = Date.now();
+  if (now - _lastVisRefetchAt < _VIS_REFETCH_MIN_MS) return;
+  _lastVisRefetchAt = now;
+  _fetchedRanges = [];
+  const range = (_view === 'year')
+    ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
+    : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+  _fetchEvents(range[0], range[1], /*force*/ true)
+    .then(() => { if (_open) _render(); _updateBadge(); })
+    .catch(() => {});
+});
+
+// Same idea for window-level focus — covers desktop alt-tabbing back to a
+// browser that already had the tab visible (visibilitychange won't fire).
+window.addEventListener('focus', () => {
+  const now = Date.now();
+  if (now - _lastVisRefetchAt < _VIS_REFETCH_MIN_MS) return;
+  _lastVisRefetchAt = now;
   _fetchedRanges = [];
   const range = (_view === 'year')
     ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
