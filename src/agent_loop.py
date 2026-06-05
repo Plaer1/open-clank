@@ -637,28 +637,11 @@ def _build_system_prompt(
 
     set_active_model(model)
 
-    # Current date/time — every request. Models default to their
-    # training-cutoff date when "today" is asked otherwise (was
-    # rendering April 2026 dates as "today" when the actual date is
-    # May 19, 2026). System TZ-local so calendar/email date math
-    # matches what the user sees.
+    # Current date/time for every agent request. This is user-local when the
+    # browser provided timezone headers, with a server-local fallback.
     try:
-        from datetime import datetime as _dt, timezone as _tz
-        _now = _dt.now().astimezone()
-        _utc = _dt.now(_tz.utc)
-        _off = _now.strftime('%z')  # e.g. +0900
-        _off_fmt = (f"{_off[:3]}:{_off[3:]}" if _off else "+00:00")
-        agent_prompt = (
-            f"## Current date and time\n"
-            f"Today is {_now.strftime('%A, %B %-d, %Y')} ({_now.strftime('%Y-%m-%d')}). "
-            f"Local time is {_now.strftime('%-I:%M %p')} ({_now.strftime('%Z')}, UTC{_off_fmt}); "
-            f"current UTC time is {_utc.strftime('%H:%M')}. "
-            f"Use this for any 'today'/'tomorrow'/'this week' reasoning — do NOT "
-            f"infer the date from training data or from event timestamps.\n"
-            f"When scheduling a task (manage_tasks), scheduled_time is in UTC: "
-            f"subtract the offset above from the user's local time "
-            f"(local {_now.strftime('%H:%M')} = {_utc.strftime('%H:%M')} UTC right now).\n\n"
-        ) + agent_prompt
+        from src.user_time import current_datetime_prompt
+        agent_prompt = current_datetime_prompt() + agent_prompt
     except Exception:
         pass
 
