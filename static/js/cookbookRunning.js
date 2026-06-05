@@ -2094,7 +2094,7 @@ export function _renderRunningTab() {
         // Edit serve — open the full serve panel (same as the edit icon),
         // switching to this task's server first so the model is found.
         if (task.type === 'serve' && task.payload?.repo_id) {
-          items.push({ label: 'Edit serve', action: 'edit-panel', custom: () => _openEdit() });
+          items.push({ label: 'Edit in serve panel', action: 'edit-panel', tooltip: 'Open the full Serve config panel pre-filled with this task — pick a different backend, change GPUs, edit env vars, then Launch from there', custom: () => _openEdit() });
         }
         // Save serve — save current launch config as a preset.
         if (task.type === 'serve' && task.payload?._cmd) {
@@ -2107,7 +2107,7 @@ export function _renderRunningTab() {
         // Edit command — only meaningful for serve tasks that aren't running.
         // Lets the user tweak flags after a crash/error and relaunch.
         if (task.type === 'serve' && task.status !== 'running' && task.payload?._cmd) {
-          items.push({ label: 'Edit command', action: 'edit', custom: async () => {
+          items.push({ label: 'Edit cmd & relaunch', action: 'edit', tooltip: 'Edit the raw vllm/llama-server cmd string in a dialog and relaunch immediately on the same host', custom: async () => {
             const newCmd = await _promptEditServeCmd(task.payload._cmd);
             if (newCmd == null) return; // cancelled
             try {
@@ -2201,7 +2201,19 @@ export function _renderRunningTab() {
           _copyText(last);
           uiModule.showToast('Copied last 50 lines');
         }});
-        items.push({ label: 'Remove', action: 'kill', danger: true });
+        // Label matches behavior — the kill handler ALWAYS first kills
+        // the live tmux session and (for serve tasks) deletes the
+        // matching model-endpoint, THEN animates the task card out.
+        // Just "Remove" hid that it stops the live serve too.
+        const _isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
+        items.push({
+          label: _isLive ? 'Stop and remove' : 'Remove',
+          action: 'kill',
+          tooltip: _isLive
+            ? 'Kill the live tmux session, deregister the chat endpoint, and remove this row'
+            : 'Remove this row',
+          danger: true,
+        });
         // Cancel = mobile-only dismiss item. Same pattern as the email kebab:
         // the `dropdown-cancel-mobile` class is hidden on desktop and styled
         // as a separated bottom row on mobile (border-top + extra padding).
@@ -2228,6 +2240,7 @@ export function _renderRunningTab() {
             + (item.danger ? ' cookbook-dropdown-danger' : '')
             + (item.mobileOnly ? ' dropdown-cancel-mobile' : '');
           div.style.cssText = 'display:flex;align-items:center;gap:8px;';
+          if (item.tooltip) div.title = item.tooltip;
           const ic = _MENU_ICONS[item.action] || '';
           div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></span><span>${item.label}</span>`;
           div.addEventListener('click', () => {
@@ -2347,22 +2360,57 @@ export function _renderRunningTab() {
       _animateOutThenRemove(el, task.sessionId);
     });
 
-    // Wire kill
-    el.querySelector('.cookbook-task-action-kill').addEventListener('click', () => {
+    // Wire kill — awaits the SSH/tmux kill and verifies the session is
+    // actually gone before removing the row. Previously fire-and-forget,
+    // which meant a failed kill (wrong remoteHost, SSH error, tmux server
+    // already exited) silently left the live serve running while the
+    // row disappeared from the UI.
+    el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
+      const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
       if (ollamaUnload) {
-        fetch('/api/shell/exec', {
+        try {
+          await fetch('/api/shell/exec', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: ollamaUnload }),
+          });
+        } catch (_) { /* unload best-effort */ }
+      }
+      let killOk = true;
+      try {
+        const r = await fetch('/api/shell/exec', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: ollamaUnload }),
-        }).catch(() => {});
+          body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
+        });
+        if (r.ok) {
+          const out = await r.json();
+          // Don't trust exit_code alone — tmux kill returns 0 even when
+          // there was nothing to kill. Verify the session is actually gone.
+          if (task.sessionId && isLive) {
+            try {
+              const probe = await fetch('/api/shell/exec', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
+              });
+              if (probe.ok) {
+                const pj = await probe.json();
+                // has-session exits 0 when session STILL exists; non-zero = gone.
+                if ((pj.exit_code || 0) === 0) killOk = false;
+              }
+            } catch (_) { /* probe best-effort; trust kill */ }
+          }
+        } else {
+          killOk = false;
+        }
+      } catch (_) { killOk = false; }
+      if (!killOk) {
+        try { uiModule.showToast('Kill failed — session may still be running. Check `tmux ls` on the server.', 'error'); } catch (_) {}
+        return;  // leave the row so the user can retry
       }
-      fetch('/api/shell/exec', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
-      }).catch(() => {});
       if (task.type === 'serve' && task.payload) {
         const endpointUrl = _endpointUrlForTask(task, outputText);
         _removeEndpointByUrl(endpointUrl);
@@ -2401,7 +2449,13 @@ export function _renderRunningTab() {
     if (targetBody) targetBody.appendChild(el);
     else group.appendChild(el);
 
-    if (task.status === 'running') {
+    // Auto-attach the tmux output stream for any task whose underlying
+    // session could still be alive — not just 'running'. Scheduler-
+    // launched serves transition to 'ready' as soon as /v1/models
+    // responds; without this, the user opens the Running tab and sees
+    // only the placeholder ("Launched by scheduled task …") because
+    // _reconnectTask never fires for status 'ready'/'loading'/'warming'.
+    if (['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status)) {
       _reconnectTask(el, task);
     }
   }

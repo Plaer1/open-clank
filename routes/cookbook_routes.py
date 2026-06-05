@@ -801,6 +801,55 @@ def setup_cookbook_routes() -> APIRouter:
         finally:
             db.close()
 
+    def _pick_free_port_for_ollama(
+        remote: str | None, ssh_port: str | None, start_port: int, max_offset: int
+    ) -> int | None:
+        """Return the first free port in [start_port, start_port+max_offset] on
+        the target host. Used to pick a real bind for `ollama serve` so we
+        don't reattach to an external systemd ollama (or other listener) the
+        Cookbook Stop button can't kill."""
+        import socket
+        if remote:
+            # Probe over SSH. Bash's /dev/tcp gives a portable "is anything
+            # listening" check without requiring ss/netstat/nmap.
+            ssh_base = ["ssh", "-o", "ConnectTimeout=4", "-o", "StrictHostKeyChecking=no"]
+            if ssh_port and str(ssh_port) != "22":
+                if not _SSH_PORT_RE.match(str(ssh_port)):
+                    return None
+                ssh_base.extend(["-p", str(ssh_port)])
+            host_arg = remote
+            if not _REMOTE_HOST_RE.match(host_arg):
+                return None
+            probe_ports = " ".join(str(start_port + i) for i in range(max_offset + 1))
+            script = (
+                f"for p in {probe_ports}; do "
+                "if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then "
+                "echo $p; exit 0; fi; exec 3<&-; exec 3>&-; done; exit 1"
+            )
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ssh_base + [host_arg, script],
+                    capture_output=True, text=True, timeout=8,
+                )
+                if r.returncode == 0:
+                    out = (r.stdout or "").strip().splitlines()
+                    if out and out[0].isdigit():
+                        return int(out[0])
+            except Exception:
+                return None
+            return None
+        # Local: just try to connect.
+        for off in range(max_offset + 1):
+            p = start_port + off
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.25)
+                try:
+                    s.connect(("127.0.0.1", p))
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    return p
+        return None
+
     def _auto_register_llm_endpoint(req: ServeRequest, remote: str | None) -> str | None:
         """Register a freshly-served LLM as a model endpoint so it appears in the
         model picker without a manual /setup step — the text-model sibling of
@@ -815,21 +864,37 @@ def setup_cookbook_routes() -> APIRouter:
         import re
         from core.database import SessionLocal, ModelEndpoint
 
-        # Port: an explicit --port wins. Otherwise fall back by backend — Ollama
-        # is the only server in our generated commands that omits --port.
+        # Port: ordered fallbacks so we match whatever the user actually
+        # asked for, not a hardcoded default:
+        #   1. explicit `--port N`  (vllm / sglang / llama-server)
+        #   2. `OLLAMA_HOST=host:port`  (the way Ollama specifies its bind)
+        #   3. fallback by backend (11434 ollama / 8080 llama.cpp)
+        # Previously the OLLAMA_HOST form was silently ignored and we
+        # registered every Ollama endpoint at 11434 — even if the user
+        # set OLLAMA_HOST=0.0.0.0:11435 to avoid colliding with an
+        # existing systemd Ollama, the registered endpoint pointed at
+        # the OLD port and showed as offline.
         port_match = re.search(r'--port\s+(\d+)', req.cmd)
+        ollama_host_match = re.search(r'OLLAMA_HOST=[^\s]*?:(\d+)', req.cmd)
         if port_match:
             port = int(port_match.group(1))
+        elif ollama_host_match:
+            port = int(ollama_host_match.group(1))
         elif "ollama" in req.cmd:
             port = 11434
         else:
             port = 8080  # llama.cpp's llama-server default — the Apple Silicon path
 
         # Determine host (mirrors the image path: SSH alias for remote serves).
+        # For local serves while Odysseus runs inside Docker, "localhost"
+        # resolves to the container itself — useless. Use host.docker.internal
+        # which compose maps to the actual host, matching what /setup adds
+        # for Ollama by hand.
         if remote:
             host = remote.split("@")[-1] if "@" in remote else remote
         else:
-            host = "localhost"
+            from routes.model_routes import _docker_host_gateway_reachable
+            host = "host.docker.internal" if _docker_host_gateway_reachable() else "localhost"
 
         base_url = f"http://{host}:{port}/v1"
 
@@ -927,6 +992,19 @@ def setup_cookbook_routes() -> APIRouter:
         session_id = f"serve-{uuid.uuid4().hex[:8]}"
         remote = req.remote_host
         is_windows = req.platform == "windows"
+
+        # Ollama: if the user didn't pin a port, resolve the actual port we'll
+        # bind to here (before runner construction) by probing the target host.
+        # Otherwise the runner script picks one at runtime and `_auto_register`
+        # below still registers the stale 11434 default — which on a host with
+        # a systemd ollama lands on the wrong (unreachable-from-docker) service.
+        if "ollama" in req.cmd and "OLLAMA_HOST=" not in req.cmd:
+            _ollama_bind_host = "0.0.0.0" if remote else "127.0.0.1"
+            _ollama_chosen_port = _pick_free_port_for_ollama(
+                remote, req.ssh_port, start_port=11434, max_offset=10,
+            )
+            if _ollama_chosen_port:
+                req.cmd = f"OLLAMA_HOST={_ollama_bind_host}:{_ollama_chosen_port} {req.cmd}"
         # LOCAL execution on a native-Windows host never uses tmux (detached
         # process path below), regardless of the UI-supplied platform.
         local_windows = IS_WINDOWS and not remote
@@ -1089,38 +1167,24 @@ def setup_cookbook_routes() -> APIRouter:
                     req.cmd,
                     default_host=_ollama_default_host,
                 )
-                # Ollama can be a host binary, a system service, or a Docker
-                # container. If the HTTP API is already reachable, the model is
-                # already served and we should not require a host `ollama` CLI.
+                # Always launch a fresh ollama under tmux so Stop reliably
+                # kills it. If the requested port is busy (e.g. a systemd
+                # ollama on 11434), scan upward for a free one rather than
+                # silently reattaching to an external service that Stop
+                # can't reach.
                 runner_lines.append(f'ODYSSEUS_OLLAMA_HOST={_bash_squote(_ollama_host)}')
                 runner_lines.append(f'ODYSSEUS_OLLAMA_PORT="{_ollama_port}"')
-                runner_lines.append('ODYSSEUS_OLLAMA_URL=""')
-                runner_lines.append('for _ody_ollama_try in $(seq 1 20); do')
-                runner_lines.append('  for _ody_ollama_port in "$ODYSSEUS_OLLAMA_PORT" 11434; do')
-                runner_lines.append('    [ -z "$_ody_ollama_port" ] && continue')
-                runner_lines.append('    for _ody_ollama_host in 127.0.0.1 localhost host.docker.internal; do')
-                runner_lines.append('      _ody_ollama_url="http://${_ody_ollama_host}:${_ody_ollama_port}"')
-                runner_lines.append('      if curl -sf "$_ody_ollama_url/api/tags" >/dev/null 2>&1; then')
-                runner_lines.append('        ODYSSEUS_OLLAMA_URL="$_ody_ollama_url"')
-                runner_lines.append('        ODYSSEUS_OLLAMA_PORT="$_ody_ollama_port"')
-                runner_lines.append('        break 3')
-                runner_lines.append('      fi')
-                runner_lines.append('    done')
-                runner_lines.append('  done')
-                runner_lines.append('  [ "$_ody_ollama_try" -eq 1 ] && echo "[odysseus] Waiting for an existing Ollama API on ports ${ODYSSEUS_OLLAMA_PORT}/11434..."')
-                runner_lines.append('  sleep 1')
-                runner_lines.append('done')
-                runner_lines.append('if [ -n "$ODYSSEUS_OLLAMA_URL" ]; then')
-                runner_lines.append('  if [ "$ODYSSEUS_OLLAMA_PORT" != "' + _ollama_port + '" ]; then')
-                runner_lines.append('    echo "[odysseus] Selected Ollama port ' + _ollama_port + ' was not reachable; using running Ollama on port ${ODYSSEUS_OLLAMA_PORT}."')
+                runner_lines.append('for _ody_off in 0 1 2 3 4 5 6 7 8 9; do')
+                runner_lines.append('  _ody_try_port=$((ODYSSEUS_OLLAMA_PORT + _ody_off))')
+                runner_lines.append('  if ! (exec 3<>/dev/tcp/127.0.0.1/$_ody_try_port) 2>/dev/null; then')
+                runner_lines.append('    exec 3<&-; exec 3>&-')
+                runner_lines.append('    ODYSSEUS_OLLAMA_PORT="$_ody_try_port"')
+                runner_lines.append('    break')
                 runner_lines.append('  fi')
-                runner_lines.append('  echo "[odysseus] Ollama API ready on port ${ODYSSEUS_OLLAMA_PORT}: ${ODYSSEUS_OLLAMA_URL}"')
-                runner_lines.append('  echo "[odysseus] This task is monitoring an existing Ollama server; stopping it here will not stop an external Docker/system service."')
-                runner_lines.append('  exec bash -i')
-                runner_lines.append('fi')
+                runner_lines.append('  exec 3<&-; exec 3>&-')
+                runner_lines.append('done')
                 runner_lines.append('if ! command -v ollama &>/dev/null; then')
-                runner_lines.append('  echo "ERROR: Ollama not found and no Ollama API is reachable on 127.0.0.1, localhost, or host.docker.internal (ports ${ODYSSEUS_OLLAMA_PORT}/11434)."')
-                runner_lines.append('  echo "Install Ollama, start an Ollama service/container on this server, or pick the port where it is already listening."')
+                runner_lines.append('  echo "ERROR: Ollama not found on this server. Install it from https://ollama.com/download or `curl -fsSL https://ollama.com/install.sh | sh`."')
                 runner_lines.append('  echo')
                 runner_lines.append('  echo "=== Process exited with code 127 ==="')
                 runner_lines.append('  exec bash -i')
@@ -2017,12 +2081,14 @@ def setup_cookbook_routes() -> APIRouter:
                 sid = line.split(":", 1)[0].strip()
                 if not sid or not _SESSION_ID_RE.match(sid):
                     continue
-                # Only adopt sessions that LOOK like model serves; ignore
-                # bare numeric tmux sessions and unrelated work.
-                if not (sid.startswith("serve-") or sid.startswith("cookbook-")):
-                    continue
                 if sid in known_sids:
                     continue
+                # Adopt any session whose pane is currently running a
+                # known model-server process (checked below). The earlier
+                # prefix gate (serve-/cookbook-) dropped legitimate
+                # serves whenever tmux fell back to numeric IDs, leaving
+                # them invisible in the Cookbook UI — so the user could
+                # neither see nor stop them.
                 # Skip zombie / idle-shell sessions. A tmux session left
                 # over from a crashed vllm just shows a bash prompt —
                 # adopting it would pollute the UI with "running" tasks
