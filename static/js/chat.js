@@ -53,7 +53,27 @@ import { createStreamRenderer } from './streamingRenderer.js';
 
   // shortModel and modelColor are now in chatRenderer.js
   var _shortModel = chatRenderer.shortModel;
+  var _modelRouteLabel = chatRenderer.modelRouteLabel;
+  var _sameModelName = chatRenderer.sameModelName;
   var _applyModelColor = chatRenderer.applyModelColor;
+  function _setRoleModelLabel(roleEl, requestedModel, actualModel, opts) {
+    if (!roleEl) return;
+    opts = opts || {};
+    const tsSpan = roleEl.querySelector('.role-timestamp');
+    const req = requestedModel || actualModel || '';
+    const actual = actualModel || requestedModel || '';
+    let label = _modelRouteLabel(req, actual);
+    if (opts.suffix) label += ' (' + opts.suffix + ')';
+    if (opts.characterName) label = opts.characterName;
+    roleEl.textContent = label + ' ';
+    _applyModelColor(roleEl, actual || req);
+    if (req && actual && !_sameModelName(req, actual)) {
+      roleEl.title = req + ' -> ' + actual + (opts.reason ? ': ' + opts.reason : '');
+    } else if (!opts.reason) {
+      roleEl.removeAttribute('title');
+    }
+    if (tsSpan) roleEl.appendChild(tsSpan);
+  }
   // Per-session research tracking (supports concurrent research across sessions)
   const _researchingStreamIds = new Set();
   let _researchTimerEl = null, _researchTimerInterval = null;
@@ -556,7 +576,6 @@ import { createStreamRenderer } from './streamingRenderer.js';
     let _thinkOpen = false;
     let holder = null;
     let finalMeta = null;
-    let finalModelName = null;
     let spinner = null;
     let timedOut = false;
     let processingProbeTimer = null;
@@ -892,11 +911,13 @@ import { createStreamRenderer } from './streamingRenderer.js';
         loadingText = 'Processing request...';
       }
 
-      var roleLabel = _shortModel(modelName);
+      var roleLabel = _modelRouteLabel(modelName, modelName);
       var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
       if (_charNameInit) roleLabel = _charNameInit;
       const roleTs = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
       holder.innerHTML = `<div class="role">${uiModule.esc(roleLabel)} <span class="role-timestamp">${roleTs}</span></div><div class="body"></div>`;
+      holder._requestedModel = modelName;
+      holder._actualModel = modelName;
       _applyModelColor(holder.querySelector('.role'), modelName);
       holder.style.position = 'relative';
       
@@ -1807,21 +1828,16 @@ import { createStreamRenderer } from './streamingRenderer.js';
                 if (!_isBg && holder) {
                   const roleEl = holder.querySelector('.role');
                   if (roleEl) {
-                    const tsSpan = roleEl.querySelector('.role-timestamp');
-                    var _modelLabel = _shortModel(json.model);
-                    if (json.suffix) {
-                      _modelLabel += ' (' + json.suffix + ')';
-                      holder._roleSuffix = json.suffix;
-                    }
+                    holder._requestedModel = json.requested_model || json.model || holder._requestedModel;
+                    holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
+                    if (json.suffix) holder._roleSuffix = json.suffix;
                     // Prepend character name if sent by server or set locally
                     var _charName = json.character_name || (presetsModule.getCharacterName ? presetsModule.getCharacterName() : '');
-                    if (_charName) {
-                      _modelLabel = _charName;
-                      holder._characterName = _charName;
-                    }
-                    roleEl.textContent = _modelLabel + ' ';
-                    _applyModelColor(roleEl, json.model);
-                    if (tsSpan) roleEl.appendChild(tsSpan);
+                    if (_charName) holder._characterName = _charName;
+                    _setRoleModelLabel(roleEl, holder._requestedModel, holder._actualModel, {
+                      suffix: holder._roleSuffix,
+                      characterName: holder._characterName,
+                    });
                   }
                 }
               } else if (json.type === 'fallback') {
@@ -1841,6 +1857,14 @@ import { createStreamRenderer } from './streamingRenderer.js';
                         (json.reason ? ': ' + json.reason : '') + ' — answered by ' + (json.answered_by || '');
                       _applyModelColor(_rEl, json.answered_by);
                       if (_tsS) _rEl.appendChild(_tsS);
+                      holder._requestedModel = json.selected_model || holder._requestedModel || modelName;
+                      const _hasResolvedActual = holder._actualModel && !_sameModelName(holder._actualModel, holder._requestedModel);
+                      holder._actualModel = _hasResolvedActual ? holder._actualModel : (json.answered_by || holder._actualModel || holder._requestedModel);
+                      _setRoleModelLabel(_rEl, holder._requestedModel, holder._actualModel, {
+                        suffix: holder._roleSuffix,
+                        characterName: holder._characterName,
+                        reason: json.reason,
+                      });
                     }
                   }
                 }
@@ -1881,6 +1905,15 @@ import { createStreamRenderer } from './streamingRenderer.js';
                   note.appendChild(contBtn);
                   _chatBox.appendChild(note);
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
+                }
+              } else if (json.type === 'model_actual') {
+                if (!_isBg && holder) {
+                  holder._requestedModel = json.requested_model || holder._requestedModel || modelName;
+                  holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
+                  _setRoleModelLabel(holder.querySelector('.role'), holder._requestedModel, holder._actualModel, {
+                    suffix: holder._roleSuffix,
+                    characterName: holder._characterName,
+                  });
                 }
               } else if (json.type === 'attachments') {
                 if (_isBg) continue;
@@ -1959,6 +1992,10 @@ import { createStreamRenderer } from './streamingRenderer.js';
                 }
               } else if (json.type === 'metrics') {
                 metrics = json.data;
+                if (!_isBg && holder && metrics) {
+                  holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
+                  holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
+                }
                 if (_isBg) {
                   var bgM = _backgroundStreams.get(streamSessionId);
                   if (bgM) bgM.metrics = json.data;
@@ -2441,8 +2478,10 @@ import { createStreamRenderer } from './streamingRenderer.js';
                 const newRole = document.createElement('div');
                 newRole.className = 'role';
                 const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
-                newRole.textContent = _shortModel(metaS?.model) || '';
-                _applyModelColor(newRole, metaS?.model);
+                const _roundRequested = holder?._requestedModel || metaS?.model;
+                const _roundActual = holder?._actualModel || _roundRequested;
+                newRole.textContent = _modelRouteLabel(_roundRequested, _roundActual) || '';
+                _applyModelColor(newRole, _roundActual);
                 newWrap.appendChild(newRole);
                 const newBody = document.createElement('div');
                 newBody.className = 'body';
@@ -2548,18 +2587,16 @@ import { createStreamRenderer } from './streamingRenderer.js';
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
         finalMeta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-        finalModelName = _shortModel(metrics?.model || finalMeta?.model);
-        // Preserve suffix (e.g. "Research") if set by model_info event
-        if (holder._roleSuffix) finalModelName += ' (' + holder._roleSuffix + ')';
+        const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
+        const _finalRequestedModel = metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set
         var _charNameFinal = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
-        if (_charNameFinal) finalModelName = _charNameFinal;
         const roleEl = holder.querySelector('.role');
         if (roleEl) {
-          const tsSpan = roleEl.querySelector('.role-timestamp');
-          roleEl.textContent = finalModelName + ' ';
-          _applyModelColor(roleEl, metrics?.model || finalMeta?.model);
-          if (tsSpan) roleEl.appendChild(tsSpan);
+          _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {
+            suffix: holder._roleSuffix,
+            characterName: _charNameFinal || holder._characterName,
+          });
         }
         holder.dataset.raw = accumulated;
 

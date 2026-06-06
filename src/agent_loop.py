@@ -1741,6 +1741,8 @@ async def stream_agent_loop(
     has_real_usage = False
     backend_gen_tps = 0      # backend-reported true gen speed (llama.cpp timings)
     backend_prefill_tps = 0  # backend-reported prefill speed
+    requested_model = model
+    actual_model = model
     total_tool_calls = 0  # for budget enforcement
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
@@ -1913,6 +1915,7 @@ async def stream_agent_loop(
                         logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
                     elif data.get("type") == "usage":
                         u = data.get("data", {})
+                        actual_model = u.get("model") or actual_model
                         round_input = u.get("input_tokens", 0)
                         real_input_tokens += round_input
                         real_output_tokens += u.get("output_tokens", 0)
@@ -1929,9 +1932,14 @@ async def stream_agent_loop(
                     elif data.get("type") == "fallback":
                         # The selected model failed and another answered; surface
                         # the notice so a misconfigured provider isn't masked.
+                        actual_model = data.get("answered_by") or actual_model
                         logger.warning(f"[agent] round {round_num} fell back: "
                                        f"{data.get('selected_model')} -> {data.get('answered_by')}")
                         yield chunk
+                    elif data.get("type") == "model_actual":
+                        actual_model = data.get("model") or actual_model
+                        data["requested_model"] = requested_model
+                        yield f"data: {json.dumps(data)}\n\n"
                     elif "delta" in data:
                         if not first_token_received:
                             time_to_first_token = time.time() - total_start
@@ -2562,12 +2570,13 @@ async def stream_agent_loop(
     metrics = _compute_final_metrics(
         messages, full_response, total_duration, time_to_first_token,
         context_length, real_input_tokens, real_output_tokens,
-        has_real_usage, tool_events, round_texts, model=model,
+        has_real_usage, tool_events, round_texts, model=actual_model,
         last_round_input_tokens=last_round_input_tokens,
         prep_timings=prep_timings,
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
     )
+    metrics["requested_model"] = requested_model
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.
