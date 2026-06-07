@@ -285,6 +285,8 @@ _HOST_TO_CURATED = (
     ("x.ai", "xai"),
     ("openrouter.ai", "openrouter"),
     ("ollama.com", "ollama"),
+    ("opencode.ai/zen/go", "opencode-go"),
+    ("opencode.ai/zen", "opencode-zen"),
 )
 
 
