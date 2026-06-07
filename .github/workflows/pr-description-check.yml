@@ -7,12 +7,14 @@ on:
 # pull_request_target runs in the base-repo context (has secrets).
 # The checkout below pins to the base branch so no fork code is executed.
 # The script only reads context.payload and calls the GitHub API.
-# Least privilege: contents:read for the base-ref checkout, pull-requests:read
-# for pulls.get (mergeability), issues:write for label + comment management
-# (PR labels and comments both go through the issues API).
+# Least privilege: contents:read for the base-ref checkout, pull-requests:write
+# to add/remove labels and post comments on PRs, and issues:write for the same
+# on real issues. NOTE: modifying a *pull request's* labels/comments needs the
+# `pull-requests` scope even though the REST path is under `/issues/{n}/...`;
+# `issues:write` alone returns 403 on PRs.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: write
 
 jobs:
