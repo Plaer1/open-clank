@@ -48,7 +48,7 @@ class TestCompactionSummaryFailure:
         cc.get_context_length = lambda url, model: context_length
         cc.estimate_tokens = lambda msgs: 10000  # well over the threshold
         cc.llm_call_async = _boom
-        cc.resolve_endpoint = lambda which: (None, None, None)
+        cc.resolve_endpoint = lambda *a, **k: (None, None, None)
         cc._update_session_history = lambda *a, **k: None
         try:
             return asyncio.run(
