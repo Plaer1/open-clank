@@ -2495,7 +2495,21 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
 # Cookbook routes loopback. The agent's tool calls run in-process but
 # need to reach admin-gated cookbook routes; we ride the per-process
 # internal token so require_admin lets us through. See core/middleware.py.
-_COOKBOOK_BASE = "http://localhost:7000"
+#
+# Resolution order:
+#   1. ODYSSEUS_INTERNAL_BASE — explicit override (e.g. behind a TLS proxy).
+#   2. APP_PORT — derive http://127.0.0.1:$APP_PORT (matches docker-compose).
+#   3. Fallback http://127.0.0.1:7000 — preserves legacy default.
+#
+# 127.0.0.1 (not "localhost") avoids IPv6/DNS ambiguity for a strictly-local
+# call. Without this, tools that loop back (app_api, trigger_research,
+# cookbook state read/write) fail with "All connection attempts failed"
+# whenever the running uvicorn isn't on 7000 — which is most non-default
+# deployments and any side-by-side multi-instance setup.
+_COOKBOOK_BASE = os.environ.get(
+    "ODYSSEUS_INTERNAL_BASE",
+    f"http://127.0.0.1:{os.environ.get('APP_PORT', '7000')}",
+)
 
 
 def _internal_headers(owner: Optional[str] = None) -> Dict[str, str]:
