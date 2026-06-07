@@ -33,6 +33,7 @@ from core.platform_compat import (
     get_wsl_windows_user_profile,
 )
 from routes.shell_routes import TMUX_LOG_DIR
+from core.constants import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ _HF_TOKEN_STATUS_SNIPPET = (
 
 def setup_cookbook_routes() -> APIRouter:
     router = APIRouter(tags=["cookbook"])
-    _cookbook_state_path = Path(os.environ.get("DATA_DIR", "data")) / "cookbook_state.json"
+    _cookbook_state_path = Path(DATA_DIR) / "cookbook_state.json"
 
     def _mask_secret(value: str) -> str:
         if not value:
