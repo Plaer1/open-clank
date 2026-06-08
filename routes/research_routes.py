@@ -75,6 +75,38 @@ def _owned_enabled_endpoint(db, owner, endpoint_id=None):
     return owner_filter(q, ModelEndpoint, owner).first()
 
 
+def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
+    """Resolve a ModelEndpoint row into (chat_url, model, headers).
+
+    Mirrors endpoint_resolver.resolve_endpoint's provider-auth handling for
+    panel-selected research endpoints. ChatGPT Subscription endpoints keep
+    OAuth tokens in ProviderAuthSession, so ep.api_key is intentionally empty.
+    """
+    from src.endpoint_resolver import (
+        build_chat_url,
+        build_headers,
+        resolve_endpoint_runtime as resolve_model_endpoint_runtime,
+    )
+
+    try:
+        base, api_key = resolve_model_endpoint_runtime(ep, owner=owner)
+    except Exception as e:
+        logger.warning("Could not resolve endpoint credentials for research: %s", e)
+        return None
+
+    ep_model = (model or "").strip()
+    if not ep_model:
+        try:
+            models = json.loads(ep.cached_models) if ep.cached_models else []
+            if models:
+                ep_model = _first_chat_model(models)
+        except Exception:
+            pass
+    if not ep_model:
+        return None
+    return build_chat_url(base), ep_model, build_headers(api_key, base)
+
+
 def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     router = APIRouter(tags=["research"])
 
@@ -371,7 +403,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
 
         if body.endpoint_id:
             from src.database import SessionLocal
-            from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
             db = SessionLocal()
             try:
                 # Owner-scoped: never resolve another user's private endpoint
@@ -380,18 +411,10 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 ep = _owned_enabled_endpoint(db, user, body.endpoint_id)
                 if not ep:
                     raise HTTPException(404, "Endpoint not found or disabled")
-                base = normalize_base(ep.base_url)
-                ep_url = build_chat_url(base)
-                ep_headers = build_headers(ep.api_key, base)
-                ep_model = body.model or ""
-                if not ep_model:
-                    try:
-                        import json as _json
-                        models = _json.loads(ep.cached_models) if ep.cached_models else []
-                        if models:
-                            ep_model = _first_chat_model(models)
-                    except Exception:
-                        pass
+                resolved = _resolve_endpoint_runtime(ep, owner=user, model=body.model)
+                if not resolved:
+                    raise HTTPException(400, "Endpoint is not configured with a usable model.")
+                ep_url, ep_model, ep_headers = resolved
             finally:
                 db.close()
         else:
@@ -408,7 +431,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 ep_url, ep_model, ep_headers = resolve_endpoint("chat", owner=user)
             if not ep_url:
                 from src.database import SessionLocal
-                from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
                 db = SessionLocal()
                 try:
                     # Owner-scoped first-enabled fallback: the caller's own rows
@@ -417,18 +439,9 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     # /api/v1/chat fallback (webhook_routes._first_enabled_endpoint).
                     ep = _owned_enabled_endpoint(db, user)
                     if ep:
-                        base = normalize_base(ep.base_url)
-                        ep_url = build_chat_url(base)
-                        ep_headers = build_headers(ep.api_key, base)
-                        ep_model = ""
-                        if ep.cached_models:
-                            try:
-                                import json as _json
-                                models = _json.loads(ep.cached_models)
-                                if models:
-                                    ep_model = _first_chat_model(models)
-                            except Exception:
-                                pass
+                        resolved = _resolve_endpoint_runtime(ep, owner=user)
+                        if resolved:
+                            ep_url, ep_model, ep_headers = resolved
                 finally:
                     db.close()
             if not ep_url:

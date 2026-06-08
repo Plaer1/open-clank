@@ -57,7 +57,7 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # Model resolution
 # ---------------------------------------------------------------------------
 
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url, build_headers, build_models_url
+from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
 
 
 def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
@@ -98,9 +98,12 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                              (f" matching '{target_endpoint_name}'" if target_endpoint_name else ""))
 
         for ep in endpoints:
-            base = _normalize_base(ep.base_url)
+            try:
+                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+            except Exception:
+                continue
             provider = _detect_provider(base)
-            headers = build_headers(ep.api_key, base)
+            headers = build_headers(api_key, base)
 
             if provider == "anthropic":
                 # Anthropic: match against hardcoded model list
@@ -114,16 +117,20 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
                 try:
-                    r = httpx.get(build_models_url(base), headers=headers, timeout=5)
-                    r.raise_for_status()
-                    data = r.json()
-                    model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-                    if not model_ids:
-                        model_ids = [
-                            m.get("name") or m.get("model")
-                            for m in (data.get("models") or [])
-                            if m.get("name") or m.get("model")
-                        ]
+                    models_url = build_models_url(base)
+                    if models_url:
+                        r = httpx.get(models_url, headers=headers, timeout=5)
+                        r.raise_for_status()
+                        data = r.json()
+                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+                        if not model_ids:
+                            model_ids = [
+                                m.get("name") or m.get("model")
+                                for m in (data.get("models") or [])
+                                if m.get("name") or m.get("model")
+                            ]
+                    else:
+                        model_ids = json.loads(ep.cached_models or "[]")
                 except Exception:
                     model_ids = []
 
@@ -1121,25 +1128,32 @@ async def do_list_models(content: str, session_id: Optional[str] = None, owner: 
         total_models = 0
 
         for ep in endpoints:
-            base = _normalize_base(ep.base_url)
+            try:
+                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+            except Exception:
+                continue
             provider = _detect_provider(base)
-            headers = build_headers(ep.api_key, base)
+            headers = build_headers(api_key, base)
 
             model_ids = []
             if provider == "anthropic":
                 model_ids = list(ANTHROPIC_MODELS)
             else:
                 try:
-                    r = httpx.get(build_models_url(base), headers=headers, timeout=5)
-                    r.raise_for_status()
-                    data = r.json()
-                    model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-                    if not model_ids:
-                        model_ids = [
-                            m.get("name") or m.get("model")
-                            for m in (data.get("models") or [])
-                            if m.get("name") or m.get("model")
-                        ]
+                    models_url = build_models_url(base)
+                    if models_url:
+                        r = httpx.get(models_url, headers=headers, timeout=5)
+                        r.raise_for_status()
+                        data = r.json()
+                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+                        if not model_ids:
+                            model_ids = [
+                                m.get("name") or m.get("model")
+                                for m in (data.get("models") or [])
+                                if m.get("name") or m.get("model")
+                            ]
+                    else:
+                        model_ids = json.loads(ep.cached_models or "[]")
                 except Exception:
                     model_ids = ["(endpoint offline)"]
 

@@ -361,6 +361,24 @@ class ModelEndpoint(TimestampMixin, Base):
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
     owner = Column(String, nullable=True, index=True)
+    # Optional OAuth/session-backed credential row. Used by subscription-backed
+    # providers that need refresh tokens instead of a static API key.
+    provider_auth_id = Column(String, nullable=True, index=True)
+
+
+class ProviderAuthSession(TimestampMixin, Base):
+    """Encrypted OAuth/session credentials for refresh-aware model providers."""
+    __tablename__ = "provider_auth_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    provider = Column(String, nullable=False, index=True)
+    owner = Column(String, nullable=True, index=True)
+    label = Column(String, nullable=True)
+    base_url = Column(String, nullable=False)
+    access_token = Column(EncryptedText, nullable=True)
+    refresh_token = Column(EncryptedText, nullable=True)
+    last_refresh = Column(DateTime, nullable=True)
+    auth_mode = Column(String, nullable=True)
 
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
@@ -799,6 +817,26 @@ def _migrate_add_model_endpoint_owner_column():
         conn.close()
     except Exception as e:
         logging.getLogger(__name__).warning(f"model_endpoints.owner migration failed: {e}")
+
+
+def _migrate_add_provider_auth_id_column():
+    """Add provider_auth_id column to model_endpoints if it doesn't exist."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "provider_auth_id" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN provider_auth_id VARCHAR")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_model_endpoints_provider_auth_id ON model_endpoints(provider_auth_id)")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'provider_auth_id' column + index to model_endpoints")
+        conn.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"model_endpoints.provider_auth_id migration failed: {e}")
 
 
 def _migrate_add_model_type_column():
@@ -1599,6 +1637,7 @@ def init_db():
     _migrate_add_model_type_column()
     _migrate_add_model_endpoint_refresh_columns()
     _migrate_add_model_endpoint_owner_column()
+    _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
