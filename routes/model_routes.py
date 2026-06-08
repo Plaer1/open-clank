@@ -857,7 +857,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
             and 400 <= result["status_code"] < 500
             and result["status_code"] not in (401, 403)
         ):
-            models_url = base.rstrip("/") + "/models"
+            models_url = build_models_url(base)
             try:
                 r2 = httpx.get(models_url, headers=headers, timeout=timeout, verify=llm_verify())
                 result2 = _result_from_response(r2)
