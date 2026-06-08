@@ -122,7 +122,7 @@ jobs:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
       - name: Inspect
         run: |
-          ref='${{ github.ref == ''refs/heads/main'' && ''latest'' || ''dev'' }}'
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then ref=latest; else ref=dev; fi
           docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${ref}"
         env:
           REGISTRY: ${{ env.REGISTRY }}
