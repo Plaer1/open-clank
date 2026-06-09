@@ -2307,48 +2307,7 @@ body.bg-pattern-sparkles {
       color: var(--fg);
       background: color-mix(in srgb, var(--fg) 9%, transparent);
     }
-    /* Plan mode: "Approve & Run" affordance under a proposed plan */
-    .plan-approve-bar {
-      margin: 8px 0 2px;
-    }
-    .plan-approve-btn {
-      font: inherit;
-      font-size: 13px;
-      font-weight: 600;
-      padding: 6px 14px;
-      border-radius: 8px;
-      cursor: pointer;
-      color: var(--accent);
-      background: color-mix(in srgb, var(--accent) 12%, transparent);
-      border: 1px solid var(--accent);
-      transition: background 0.15s, transform 0.1s;
-    }
-    .plan-approve-btn:hover {
-      background: color-mix(in srgb, var(--accent) 22%, transparent);
-    }
-    .plan-approve-btn:active {
-      transform: scale(0.97);
-    }
-    .plan-approve-bar {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .plan-open-btn {
-      font: inherit;
-      font-size: 13px;
-      padding: 6px 12px;
-      border-radius: 8px;
-      cursor: pointer;
-      color: var(--fg);
-      background: color-mix(in srgb, var(--fg) 8%, transparent);
-      border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
-      transition: background 0.15s;
-    }
-    .plan-open-btn:hover {
-      background: color-mix(in srgb, var(--fg) 15%, transparent);
-    }
-    /* GitHub-style task lists (- [ ] / - [x]) — used by plan-mode checklists */
+    /* GitHub-style task lists (- [ ] / - [x]) */
     li.task-item {
       list-style: none;
       margin-left: -1.2em;
