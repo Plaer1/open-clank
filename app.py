@@ -529,9 +529,6 @@ upload_cleanup_task = None
 from routes.emoji_routes import setup_emoji_routes
 app.include_router(setup_emoji_routes())
 
-from routes.workspace_routes import setup_workspace_routes
-app.include_router(setup_workspace_routes())
-
 # Sessions
 from routes.session_routes import setup_session_routes
 session_config = {"REQUEST_TIMEOUT": REQUEST_TIMEOUT, "OPENAI_API_KEY": OPENAI_API_KEY, "SESSIONS_FILE": SESSIONS_FILE}
@@ -649,10 +646,6 @@ app.include_router(calendar_router)
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
-
-# Terminal agents (tmux-backed Codex/Claude/shell sessions)
-from routes.terminal_agent_routes import setup_terminal_agent_routes
-app.include_router(setup_terminal_agent_routes())
 
 # Cookbook (model download/serve/cache, cookbook state sync)
 from routes.cookbook_routes import setup_cookbook_routes

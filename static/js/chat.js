@@ -817,10 +817,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (incognitoChk && incognitoChk.checked) {
         fd.append('incognito', 'true');
       }
-      const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
-      if (_ws) {
-        fd.append('workspace', _ws);
-      }
       if (presetsModule.getSelectedPreset()) {
         fd.append('preset_id', presetsModule.getSelectedPreset());
       }
