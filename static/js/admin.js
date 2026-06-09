@@ -1444,30 +1444,34 @@ function initEndpointForm() {
     });
   }
 
-  // Collapsible Add-Models subsections (API / Local). Both start collapsed
-  // so the card is compact; the last-used state is remembered per section
-  // in localStorage so a frequent API-adder doesn't re-expand every time.
-  document.querySelectorAll('#adm-add-api, #adm-add-local').forEach((sec) => {
-    const head = sec.querySelector('.adm-section-toggle');
-    if (!head) return;
-    const key = 'odysseus.addModels.' + sec.id + '.open';
-    let open = false;
-    try { open = localStorage.getItem(key) === '1'; } catch {}
-    const apply = () => {
-      sec.classList.toggle('collapsed', !open);
-      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // Add Models card has Local / API tabs (each tab pairs an Add form
+  // with its corresponding Added list). Remember the active tab in
+  // localStorage so the user lands back where they were.
+  (function wireModelsTabs() {
+    const tabs = document.querySelectorAll('.adm-models-tab');
+    const panes = document.querySelectorAll('.adm-models-pane');
+    if (!tabs.length || !panes.length) return;
+    const KEY = 'odysseus.addModels.activeTab';
+    let active = 'local';
+    try { active = localStorage.getItem(KEY) || 'local'; } catch {}
+    const apply = (name) => {
+      active = name;
+      try { localStorage.setItem(KEY, name); } catch {}
+      tabs.forEach((t) => {
+        const on = t.dataset.modelsTab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        // Inline style swap so we don't need a CSS rule for active.
+        t.style.borderBottomColor = on ? 'var(--accent, var(--red))' : 'transparent';
+        t.style.color = on ? 'var(--fg)' : 'var(--fg-muted)';
+      });
+      panes.forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.modelsPane !== name);
+      });
     };
-    apply();
-    const toggle = () => {
-      open = !open;
-      try { localStorage.setItem(key, open ? '1' : '0'); } catch {}
-      apply();
-    };
-    head.addEventListener('click', toggle);
-    head.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
-    });
-  });
+    tabs.forEach((t) => t.addEventListener('click', () => apply(t.dataset.modelsTab)));
+    apply(active);
+  })();
   document.querySelectorAll('.adm-quickstart-section').forEach((sec) => {
     const head = sec.querySelector('.adm-quickstart-toggle');
     if (!head) return;
