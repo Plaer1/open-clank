@@ -1452,8 +1452,12 @@ function initEndpointForm() {
     const panes = document.querySelectorAll('.adm-models-pane');
     if (!tabs.length || !panes.length) return;
     const KEY = 'odysseus.addModels.activeTab';
+    const validTabs = new Set(Array.from(tabs).map((t) => t.dataset.modelsTab));
     let active = 'local';
-    try { active = localStorage.getItem(KEY) || 'local'; } catch {}
+    try {
+      const stored = localStorage.getItem(KEY);
+      if (stored && validTabs.has(stored)) active = stored;
+    } catch {}
     const apply = (name) => {
       active = name;
       try { localStorage.setItem(KEY, name); } catch {}
