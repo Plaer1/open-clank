@@ -14,6 +14,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 let _envState;
 let _sshCmd;
 let _getPort;
+let _serverByVal;
 let _sshPrefix;
 let _getPlatform;
 let _isWindows;
@@ -97,14 +98,14 @@ function _selectedServeTarget(panel) {
   const select = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
   const servers = Array.isArray(_envState.servers) ? _envState.servers : [];
   let host = _envState.remoteHost || '';
-  let server = host ? servers.find(s => s.host === host) : null;
+  let server = host ? (_serverByVal?.(_envState.remoteServerKey || host) || servers.find(s => s.host === host)) : null;
   if (select && select.value != null) {
     if (select.value === 'local') {
       host = '';
       server = servers.find(s => !s.host || s.host === 'local') || null;
     } else {
       const idx = /^\d+$/.test(String(select.value)) ? parseInt(select.value, 10) : -1;
-      server = servers.find(s => s.host === select.value) || (idx >= 0 ? servers[idx] : null) || null;
+      server = _serverByVal?.(select.value) || (idx >= 0 ? servers[idx] : null) || null;
       host = server?.host || '';
     }
   }
@@ -114,7 +115,7 @@ function _selectedServeTarget(panel) {
     : (server?.name || 'local server');
   return {
     host,
-    port: host ? (_getPort(host) || server?.port || '') : '',
+    port: host ? (server?.port || _getPort(host) || '') : '',
     venv,
     label,
   };
@@ -242,6 +243,21 @@ function _shellPathExpr(path) {
 function _selectedGgufExpr(model, repo, relPath) {
   const rel = String(relPath || '').replace(/^\/+/, '');
   if (!rel) return '';
+  if (_isWindows()) {
+    // PowerShell: plain path — no bash $() syntax (backend validator rejects
+    // $( ) in non-prelude commands, and PowerShell doesn't have printf).
+    const relW = rel.replace(/\//g, '\\');
+    if (model.is_local_dir && model.path) {
+      const base = String(model.path || '').replace(/\/+$/, '').replace(/\//g, '\\');
+      return `${base}\\${repo.replace(/\//g, '\\')}\\${relW}`;
+    }
+    if (model.path) {
+      const base = String(model.path || '').replace(/\/+$/, '').replace(/\//g, '\\');
+      return `${base}\\models--${repo.replace(/\//g, '--')}\\snapshots\\${relW}`;
+    }
+    const cacheRepo = repo.replace(/\//g, '--');
+    return `$env:USERPROFILE\\.cache\\huggingface\\hub\\models--${cacheRepo}\\snapshots\\${relW}`;
+  }
   if (model.is_local_dir && model.path) {
     const base = String(model.path || '').replace(/\/+$/, '');
     return `$(printf %s ${_shellPathExpr(`${base}/${repo}/${rel}`)})`;
@@ -255,6 +271,15 @@ function _selectedGgufExpr(model, repo, relPath) {
 }
 
 function _ggufSearchDirExpr(model, repo) {
+  if (_isWindows()) {
+    if (model.is_local_dir && model.path) {
+      return `${String(model.path || '').replace(/\/+$/, '').replace(/\//g, '\\')}\\${repo.replace(/\//g, '\\')}`;
+    }
+    if (model.path) {
+      return `${String(model.path || '').replace(/\/+$/, '').replace(/\//g, '\\')}\\models--${repo.replace(/\//g, '--')}\\snapshots`;
+    }
+    return `$env:USERPROFILE\\.cache\\huggingface\\hub\\models--${repo.replace(/\//g, '--')}\\snapshots`;
+  }
   if (model.is_local_dir && model.path) return _shellQuote(`${String(model.path || '').replace(/\/+$/, '')}/${repo}`);
   if (model.path) return _shellQuote(`${String(model.path || '').replace(/\/+$/, '')}/models--${repo.replace(/\//g, '--')}/snapshots`);
   return `"$HOME/.cache/huggingface/hub/models--${repo.replace(/\//g, '--')}/snapshots"`;
@@ -512,7 +537,7 @@ function _rerenderCachedModels() {
       // The venv set per-server in Settings (server.envPath). Used as the venv
       // field default when the global active env path isn't carrying it, so a
       // configured server venv shows up without re-typing it.
-      const _selSrv = (_es.servers || []).find(s => s.host === (_es.remoteHost || '')) || {};
+      const _selSrv = _serverByVal?.(_es.remoteServerKey || _es.remoteHost || '') || {};
       const _srvVenv = _selSrv.envPath || '';
       // Serve state schema: { _byRepo: { <repo>: {...} }, _lastUsed: {...} }.
       // Loading priority: this-repo's saved settings → last-used (from any
@@ -800,17 +825,27 @@ function _rerenderCachedModels() {
           // model the file lives under "<path>/<repo>" — search there just like we
           // search the HF snapshots dir, so serving a GGUF from a custom dir works
           // instead of handing llama.cpp a directory (which fails).
-          const _ldir = m.path ? _shellQuote(`${m.path}/${repo}`) : '""';
-          f._gguf_path = selectedGguf
-            ? _selectedGgufExpr(m, repo, selectedGguf.rel_path)
-            : m.is_local_dir && m.path
-            ? `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`
-            : `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
+          const _ldir = m.path
+            ? (_isWindows() ? `${m.path.replace(/\//g, '\\')}\\${repo.replace(/\//g, '\\')}` : _shellQuote(`${m.path}/${repo}`))
+            : (_isWindows() ? '' : '""');
+          if (selectedGguf) {
+            f._gguf_path = _selectedGgufExpr(m, repo, selectedGguf.rel_path);
+          } else if (_isWindows()) {
+            // Windows fallback: no bash $() available; validator rejects it.
+            // Return empty so the serve fails with a clear message.
+            f._gguf_path = '';
+          } else if (m.is_local_dir && m.path) {
+            f._gguf_path = `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
+          } else {
+            f._gguf_path = `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
+          }
           // Vision: auto-find the mmproj (CLIP/projector) file in the same dir.
           // Resolved at runtime so the toggle just works if an mmproj-*.gguf is
           // present (downloaded alongside the model). Empty if none → cmd omits it.
           const _vsearchdir = (m.is_local_dir && m.path) ? _ldir : dir;
-          f._mmproj_path = `$(find ${_vsearchdir} -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1)`;
+          f._mmproj_path = _isWindows()
+            ? (_vsearchdir ? `${_vsearchdir}\\mmproj*.gguf` : '')
+            : `$(find ${_vsearchdir} -iname 'mmproj*.gguf' 2>/dev/null | sort | head -1)`;
         }
         if (f.reasoning_parser) {
           const _rpEl2 = panel.querySelector('[data-field="reasoning_parser"]');
@@ -860,10 +895,11 @@ function _rerenderCachedModels() {
         if (!wrap) return;
         try {
           const host = (_es.remoteHost || '').trim();
+          const selected = _serverByVal?.(_es.remoteServerKey || host);
           const params = new URLSearchParams({ model: repo });
           if (host) {
             params.set('host', host);
-            const _sp = (_es.servers || []).find(s => s.host === host)?.port;
+            const _sp = selected?.port;
             if (_sp) params.set('ssh_port', _sp);
           }
           // SERVE mode: this is a specific GGUF file already on disk, so its quant
@@ -926,10 +962,11 @@ function _rerenderCachedModels() {
         if (!el || !document.body.contains(el)) return false;  // panel closed → stop
         try {
           const host = (_es.remoteHost || '').trim();
+          const selected = _serverByVal?.(_es.remoteServerKey || host);
           const params = new URLSearchParams();
           if (host) {
             params.set('host', host);
-            const _sp = (_es.servers || []).find(s => s.host === host)?.port;
+            const _sp = selected?.port;
             if (_sp) params.set('ssh_port', _sp);
           }
           const res = await fetch('/api/cookbook/gpus' + (params.toString() ? '?' + params : ''));
@@ -1753,7 +1790,7 @@ function _rerenderCachedModels() {
             const _probeParams = new URLSearchParams();
             if (_probeHost) {
               _probeParams.set('host', _probeHost);
-              const _sp = (_envState.servers || []).find(s => s.host === _probeHost)?.port;
+              const _sp = (_serverByVal?.(_envState.remoteServerKey || _probeHost) || {}).port;
               if (_sp) _probeParams.set('ssh_port', _sp);
             }
             const _probeRes = await fetch('/api/cookbook/gpus' + (_probeParams.toString() ? '?' + _probeParams : ''), { credentials: 'same-origin' });
@@ -1845,8 +1882,7 @@ function _rerenderCachedModels() {
         if (_ssEl && _ssEl.value != null) {
           if (_ssEl.value === 'local') serveHost = '';
           else {
-            // Values are host strings now; resolve by host (numeric fallback).
-            const _srv = _envState.servers.find(s => s.host === _ssEl.value) || _envState.servers[parseInt(_ssEl.value)];
+            const _srv = _serverByVal?.(_ssEl.value) || _envState.servers[parseInt(_ssEl.value)];
             if (_srv) {
               serveHost = _srv.host;
               _srvEnv = _srv.env || '';
@@ -1905,7 +1941,7 @@ function _resolveCacheHost() {
   if (cacheSrv) {
     const val = cacheSrv.value;
     if (val === 'local') host = '';
-    else { const s = _envState.servers.find(x => x.host === val) || _envState.servers[parseInt(val)]; if (s) host = s.host; }
+    else { const s = _serverByVal?.(val) || _envState.servers[parseInt(val)]; if (s) host = s.host; }
   }
   return host;
 }
@@ -2101,11 +2137,11 @@ export async function _fetchCachedModels() {
         host = '';
         selectedServer = _envState.servers.find(s => !s.host || s.host === 'local') || _envState.servers[0];
       } else {
-        const s = _envState.servers.find(x => x.host === val) || _envState.servers[parseInt(val)];
+        const s = _serverByVal?.(val) || _envState.servers[parseInt(val)];
         if (s) { host = s.host; selectedServer = s; }
       }
     } else {
-      selectedServer = _envState.servers.find(s => s.host === host) || _envState.servers[0];
+      selectedServer = _serverByVal?.(_envState.remoteServerKey || host) || _envState.servers[0];
     }
     // Read extra model dirs from the SELECTED server's modelDirs (canonical source)
     const modelDirs = [];
@@ -2232,6 +2268,7 @@ export function initServe(shared) {
   _envState = shared._envState;
   _sshCmd = shared._sshCmd;
   _getPort = shared._getPort;
+  _serverByVal = shared._serverByVal;
   _sshPrefix = shared._sshPrefix;
   _getPlatform = shared._getPlatform;
   _isWindows = shared._isWindows;
