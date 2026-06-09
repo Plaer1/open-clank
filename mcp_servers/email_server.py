@@ -1130,8 +1130,8 @@ def _create_email_draft_document(
 def _draft_reply_to_email(uid, body, folder="INBOX", reply_all=False, account=None, title=None):
     """Create a threaded Odysseus reply draft document. Does not send."""
     conn = _imap_connect(account)
-    conn.select(folder, readonly=True)
-    status, msg_data = conn.uid("FETCH", _b(uid), "(RFC822)")
+    conn.select(_q(folder), readonly=True)
+    status, msg_data = conn.uid("FETCH", _b(uid), "(BODY.PEEK[])")
     conn.logout()
     if status != "OK" or not msg_data or not msg_data[0]:
         return {"error": f"Failed to fetch email UID {uid}"}

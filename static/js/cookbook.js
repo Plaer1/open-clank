@@ -117,7 +117,7 @@ function _isLocalEntry(s) { return !s || !s.host || s.host === 'local' || s.host
 // Resolve a dropdown option value to a server entry. New option values are
 // stable per-profile keys, so same-host SSH profiles stay distinguishable.
 // Host strings and numeric indices remain accepted for stale saved state.
-function _serverKey(s) {
+export function _serverKey(s) {
   if (_isLocalEntry(s)) return 'local';
   return 'srv:' + [
     s?.name || '',
@@ -128,7 +128,7 @@ function _serverKey(s) {
   ].map(v => encodeURIComponent(String(v).trim())).join('|');
 }
 
-function _serverByVal(val) {
+export function _serverByVal(val) {
   if (val == null || val === 'local' || val === '') return null;
   const raw = String(val);
   let s = _envState.servers.find(x => _serverKey(x) === raw);
@@ -138,7 +138,7 @@ function _serverByVal(val) {
   return s || null;
 }
 
-function _selectedServer() {
+export function _selectedServer() {
   if (_envState.remoteServerKey) {
     const keyed = _serverByVal(_envState.remoteServerKey);
     if (keyed) return keyed;
@@ -147,10 +147,23 @@ function _selectedServer() {
   return null;
 }
 
-function _currentServerValue() {
+export function _currentServerValue() {
   const selected = _selectedServer();
   if (selected) return _serverKey(selected);
   return _envState.remoteHost || 'local';
+}
+
+const GEMMA4_THINKING_CHAT_TEMPLATE = `{% for message in messages %}{% if message['role'] == 'system' %}<|turn>system\n<|think|>{{ message['content'] }}<turn|>\n{% elif message['role'] == 'user' %}<|turn>user\n{{ message['content'] }}<turn|>\n{% elif message['role'] == 'assistant' %}<|turn>model\n{{ message['content'] }}<turn|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|turn>model\n<|channel>thought{% endif %}`;
+
+function _isGemma4ThinkingModel(modelName) {
+  const n = (modelName || '').toLowerCase();
+  return n.includes('gemma-4') || n.includes('gemma4');
+}
+
+function _gemma4ThinkingChatTemplateArg(modelName) {
+  return _isGemma4ThinkingModel(modelName)
+    ? _shellQuote(GEMMA4_THINKING_CHAT_TEMPLATE)
+    : '';
 }
 
 function _buildServerOpts(excludeLocal = false) {
@@ -188,16 +201,18 @@ export function _sshCmd(host, cmd, port) {
 /** Get SSH port for a given host (or task object) */
 function _getPort(hostOrTask) {
   if (!hostOrTask) return '';
-  if (typeof hostOrTask === 'object') return hostOrTask.sshPort || _getPort(hostOrTask.remoteHost);
-  const srv = _envState.servers.find(s => s.host === hostOrTask);
+  if (typeof hostOrTask === 'object') return hostOrTask.sshPort || _getPort(hostOrTask.remoteServerKey || hostOrTask.remoteHost);
+  const selected = hostOrTask === _envState.remoteHost ? _selectedServer() : null;
+  const srv = selected || _serverByVal(hostOrTask);
   return srv?.port || '';
 }
 
 /** Get platform for a given host (or task object). Returns 'windows', 'termux', 'linux', or '' */
 export function _getPlatform(hostOrTask) {
   if (!hostOrTask) return _envState.platform || '';
-  if (typeof hostOrTask === 'object') return hostOrTask.platform || _getPlatform(hostOrTask.remoteHost);
-  const srv = _envState.servers.find(s => s.host === hostOrTask);
+  if (typeof hostOrTask === 'object') return hostOrTask.platform || _getPlatform(hostOrTask.remoteServerKey || hostOrTask.remoteHost);
+  const selected = hostOrTask === _envState.remoteHost ? _selectedServer() : null;
+  const srv = selected || _serverByVal(hostOrTask);
   return srv?.platform || '';
 }
 
@@ -416,6 +431,8 @@ export function _buildServeCmd(f, modelName, backend) {
     const _extraEnv = (f.extra_env ?? '').toString().replace(/\s+/g, ' ').trim();
     if (_extraEnv) cmd += _extraEnv + ' ';
     cmd += `${_vllmBin} serve ${modelName} --host 0.0.0.0 --port ${f.port || '8000'}`;
+    const _gemma4ChatTemplate = _gemma4ThinkingChatTemplateArg(modelName);
+    if (_gemma4ChatTemplate) cmd += ` --chat-template ${_gemma4ChatTemplate}`;
     cmd += ` --tensor-parallel-size ${f.tp || '1'}`;
     cmd += ` --max-model-len ${f.ctx || '8192'}`;
     cmd += ` --gpu-memory-utilization ${f.gpu_mem || '0.90'}`;
@@ -446,6 +463,8 @@ export function _buildServeCmd(f, modelName, backend) {
     const _extraEnv = (f.extra_env ?? '').toString().replace(/\s+/g, ' ').trim();
     if (_extraEnv) cmd += _extraEnv + ' ';
     cmd += `${_py3Bin} -m sglang.launch_server --model-path ${modelName} --host 0.0.0.0 --port ${f.port || '30000'}`;
+    const _gemma4ChatTemplate = _gemma4ThinkingChatTemplateArg(modelName);
+    if (_gemma4ChatTemplate) cmd += ` --chat-template ${_gemma4ChatTemplate}`;
     if (f.tp && f.tp !== '1') cmd += ` --tp ${f.tp}`;
     if (f.ctx) cmd += ` --context-length ${f.ctx}`;
     if (f.gpu_mem && f.gpu_mem !== '0.90') cmd += ` --mem-fraction-static ${f.gpu_mem}`;
@@ -910,6 +929,7 @@ async function _fetchDependencies() {
 function _applyServerSelection(val) {
   if (val === 'local') {
     _envState.remoteHost = '';
+    _envState.remoteServerKey = '';
     _envState.env = 'none';
     _envState.envPath = '';
     _envState.platform = '';
@@ -917,6 +937,7 @@ function _applyServerSelection(val) {
     const s = _serverByVal(val);
     if (s) {
       _envState.remoteHost = s.host;
+      _envState.remoteServerKey = _serverKey(s);
       _envState.env = s.env || 'none';
       _envState.envPath = s.envPath || '';
       _envState.platform = s.platform || '';
@@ -927,7 +948,7 @@ function _applyServerSelection(val) {
   // bug: the Download/Cache/Deps dropdowns set the host but never saved it, so
   // it silently reverted and downloads/scans hit the wrong server).
   _persistEnvState();
-  const _want = _envState.remoteHost || 'local';
+  const _want = _currentServerValue();
   document.querySelectorAll('#hwfit-server-select, #hwfit-dl-server, #hwfit-cache-server, #hwfit-deps-server').forEach(sel => {
     if (!sel || sel.tagName !== 'SELECT') return;
     // Option values are host strings now ('local' for the local box).
@@ -1038,7 +1059,7 @@ function _wireTabEvents(body) {
     // UI matches the resolved host. Done in a microtask so the dropdowns
     // exist by the time we set their .value.
     Promise.resolve().then(() => {
-      const _want = _envState.remoteHost || 'local';
+      const _want = _currentServerValue();
       document.querySelectorAll('#hwfit-server-select, #hwfit-dl-server, #hwfit-cache-server, #hwfit-deps-server').forEach(sel => {
         if (sel && sel.tagName === 'SELECT') sel.value = _want;
       });
@@ -2265,6 +2286,8 @@ const shared = {
   _sshCmd,
   _getPort,
   _sshPrefix,
+  _serverByVal,
+  _selectedServer,
   _getPlatform,
   _isWindows,
   _isMetal,
@@ -2317,7 +2340,7 @@ export {
   _startBackgroundMonitor,
   _setPanelField, _setPanelCheckbox,
   _wirePanelEvents, _runPanelCmd, _runModelDownload, _buildDownloadCmd,
-  _serverByVal, _serverKey, _currentServerValue, _selectedServer, _isLocalEntry,
+  _isLocalEntry,
 };
 
 const cookbookModule = { open, close, isVisible, startBackgroundMonitor: _startBackgroundMonitor };

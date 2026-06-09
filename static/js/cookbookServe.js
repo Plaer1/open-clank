@@ -97,14 +97,14 @@ function _selectedServeTarget(panel) {
   const select = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
   const servers = Array.isArray(_envState.servers) ? _envState.servers : [];
   let host = _envState.remoteHost || '';
-  let server = host ? servers.find(s => s.host === host) : null;
+  let server = host ? (_serverByVal?.(_envState.remoteServerKey || host) || servers.find(s => s.host === host)) : null;
   if (select && select.value != null) {
     if (select.value === 'local') {
       host = '';
       server = servers.find(s => !s.host || s.host === 'local') || null;
     } else {
       const idx = /^\d+$/.test(String(select.value)) ? parseInt(select.value, 10) : -1;
-      server = servers.find(s => s.host === select.value) || (idx >= 0 ? servers[idx] : null) || null;
+      server = _serverByVal?.(select.value) || (idx >= 0 ? servers[idx] : null) || null;
       host = server?.host || '';
     }
   }
@@ -512,7 +512,7 @@ function _rerenderCachedModels() {
       // The venv set per-server in Settings (server.envPath). Used as the venv
       // field default when the global active env path isn't carrying it, so a
       // configured server venv shows up without re-typing it.
-      const _selSrv = (_es.servers || []).find(s => s.host === (_es.remoteHost || '')) || {};
+      const _selSrv = _serverByVal?.(_es.remoteServerKey || _es.remoteHost || '') || {};
       const _srvVenv = _selSrv.envPath || '';
       // Serve state schema: { _byRepo: { <repo>: {...} }, _lastUsed: {...} }.
       // Loading priority: this-repo's saved settings → last-used (from any
@@ -1771,7 +1771,7 @@ function _rerenderCachedModels() {
             const _probeParams = new URLSearchParams();
             if (_probeHost) {
               _probeParams.set('host', _probeHost);
-              const _sp = (_envState.servers || []).find(s => s.host === _probeHost)?.port;
+              const _sp = (_serverByVal?.(_envState.remoteServerKey || _probeHost) || {}).port;
               if (_sp) _probeParams.set('ssh_port', _sp);
             }
             const _probeRes = await fetch('/api/cookbook/gpus' + (_probeParams.toString() ? '?' + _probeParams : ''), { credentials: 'same-origin' });
@@ -1871,8 +1871,7 @@ function _rerenderCachedModels() {
         if (_ssEl && _ssEl.value != null) {
           if (_ssEl.value === 'local') serveHost = '';
           else {
-            // Values are host strings now; resolve by host (numeric fallback).
-            const _srv = _envState.servers.find(s => s.host === _ssEl.value) || _envState.servers[parseInt(_ssEl.value)];
+            const _srv = _serverByVal?.(_ssEl.value) || _envState.servers[parseInt(_ssEl.value)];
             if (_srv) {
               serveHost = _srv.host;
               _srvEnv = _srv.env || '';
@@ -1931,7 +1930,7 @@ function _resolveCacheHost() {
 
   function _serverByCacheValue(val) {
     if (val === 'local') return null;
-    const found = _envState.servers.find(x => x.host === val)
+    const found = _serverByVal?.(val)
       || (/^\d+$/.test(String(val)) ? _envState.servers[parseInt(val)] : null)
       || _envState.servers.find(x => x.name === val)
       || null;
@@ -2151,7 +2150,7 @@ export async function _fetchCachedModels() {
     let selectedServer = null;
     const _serverByCacheValue = (val) => {
       if (val === 'local') return null;
-      return _envState.servers.find(x => x.host === val)
+      return _serverByVal?.(val)
         || (/^\d+$/.test(String(val)) ? _envState.servers[parseInt(val)] : null)
         || _envState.servers.find(x => x.name === val)
         || null;
