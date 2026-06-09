@@ -2015,6 +2015,9 @@
               <button type="button" role="tab" class="adm-models-tab" data-models-tab="api" aria-selected="false" style="background:transparent;border:0;border-bottom:2px solid transparent;padding:7px 14px;font-size:12px;font-weight:600;color:var(--fg-muted);cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
               </button>
+              <button type="button" role="tab" class="adm-models-tab" data-models-tab="added" aria-selected="false" style="background:transparent;border:0;border-bottom:2px solid transparent;padding:7px 14px;font-size:12px;font-weight:600;color:var(--fg-muted);cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Added Models
+              </button>
             </div>
 
             <!-- ── Local tab ─────────────────────────────────────────── -->
@@ -2058,14 +2061,6 @@
                 </div>
                 <div id="adm-epLocalMsg" class="adm-ep-inline-msg"></div>
               </div>
-              </div>
-
-              <!-- Added Local Models — inline in the Local tab -->
-              <div class="adm-ep-section" style="margin-top:18px;">
-                <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;">
-                  Added Local Models
-                </div>
-                <div id="adm-epList-local"><div class="admin-empty">Loading...</div></div>
               </div>
             </div>
 
@@ -2137,11 +2132,20 @@
                 <div id="adm-deviceAuthStatus" class="adm-ep-inline-msg"></div>
               </div>
               </div>
+            </div>
 
-              <!-- Added API Endpoints — inline in the API tab -->
+            <!-- ── Added Models tab ─────────────────────────────────── -->
+            <div class="adm-models-pane hidden" data-models-pane="added">
+              <div class="admin-toggle-sub" style="margin:0 0 8px 2px;">Endpoints you've added. Probe re-tests all; Clear offline removes the dead ones.</div>
+              <div class="adm-ep-section" style="margin-top:6px;">
+                <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
+                </div>
+                <div id="adm-epList-local"><div class="admin-empty">Loading...</div></div>
+              </div>
               <div class="adm-ep-section" style="margin-top:18px;">
-                <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;">
-                  Added API Endpoints
+                <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
                 </div>
                 <div id="adm-epList-api"><div class="admin-empty">No API endpoints yet.</div></div>
               </div>
