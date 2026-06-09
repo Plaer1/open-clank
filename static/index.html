@@ -2002,36 +2002,19 @@
 
         <!-- ═══ SERVICES TAB ═══ -->
         <div data-settings-panel="services">
-          <div class="admin-card" id="adm-models-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>Add Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoints)</span></h2>
-            <div class="adm-models-tabs" role="tablist" style="display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:12px;">
-              <button type="button" role="tab" class="adm-models-tab active" data-models-tab="local" aria-selected="true" style="background:transparent;border:0;border-bottom:2px solid var(--accent,var(--red));padding:7px 14px;font-size:12px;font-weight:600;color:var(--fg);cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
-              </button>
-              <button type="button" role="tab" class="adm-models-tab" data-models-tab="api" aria-selected="false" style="background:transparent;border:0;border-bottom:2px solid transparent;padding:7px 14px;font-size:12px;font-weight:600;color:var(--fg-muted);cursor:pointer;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
-              </button>
-            </div>
 
-            <!-- ── Local tab ─────────────────────────────────────────── -->
-            <div class="adm-models-pane" data-models-pane="local">
-              <div class="admin-toggle-sub" style="margin:0 0 8px 2px;">Add a local model server (Ollama, llama.cpp, vLLM).</div>
-              <div class="adm-add-section">
-                <div class="admin-model-form">
+          <!-- ── Local card ─────────────────────────────────────────── -->
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local Models</h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Add a local model server (Ollama, llama.cpp, vLLM).</div>
+            <div class="adm-add-section">
+              <div class="admin-model-form">
                 <div class="admin-model-form-row">
                   <input id="adm-epLocalUrl" type="text" placeholder="Paste endpoint URL, e.g. http://localhost:11434/v1" style="flex:1">
                 </div>
-                <!-- API key row stays in the DOM but is collapsed until the
-                     user clicks the Key button on the action row. Local
-                     endpoints rarely need a key; hiding it by default keeps
-                     the form a single visual line. -->
                 <div class="admin-model-form-row" id="adm-epLocalApiKey-row" style="display:none;">
                   <input id="adm-epLocalApiKey" type="password" placeholder="API key (optional — for protected local endpoints)" autocomplete="off" style="flex:1">
                 </div>
-                <!-- Action row: LLM/Image type, Quickstart buttons (Scan,
-                     Ollama), Key reveal toggle, Test, Add — all inline so
-                     the Quickstart fold is gone and Type sits with the
-                     primary actions. -->
                 <div class="admin-model-form-row">
                   <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:0.6;flex-shrink:0;">Type:<select id="adm-epLocalType" style="padding:5px;width:72px;flex-shrink:0;">
                     <option value="llm" selected>LLM</option>
@@ -2054,17 +2037,15 @@
                 </div>
                 <div id="adm-epLocalMsg" class="adm-ep-inline-msg"></div>
               </div>
-              </div>
             </div>
+          </div>
 
-            <!-- ── API tab ───────────────────────────────────────────── -->
-            <div class="adm-models-pane hidden" data-models-pane="api">
-              <div class="admin-toggle-sub" style="margin:0 0 8px 2px;">Connect a cloud provider (OpenAI, Anthropic, DeepSeek, OpenRouter, etc.).</div>
-              <div class="adm-add-section">
-                <div class="admin-model-form">
-                <!-- Custom picker (with logos). Hidden native <select> mirrors
-                     its value so the existing JS that reads adm-epProvider
-                     keeps working unchanged. -->
+          <!-- ── API card ───────────────────────────────────────────── -->
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API Models</h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Connect a cloud provider (OpenAI, Anthropic, DeepSeek, OpenRouter, etc.).</div>
+            <div class="adm-add-section">
+              <div class="admin-model-form">
                 <div class="adm-provider-picker adm-provider-combo" id="adm-provider-picker">
                   <input id="adm-epUrl" type="text" placeholder="Base URL or pick provider" autocomplete="off">
                   <button type="button" class="adm-provider-btn" id="adm-provider-btn" title="Pick provider">
@@ -2093,11 +2074,7 @@
                   <option value="https://opencode.ai/zen/go/v1" data-logo="opencode">OpenCode Go</option>
                   <option value="https://api.z.ai/api/coding/paas/v4" data-logo="zhipu">Z.AI Coding Plan</option>
                 </select>
-                <!-- API key row stays in DOM, hidden until Key button is
-                     clicked. Mirrors the Local section pattern: most users
-                     paste a key via the provider preset flow rather than
-                     typing it free-form, so the row only appears on demand. -->
-                <div class="admin-model-form-row" id="adm-epApiKey-row" style="display:none;">
+                <div class="admin-model-form-row" id="adm-epApiKey-row">
                   <input id="adm-epApiKey" type="password" placeholder="API key" autocomplete="off" style="flex:1">
                 </div>
                 <div class="admin-model-form-row" style="margin-top:-4px;">
@@ -2110,9 +2087,6 @@
                     <option value="image">Image</option>
                   </select></label>
                   <span style="flex:1"></span>
-                  <button class="admin-btn-sm" id="adm-epApiKeyBtn" title="Show / hide the API key field" aria-expanded="false" aria-controls="adm-epApiKey-row" style="opacity:0.75;display:inline-flex;align-items:center;gap:4px;">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>API
-                  </button>
                   <button class="admin-btn-sm" id="adm-epApiTestBtn" style="min-width:55px;text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:4px;">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test
                   </button>
@@ -2124,10 +2098,9 @@
                 <div id="adm-epApiMsg" class="adm-ep-inline-msg"></div>
                 <div id="adm-deviceAuthStatus" class="adm-ep-inline-msg"></div>
               </div>
-              </div>
             </div>
-
           </div>
+
         </div>
 
         <!-- ═══ ADDED MODELS TAB ═══ -->

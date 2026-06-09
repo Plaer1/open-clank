@@ -1168,7 +1168,6 @@ function initEndpointForm() {
     });
   };
   _wireKeyToggle('adm-epLocalKeyBtn', 'adm-epLocalApiKey-row');
-  _wireKeyToggle('adm-epApiKeyBtn', 'adm-epApiKey-row');
 
   // ── Added Models toolbar: Probe + Clear offline ────────────────────
   // Both buttons act over the currently-rendered endpoint list. The
@@ -1444,38 +1443,6 @@ function initEndpointForm() {
     });
   }
 
-  // Add Models card has Local / API tabs (each tab pairs an Add form
-  // with its corresponding Added list). Remember the active tab in
-  // localStorage so the user lands back where they were.
-  (function wireModelsTabs() {
-    const tabs = document.querySelectorAll('.adm-models-tab');
-    const panes = document.querySelectorAll('.adm-models-pane');
-    if (!tabs.length || !panes.length) return;
-    const KEY = 'odysseus.addModels.activeTab';
-    const validTabs = new Set(Array.from(tabs).map((t) => t.dataset.modelsTab));
-    let active = 'local';
-    try {
-      const stored = localStorage.getItem(KEY);
-      if (stored && validTabs.has(stored)) active = stored;
-    } catch {}
-    const apply = (name) => {
-      active = name;
-      try { localStorage.setItem(KEY, name); } catch {}
-      tabs.forEach((t) => {
-        const on = t.dataset.modelsTab === name;
-        t.classList.toggle('active', on);
-        t.setAttribute('aria-selected', on ? 'true' : 'false');
-        // Inline style swap so we don't need a CSS rule for active.
-        t.style.borderBottomColor = on ? 'var(--accent, var(--red))' : 'transparent';
-        t.style.color = on ? 'var(--fg)' : 'var(--fg-muted)';
-      });
-      panes.forEach((p) => {
-        p.classList.toggle('hidden', p.dataset.modelsPane !== name);
-      });
-    };
-    tabs.forEach((t) => t.addEventListener('click', () => apply(t.dataset.modelsTab)));
-    apply(active);
-  })();
   document.querySelectorAll('.adm-quickstart-section').forEach((sec) => {
     const head = sec.querySelector('.adm-quickstart-toggle');
     if (!head) return;
