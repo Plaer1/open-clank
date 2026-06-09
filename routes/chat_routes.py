@@ -452,7 +452,9 @@ def setup_chat_routes(
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
-        plan_mode = str(form_data.get("plan_mode", "")).lower() == "true"
+        # Plan mode is not part of the merge-ready UI. Ignore stale clients or
+        # manual form posts that still send plan_mode=true.
+        plan_mode = False
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         # Workspace: confine the agent's file/shell tools to this folder. Validate
         # it's a real directory; ignore (no confinement) otherwise.
