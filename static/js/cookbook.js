@@ -117,7 +117,7 @@ function _isLocalEntry(s) { return !s || !s.host || s.host === 'local' || s.host
 // Resolve a dropdown option value to a server entry. New option values are
 // stable per-profile keys, so same-host SSH profiles stay distinguishable.
 // Host strings and numeric indices remain accepted for stale saved state.
-export function _serverKey(s) {
+function _serverKey(s) {
   if (_isLocalEntry(s)) return 'local';
   return 'srv:' + [
     s?.name || '',
@@ -128,7 +128,7 @@ export function _serverKey(s) {
   ].map(v => encodeURIComponent(String(v).trim())).join('|');
 }
 
-export function _serverByVal(val) {
+function _serverByVal(val) {
   if (val == null || val === 'local' || val === '') return null;
   const raw = String(val);
   let s = _envState.servers.find(x => _serverKey(x) === raw);
@@ -138,7 +138,7 @@ export function _serverByVal(val) {
   return s || null;
 }
 
-export function _selectedServer() {
+function _selectedServer() {
   if (_envState.remoteServerKey) {
     const keyed = _serverByVal(_envState.remoteServerKey);
     if (keyed) return keyed;
@@ -147,7 +147,7 @@ export function _selectedServer() {
   return null;
 }
 
-export function _currentServerValue() {
+function _currentServerValue() {
   const selected = _selectedServer();
   if (selected) return _serverKey(selected);
   return _envState.remoteHost || 'local';
@@ -2317,7 +2317,7 @@ export {
   _startBackgroundMonitor,
   _setPanelField, _setPanelCheckbox,
   _wirePanelEvents, _runPanelCmd, _runModelDownload, _buildDownloadCmd,
-  _serverByVal, _isLocalEntry,
+  _serverByVal, _serverKey, _currentServerValue, _selectedServer, _isLocalEntry,
 };
 
 const cookbookModule = { open, close, isVisible, startBackgroundMonitor: _startBackgroundMonitor };
