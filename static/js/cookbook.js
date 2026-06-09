@@ -114,16 +114,43 @@ function _setCookbookOpening(on) {
 // True for the local server entry (empty / "local" / "localhost" host).
 function _isLocalEntry(s) { return !s || !s.host || s.host === 'local' || s.host.toLowerCase() === 'localhost'; }
 
-// Resolve a dropdown option value to a server entry. Option values are the
-// stable HOST string ('local' for the local box) — NOT array indices — because
-// `_envState.servers` gets deduped/reordered, which made index-based selection
-// silently resolve to the wrong (or local) server. Accepts a numeric index too
-// for backwards-compat with any stale value.
-function _serverByVal(val) {
+// Resolve a dropdown option value to a server entry. New option values are
+// stable per-profile keys, so same-host SSH profiles stay distinguishable.
+// Host strings and numeric indices remain accepted for stale saved state.
+export function _serverKey(s) {
+  if (_isLocalEntry(s)) return 'local';
+  return 'srv:' + [
+    s?.name || '',
+    s?.host || '',
+    s?.port || '',
+    s?.envPath || '',
+    s?.platform || '',
+  ].map(v => encodeURIComponent(String(v).trim())).join('|');
+}
+
+export function _serverByVal(val) {
   if (val == null || val === 'local' || val === '') return null;
-  let s = _envState.servers.find(x => x.host === val);
+  const raw = String(val);
+  let s = _envState.servers.find(x => _serverKey(x) === raw);
+  if (!s) s = _envState.servers.find(x => x.host === raw);
+  if (!s) s = _envState.servers.find(x => x.name === raw);
   if (!s && /^\d+$/.test(String(val))) s = _envState.servers[parseInt(val)];
   return s || null;
+}
+
+export function _selectedServer() {
+  if (_envState.remoteServerKey) {
+    const keyed = _serverByVal(_envState.remoteServerKey);
+    if (keyed) return keyed;
+  }
+  if (_envState.remoteHost) return _envState.servers.find(s => s.host === _envState.remoteHost) || null;
+  return null;
+}
+
+export function _currentServerValue() {
+  const selected = _selectedServer();
+  if (selected) return _serverKey(selected);
+  return _envState.remoteHost || 'local';
 }
 
 function _buildServerOpts(excludeLocal = false) {
@@ -134,13 +161,20 @@ function _buildServerOpts(excludeLocal = false) {
   const _localSrv = _localIdx >= 0 ? _envState.servers[_localIdx] : null;
   const _localLabel = (_localSrv && _localSrv.name) ? _localSrv.name : 'Local';
   let html = `<option value="local"${!_envState.remoteHost ? ' selected' : ''}>${esc(_localLabel)}</option>`;
+  const selectedKey = _envState.remoteServerKey || '';
+  let legacyHostSelected = false;
   for (let i = 0; i < _envState.servers.length; i++) {
     const s = _envState.servers[i];
     if (i === _localIdx) continue;                 // already the synthetic "local" option
     if (excludeLocal && _isLocalEntry(s)) continue;
     const label = s.name || s.host || `Server ${i + 1}`;
-    const selected = _envState.remoteHost === s.host ? ' selected' : '';
-    html += `<option value="${esc(s.host)}"${selected}>${esc(label)}</option>`;
+    const value = _serverKey(s);
+    let selected = selectedKey ? value === selectedKey : false;
+    if (!selectedKey && _envState.remoteHost === s.host && !legacyHostSelected) {
+      selected = true;
+      legacyHostSelected = true;
+    }
+    html += `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
   }
   return html;
 }
