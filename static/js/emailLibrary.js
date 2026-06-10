@@ -3705,7 +3705,7 @@ function _wireAttachmentHandlers(reader, folder) {
         _wp = sp.createWhirlpool(12);
         _spinnerHost = document.createElement('span');
         _spinnerHost.className = 'email-attachment-spinner';
-        _spinnerHost.style.cssText = 'display:inline-flex;width:12px;height:12px;align-items:center;justify-content:center;flex-shrink:0;';
+        _spinnerHost.style.cssText = 'display:inline-flex;width:12px;height:12px;align-items:center;justify-content:center;flex-shrink:0;position:relative;top:-2px;';
         _spinnerHost.appendChild(_wp.element);
         if (iconSvg) iconSvg.replaceWith(_spinnerHost);
       } catch (_) {}
