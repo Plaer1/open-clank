@@ -301,14 +301,8 @@ function _renderAccountsLoading() {
   try {
     const wp = spinnerModule.createWhirlpool(14);
     wp.element.classList.add('email-accounts-loading-whirlpool');
-    const label = document.createElement('span');
-    label.className = 'email-accounts-loading-label';
-    label.textContent = 'Accounts';
     strip.appendChild(wp.element);
-    strip.appendChild(label);
-  } catch (_) {
-    strip.textContent = 'Accounts...';
-  }
+  } catch (_) {}
 }
 
 function _syncEmailReminderBellVisibility(enabled) {
