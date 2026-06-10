@@ -29818,6 +29818,10 @@ body.doc-find-active mark.doc-find-mark.current {
 @media (min-width: 769px) {
   #email-lib-compose-btn { height: 28px; top: 0; }
 }
+/* Envelope icon picks up the user's accent so the primary action is
+   easy to spot at any size. The SVG already uses stroke=currentColor,
+   so a color: rule on the svg propagates. */
+#email-lib-compose-btn svg { color: var(--accent, var(--red)); }
 @media (max-width: 768px) {
   /* On mobile they're 1px higher than desktop. */
   #email-lib-select-btn, #email-lib-refresh-btn { top: -3px; }
