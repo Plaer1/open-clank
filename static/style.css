@@ -22809,7 +22809,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
 }
 .sort-dropdown-item {
   cursor: pointer;
-  padding: 6px 8px !important;
+  padding: 6px 8px 6px 6px !important;
   font-size: 11px !important;
   border-radius: 6px !important;
   border-bottom: none !important;
