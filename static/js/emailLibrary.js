@@ -2249,6 +2249,13 @@ async function _toggleCardPreview(card, em) {
   card.classList.add('email-card-expanded');
   card.classList.add('doclib-card-expanded');
   card.style.minHeight = `${Math.round(stableOpenHeight)}px`;
+  // Pull the card into view in case the user clicked an email further up
+  // the list whose top is partially scrolled off the viewport. Wait for
+  // the layout to settle (minHeight just changed) before scrolling so
+  // the browser scrolls toward the post-expansion position.
+  requestAnimationFrame(() => {
+    try { card.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) {}
+  });
   if (!em.is_read) {
     _syncEmailReadState(em.uid, true);
     fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(folderAtStart)}${_acct()}`, { method: 'POST' })
