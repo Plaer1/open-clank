@@ -1261,6 +1261,23 @@ body.bg-pattern-sparkles {
       #sessions-section .chats-manage-btn { opacity: 0.35 !important; }
       #sessions-section .chats-manage-btn:active { opacity: 1 !important; }
     }
+    /* Pull the 'manage' label out of email's absolute-positioning trick
+       so it sits in the flex flow and expands the button's clickable
+       area as it slides in. Otherwise hovering the visible 'manage'
+       text would actually be outside the button's bounding box. */
+    #sessions-section .chats-manage-btn .list-item-plus-label {
+      position: static;
+      transform: none;
+      max-width: 0;
+      overflow: hidden;
+      padding-right: 0;
+      transition: max-width 0.2s ease, opacity 0.18s ease, padding-right 0.18s ease;
+    }
+    #sessions-section .chats-manage-btn:hover .list-item-plus-label,
+    #sessions-section .chats-manage-btn:focus-visible .list-item-plus-label {
+      max-width: 80px;
+      padding-right: 4px;
+    }
 
     /* Collapse chevron */
     .section-collapse-btn {
