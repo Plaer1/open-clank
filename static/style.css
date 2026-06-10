@@ -1257,6 +1257,14 @@ body.bg-pattern-sparkles {
     #sessions-section .chats-manage-btn:focus-visible {
       opacity: 1 !important;
     }
+    /* No hover background on the Chats manage button — the inherited
+       section-header-btn rule was painting a tinted box behind the
+       'manage' label as it slid in. */
+    #sessions-section .chats-manage-btn,
+    #sessions-section .chats-manage-btn:hover,
+    #sessions-section .chats-manage-btn:focus-visible {
+      background: transparent !important;
+    }
     @media (hover: none) {
       #sessions-section .chats-manage-btn { opacity: 0.35 !important; }
       #sessions-section .chats-manage-btn:active { opacity: 1 !important; }
