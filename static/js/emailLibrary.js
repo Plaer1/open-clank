@@ -5046,6 +5046,14 @@ async function _bulkAction(action) {
       await _animateEmailCardRemoval(uids);
       const removed = new Set(uids.map(uid => String(uid)));
       state._libEmails = state._libEmails.filter(e => !removed.has(String(e.uid)));
+    } else if (action === 'done' && state._libFilter === 'undone') {
+      // The undone filter is a "show only not-done" view — after marking
+      // selected emails done, they no longer match. Animate them out and
+      // drop them from the local list so the view reflects the filter
+      // instead of leaving freshly-done cards sitting there.
+      await _animateEmailCardRemoval(uids);
+      const removed = new Set(uids.map(uid => String(uid)));
+      state._libEmails = state._libEmails.filter(e => !removed.has(String(e.uid)));
     }
   } finally {
     if (busySpinner) busySpinner.destroy();
