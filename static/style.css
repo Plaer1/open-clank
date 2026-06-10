@@ -33969,14 +33969,19 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
   white-space: nowrap;
 }
 .email-loading-with-label {
-  min-height: 180px;
+  /* Fill the email list grid so the spinner lands in the middle of the
+     email window rather than the top of the empty list section. */
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
   text-align: center;
+  pointer-events: none;
 }
+#email-lib-grid { position: relative; }
 .email-loading-label {
   font-size: 11px;
   opacity: 0.6;
