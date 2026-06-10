@@ -14314,6 +14314,17 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 /* Selected integration card — class beats inline borderColor reset */
 .intg-card.intg-card-active { border-color: var(--accent, var(--red)) !important; }
 
+/* Edge-dock resize handle: invisible at rest, accent stripe animates in
+   on hover. Inline background:transparent + transition come from
+   modalSnap.js; this rule paints the accent gradient on hover, beating
+   the inline style with !important. */
+.edge-dock-resize-handle-left:hover {
+  background: linear-gradient(to right, transparent 0 3px, color-mix(in srgb, var(--accent, var(--red)) 35%, transparent) 3px 7px, transparent 7px 10px) !important;
+}
+.edge-dock-resize-handle-right:hover {
+  background: linear-gradient(to left, transparent 0 3px, color-mix(in srgb, var(--accent, var(--red)) 35%, transparent) 3px 7px, transparent 7px 10px) !important;
+}
+
 [data-settings-panel="ai"] .admin-card > h2 > svg,
 [data-settings-panel="services"] .admin-card > h2 > svg,
 [data-settings-panel="added-models"] .admin-card > h2 > svg,

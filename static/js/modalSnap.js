@@ -809,10 +809,10 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     handle.style.bottom = '0';
     handle.style.width = '10px';
     handle.style.cursor = 'col-resize';
-    // Invisible drag affordance — the col-resize cursor still surfaces
-    // it on hover, but the accent stripe was distracting and felt like
-    // a misplaced UI element when first noticed.
+    // Invisible at rest, accent stripe fades in on hover (see
+    // .edge-dock-resize-handle CSS rule).
     handle.style.background = 'transparent';
+    handle.style.transition = 'background 0.18s ease';
     handle.style.pointerEvents = 'auto';
     handle.style.touchAction = 'none';
     handle.style.display = 'none';
