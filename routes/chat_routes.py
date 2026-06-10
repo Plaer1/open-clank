@@ -400,6 +400,7 @@ def setup_chat_routes(
             temperature=ctx.preset.temperature,
             max_tokens=ctx.preset.max_tokens,
             prompt_type=preset_id,
+            session_id=session,
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
@@ -456,7 +457,6 @@ def setup_chat_routes(
         # manual form posts that still send plan_mode=true.
         plan_mode = False
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
-        workspace = ""
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
             chat_mode = "agent"
@@ -635,7 +635,7 @@ def setup_chat_routes(
             # leak a doc that belongs to a DIFFERENT session.
             if not active_doc:
                 try:
-                    from src.tool_implementations import get_active_document
+                    from src.agent_tools.document_tools import get_active_document
                     _mem_id = get_active_document()
                     if _mem_id:
                         _mem_q = _doc_db.query(DBDocument).filter(DBDocument.id == _mem_id)
@@ -989,6 +989,7 @@ def setup_chat_routes(
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
                         tools=None,
+                        session_id=session,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1135,7 +1136,6 @@ def setup_chat_routes(
                         tool_policy=tool_policy,
                         owner=_user,
                         fallbacks=_fallback_candidates,
-                        workspace=None,
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
                     ):
