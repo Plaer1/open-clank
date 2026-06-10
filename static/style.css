@@ -1239,23 +1239,27 @@ body.bg-pattern-sparkles {
     .section-header-btn.active { opacity: 0.9; color: var(--accent); }
     .section-header-btn svg { width: 12px; height: 12px; }
 
-    /* Chats library — grid icon, hover-reveal so the header only toggles collapse */
+    /* Chats library — grid icon, hover-reveal so the header only toggles
+       collapse. Uses !important to win over .list-item-plus-btn's
+       opacity:1!important (the email-style plus button forces always-on,
+       which we don't want here — the manage button should fade until the
+       user actually hovers the section). */
     #sessions-section .chats-manage-btn {
-      opacity: 0;
+      opacity: 0 !important;
       transition: opacity 0.12s, background 0.08s;
     }
     #sessions-section .section-header-flex:hover .chats-manage-btn,
     #sessions-section .chats-manage-btn:hover,
     #sessions-section .chats-manage-btn:focus-visible {
-      opacity: 0.45;
+      opacity: 0.45 !important;
     }
     #sessions-section .chats-manage-btn:hover,
     #sessions-section .chats-manage-btn:focus-visible {
-      opacity: 1;
+      opacity: 1 !important;
     }
     @media (hover: none) {
-      #sessions-section .chats-manage-btn { opacity: 0.35; }
-      #sessions-section .chats-manage-btn:active { opacity: 1; }
+      #sessions-section .chats-manage-btn { opacity: 0.35 !important; }
+      #sessions-section .chats-manage-btn:active { opacity: 1 !important; }
     }
 
     /* Collapse chevron */
@@ -14011,7 +14015,7 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
   border-radius: 50%;
 }
-.adm-provider-caret { flex-shrink: 0; opacity: 0.5; transition: transform 0.15s; }
+.adm-provider-caret { flex-shrink: 0; transition: transform 0.15s; }
 .adm-provider-picker:has(.adm-provider-menu:not(.hidden)) .adm-provider-caret {
   transform: rotate(180deg);
 }
@@ -14273,6 +14277,25 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-top: -4px;
+}
+
+/* Settings panel — tint each card's h2 title icon with the user's accent
+   colour. Direct-child selector (`> h2 > svg`) so SVGs nested inside
+   header buttons (Test, kebab, etc.) are untouched. Each title icon uses
+   stroke="currentColor", so setting color propagates; existing inline
+   opacity:0.6 stays so the tint reads soft. */
+/* Selected integration card — class beats inline borderColor reset */
+.intg-card.intg-card-active { border-color: var(--accent, var(--red)) !important; }
+
+[data-settings-panel="ai"] .admin-card > h2 > svg,
+[data-settings-panel="services"] .admin-card > h2 > svg,
+[data-settings-panel="added-models"] .admin-card > h2 > svg,
+[data-settings-panel="search"] .admin-card > h2 > svg,
+[data-settings-panel="integrations"] .admin-card > h2 > svg,
+[data-settings-panel="reminders"] .admin-card > h2 > svg,
+[data-settings-panel="added-models"] .adm-ep-section-head > svg {
+  color: var(--accent, var(--red));
 }
 .admin-ep-actions {
   display: flex;
@@ -21463,7 +21486,7 @@ body.gallery-selecting .gallery-dl-btn,
   padding: 8px 10px;
   border: none;
   background: none;
-  color: var(--color-muted);
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
@@ -21565,9 +21588,11 @@ body.gallery-selecting .gallery-dl-btn,
   background: transparent; color: var(--fg); cursor: pointer; font-size: 13px;
   display: flex; align-items: center; justify-content: center; transition: all 0.15s;
 }
-.shortcut-action-btn:hover { border-color: var(--accent, #cc6a3a); background: color-mix(in srgb, var(--accent, #cc6a3a) 10%, var(--bg)); }
-.shortcut-action-btn.is-reset { opacity: 0.5; }
-.shortcut-action-btn.is-reset:hover { opacity: 1; }
+.shortcut-action-btn:not(.is-reset):hover { border-color: var(--accent, #cc6a3a); background: color-mix(in srgb, var(--accent, #cc6a3a) 10%, var(--bg)); }
+.shortcut-action-btn.is-reset { opacity: 0.55; border-color: transparent; background: transparent; }
+.shortcut-action-btn.is-reset:hover,
+.shortcut-action-btn.is-reset:focus,
+.shortcut-action-btn.is-reset:active { opacity: 0.55; background: transparent; border-color: transparent; }
 @keyframes shortcut-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
@@ -22659,23 +22684,17 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
 .settings-fallback-remove {
   flex-shrink: 0;
   margin-right: 4px;
-  width: 22px;
-  height: 22px;
-  line-height: 1;
-  font-size: 15px;
-  /* Nudge the × glyph 5px left within the button (button size unchanged). */
-  text-indent: -5px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: transparent;
   color: color-mix(in srgb, var(--fg) 55%, transparent);
   cursor: pointer;
   transition: border-color 0.12s, color 0.12s, background 0.12s;
-  position: relative;
-  top: -6px;
-  /* Glyph baseline trim: nudge × up 1px inside the button without moving the
-     button. line-height < 1 lets the glyph float toward the top of its line box. */
-  line-height: 0.85;
 }
 .settings-fallback-remove:hover {
   border-color: var(--red);

@@ -2482,12 +2482,15 @@ function _renderMainView() {
 
 // ---- Modal ----
 
-export function openTasks(focusId) {
+export function openTasks(focusId, opts) {
+  const o = opts || {};
   if (_open) {
-    // Already open — just focus the requested task.
+    // Already open — just focus the requested task / apply filter.
+    if (o.filter !== undefined) { _taskFilter = o.filter; _renderList(); }
     if (focusId) _focusTask(focusId);
     return;
   }
+  if (o.filter !== undefined) _taskFilter = o.filter;
   _pendingFocusTaskId = focusId || null;
   _open = true;
   _tasksCascadeNext = true;

@@ -29,7 +29,7 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
-    "image_gen_enabled": True,
+    "image_gen_enabled": False,
     "image_model": "",
     "image_quality": "medium",
     "vision_model": "",
@@ -143,6 +143,7 @@ DEFAULT_SETTINGS = {
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,
+    "reminder_llm_persona": "",
     "reminder_ntfy_topic": "Reminders",
     "reminder_email_to": "",
     # Generic outbound webhook channel: pick any saved Integration as the

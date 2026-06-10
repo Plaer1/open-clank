@@ -1436,9 +1436,25 @@ async def do_manage_documents(content: str, owner: Optional[str] = None) -> Dict
             if not doc:
                 return {"error": f"Document '{doc_id}' not found", "exit_code": 1}
             body = doc.current_content or ""
+            total = len(body)
+            # Clamp offset to [0, total] so a far-out offset returns an empty
+            # window with a useful "end of document" hint rather than erroring.
+            try: offset = int(args.get("offset", 0))
+            except (TypeError, ValueError): offset = 0
+            offset = max(0, min(offset, total))
             preview_limit = int(args.get("limit", MAX_READ_CHARS))
-            truncated = len(body) > preview_limit
-            preview = body[:preview_limit] + (f"\n... (truncated, {len(body)} chars total)" if truncated else "")
+            chunk = body[offset:offset + preview_limit]
+            next_offset = offset + len(chunk)
+            has_more = next_offset < total
+            # Trailing marker — tells the agent (and a curious human) exactly
+            # what to pass next to continue paginating.
+            if has_more:
+                marker = f"\n... ({total - next_offset:,} more chars; pass offset={next_offset} to continue)"
+            elif offset > 0:
+                marker = f"\n... (end of document, {total:,} chars total)"
+            else:
+                marker = ""
+            preview = chunk + marker
             anchor = f"[{doc.title}](#document-{doc.id})"
             return {
                 "response": f"{anchor} — click to open in editor.\n\n```{doc.language or ''}\n{preview}\n```",
@@ -1446,9 +1462,11 @@ async def do_manage_documents(content: str, owner: Optional[str] = None) -> Dict
                     "id": doc.id,
                     "title": doc.title,
                     "language": doc.language,
-                    "size": len(body),
-                    "content": preview,
-                    "truncated": truncated,
+                    "size": total,
+                    "content": chunk,
+                    "offset": offset,
+                    "next_offset": next_offset if has_more else None,
+                    "truncated": has_more,
                 },
                 "exit_code": 0,
             }

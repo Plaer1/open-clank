@@ -22,6 +22,7 @@ import {
   _tryFoldHintSig, _foldSignature, _SIG_ICON, _QUOTE_ICON,
 } from './emailLibrary/signatureFold.js';
 import { state } from './emailLibrary/state.js';
+import { collapseSidebarToRail } from './modalSnap.js';
 
 const API_BASE = window.location.origin;
 let _emailUnreadChipClickWired = false;
@@ -406,7 +407,14 @@ function _clearEmailDocumentSplit() {
   ].forEach(prop => docPane.style.removeProperty(prop));
 }
 
-function _hasDesktopRoomForEmailAndDocument(modal) {
+// Compute the left-edge x assuming the wide sidebar has collapsed to the
+// rail. Used by the "try collapsing the sidebar first" path so we can decide
+// whether collapsing recovers enough room before minimizing email.
+function _emailSplitLeftEdgeIfSidebarCollapsed() {
+  return _readCssPx('--icon-rail-w');
+}
+
+function _hasDesktopRoomForEmailAndDocument(modal, opts = {}) {
   if (window.innerWidth <= 768) return false;
   if (window.innerWidth >= 1100) return true;
   const content = modal?.querySelector?.('.modal-content');
@@ -416,9 +424,12 @@ function _hasDesktopRoomForEmailAndDocument(modal) {
   const emailWidth = isFullscreen
     ? Math.min(440, Math.max(360, Math.round(window.innerWidth * 0.30)))
     : Math.max(360, Math.round(rect?.width || 440));
-  const docMinWidth = 560;
-  const breathingRoom = 72;
-  const leftEdge = isFullscreen ? _emailSplitLeftEdge() : Math.max(0, Math.round(rect?.left || _emailSplitLeftEdge()));
+  // Relaxed thresholds — the old 560 + 72 forced an unnecessary tab-down
+  // on ~1200–1300px viewports where there was visually plenty of room.
+  const docMinWidth = 460;
+  const breathingRoom = 40;
+  const leftEdgeNow = isFullscreen ? _emailSplitLeftEdge() : Math.max(0, Math.round(rect?.left || _emailSplitLeftEdge()));
+  const leftEdge = opts.assumeSidebarCollapsed ? _emailSplitLeftEdgeIfSidebarCollapsed() : leftEdgeNow;
   return (window.innerWidth - leftEdge - emailWidth) >= (docMinWidth + breathingRoom);
 }
 
@@ -426,8 +437,18 @@ function _prepareEmailWindowForDocument(modal) {
   if (window.innerWidth <= 768) return true;
   if (!modal) return false;
   if (!_hasDesktopRoomForEmailAndDocument(modal)) {
-    _clearEmailDocumentSplit();
-    return true;
+    // Before giving up and minimizing email, see if collapsing the wide
+    // sidebar to the rail would recover enough space. The route-collapse
+    // marker that collapseSidebarToRail() sets makes the existing
+    // auto-restore logic put the sidebar back when the doc closes.
+    const sidebar = document.getElementById('sidebar');
+    const sidebarWasOpen = sidebar && !sidebar.classList.contains('hidden');
+    if (sidebarWasOpen && _hasDesktopRoomForEmailAndDocument(modal, { assumeSidebarCollapsed: true })) {
+      try { collapseSidebarToRail(); } catch (_) {}
+    } else {
+      _clearEmailDocumentSplit();
+      return true;
+    }
   }
   if (modal.classList.contains('modal-left-docked')) {
     const content = modal.querySelector('.modal-content');

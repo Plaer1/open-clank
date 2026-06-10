@@ -1256,7 +1256,7 @@ def _build_base_prompt(
     from src.tool_index import ALWAYS_AVAILABLE
 
     disabled = set(disabled_tools or [])
-    if not get_setting("image_gen_enabled", True):
+    if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
 
     if relevant_tools is not None:

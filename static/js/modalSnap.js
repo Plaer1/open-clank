@@ -302,6 +302,7 @@ function _anchorLeftDock(content) {
   }
 }
 
+export function collapseSidebarToRail() { return _collapseSidebarToRail(); }
 function _collapseSidebarToRail() {
   const sidebar = document.getElementById('sidebar');
   const rail = document.getElementById('icon-rail');
