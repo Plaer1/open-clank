@@ -530,11 +530,6 @@ function _createEmailItem(em) {
       </div>
       <div class="email-subject">${_esc(em.subject)}${unreadIcon}${attachIcon}${tagPills}${spamTag}</div>
     </div>
-    <div class="email-menu-wrap">
-      <button class="hamburger email-menu-btn" title="Actions">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
-      </button>
-    </div>
   `;
 
   // Click sender name → filter list to that sender
