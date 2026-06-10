@@ -27759,9 +27759,10 @@ button .spinner-whirlpool {
   flex: 0 0 auto !important;
   width: 100%;
 }
-.doclib-card.email-card-expanded .memory-item-actions {
-  display: none !important;
-}
+/* Keep the per-card '...' actions menu visible while the email card is
+   expanded — we used to hide it and surface a duplicate menu button in
+   the expanded header, but that was redundant. The bottom menu now
+   carries the actions in both states. */
 /* When expanded inline, show the subject a touch larger than the 12px card
    title (close to the new-tab window header) without being oversized. */
 .doclib-card.email-card-expanded .memory-item-title {

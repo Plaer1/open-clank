@@ -235,9 +235,9 @@ function _syncEmailReadState(uid, isRead = true) {
     dot.className = 'email-card-unread-dot';
     dot.style.cssText = `width:6px;height:6px;border-radius:50%;background:${_senderColor(senderName)};flex-shrink:0;margin-left:2px;`;
     const done = titleRow.querySelector('.email-card-done');
-    const rightCluster = titleRow.querySelector('.email-card-header-menu')?.parentElement;
+    const navArrows = titleRow.querySelector('.email-card-nav-arrows');
     if (done) done.insertAdjacentElement('afterend', dot);
-    else if (rightCluster) titleRow.insertBefore(dot, rightCluster);
+    else if (navArrows) titleRow.insertBefore(dot, navArrows);
     else titleRow.appendChild(dot);
   });
 }
@@ -2083,27 +2083,10 @@ function _createCard(em) {
     await _toggleCardPreview(sibling, nextEm);
     sibling.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
-  // Right cluster: expanded-only actions menu + nav arrows. The normal
-  // `.memory-item-actions` menu is hidden while expanded, so this keeps
-  // the same email actions available beside the previous/next controls.
-  const rightCluster = document.createElement('span');
-  rightCluster.style.cssText = 'margin-left:auto;display:inline-flex;align-items:center;gap:6px;';
-  const headerMenuBtn = document.createElement('button');
-  headerMenuBtn.type = 'button';
-  headerMenuBtn.className = 'email-card-header-menu';
-  headerMenuBtn.title = 'Actions';
-  headerMenuBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
-  headerMenuBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    _showCardMenu(em, headerMenuBtn);
-  });
-  // The CSS rule on .email-card-nav-arrows still sets margin-left:auto
-  // (needed when the arrows live alone in the title row). Inside this
-  // wrapper, we want the cluster's gap to apply, so cancel that auto.
-  navArrows.style.marginLeft = '0';
-  rightCluster.appendChild(headerMenuBtn);
-  rightCluster.appendChild(navArrows);
-  titleRow.appendChild(rightCluster);
+  // Just the nav arrows here — the per-card `.memory-item-actions` menu
+  // at the bottom of the card stays visible while expanded (see the CSS
+  // override below), so duplicating it in the header was redundant.
+  titleRow.appendChild(navArrows);
 
   content.appendChild(titleRow);
 
