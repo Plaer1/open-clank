@@ -1071,6 +1071,10 @@ export function openEmailLibrary(opts = {}) {
   let searchTimer = null;
   document.getElementById('email-lib-search').addEventListener('input', (e) => {
     state._libSearch = e.target.value;
+    // Instant local filter so the grid responds on every keystroke even
+    // before the server-side IMAP search lands. The debounced server
+    // search still runs and replaces the grid when it returns.
+    _localSearchFilter(state._libSearch);
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(_doSearch, 350);
   });
@@ -1592,6 +1596,52 @@ function _crossFolderCandidates() {
   return Array.from(new Set(candidates.filter(Boolean)));
 }
 
+// Snapshot of state._libEmails taken right before search starts so we
+// can both filter locally and restore on clear without re-fetching.
+let _libPreSearchEmails = null;
+let _libPreSearchTotal = 0;
+
+function _matchesQuery(em, q) {
+  const needle = q.toLowerCase();
+  return (
+    String(em.subject || '').toLowerCase().includes(needle) ||
+    String(em.from_name || '').toLowerCase().includes(needle) ||
+    String(em.from_address || '').toLowerCase().includes(needle) ||
+    String(em.snippet || em.preview || '').toLowerCase().includes(needle)
+  );
+}
+
+// Instant client-side filter — fires on every keystroke. Filters the
+// pre-search snapshot so the user sees something immediately even
+// though the server search hasn't returned yet.
+function _localSearchFilter(query) {
+  const q = (query || '').trim();
+  // First non-empty keystroke after an empty search: take the snapshot.
+  if (q.length >= 1 && !_libPreSearchEmails) {
+    _libPreSearchEmails = (state._libEmails || []).slice();
+    _libPreSearchTotal = state._libTotal;
+  }
+  if (q.length === 0) {
+    // Cleared — restore.
+    if (_libPreSearchEmails) {
+      state._libEmails = _libPreSearchEmails;
+      state._libTotal = _libPreSearchTotal;
+      _libPreSearchEmails = null;
+      _libPreSearchTotal = 0;
+    }
+    _renderGrid();
+    return;
+  }
+  if (q.length < 2) {
+    _renderGrid();
+    return;
+  }
+  const source = _libPreSearchEmails || state._libEmails || [];
+  const filtered = source.filter(em => _matchesQuery(em, q));
+  state._libEmails = filtered;
+  _renderGrid();
+}
+
 async function _doSearch() {
   const seq = ++_libSearchSeq;
   const q = state._libSearch.trim();
@@ -1607,17 +1657,19 @@ async function _doSearch() {
     _renderGrid();
     return;
   }
-  const grid = document.getElementById('email-lib-grid');
-  if (!grid) return;
-  const sp = _renderEmailLoading(grid);
   const accountAtStart = state._libAccountId || '';
   const folderAtStart = state._libFolder || 'INBOX';
+  // No grid-blanking spinner — the local filter already painted something
+  // useful. Surface progress in the stats badge instead so the user knows
+  // the server search is still grinding.
+  const stats = document.getElementById('email-lib-stats');
+  const originalStatsText = stats?.textContent || '';
+  if (stats) stats.textContent = 'Searching…';
 
   try {
     const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
     const res = await fetch(`${API_BASE}/api/email/search?folder=${encodeURIComponent(folderAtStart)}${accountQS}&q=${encodeURIComponent(q)}&limit=100`);
     const data = await res.json();
-    sp.destroy();
     if (
       seq !== _libSearchSeq ||
       q !== state._libSearch.trim() ||
@@ -1631,13 +1683,12 @@ async function _doSearch() {
     const results = data.emails || [];
     _libSearchHadResults = true;
     state._libEmails = results;  // temporarily replace with search results
+    state._libTotal = data.total || results.length;
     _renderGrid();
 
-    const stats = document.getElementById('email-lib-stats');
     if (stats) stats.textContent = `${data.total || results.length} match${(data.total || results.length) === 1 ? '' : 'es'}`;
   } catch (e) {
-    sp.destroy();
-    grid.innerHTML = '<div class="email-loading">Search failed</div>';
+    if (stats) stats.textContent = originalStatsText || 'Search failed';
   }
 }
 
