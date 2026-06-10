@@ -29023,8 +29023,10 @@ body.doc-find-active mark.doc-find-mark.current {
   font-size: 12px; font-weight: 600; flex-shrink: 0; margin-top: 1px;
 }
 .email-item-content { flex: 1; min-width: 0; overflow: hidden; }
-.email-item-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.email-sender { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.email-item-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.email-sender { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; max-width: 35%; }
+.email-item-top .email-subject { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.email-item-top .email-date { flex-shrink: 0; margin-left: auto; }
 .email-sender-clickable { cursor: pointer; }
 .email-sender-clickable:hover { text-decoration: underline; }
 .email-filter-chip {
