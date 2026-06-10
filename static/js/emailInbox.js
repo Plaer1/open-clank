@@ -74,6 +74,11 @@ window.addEventListener('email-answered', (e) => {
     item.classList.remove('email-unread');
     const check = item.querySelector('.email-done-check');
     if (check) check.classList.add('active');
+    // Auto-mark from sending a reply — flash the row so the user sees the
+    // state change without staring at it. Class self-removes after the
+    // animation so it doesn't replay on re-renders.
+    item.classList.add('email-auto-done-flash');
+    setTimeout(() => item.classList.remove('email-auto-done-flash'), 1200);
   });
 });
 let _loading = false;

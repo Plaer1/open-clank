@@ -27630,6 +27630,22 @@ button .spinner-whirlpool {
 .email-done-check.active svg { display: block; }
 .email-done-check svg { display: none; }
 
+/* Auto-done flash: when a row gets marked done because the user just sent
+   a reply, briefly tint the whole row with the accent and pop the check
+   so the state change is hard to miss. Self-removes after ~1.2s. */
+@keyframes email-auto-done-row {
+  0%   { background: color-mix(in srgb, var(--accent, var(--red)) 22%, transparent); }
+  60%  { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+  100% { background: transparent; }
+}
+@keyframes email-auto-done-check {
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 45%, transparent); }
+  40%  { transform: scale(1.4); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent, var(--red)) 0%, transparent); }
+  100% { transform: scale(1); }
+}
+.email-item.email-auto-done-flash { animation: email-auto-done-row 1.2s ease-out; }
+.email-item.email-auto-done-flash .email-done-check { animation: email-auto-done-check 0.6s ease-out; }
+
 /* Email titles that carry a cached AI summary get a thin underline-dot hint
    so the user knows a hover-preview is available. */
 .memory-item-title.email-card-has-summary {
