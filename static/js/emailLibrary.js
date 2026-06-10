@@ -5025,13 +5025,18 @@ async function _bulkAction(action) {
         } else if (action === 'delete') {
           await fetch(`${API_BASE}/api/email/delete/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
         } else if (action === 'done') {
-          const em = state._libEmails.find(e => e.uid === uid);
+          // uid may come back from the Set as a string while em.uid is
+          // numeric (or vice versa) — coerce both sides so the in-memory
+          // state actually flips and the post-loop re-render shows the
+          // done checkmark.
+          const em = state._libEmails.find(e => String(e.uid) === String(uid));
           if (em) {
             em.is_answered = true;
             em.is_read = true;
           }
-          await fetch(`${API_BASE}/api/email/mark-answered/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          await fetch(`${API_BASE}/api/email/mark-read/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          const ansRes = await fetch(`${API_BASE}/api/email/mark-answered/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          const readRes = await fetch(`${API_BASE}/api/email/mark-read/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          if (!ansRes.ok || !readRes.ok) throw new Error(`mark-done HTTP ${ansRes.status}/${readRes.status}`);
         } else if (action === 'read' || action === 'unread') {
           const endpoint = action === 'read' ? 'mark-read' : 'mark-unread';
           const res = await fetch(`${API_BASE}/api/email/${endpoint}/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
