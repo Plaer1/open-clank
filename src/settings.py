@@ -29,6 +29,14 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # Agent email safety: when True, the MCP send_email / reply_to_email
+    # tools don't SMTP directly. They stage the composed message into the
+    # scheduled_emails table with status='agent_draft' and return a
+    # pending_id + the rendered email so the user can review and approve
+    # (or cancel) before it actually goes out. Default ON because models
+    # have been observed inventing signatures and sending to real
+    # recipients without confirmation.
+    "agent_email_confirm": True,
     "image_gen_enabled": False,
     "image_model": "",
     "image_quality": "medium",
