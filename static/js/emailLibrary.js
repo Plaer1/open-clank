@@ -4998,58 +4998,96 @@ async function _bulkAction(action) {
   const originalDeleteHtml = deleteBtn?.innerHTML || '';
   const originalCountText = countEl?.textContent || '';
   let busySpinner = null;
-  if (action === 'delete') {
-    if (deleteBtn) {
-      deleteBtn.disabled = true;
-      deleteBtn.classList.add('email-bulk-loading');
-      deleteBtn.innerHTML = '<span class="email-bulk-loading-label">Deleting</span>';
-      busySpinner = spinnerModule.create('', 'clean', 'whirlpool');
-      const spEl = busySpinner.createElement();
-      spEl.classList.add('email-bulk-whirlpool');
-      deleteBtn.appendChild(spEl);
-      busySpinner.start();
-    }
-    if (actionsBtn) actionsBtn.disabled = true;
-    if (cancelBtn) cancelBtn.disabled = true;
-    if (selectAll) selectAll.disabled = true;
-    if (countEl) countEl.textContent = `Deleting ${uids.length}...`;
+  // Loading state for every bulk action, not just delete — large
+  // selections (e.g. 90+ Dones) used to silently hammer the server
+  // with sequential requests and the user got zero feedback. Now the
+  // Actions button (or Delete button) shows a whirlpool + verb-ing
+  // label, and the count surfaces progress.
+  const verbing = {
+    delete: 'Deleting',
+    archive: 'Archiving',
+    done: 'Marking done',
+    read: 'Marking read',
+    unread: 'Marking unread',
+  }[action] || 'Updating';
+  const targetBtn = action === 'delete' ? deleteBtn : actionsBtn;
+  let originalTargetHtml = '';
+  if (targetBtn) {
+    originalTargetHtml = targetBtn.innerHTML;
+    targetBtn.disabled = true;
+    targetBtn.classList.add('email-bulk-loading');
+    targetBtn.innerHTML = `<span class="email-bulk-loading-label">${verbing}</span>`;
+    busySpinner = spinnerModule.create('', 'clean', 'whirlpool');
+    const spEl = busySpinner.createElement();
+    spEl.classList.add('email-bulk-whirlpool');
+    targetBtn.appendChild(spEl);
+    busySpinner.start();
   }
+  if (action !== 'delete' && deleteBtn) deleteBtn.disabled = true;
+  if (action === 'delete' && actionsBtn) actionsBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (selectAll) selectAll.disabled = true;
+  if (countEl) countEl.textContent = `${verbing} ${uids.length}…`;
+
+  // Single-uid worker.
+  const handleOne = async (uid) => {
+    try {
+      if (action === 'archive') {
+        await fetch(`${API_BASE}/api/email/archive/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+      } else if (action === 'delete') {
+        await fetch(`${API_BASE}/api/email/delete/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
+      } else if (action === 'done') {
+        // uid may come back from the Set as a string while em.uid is
+        // numeric (or vice versa) — coerce both sides so the in-memory
+        // state actually flips and the post-loop re-render shows the
+        // done checkmark.
+        const em = state._libEmails.find(e => String(e.uid) === String(uid));
+        if (em) { em.is_answered = true; em.is_read = true; }
+        const ansRes = await fetch(`${API_BASE}/api/email/mark-answered/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        const readRes = await fetch(`${API_BASE}/api/email/mark-read/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        if (!ansRes.ok || !readRes.ok) throw new Error(`mark-done HTTP ${ansRes.status}/${readRes.status}`);
+      } else if (action === 'read' || action === 'unread') {
+        const endpoint = action === 'read' ? 'mark-read' : 'mark-unread';
+        const res = await fetch(`${API_BASE}/api/email/${endpoint}/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+        let data = null;
+        try { data = await res.json(); } catch (_) {}
+        if (!res.ok || data?.success === false) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        _syncEmailReadState(uid, action === 'read');
+      }
+    } catch (e) {
+      if (action === 'read' || action === 'unread') failedReadSync += 1;
+      console.error(`Failed to ${action} ${uid}:`, e);
+    }
+  };
 
   try {
-    for (const uid of uids) {
-      try {
-        if (action === 'archive') {
-          await fetch(`${API_BASE}/api/email/archive/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-        } else if (action === 'delete') {
-          await fetch(`${API_BASE}/api/email/delete/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
-        } else if (action === 'done') {
-          // uid may come back from the Set as a string while em.uid is
-          // numeric (or vice versa) — coerce both sides so the in-memory
-          // state actually flips and the post-loop re-render shows the
-          // done checkmark.
-          const em = state._libEmails.find(e => String(e.uid) === String(uid));
-          if (em) {
-            em.is_answered = true;
-            em.is_read = true;
-          }
-          const ansRes = await fetch(`${API_BASE}/api/email/mark-answered/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          const readRes = await fetch(`${API_BASE}/api/email/mark-read/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          if (!ansRes.ok || !readRes.ok) throw new Error(`mark-done HTTP ${ansRes.status}/${readRes.status}`);
-        } else if (action === 'read' || action === 'unread') {
-          const endpoint = action === 'read' ? 'mark-read' : 'mark-unread';
-          const res = await fetch(`${API_BASE}/api/email/${endpoint}/${uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          let data = null;
-          try { data = await res.json(); } catch (_) {}
-          if (!res.ok || data?.success === false) {
-            throw new Error(data?.error || `HTTP ${res.status}`);
-          }
-          _syncEmailReadState(uid, action === 'read');
+    // Run in parallel with a concurrency cap so 92 emails don't take
+    // 30 seconds sequentially but we also don't open 92 simultaneous
+    // connections.
+    const CONCURRENCY = 6;
+    const queue = uids.slice();
+    let inFlight = 0;
+    let nextSlot = 0;
+    let finishedCount = 0;
+    await new Promise((resolve) => {
+      const launch = () => {
+        while (inFlight < CONCURRENCY && nextSlot < queue.length) {
+          const uid = queue[nextSlot++];
+          inFlight++;
+          handleOne(uid).finally(() => {
+            inFlight--;
+            finishedCount++;
+            if (countEl) countEl.textContent = `${verbing} ${finishedCount}/${queue.length}…`;
+            if (nextSlot >= queue.length && inFlight === 0) resolve();
+            else launch();
+          });
         }
-      } catch (e) {
-        if (action === 'read' || action === 'unread') failedReadSync += 1;
-        console.error(`Failed to ${action} ${uid}:`, e);
-      }
-    }
+        if (queue.length === 0) resolve();
+      };
+      launch();
+    });
 
     if (action === 'archive' || action === 'delete') {
       await _animateEmailCardRemoval(uids);
@@ -5066,12 +5104,17 @@ async function _bulkAction(action) {
     }
   } finally {
     if (busySpinner) busySpinner.destroy();
-    if (deleteBtn) {
-      deleteBtn.disabled = false;
-      deleteBtn.classList.remove('email-bulk-loading');
-      deleteBtn.innerHTML = originalDeleteHtml;
+    // Restore whichever button we hijacked (delete vs actions).
+    if (targetBtn) {
+      targetBtn.disabled = false;
+      targetBtn.classList.remove('email-bulk-loading');
+      targetBtn.innerHTML = originalTargetHtml || targetBtn.innerHTML;
     }
-    if (actionsBtn) actionsBtn.disabled = false;
+    if (deleteBtn && deleteBtn !== targetBtn) {
+      deleteBtn.disabled = false;
+      deleteBtn.innerHTML = originalDeleteHtml || deleteBtn.innerHTML;
+    }
+    if (actionsBtn && actionsBtn !== targetBtn) actionsBtn.disabled = false;
     if (cancelBtn) cancelBtn.disabled = false;
     if (selectAll) selectAll.disabled = false;
     if (countEl) countEl.textContent = originalCountText;
