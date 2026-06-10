@@ -29812,8 +29812,12 @@ body.doc-find-active mark.doc-find-mark.current {
 /* Select + Refresh sit slightly lower than Compose on desktop. */
 #email-lib-select-btn, #email-lib-refresh-btn { top: -2px; }
 /* New (Compose) button gets a slightly taller, slightly lower variant
-   on desktop so it reads as the primary action of the row. */
-#email-lib-compose-btn { height: 28px; top: 0; }
+   on desktop so it reads as the primary action of the row. Scoped to
+   desktop so the mobile touch-friendly variant (further down) stays in
+   charge for ≤768px. */
+@media (min-width: 769px) {
+  #email-lib-compose-btn { height: 28px; top: 0; }
+}
 @media (max-width: 768px) {
   /* On mobile they're 1px higher than desktop. */
   #email-lib-select-btn, #email-lib-refresh-btn { top: -3px; }
