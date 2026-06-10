@@ -861,7 +861,7 @@ export function openEmailLibrary(opts = {}) {
             </div>
           </div>
           <div id="email-lib-bulk" class="memory-bulk-bar hidden" style="margin-bottom:5px;">
-            <label class="memory-bulk-check-all" style="position:relative;top:2px;"><input type="checkbox" id="email-lib-select-all"> All</label>
+            <label class="memory-bulk-check-all" style="position:relative;top:0px;"><input type="checkbox" id="email-lib-select-all"> All</label>
             <span id="email-lib-selected-count" style="position:relative;top:1px;">0 Selected</span>
             <button class="memory-toolbar-btn" id="email-lib-bulk-actions" style="position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Actions <span style="opacity:0.55;font-size:9px;">▼</span></button>
             <button class="memory-toolbar-btn" id="email-lib-bulk-delete" style="position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>

@@ -10434,23 +10434,26 @@ textarea.memory-add-input {
 #memory-modal .memory-bulk-bar {
   padding-right: 18px;
 }
-#email-lib-bulk-delete.email-bulk-loading {
+#email-lib-bulk-delete.email-bulk-loading,
+#email-lib-bulk-actions.email-bulk-loading {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   opacity: 0.9;
   cursor: wait;
 }
-#email-lib-bulk-delete.email-bulk-loading .email-bulk-whirlpool {
+#email-lib-bulk-delete.email-bulk-loading .email-bulk-whirlpool,
+#email-lib-bulk-actions.email-bulk-loading .email-bulk-whirlpool {
   width: 12px;
   height: 12px;
   margin: 0;
   position: relative;
   top: -1px;
 }
-#email-lib-bulk-delete.email-bulk-loading .email-bulk-loading-label {
+#email-lib-bulk-delete.email-bulk-loading .email-bulk-loading-label,
+#email-lib-bulk-actions.email-bulk-loading .email-bulk-loading-label {
   position: relative;
-  top: 0;
+  top: -2px;
 }
 /* Drafts bulk bar defaults to justify-content:flex-end (whole row hugs the
    right). Reset it so All + count sit on the left and only the action button
