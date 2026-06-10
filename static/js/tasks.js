@@ -1077,9 +1077,23 @@ function _showForm(existing, initTaskType, initTriggerType) {
     typeOpts.innerHTML = '';
     if (taskType === 'llm' || taskType === 'research') {
       const placeholder = taskType === 'research' ? 'What should be researched?' : 'What should the AI do?';
+      const _personaOpts = [
+        ['', 'Default (no persona)'],
+        ['socrates', 'Socrates'],
+        ['razor', 'Razor'],
+        ['nietzsche', 'Nietzsche'],
+        ['spark', 'Spark'],
+        ['odysseus', 'Odysseus'],
+      ];
+      const _curPersona = (existing?.character_id || '').toLowerCase();
+      const _personaOptsHtml = _personaOpts.map(([v, label]) =>
+        `<option value="${v}" ${v === _curPersona ? 'selected' : ''}>${label}</option>`).join('');
       typeOpts.innerHTML = `
         <label class="task-form-label">${taskType === 'research' ? 'Research question' : 'Prompt'}</label>
         <textarea id="task-form-prompt" class="task-form-input task-form-textarea" rows="4" placeholder="${placeholder}">${existing?.prompt || ''}</textarea>
+
+        <label class="task-form-label">Persona <span style="opacity:0.5;font-weight:normal;font-size:10px;">(optional — biases the output voice)</span></label>
+        <select id="task-form-persona" class="task-form-input">${_personaOptsHtml}</select>
       `;
     } else {
       typeOpts.innerHTML = `
@@ -1437,7 +1451,11 @@ function _showForm(existing, initTaskType, initTriggerType) {
         return;
       }
       payload.prompt = prompt;
+      const personaVal = document.getElementById('task-form-persona')?.value || '';
+      payload.character_id = personaVal;
     } else {
+      // Non-llm/research tasks: explicitly clear any persona on switch.
+      payload.character_id = '';
       const action = document.getElementById('task-form-action')?.value;
       if (!action) {
         if (uiModule) uiModule.showError('Select an action');
