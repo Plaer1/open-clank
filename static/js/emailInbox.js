@@ -562,15 +562,8 @@ function _createEmailItem(em) {
 
   // Click to open — do NOT close sidebar
   item.addEventListener('click', (e) => {
-    if (e.target.closest('.email-menu-wrap')) return;
     if (item.dataset.swipeBlock === '1') return;
     _openEmail(em, item);
-  });
-
-  const menuWrap = item.querySelector('.email-menu-wrap');
-  menuWrap.addEventListener('click', (e) => {
-    e.stopPropagation();
-    _showEmailMenu(em, menuWrap, item);
   });
 
   // Swipe left to archive (mobile). Mirrors sidebar-layout.js swipe pattern.
@@ -580,7 +573,6 @@ function _createEmailItem(em) {
     const VERT_CANCEL = 30;     // px vertical motion cancels swipe (treat as scroll)
 
     item.addEventListener('touchstart', (e) => {
-      if (e.target.closest('.email-menu-wrap')) return;
       const t = e.touches[0];
       startX = t.clientX; startY = t.clientY;
       dx = 0; dy = 0; swiping = true; swiped = false;
