@@ -321,6 +321,12 @@ async function _loadEmailReminderBellVisibility() {
     _syncEmailReminderBellVisibility(false);
   }
 }
+// Live-update the bell when the reminder channel changes in Settings,
+// so the user doesn't have to reopen Email to see the change apply.
+window.addEventListener('odysseus-reminder-channel-changed', (e) => {
+  const ch = e?.detail?.channel;
+  _syncEmailReminderBellVisibility(ch === 'email');
+});
 
 function _readCssPx(name) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name);
