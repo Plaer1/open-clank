@@ -521,9 +521,9 @@ function _createEmailItem(em) {
     <div class="email-item-content">
       <div class="email-item-top">
         <span class="email-sender email-sender-clickable" style="color:${color}" data-from-addr="${_esc(senderAddr)}" data-from-name="${_esc(senderName)}" title="Show all emails from ${_esc(senderName)}">${_esc(senderName)}</span>
-        <span class="email-subject">${_esc(em.subject)}${unreadIcon}${attachIcon}${tagPills}${spamTag}</span>
         <span class="email-date">${_esc(dateStr)}</span>
       </div>
+      <div class="email-subject">${_esc(em.subject)}${unreadIcon}${attachIcon}${tagPills}${spamTag}</div>
     </div>
     <div class="email-menu-wrap">
       <button class="hamburger email-menu-btn" title="Actions">

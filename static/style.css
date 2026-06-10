@@ -29023,10 +29023,8 @@ body.doc-find-active mark.doc-find-mark.current {
   font-size: 12px; font-weight: 600; flex-shrink: 0; margin-top: 1px;
 }
 .email-item-content { flex: 1; min-width: 0; overflow: hidden; }
-.email-item-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.email-sender { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; max-width: 35%; }
-.email-item-top .email-subject { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.email-item-top .email-date { flex-shrink: 0; margin-left: auto; }
+.email-item-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.email-sender { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .email-sender-clickable { cursor: pointer; }
 .email-sender-clickable:hover { text-decoration: underline; }
 .email-filter-chip {
@@ -33853,24 +33851,23 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 /* Only the direct-child compose button gets pushed right; nested chips
    inside #email-lib-accounts pack to the left as normal flex items. */
 .email-accounts-row > .memory-toolbar-btn { flex-shrink: 0; margin-left: auto; }
-#email-lib-accounts { justify-content: flex-start; flex-wrap: wrap; }
-/* Mobile: collapse the account chips to a single horizontally-scrollable
-   strip instead of stacking onto multiple rows. The compose "New" button
-   stays outside the scroller (it's a sibling of #email-lib-accounts inside
+/* Account chips collapse to a single horizontally-scrollable strip
+   at every breakpoint, instead of stacking onto multiple rows when
+   there are several accounts. The compose "New" button stays outside
+   the scroller (it's a sibling of #email-lib-accounts inside
    .email-accounts-row) so it remains pinned on the right. */
-@media (max-width: 768px) {
-  #email-lib-accounts {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
-    scroll-snap-type: x proximity;
-    -webkit-overflow-scrolling: touch;
-  }
-  #email-lib-accounts::-webkit-scrollbar { display: none; height: 0; }
-  #email-lib-accounts > * { flex-shrink: 0; scroll-snap-align: start; }
+#email-lib-accounts {
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
 }
+#email-lib-accounts::-webkit-scrollbar { display: none; height: 0; }
+#email-lib-accounts > * { flex-shrink: 0; scroll-snap-align: start; }
 .email-accounts-loading-whirlpool {
   width: 14px;
   height: 14px;
