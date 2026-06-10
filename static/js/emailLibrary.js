@@ -4563,6 +4563,10 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
 
   const _bubblesIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
   const _contactIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>';
+  // Three groups separated by dividers:
+  //   1. Open / Mark Unread / Remind — the per-email view actions
+  //   2. Save sender / Not Done / Archive — non-destructive state changes
+  //   3. Move to Spam / Move to Trash / Delete — destructive
   const actions = [
     {
       label: 'Open in new tab',
@@ -4572,6 +4576,28 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
         await _openEmailAsTab(em, folder);
       },
     },
+    {
+      label: em.is_read ? 'Mark Unread' : 'Mark Read',
+      icon: _unreadIcon,
+      action: async () => {
+        const newRead = !em.is_read;
+        _syncEmailReadState(em.uid, newRead);
+        try {
+          if (newRead) {
+            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          } else {
+            await fetch(`${API_BASE}/api/email/mark-unread/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
+          }
+        } catch (e) { console.error(e); }
+        _renderGrid();
+      },
+    },
+    {
+      label: 'Remind to reply',
+      icon: _bellIcon,
+      submenu: 'remind',
+    },
+    { separator: true },
     {
       // Save the sender to CardDAV contacts. Pulls name + address off the
       // list-item (em); falls back to splitting the local-part for a name.
@@ -4602,25 +4628,6 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
         }
       },
     },
-    // Threaded ⇄ Plain-text view toggle removed — threaded view disabled
-    // for now (too buggy). Emails always render plain text. Restore this
-    // menu item + _bubblesDisabled() localStorage logic to bring it back.
-    {
-      label: em.is_read ? 'Mark Unread' : 'Mark Read',
-      icon: _unreadIcon,
-      action: async () => {
-        const newRead = !em.is_read;
-        _syncEmailReadState(em.uid, newRead);
-        try {
-          if (newRead) {
-            await fetch(`${API_BASE}/api/email/mark-read/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          } else {
-            await fetch(`${API_BASE}/api/email/mark-unread/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'POST' });
-          }
-        } catch (e) { console.error(e); }
-        _renderGrid();
-      },
-    },
     {
       label: em.is_answered ? 'Not Done' : 'Done',
       icon: _checkIcon,
@@ -4649,11 +4656,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
         await closeAndRemove();
       },
     },
-    {
-      label: 'Remind to reply',
-      icon: _bellIcon,
-      submenu: 'remind',
-    },
+    { separator: true },
     {
       label: 'Move to Spam',
       icon: _spamIcon,
@@ -4694,6 +4697,12 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
   ];
 
   for (const a of actions) {
+    if (a.separator) {
+      const sep = document.createElement('div');
+      sep.className = 'dropdown-divider';
+      dropdown.appendChild(sep);
+      continue;
+    }
     const item = document.createElement('div');
     item.className = 'dropdown-item-compact' + (a.danger ? ' dropdown-item-danger' : '');
     const arrow = a.submenu ? '<span style="margin-left:auto;opacity:0.5;">›</span>' : '';
