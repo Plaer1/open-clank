@@ -27971,6 +27971,50 @@ button .spinner-whirlpool {
 }
 .email-reader-body.html-body img { max-width: 100%; height: auto; }
 .email-reader-body.html-body table { max-width: 100%; border-collapse: collapse; }
+/* Gmail Drive chips arrive with inline width/height/border/padding from
+   Gmail's composer (border:1px solid #ddd, white-ish bg assumed). On a
+   dark theme that reads as a near-invisible white box. Override with a
+   theme-aware chip surface so the filename + icon stay visible. */
+.email-reader-body .gmail_chip,
+.email-reader-body .gmail_drive_chip {
+  width: auto !important;
+  max-width: 100% !important;
+  height: auto !important;
+  max-height: none !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px;
+  padding: 6px 10px !important;
+  margin: 6px 0 !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.email-reader-body .gmail_chip:hover,
+.email-reader-body .gmail_drive_chip:hover {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border)) !important;
+  background: color-mix(in srgb, var(--accent, var(--red)) 6%, transparent);
+}
+.email-reader-body .gmail_chip a,
+.email-reader-body .gmail_drive_chip a {
+  color: var(--accent, var(--red)) !important;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  max-width: 100% !important;
+}
+.email-reader-body .gmail_chip a > span,
+.email-reader-body .gmail_drive_chip a > span {
+  color: var(--fg) !important;
+  font-size: 12px;
+}
+.email-reader-body .gmail_chip img,
+.email-reader-body .gmail_drive_chip img {
+  width: 16px !important;
+  height: 16px !important;
+  padding-right: 0 !important;
+  filter: none;
+}
 /* Preserve highlights — sender's intent (snark, callouts) gets through, but
    rendered with a theme-aware accent so it stays legible in any theme. The
    sanitizer rewrites `<span style="background:yellow">…</span>` to <mark>. */
