@@ -1251,7 +1251,7 @@ body.bg-pattern-sparkles {
     #sessions-section .section-header-flex:hover .chats-manage-btn,
     #sessions-section .chats-manage-btn:hover,
     #sessions-section .chats-manage-btn:focus-visible {
-      opacity: 0.45 !important;
+      opacity: 0.85 !important;
     }
     #sessions-section .chats-manage-btn:hover,
     #sessions-section .chats-manage-btn:focus-visible {
@@ -1282,7 +1282,8 @@ body.bg-pattern-sparkles {
       transition: max-width 0.2s ease, opacity 0.18s ease, padding-right 0.18s ease;
     }
     #sessions-section .chats-manage-btn:hover .list-item-plus-label,
-    #sessions-section .chats-manage-btn:focus-visible .list-item-plus-label {
+    #sessions-section .chats-manage-btn:focus-visible .list-item-plus-label,
+    #sessions-section .section-header-flex:hover .chats-manage-btn .list-item-plus-label {
       max-width: 80px;
       padding-right: 4px;
     }
