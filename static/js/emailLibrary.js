@@ -3693,8 +3693,24 @@ function _wireAttachmentHandlers(reader, folder) {
         window.open(url, '_blank');
         return;
       }
-      const orig = chip.style.opacity;
-      chip.style.opacity = '0.6';
+      // Swap the paperclip icon for a whirlpool spinner while the
+      // download is in flight, so large attachments give a clear cue
+      // they're loading. Restore on completion.
+      const iconSvg = chip.querySelector(':scope > svg');
+      const origIconHtml = iconSvg ? iconSvg.outerHTML : '';
+      let _wp = null;
+      let _spinnerHost = null;
+      try {
+        const sp = window.spinnerModule || (await import('./spinner.js')).default;
+        _wp = sp.createWhirlpool(12);
+        _spinnerHost = document.createElement('span');
+        _spinnerHost.className = 'email-attachment-spinner';
+        _spinnerHost.style.cssText = 'display:inline-flex;width:12px;height:12px;align-items:center;justify-content:center;flex-shrink:0;';
+        _spinnerHost.appendChild(_wp.element);
+        if (iconSvg) iconSvg.replaceWith(_spinnerHost);
+      } catch (_) {}
+      const origOpacity = chip.style.opacity;
+      chip.style.opacity = '0.85';
       try {
         const res = await fetch(url, { credentials: 'same-origin' });
         if (!res.ok) {
@@ -3715,7 +3731,14 @@ function _wireAttachmentHandlers(reader, folder) {
         console.error('attachment download error', e);
         location.href = url;
       } finally {
-        chip.style.opacity = orig;
+        chip.style.opacity = origOpacity;
+        if (_spinnerHost && _spinnerHost.parentNode && origIconHtml) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = origIconHtml;
+          const restored = tmp.firstChild;
+          if (restored) _spinnerHost.replaceWith(restored);
+        }
+        if (_wp) { try { _wp.destroy(); } catch (_) {} }
       }
     });
   });
