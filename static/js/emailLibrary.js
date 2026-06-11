@@ -1802,9 +1802,9 @@ function _renderSearchPills() {
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   wrap.innerHTML = pills.map((p, i) => {
     const label = p.type === 'contact' ? (p.name || p.email || '?') : (p.text || '');
-    return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:4px;padding:2px 6px 2px 8px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:11px;line-height:1.4;font-weight:600;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+    return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:2px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:10px;line-height:18px;height:18px;font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
       <span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
-      <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:13px;line-height:1;padding:0 2px;opacity:0.7;">×</button>
+      <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;">×</button>
     </span>`;
   }).join('');
   wrap.querySelectorAll('.email-lib-pill-x').forEach(btn => {
@@ -1962,27 +1962,51 @@ async function _initEmailSearchChipBar() {
       return;
     }
     if (e.key === 'Escape') {
-      _hideSearchSuggestions();
+      if (menuOpen) {
+        // Just close the dropdown — let the modal Esc handler run on the
+        // next Esc to actually dismiss the library.
+        e.preventDefault();
+        e.stopPropagation();
+        _hideSearchSuggestions();
+      } else {
+        // Blur first so the modal Esc handler doesn't get suppressed by
+        // any IME / typing-target check, and let the event propagate.
+        try { input.blur(); } catch (_) {}
+      }
     }
   });
 }
 
-// Click-to-add: if a recipient chip in the email reader is clicked, drop
-// the person into the library search as a contact pill so the user can
-// pivot to "everything from / to this person" in one tap.
+// Click-to-add: clicking a recipient-chip in the email reader OR a
+// .email-meta-sender in the library list drops the person into the
+// library search as a contact pill so the user can pivot to "everything
+// from / to this person" in one tap.
 window.addEventListener('click', (e) => {
+  const lib = document.getElementById('email-lib-modal');
+  // 1) Recipient chips inside the email reader area
   const chip = e.target.closest && e.target.closest('.recipient-chip');
-  if (!chip) return;
-  // Only hijack inside the email reader area; ignore composer / forms etc.
-  if (!chip.closest('.email-reader-header, .email-card-reader, .email-reader-tab-modal')) return;
-  const email = (chip.dataset && chip.dataset.email) || '';
-  const name = (chip.dataset && chip.dataset.name) || (chip.textContent || '').trim();
-  if (!email) return;
-  e.preventDefault();
-  e.stopPropagation();
-  // Surface the library window if it's hidden, then drop a pill in.
-  try { window.openEmailLibrary && window.openEmailLibrary(); } catch (_) {}
-  _addSearchPill({ type: 'contact', name, email });
+  if (chip && chip.closest('.email-reader-header, .email-card-reader, .email-reader-tab-modal')) {
+    const email = (chip.dataset && chip.dataset.email) || '';
+    const name = (chip.dataset && chip.dataset.name) || (chip.textContent || '').trim();
+    if (!email) return;
+    e.preventDefault();
+    e.stopPropagation();
+    try { window.openEmailLibrary && window.openEmailLibrary(); } catch (_) {}
+    _addSearchPill({ type: 'contact', name, email });
+    return;
+  }
+  // 2) Sender name in a library list card row (only when the library is open)
+  if (lib && !lib.classList.contains('hidden')) {
+    const senderEl = e.target.closest && e.target.closest('.email-meta-sender');
+    if (senderEl && senderEl.closest('#email-lib-grid')) {
+      const email = (senderEl.dataset && senderEl.dataset.email) || '';
+      const name = (senderEl.dataset && senderEl.dataset.name) || (senderEl.textContent || '').trim();
+      if (!email) return;
+      e.preventDefault();
+      e.stopPropagation();
+      _addSearchPill({ type: 'contact', name, email });
+    }
+  }
 }, true);
 
 async function _doSearch() {
@@ -2258,7 +2282,18 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
       state._libEmails = data.emails || [];
       state._libTotal = data.total || 0;
       if (sp) sp.destroy();
-      _renderGrid();
+      // If chip-bar pills are active, swap the snapshot to the freshly
+      // loaded list and re-apply the filter so pills persist across
+      // refreshes / folder switches instead of getting wiped.
+      const _activePills = (state._libSearchPills || []).length > 0
+                       || (state._libSearchDraft || '').length > 0;
+      if (_activePills) {
+        _libPreSearchEmails = state._libEmails.slice();
+        _libPreSearchTotal = state._libTotal;
+        _applyPillFilter();
+      } else {
+        _renderGrid();
+      }
       const stats = document.getElementById('email-lib-stats');
       if (stats) stats.textContent = `${state._libTotal} emails`;
       _refreshUnreadBadge();
@@ -2453,10 +2488,16 @@ function _createCard(em) {
   // hides the actually useful info. Outside Sent, show the sender as before.
   const isSentFolderEarly = /sent/i.test(state._libFolder);
   let senderName;
+  let senderAddress;
   if (isSentFolderEarly) {
     senderName = _formatRecipients(em.to) || em.to || '(no recipient)';
+    // First address out of em.to for click-to-pill targeting.
+    const _firstTo = String(em.to || '').split(',')[0] || '';
+    const _m = _firstTo.match(/<([^>]+)>/);
+    senderAddress = (_m ? _m[1] : _firstTo).trim();
   } else {
     senderName = em.from_name || em.from_address;
+    senderAddress = em.from_address || '';
   }
   const color = _senderColor(senderName);
 
@@ -2588,7 +2629,7 @@ function _createCard(em) {
   meta.className = 'memory-item-meta';
   meta.style.cssText = 'font-size:10px;opacity:0.7;margin-top:2px;';
   const senderPrefix = isSentFolderEarly ? 'to ' : '';
-  meta.innerHTML = `<span class="email-meta-sender"><span style="opacity:0.55">${senderPrefix}</span><span style="color:${color};font-weight:600">${_esc(senderName)}</span></span><span class="email-meta-sep"> · </span><span class="email-meta-date">${_esc(dateStr)}</span>`;
+  meta.innerHTML = `<span class="email-meta-sender" data-email="${_esc(senderAddress || '')}" data-name="${_esc(senderName || '')}"><span style="opacity:0.55">${senderPrefix}</span><span style="color:${color};font-weight:600">${_esc(senderName)}</span></span><span class="email-meta-sep"> · </span><span class="email-meta-date">${_esc(dateStr)}</span>`;
   content.appendChild(meta);
 
   card.appendChild(content);
