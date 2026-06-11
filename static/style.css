@@ -10431,7 +10431,7 @@ textarea.memory-add-input {
    option can carry its own SVG icon. Themed to match .email-filter-btn. */
 .memory-sort-picker {
   position: relative;
-  top: 1px;
+  top: 0;
   flex-shrink: 0;
 }
 .memory-sort-btn {
@@ -28230,51 +28230,39 @@ button .spinner-whirlpool {
   gap: 6px;
   min-width: 0;
 }
-/* Meta uses CSS grid so the From row sits left of the action cluster
-   in row 1, and the To/Cc details share col 1 in row 2 below. Track
-   sizing: col 1 = chip natural width clamped to 60–250px (chip span
-   keeps overflow-x scroll so longer names truncate cleanly); col 2
-   takes the remaining space, shrinking first when the pane narrows
-   so the cluster wraps to 2 rows of icons before the chip squeezes. */
+/* Meta is a plain block stack — From row, then To/Cc details right
+   below — with the action cluster absolute-positioned in the top
+   right. Out of flow means the cluster's height (1 row vs 2 rows
+   vs absolute overlay) never reshapes the From/details row spacing,
+   so To/Cc always hugs From the same way regardless of the cluster's
+   current state. Padding-right on the rows reserves the chip area
+   that the cluster occupies, and is tightened per container query
+   below. */
 .email-reader-meta {
-  display: grid;
-  grid-template-columns: minmax(60px, 250px) minmax(48px, 1fr);
-  grid-auto-rows: auto;
-  align-items: start;
-  column-gap: 12px;
-  row-gap: 2px;
+  position: relative;
 }
 .email-reader-meta-row.email-reader-meta-from {
-  grid-column: 1;
-  grid-row: 1;
   position: relative;
   flex-wrap: wrap;
+  min-width: 0;
+  /* Reserve space on the right for the 1-row cluster in wide mode. */
+  padding-right: 320px;
 }
 .email-reader-meta > .email-reader-meta-details {
-  /* Stays in col 1 (not spanning) so To/Cc shrink along with From
-     when the pane narrows, instead of going edge-to-edge under the
-     action cluster. */
-  grid-column: 1;
-  grid-row: 2;
   min-width: 0;
+  padding-right: 320px;
 }
 .email-reader-meta > .email-reader-actions-inline {
-  grid-column: 2;
-  /* Cluster spans both meta rows so its width is determined by the
-     widest col-1 content (From OR a long To/Cc) — it wraps to a
-     2-icon-row stack when any of those rows grows long. */
-  grid-row: 1 / span 2;
+  position: absolute;
+  top: 1px;
+  right: 0;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: flex-end;
   gap: 4px;
-  /* Cluster takes its grid column's width — on wide panes col 2 has
-     room for the 6 icons on one row; as the pane narrows, col 2
-     shrinks first (col 1 holds its chip width up to 250px), and
-     flex-wrap drops the buttons to 2 rows once the cluster can't
-     fit in 1. The chips only start to shrink past that. */
+  z-index: 2;
   /* Sit visually above the From baseline like the lifted overlay. */
   margin-top: -7px;
 }
@@ -28296,42 +28284,31 @@ button .spinner-whirlpool {
        icons and fan the cluster into a 3rd row. */
     min-width: 158px;
     max-width: 158px;
-    /* Right-align the cluster so the icons stay glued to the right
-       edge instead of drifting to the middle when the cluster is
-       wider than its content (e.g. a 2-row stack of 3). */
-    justify-self: end;
   }
-}
-/* When the user expands To/Cc, lock the From row at the cluster's
-   2-row height (92px). That makes row 1 the same size regardless of
-   whether the cluster is 1-row or 2-row layout, so window resizing
-   across the 600px breakpoint no longer makes To/Cc "shoot up". */
-.email-reader-meta:has(> .email-reader-meta-details:not([hidden])) > .email-reader-meta-row.email-reader-meta-from {
-  min-height: 92px;
+  /* Tighten the right-side padding now that the cluster is 158px
+     wide (instead of the ~308 wide 1-row layout). */
+  .email-reader-meta-row.email-reader-meta-from,
+  .email-reader-meta > .email-reader-meta-details {
+    padding-right: 170px;
+  }
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
    character min, the cluster snaps to absolute overlay with a soft
    shadow so it visually floats above the truncated chip. */
 @container emailreader (max-width: 380px) {
-  /* Reserve row-1 height to match the now-absolute cluster so the
-     To/Cc details don't jump up when the cluster goes absolute —
-     without this the grid recalculates row 1 to the From row's
-     natural height and details slide upward, leaving the floating
-     cluster misaligned. */
-  .email-reader-meta-row.email-reader-meta-from {
-    min-height: 88px;
+  /* Pane too narrow even for 158px of right-side reservation — kill
+     the padding so chips use the full width, and let the cluster
+     overlay via z-index + shadow. */
+  .email-reader-meta-row.email-reader-meta-from,
+  .email-reader-meta > .email-reader-meta-details {
+    padding-right: 0;
   }
   .email-reader-meta > .email-reader-actions-inline {
-    position: absolute;
-    top: 1px;
-    right: 0;
     margin-top: 0;
     /* 158px content + 22px padding-left so the inner row still fits
-       3 icons cleanly. Without the +padding the 3 icons couldn't
-       fit and the cluster fanned into a third row. */
+       3 icons cleanly. */
     min-width: 180px;
     max-width: 180px;
-    z-index: 2;
     background: linear-gradient(to right, transparent 0, var(--bg) 18px);
     padding-left: 22px;
     /* Soft shadow on the left edge so the overlap reads as the
@@ -28424,11 +28401,10 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc, pulled up 10px so they sit tight under
-     From (matches the position they end up at when the cluster
-     snaps to absolute overlay, so they don't jump at the break). */
+  /* 6px between To and Cc. Meta is plain block flow now, so no need
+     to compensate for grid row gaps — details naturally hugs From. */
   gap: 6px;
-  margin-top: -10px;
+  margin-top: 0;
 }
 .email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
