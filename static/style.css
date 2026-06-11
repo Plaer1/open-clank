@@ -28202,6 +28202,13 @@ button .spinner-whirlpool {
        wider than its content (e.g. a 2-row stack of 3). */
     justify-self: end;
   }
+  /* When the cluster wraps to 2 rows, row 1 grows ~2px (the cluster
+     spans both meta rows so the extra height bleeds into each). Pull
+     the details up another 2px so To/Cc stays at the same vertical
+     offset from From as in the wide layout — no visible jump. */
+  .email-reader-meta > .email-reader-meta-details {
+    margin-top: -12px;
+  }
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
    character min, the cluster snaps to absolute overlay with a soft
