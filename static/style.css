@@ -28319,31 +28319,10 @@ button .spinner-whirlpool {
     box-shadow: -6px 0 12px -6px rgba(0, 0, 0, 0.25);
   }
 }
-/* Docked panes: cluster flows under From + details (no overlay)
-   since there's not enough horizontal room. Killed the desktop-only
-   from-row min-height / strong nudges from the old grid layout — the
-   block-flow meta doesn't need them anymore. */
-.modal.modal-right-docked .email-reader-meta > .email-reader-actions-inline,
-.modal.modal-left-docked .email-reader-meta > .email-reader-actions-inline {
-  position: static;
-  margin-top: 4px;
-  background: none;
-  padding-left: 0;
-  box-shadow: none;
-  justify-content: flex-end;
-  min-width: 0;
-  max-width: none;
-}
-.modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from,
-.modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from,
-.modal.modal-right-docked .email-reader-meta > .email-reader-meta-details,
-.modal.modal-left-docked .email-reader-meta > .email-reader-meta-details {
-  padding-right: 0;
-}
-.modal.modal-right-docked .email-reader-header,
-.modal.modal-left-docked .email-reader-header {
-  min-height: 0;
-}
+/* Docked panes used to flow the cluster under the meta; now they
+   share the same absolute-top-right + wrap behaviour as undocked.
+   No docked-specific overrides — the container queries below pick
+   the right cluster size and overlay state from the reader width. */
 /* Accent-tint the email-search (from-sender) magnifying glass so
    it reads as a deliberate search action against the other icons. */
 .email-reader-actions-inline .reader-icon-btn[data-act="from-sender"] svg {
