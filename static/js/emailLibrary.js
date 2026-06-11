@@ -1797,7 +1797,9 @@ function _applyPillFilter() {
   const source = _libPreSearchEmails || state._libEmails || [];
   const draftPill = draft.length >= 1 ? { type: 'text', text: draft } : null;
   const effective = draftPill ? pills.concat([draftPill]) : pills;
-  const filtered = source.filter(em => effective.some(p => _emailMatchesPill(em, p)));
+  // AND across pills — "alice + bob" should mean both alice AND bob are
+  // somewhere on the email (from/to/cc), not "from alice OR from bob".
+  const filtered = source.filter(em => effective.every(p => _emailMatchesPill(em, p)));
   state._libEmails = filtered;
   _renderGrid();
 }
@@ -1818,7 +1820,7 @@ function _renderSearchPills() {
     const label = p.type === 'contact' ? (p.name || p.email || '?') : (p.text || '');
     return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:2px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:10px;line-height:18px;height:18px;font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
       <span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
-      <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;">×</button>
+      <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;position:relative;top:-4px;">×</button>
     </span>`;
   }).join('');
   wrap.querySelectorAll('.email-lib-pill-x').forEach(btn => {
@@ -1920,7 +1922,10 @@ async function _initEmailSearchChipBar() {
   const _refreshSuggestions = async () => {
     await _ensureSuggestionCache();
     _itemsRef = _filterSuggestions(input.value);
-    _libSuggestionFocusIdx = 0;
+    // Default to no focused suggestion — text typing should feel like
+    // regular search; the user has to ArrowDown / Tab explicitly to
+    // pick a contact. Enter without a focused row commits as text.
+    _libSuggestionFocusIdx = -1;
     _renderSearchSuggestions(_itemsRef);
   };
 
@@ -1944,28 +1949,36 @@ async function _initEmailSearchChipBar() {
     }
     if (e.key === 'ArrowDown' && menuOpen) {
       e.preventDefault();
-      _libSuggestionFocusIdx = Math.min(_libSuggestionFocusIdx + 1, _itemsRef.length - 1);
+      // -1 → 0 → 1 → … → length-1, then wraps back to -1 (no selection)
+      const next = _libSuggestionFocusIdx + 1;
+      _libSuggestionFocusIdx = next >= _itemsRef.length ? -1 : next;
       _renderSearchSuggestions(_itemsRef);
       return;
     }
     if (e.key === 'ArrowUp' && menuOpen) {
       e.preventDefault();
-      _libSuggestionFocusIdx = Math.max(_libSuggestionFocusIdx - 1, 0);
+      // -1 → length-1 → length-2 → … → 0 → -1
+      const next = _libSuggestionFocusIdx - 1;
+      _libSuggestionFocusIdx = next < -1 ? _itemsRef.length - 1 : next;
       _renderSearchSuggestions(_itemsRef);
       return;
     }
-    if (e.key === 'Tab' && menuOpen && _itemsRef[_libSuggestionFocusIdx]) {
-      e.preventDefault();
-      _acceptSuggestion(_itemsRef[_libSuggestionFocusIdx]);
-      return;
+    if (e.key === 'Tab' && menuOpen) {
+      // Tab autocompletes the FIRST suggestion (most-relevant), regardless
+      // of whether the user arrowed down yet — matches the user's mental
+      // model of "type a name and tab to pick".
+      const pick = _libSuggestionFocusIdx >= 0 ? _itemsRef[_libSuggestionFocusIdx] : _itemsRef[0];
+      if (pick) { e.preventDefault(); _acceptSuggestion(pick); return; }
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (menuOpen && _itemsRef[_libSuggestionFocusIdx]) {
+      // Only commit a contact if the user explicitly focused one. Plain
+      // Enter should default to a text pill so regular text search works
+      // without forcing a contact pick.
+      if (menuOpen && _libSuggestionFocusIdx >= 0 && _itemsRef[_libSuggestionFocusIdx]) {
         _acceptSuggestion(_itemsRef[_libSuggestionFocusIdx]);
         return;
       }
-      // No autocomplete match — fall back to a free-text pill.
       const v = input.value.trim();
       if (v) {
         _addSearchPill({ type: 'text', text: v });
