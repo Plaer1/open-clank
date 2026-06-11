@@ -15251,6 +15251,7 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
 .modal.modal-right-docked .email-reader-meta-row:not(.email-reader-meta-from),
 .modal.modal-left-docked .email-reader-meta-row:not(.email-reader-meta-from) {
   padding-right: 0;
+  margin-top: 4px;
 }
 .modal.modal-right-docked .email-reader-meta-row strong,
 .modal.modal-left-docked .email-reader-meta-row strong {
@@ -28068,30 +28069,53 @@ button .spinner-whirlpool {
   gap: 6px;
   min-width: 0;
 }
-/* Action cluster sits as a sibling of the From row inside meta so
-   it can flow under the To/Cc details when expanded in docked mode.
-   In undocked mode it's absolute-positioned top-right of the header
-   so it visually overlays the From line. */
+/* Meta uses CSS grid so the From row sits left of the action cluster
+   in row 1, and the To/Cc details span across row 2 below. The
+   cluster naturally shrinks alongside the chip — when it can't fit
+   on one row, flex-wrap drops it into two rows of icons first; only
+   at very narrow pane widths does it switch back to absolute overlay. */
+.email-reader-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-auto-rows: auto;
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 2px;
+}
+.email-reader-meta-row.email-reader-meta-from {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+  flex-wrap: wrap;
+}
+.email-reader-meta > .email-reader-meta-details {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
 .email-reader-meta > .email-reader-actions-inline {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  position: absolute;
-  top: 1px;
-  right: 14px;
-  z-index: 2;
-  /* Solid background with a left-edge gradient fade so the From
-     chip / sender text doesn't bleed through the gaps between icons
-     when they overlay. */
-  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
-  padding-left: 22px;
+  /* Sit visually above the From baseline like the lifted overlay. */
+  margin-top: -7px;
 }
-.email-reader-meta-row.email-reader-meta-from {
-  position: relative;
-  flex-wrap: wrap;
+/* Very narrow undocked panes: cluster snaps back to absolute overlay
+   so it doesn't push the From chip into a tiny ribbon. */
+@container docpane (max-width: 380px) {
+  .email-reader-meta > .email-reader-actions-inline {
+    position: absolute;
+    top: 1px;
+    right: 0;
+    margin-top: 0;
+    z-index: 2;
+    background: linear-gradient(to right, transparent 0, var(--bg) 18px);
+    padding-left: 22px;
+  }
 }
 /* Desktop only: shift the whole From row up 6px. Mobile keeps the
    original placement (the mobile @media block overrides padding so
@@ -28124,10 +28148,17 @@ button .spinner-whirlpool {
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
     top: 0;
   }
+  /* Docked: ditch the grid layout for a simple flex column so the
+     action cluster naturally flows last — below From, and below
+     To/Cc when expanded. */
+  .modal.modal-right-docked .email-reader-meta,
+  .modal.modal-left-docked .email-reader-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
   .modal.modal-right-docked .email-reader-meta > .email-reader-actions-inline,
   .modal.modal-left-docked .email-reader-meta > .email-reader-actions-inline {
-    /* In docked mode the cluster flows naturally at the bottom of
-       meta — when To/Cc are expanded, the cluster sits below them. */
     position: static;
     margin-top: 4px;
     background: none;
