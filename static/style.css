@@ -11054,6 +11054,11 @@ textarea.memory-add-input {
   position: relative;
   top: 3px;
 }
+/* Desktop nudge — sits 2px higher than the mobile default so it aligns
+   with the neighbouring memory-sort-select baseline. */
+@media (min-width: 769px) {
+  .email-filter-picker { top: 1px; }
+}
 .email-filter-btn {
   display: flex;
   align-items: center;
