@@ -28078,7 +28078,7 @@ button .spinner-whirlpool {
   .recipient-chip { flex-shrink: 0; }
 }
 .email-reader-actions {
-  display: flex; gap: 4px; flex-wrap: nowrap; align-items: center;
+  display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
   flex-shrink: 0;
   justify-content: flex-end;
   margin-top: -4px;
@@ -28089,6 +28089,12 @@ button .spinner-whirlpool {
    line on desktop too. */
 .email-reader-actions-row {
   display: contents;
+}
+/* Pin the More button to the far right of the flattened flex row — it
+   sits at position 5 in the primary row's source order, so without an
+   explicit order the secondary AI/Summary buttons land after it. */
+.email-reader-actions .email-reader-more-wrap {
+  order: 99;
 }
 .email-reader-atts {
   display: flex; flex-wrap: wrap; gap: 6px;
