@@ -1264,8 +1264,14 @@ def _build_base_prompt(
         disabled.add("generate_image")
 
     if relevant_tools is not None:
-        # RAG mode: include always-available + retrieved + admin (if needed)
-        tool_names = set(ALWAYS_AVAILABLE) | set(relevant_tools)
+        # RAG mode: trust the relevant_tools set as already-composed.
+        # get_tools_for_query starts from ALWAYS_AVAILABLE and may
+        # *discard* tools that conflict with the query's intent (e.g.
+        # drop manage_memory for clear contact-save patterns). Unioning
+        # ALWAYS_AVAILABLE back in here used to silently undo those
+        # drops. Only force-include the irreducible loop primitives
+        # (ask_user, update_plan) as belt-and-suspenders.
+        tool_names = set(relevant_tools) | {"ask_user", "update_plan"}
         if needs_admin:
             tool_names |= _ADMIN_TOOLS
         agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
