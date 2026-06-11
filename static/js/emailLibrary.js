@@ -819,7 +819,10 @@ export function openEmailLibrary(opts = {}) {
               <select class="memory-sort-select" id="email-lib-folder" style="flex:1;min-width:0;text-overflow:ellipsis;">
                 <option value="INBOX">Inbox</option>
               </select>
-              <select class="memory-sort-select" id="email-lib-filter" style="flex:1;min-width:0;">
+              <!-- Hidden native select kept as the source of truth — all
+                   existing change handlers still fire via the custom picker
+                   dispatching 'change' on it. -->
+              <select class="memory-sort-select" id="email-lib-filter" style="display:none;">
                 <option value="all">All</option>
                 <option value="unread">Unread</option>
                 <option value="favorites">Favorites</option>
@@ -836,6 +839,13 @@ export function openEmailLibrary(opts = {}) {
                   <option value="tag:marketing">Marketing</option>
                 </optgroup>
               </select>
+              <div class="email-filter-picker" id="email-filter-picker" style="flex:1;min-width:0;position:relative;">
+                <button type="button" class="email-filter-btn" id="email-filter-btn" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="email-filter-current"><span class="email-filter-icon"></span><span class="email-filter-label">All</span></span>
+                  <svg class="email-filter-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="email-filter-menu" id="email-filter-menu" role="listbox" hidden></div>
+              </div>
               <button class="memory-toolbar-btn email-filter-select-btn" id="email-lib-select-btn">Select</button>
               <button class="memory-toolbar-btn email-filter-refresh-btn" id="email-lib-refresh-btn" title="Refresh">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
@@ -990,7 +1000,10 @@ export function openEmailLibrary(opts = {}) {
     // Sync quick-toggle active states so they mirror the dropdown.
     document.getElementById('email-undone-btn')?.classList.toggle('active', state._libFilter === 'undone');
     document.getElementById('email-reminder-btn')?.classList.toggle('active', state._libFilter === 'reminders');
+    // Mirror the picker label/icon.
+    _renderFilterPickerCurrent();
   });
+  _initFilterPicker();
   document.getElementById('email-attach-btn')?.addEventListener('click', () => {
     const btn = document.getElementById('email-attach-btn');
     state._libHasAttachments = !state._libHasAttachments;
@@ -1719,6 +1732,106 @@ async function _doSearch() {
   } catch (e) {
     if (stats) stats.textContent = originalStatsText || 'Search failed';
   }
+}
+
+// Custom dropdown for the email filter (All/Unread/Favorites/...). Replaces
+// the native <select> so each row can carry an SVG icon. The hidden
+// <select id="email-lib-filter"> stays as the value source — clicking a
+// menu item updates its value and dispatches 'change', so every existing
+// listener keeps working.
+const _EMAIL_FILTER_ICONS = {
+  'all':           '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+  'unread':        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
+  'favorites':     '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  'undone':        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/></svg>',
+  'reminders':     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>',
+  'unanswered':    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>',
+  'pending_30d':   '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  'stale_30d':     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="10" y1="14" x2="14" y2="18"/><line x1="14" y1="14" x2="10" y2="18"/></svg>',
+  'tag:urgent':    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  'tag:reply-soon':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/><circle cx="18" cy="6" r="2" fill="currentColor" stroke="none"/></svg>',
+  'tag:spam':      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
+  'tag:newsletter':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6z"/></svg>',
+  'tag:marketing': '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>',
+};
+
+function _filterIcon(value) {
+  return _EMAIL_FILTER_ICONS[value] || _EMAIL_FILTER_ICONS['all'];
+}
+
+function _renderFilterPickerCurrent() {
+  const sel = document.getElementById('email-lib-filter');
+  const btn = document.getElementById('email-filter-btn');
+  if (!sel || !btn) return;
+  const value = sel.value || 'all';
+  const opt = sel.querySelector(`option[value="${CSS.escape(value)}"]`);
+  const label = opt ? opt.textContent : value;
+  const iconWrap = btn.querySelector('.email-filter-icon');
+  const labelEl = btn.querySelector('.email-filter-label');
+  if (iconWrap) iconWrap.innerHTML = _filterIcon(value);
+  if (labelEl) labelEl.textContent = label;
+}
+
+function _initFilterPicker() {
+  const sel = document.getElementById('email-lib-filter');
+  const picker = document.getElementById('email-filter-picker');
+  const btn = document.getElementById('email-filter-btn');
+  const menu = document.getElementById('email-filter-menu');
+  if (!sel || !picker || !btn || !menu || picker._wired) return;
+  picker._wired = true;
+
+  // Build menu from the hidden <select> contents (preserves optgroup labels).
+  const items = [];
+  for (const child of sel.children) {
+    if (child.tagName === 'OPTGROUP') {
+      items.push({ group: child.label });
+      for (const o of child.children) {
+        items.push({ value: o.value, label: o.textContent, group: child.label });
+      }
+    } else if (child.tagName === 'OPTION') {
+      items.push({ value: child.value, label: child.textContent });
+    }
+  }
+  menu.innerHTML = items.map(it => {
+    if (!it.value) {
+      return `<div class="email-filter-group">${it.group}</div>`;
+    }
+    return `<button type="button" role="option" class="email-filter-item" data-value="${it.value}">
+      <span class="email-filter-item-icon">${_filterIcon(it.value)}</span>
+      <span class="email-filter-item-label">${it.label}</span>
+    </button>`;
+  }).join('');
+
+  const close = () => {
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  };
+  const open = () => {
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+  };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.hidden) open(); else close();
+  });
+  menu.addEventListener('click', (e) => {
+    const item = e.target.closest('.email-filter-item');
+    if (!item) return;
+    sel.value = item.dataset.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    close();
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.hidden && !picker.contains(e.target)) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.hidden) {
+      e.stopPropagation();
+      close();
+    }
+  }, { capture: true });
+
+  _renderFilterPickerCurrent();
 }
 
 function _renderEmailLoading(grid) {
