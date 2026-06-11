@@ -4683,41 +4683,44 @@ body.bg-pattern-sparkles {
            row inside the absolute-positioned actions cluster. */
         display: contents !important;
       }
-      /* Horizontal-scroll recipient chip rows on mobile. */
+      /* Single-row meta strip on mobile — From / To / Cc inline. */
       #email-lib-modal .email-reader-meta,
       .email-reader-tab-modal .email-reader-meta,
       .email-window-modal .email-reader-meta {
-        flex: 1 1 auto !important;
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 10px !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
         min-width: 0 !important;
         width: 100% !important;
+        scrollbar-width: none !important;
+        padding-right: 110px !important;
+      }
+      #email-lib-modal .email-reader-meta::-webkit-scrollbar,
+      .email-reader-tab-modal .email-reader-meta::-webkit-scrollbar,
+      .email-window-modal .email-reader-meta::-webkit-scrollbar {
+        display: none !important;
       }
       #email-lib-modal .email-reader-meta-row,
       .email-reader-tab-modal .email-reader-meta-row,
       .email-window-modal .email-reader-meta-row {
-        display: flex !important;
+        display: inline-flex !important;
         grid-template-columns: none !important;
         align-items: center !important;
         gap: 6px !important;
-        /* Reserve room on the right so first-row chips don't
-           sit fully underneath the actions on first paint. */
-        padding-right: 110px !important;
+        padding-right: 0 !important;
         min-width: 0 !important;
+        flex: 0 0 auto !important;
       }
       #email-lib-modal .email-reader-meta-row .recipient-chips,
       .email-reader-tab-modal .email-reader-meta-row .recipient-chips,
       .email-window-modal .email-reader-meta-row .recipient-chips {
         display: inline-flex !important;
         flex-wrap: nowrap !important;
-        overflow-x: auto !important;
-        overflow-y: hidden !important;
-        max-width: 100% !important;
-        scrollbar-width: none !important;
         gap: 4px !important;
-      }
-      #email-lib-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar,
-      .email-reader-tab-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar,
-      .email-window-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar {
-        display: none !important;
       }
       #email-lib-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
       .email-reader-tab-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
@@ -28028,49 +28031,46 @@ button .spinner-whirlpool {
   background: linear-gradient(to right, transparent 0, var(--bg) 18px);
   padding-left: 22px;
 }
-/* Recipient chip rows scroll horizontally — chips don't wrap onto new
-   lines, they run off the right edge under the action cluster. Touch
-   swipe already works via native overflow; desktop users can scroll
-   with shift+wheel or a horizontal touchpad gesture. */
+/* The meta block itself is a SINGLE horizontal row — From / To / Cc
+   all flow inline instead of stacking. The whole strip scrolls
+   horizontally; the action cluster floats above the right edge and
+   chips that overflow slide underneath. */
+.email-reader-meta {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  gap: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Reserve room on the right so the meta strip doesn't immediately
+     hide under the floating action cluster on first paint. */
+  padding-right: 180px;
+}
+.email-reader-meta::-webkit-scrollbar { display: none; }
 .email-reader-meta .recipient-chips {
   display: inline-flex;
   flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
   gap: 4px;
-  max-width: 100%;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  /* Right-pad the inside of the scroller so the last chip can be
-     scrolled fully into view without staying tucked under the
-     action cluster. */
-  padding-right: 0;
 }
-.email-reader-meta .recipient-chips::-webkit-scrollbar { display: none; }
 .email-reader-meta-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
-  /* Reserve space at the right so chips don't immediately collide
-     with the floating action cluster on the very first row. */
-  padding-right: 180px;
+  flex: 0 0 auto;
+  /* No per-row padding — padding lives on the parent strip. */
+  padding-right: 0;
 }
 .email-reader-header > .email-reader-meta {
   flex: 1; min-width: 0;
+  opacity: 0.85; line-height: 1.7; font-size: 11px;
 }
-.email-reader-meta {
-  min-width: 0; opacity: 0.85; line-height: 1.7; font-size: 11px;
-  display: flex; flex-direction: column; gap: 4px;
-}
-.email-reader-meta-row {
-  display: flex; align-items: center; gap: 6px;
-  min-width: 0;
-}
-.email-reader-meta-row strong { opacity: 0.5; font-weight: 600; flex-shrink: 0; min-width: 36px; }
+.email-reader-meta-row strong { opacity: 0.5; font-weight: 600; flex-shrink: 0; min-width: 0; }
 .email-reader-meta-row > span {
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0; flex: 1;
+  white-space: nowrap;
+  min-width: 0;
 }
 /* Recipient chips */
 .recipient-chips {
