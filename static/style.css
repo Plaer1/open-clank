@@ -11106,6 +11106,32 @@ textarea.memory-add-input {
   border-color: var(--red);
 }
 
+/* Memory sort wrapper: positions the SVG icon over the left
+   edge of the native <select>, mirroring the email filter btn. */
+.memory-sort-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.memory-sort-wrap .memory-sort-select {
+  padding-left: 24px;
+}
+.memory-sort-icon {
+  position: absolute;
+  left: 7px;
+  top: calc(50% + 1px);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  color: var(--accent, var(--red));
+  pointer-events: none;
+}
+.memory-sort-icon svg { width: 13px; height: 13px; }
+
 /* Custom email filter picker (All / Unread / Favorites / …). Replaces the
    native <select> so options can carry SVG icons. The hidden source
    <select id="email-lib-filter"> is the value store and dispatches
@@ -28089,16 +28115,23 @@ button .spinner-whirlpool {
   flex-wrap: wrap;
 }
 .email-reader-meta > .email-reader-meta-details {
-  grid-column: 1 / -1;
+  /* Stays in col 1 (not spanning) so To/Cc shrink along with From
+     when the pane narrows, instead of going edge-to-edge under the
+     action cluster. */
+  grid-column: 1;
   grid-row: 2;
+  min-width: 0;
 }
 .email-reader-meta > .email-reader-actions-inline {
   grid-column: 2;
-  grid-row: 1;
+  /* Cluster spans both meta rows so its width is determined by the
+     widest col-1 content (From OR a long To/Cc) — it wraps to a
+     2-icon-row stack when any of those rows grows long. */
+  grid-row: 1 / span 2;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-end;
   gap: 4px;
   /* Sit visually above the From baseline like the lifted overlay. */
