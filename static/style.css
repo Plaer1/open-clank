@@ -28149,6 +28149,15 @@ button .spinner-whirlpool {
 .email-reader-meta .recipient-chips {
   min-width: 60px;
 }
+/* Medium pane widths: cap the cluster at 3 icons per row so it
+   never wraps past 2 rows (3 top + 3 bottom). Below this break the
+   chips start sharing the width with a 2-row cluster instead of
+   the icons multiplying into 3+ rows. */
+@container docpane (max-width: 600px) {
+  .email-reader-meta > .email-reader-actions-inline {
+    max-width: calc(48px * 3 + 4px * 2);
+  }
+}
 /* Very narrow undocked panes: once the chip span has shrunk to its
    ~4-character min, the cluster snaps to absolute overlay with a
    soft shadow so it visually floats above the truncated chip. */
@@ -28158,7 +28167,7 @@ button .spinner-whirlpool {
     top: 1px;
     right: 0;
     margin-top: 0;
-    max-width: none;
+    max-width: calc(48px * 3 + 4px * 2);
     z-index: 2;
     background: linear-gradient(to right, transparent 0, var(--bg) 18px);
     padding-left: 22px;
