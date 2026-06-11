@@ -28134,8 +28134,19 @@ button .spinner-whirlpool {
   align-items: flex-start;
   justify-content: flex-end;
   gap: 4px;
+  /* Cluster wraps to 2 rows BEFORE the chip starts shrinking — cap
+     at ~half the meta width so as the pane narrows the icons
+     re-stack into two rows first, then the chip span starts to
+     overflow-scroll once even the half-width can't hold the icons. */
+  max-width: 50%;
   /* Sit visually above the From baseline like the lifted overlay. */
   margin-top: -7px;
+}
+/* Recipient chip span keeps at least ~4 characters visible (60px)
+   before the overflow-scroll kicks in, so the sender / first
+   recipient name is always partly readable. */
+.email-reader-meta .recipient-chips {
+  min-width: 60px;
 }
 /* Very narrow undocked panes: cluster snaps back to absolute overlay
    so it doesn't push the From chip into a tiny ribbon. */
