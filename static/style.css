@@ -28083,6 +28083,11 @@ button .spinner-whirlpool {
   top: 1px;
   right: 14px;
   z-index: 2;
+  /* Solid background with a left-edge gradient fade so the From
+     chip / sender text doesn't bleed through the gaps between icons
+     when they overlay. */
+  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
+  padding-left: 22px;
 }
 .email-reader-meta-row.email-reader-meta-from {
   position: relative;
