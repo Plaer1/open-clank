@@ -773,6 +773,9 @@ export function openEmailLibrary(opts = {}) {
   state._libEmails = [];
   state._libOffset = 0;
   state._libSearch = '';
+  state._libSearchDraft = '';
+  state._libSearchPills = [];
+  _libSuggestionCache = null;
   state._libFilter = 'all';
   state._libHasAttachments = false;
   // Animate the very first card render with a domino cascade (same as the
@@ -857,7 +860,11 @@ export function openEmailLibrary(opts = {}) {
             </div>
             <div class="email-search-row" style="display:flex;gap:6px;align-items:flex-start;">
             <div class="email-search-wrap" style="position:relative;flex:1;min-width:140px;">
-              <input type="text" id="email-lib-search" placeholder="Search emails\u2026" class="memory-search-input" style="width:100%;padding-right:96px;" />
+              <div class="email-lib-chip-bar memory-search-input" id="email-lib-chip-bar" style="width:100%;padding-right:96px;padding-left:8px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;cursor:text;min-height:30px;">
+                <span id="email-lib-pills" style="display:contents"></span>
+                <input type="text" id="email-lib-search" placeholder="Search by name or text" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;" />
+              </div>
+              <div id="email-lib-suggest" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:60;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,0.25);max-height:240px;overflow-y:auto;"></div>
               <button class="memory-toolbar-btn email-undone-toggle email-undone-toggle-inline" id="email-undone-btn" title="Show only emails not marked as done (undone)">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
               </button>
@@ -1081,16 +1088,11 @@ export function openEmailLibrary(opts = {}) {
   // \Flagged search). _libSort stays at its 'recent' default so the grid keeps
   // the API's newest-first order.
 
-  let searchTimer = null;
-  document.getElementById('email-lib-search').addEventListener('input', (e) => {
-    state._libSearch = e.target.value;
-    // Instant local filter so the grid responds on every keystroke even
-    // before the server-side IMAP search lands. The debounced server
-    // search still runs and replaces the grid when it returns.
-    _localSearchFilter(state._libSearch);
-    if (searchTimer) clearTimeout(searchTimer);
-    searchTimer = setTimeout(_doSearch, 350);
-  });
+  // Chip-bar search: pills represent contact + free-text filters; the live
+  // input below drives the autocomplete dropdown. Old behavior — instant
+  // local filter on every keystroke + server-side IMAP search after 350ms
+  // — is replaced by deterministic local filtering against the snapshot.
+  _initEmailSearchChipBar();
 
   document.getElementById('email-lib-refresh-btn').addEventListener('click', async () => {
     const btn = document.getElementById('email-lib-refresh-btn');
@@ -1664,6 +1666,85 @@ function _crossFolderCandidates() {
 let _libPreSearchEmails = null;
 let _libPreSearchTotal = 0;
 
+// Cached contact suggestions for the chip-input autocomplete. Built on
+// first focus / first keystroke from contacts + currently-loaded senders.
+let _libSuggestionCache = null;
+let _libSuggestionFocusIdx = 0;
+
+async function _buildSuggestionSource() {
+  // Combine the contacts list with senders/recipients visible in the
+  // loaded email list. Dedup by lowercased email address; prefer
+  // contact-supplied display names where present.
+  const map = new Map();
+  const _add = (name, email) => {
+    const key = String(email || '').trim().toLowerCase();
+    if (!key) return;
+    const prev = map.get(key);
+    if (!prev || (name && !prev.name)) {
+      map.set(key, { name: (name || '').trim(), email: key });
+    }
+  };
+  // 1) Senders / recipients already in the loaded grid.
+  for (const em of (state._libEmails || [])) {
+    _add(em.from_name, em.from_address);
+    const _parse = (s) => String(s || '').split(',').forEach(seg => {
+      const m = seg.match(/^\s*"?([^"<]*)"?\s*<?([^>]+)>?\s*$/);
+      if (m) _add(m[1], m[2]);
+    });
+    _parse(em.to);
+    _parse(em.cc);
+  }
+  // 2) Address book — best-effort.
+  try {
+    const r = await fetch(`${API_BASE}/api/contacts/list`, { credentials: 'same-origin' });
+    if (r.ok) {
+      const d = await r.json();
+      for (const c of (d.contacts || [])) {
+        const email = c.email || (c.emails && c.emails[0]) || '';
+        _add(c.name || c.full_name, email);
+      }
+    }
+  } catch (_) {}
+  return Array.from(map.values()).filter(x => x.email);
+}
+
+function _scoreSuggestion(s, needle) {
+  // Crude relevance: startsWith on name or email wins big; substring is fine.
+  const n = (s.name || '').toLowerCase();
+  const e = (s.email || '').toLowerCase();
+  if (n.startsWith(needle) || e.startsWith(needle)) return 3;
+  if (n.includes(needle) || e.includes(needle)) return 2;
+  return 0;
+}
+
+function _filterSuggestions(needle, limit = 6) {
+  const n = String(needle || '').trim().toLowerCase();
+  if (!n) return [];
+  const src = _libSuggestionCache || [];
+  return src
+    .map(s => ({ s, score: _scoreSuggestion(s, n) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(x => x.s);
+}
+
+function _emailMatchesPill(em, pill) {
+  if (!pill) return false;
+  if (pill.type === 'contact') {
+    const target = (pill.email || '').toLowerCase();
+    if (!target) return false;
+    if (String(em.from_address || '').toLowerCase() === target) return true;
+    if (String(em.to || '').toLowerCase().includes(target)) return true;
+    if (String(em.cc || '').toLowerCase().includes(target)) return true;
+    return false;
+  }
+  // text pill — broad local-match
+  const q = (pill.text || '').toLowerCase();
+  if (!q) return true;
+  return _matchesQuery(em, q);
+}
+
 function _matchesQuery(em, q) {
   const needle = q.toLowerCase();
   return (
@@ -1674,18 +1755,22 @@ function _matchesQuery(em, q) {
   );
 }
 
-// Instant client-side filter — fires on every keystroke. Filters the
-// pre-search snapshot so the user sees something immediately even
-// though the server search hasn't returned yet.
-function _localSearchFilter(query) {
-  const q = (query || '').trim();
-  // First non-empty keystroke after an empty search: take the snapshot.
-  if (q.length >= 1 && !_libPreSearchEmails) {
-    _libPreSearchEmails = (state._libEmails || []).slice();
-    _libPreSearchTotal = state._libTotal;
+// Apply the active pill filter to the snapshot. Each pill is OR-ed; an
+// email shows up if ANY pill matches (a contact pill matches by from/to/cc
+// equality, a text pill matches by the broad _matchesQuery substring).
+function _applyPillFilter() {
+  const pills = state._libSearchPills || [];
+  const draft = (state._libSearchDraft || '').trim();
+  const noPills = pills.length === 0;
+  const noDraft = draft.length === 0;
+  // First time we apply with anything active: snapshot the loaded list.
+  if (!noPills || draft.length >= 1) {
+    if (!_libPreSearchEmails) {
+      _libPreSearchEmails = (state._libEmails || []).slice();
+      _libPreSearchTotal = state._libTotal;
+    }
   }
-  if (q.length === 0) {
-    // Cleared — restore.
+  if (noPills && noDraft) {
     if (_libPreSearchEmails) {
       state._libEmails = _libPreSearchEmails;
       state._libTotal = _libPreSearchTotal;
@@ -1695,15 +1780,210 @@ function _localSearchFilter(query) {
     _renderGrid();
     return;
   }
-  if (q.length < 2) {
-    _renderGrid();
-    return;
-  }
   const source = _libPreSearchEmails || state._libEmails || [];
-  const filtered = source.filter(em => _matchesQuery(em, q));
+  const draftPill = draft.length >= 1 ? { type: 'text', text: draft } : null;
+  const effective = draftPill ? pills.concat([draftPill]) : pills;
+  const filtered = source.filter(em => effective.some(p => _emailMatchesPill(em, p)));
   state._libEmails = filtered;
   _renderGrid();
 }
+// Back-compat shim: older call sites still expect _localSearchFilter.
+function _localSearchFilter(query) {
+  state._libSearchDraft = String(query || '');
+  _applyPillFilter();
+}
+
+// Render the active pills inside the chip bar. Each pill carries a × to
+// remove individually. Backspace on empty input also pops the last one.
+function _renderSearchPills() {
+  const wrap = document.getElementById('email-lib-pills');
+  if (!wrap) return;
+  const pills = state._libSearchPills || [];
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  wrap.innerHTML = pills.map((p, i) => {
+    const label = p.type === 'contact' ? (p.name || p.email || '?') : (p.text || '');
+    return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:4px;padding:2px 6px 2px 8px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:11px;line-height:1.4;font-weight:600;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+      <span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
+      <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:13px;line-height:1;padding:0 2px;opacity:0.7;">×</button>
+    </span>`;
+  }).join('');
+  wrap.querySelectorAll('.email-lib-pill-x').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.dataset.pillIdx);
+      if (Number.isFinite(idx)) _removeSearchPillAt(idx);
+    });
+  });
+}
+
+function _addSearchPill(pill) {
+  if (!pill) return;
+  if (!Array.isArray(state._libSearchPills)) state._libSearchPills = [];
+  // Dedup by email (contact) or text (text pill).
+  if (pill.type === 'contact') {
+    const key = (pill.email || '').toLowerCase();
+    if (!key) return;
+    if (state._libSearchPills.some(p => p.type === 'contact' && (p.email || '').toLowerCase() === key)) return;
+  } else if (pill.type === 'text') {
+    const t = (pill.text || '').toLowerCase();
+    if (!t) return;
+    if (state._libSearchPills.some(p => p.type === 'text' && (p.text || '').toLowerCase() === t)) return;
+  }
+  state._libSearchPills.push(pill);
+  _renderSearchPills();
+  _applyPillFilter();
+}
+
+function _removeSearchPillAt(idx) {
+  if (!Array.isArray(state._libSearchPills)) return;
+  state._libSearchPills.splice(idx, 1);
+  _renderSearchPills();
+  _applyPillFilter();
+}
+
+// Render the autocomplete dropdown below the input. focusIdx highlights
+// the active row; Tab autocompletes / Enter accepts that row.
+function _renderSearchSuggestions(items) {
+  const menu = document.getElementById('email-lib-suggest');
+  if (!menu) return;
+  if (!items.length) { menu.style.display = 'none'; menu.innerHTML = ''; return; }
+  const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  menu.innerHTML = items.map((s, i) => `
+    <div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;font-size:12px;${i === _libSuggestionFocusIdx ? 'background:color-mix(in srgb, var(--fg) 8%, transparent);' : ''}">
+      <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name || s.email)}</span>
+      ${s.name ? `<span style="opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.email)}</span>` : ''}
+    </div>
+  `).join('');
+  menu.style.display = '';
+  menu.querySelectorAll('.email-lib-suggest-item').forEach(row => {
+    row.addEventListener('mousedown', (e) => {
+      // mousedown (not click) so we beat the input blur handler that hides the menu.
+      e.preventDefault();
+      const idx = Number(row.dataset.idx);
+      const item = items[idx];
+      if (item) _acceptSuggestion(item);
+    });
+  });
+}
+
+function _hideSearchSuggestions() {
+  const menu = document.getElementById('email-lib-suggest');
+  if (menu) { menu.style.display = 'none'; menu.innerHTML = ''; }
+  _libSuggestionFocusIdx = 0;
+}
+
+function _acceptSuggestion(s) {
+  const input = document.getElementById('email-lib-search');
+  _addSearchPill({ type: 'contact', name: s.name, email: s.email });
+  if (input) input.value = '';
+  state._libSearchDraft = '';
+  _hideSearchSuggestions();
+  _applyPillFilter();
+  if (input) input.focus();
+}
+
+async function _initEmailSearchChipBar() {
+  const bar = document.getElementById('email-lib-chip-bar');
+  const input = document.getElementById('email-lib-search');
+  if (!bar || !input) return;
+  state._libSearchPills = state._libSearchPills || [];
+  state._libSearchDraft = '';
+  _renderSearchPills();
+
+  // Lazy-load suggestion source on first focus / keystroke.
+  const _ensureSuggestionCache = async () => {
+    if (_libSuggestionCache) return;
+    _libSuggestionCache = await _buildSuggestionSource();
+  };
+
+  // Click anywhere in the bar lands the cursor in the input field.
+  bar.addEventListener('click', (e) => {
+    if (e.target.closest('.email-lib-pill-x')) return;
+    input.focus();
+  });
+
+  let _itemsRef = [];
+  const _refreshSuggestions = async () => {
+    await _ensureSuggestionCache();
+    _itemsRef = _filterSuggestions(input.value);
+    _libSuggestionFocusIdx = 0;
+    _renderSearchSuggestions(_itemsRef);
+  };
+
+  input.addEventListener('focus', _refreshSuggestions);
+  input.addEventListener('input', async () => {
+    state._libSearchDraft = input.value;
+    await _refreshSuggestions();
+    _applyPillFilter();
+  });
+  input.addEventListener('blur', () => {
+    // Delay so click/mousedown on a suggestion fires first.
+    setTimeout(_hideSearchSuggestions, 120);
+  });
+  input.addEventListener('keydown', (e) => {
+    const menu = document.getElementById('email-lib-suggest');
+    const menuOpen = menu && menu.style.display !== 'none';
+    if (e.key === 'Backspace' && !input.value && (state._libSearchPills || []).length) {
+      e.preventDefault();
+      _removeSearchPillAt(state._libSearchPills.length - 1);
+      return;
+    }
+    if (e.key === 'ArrowDown' && menuOpen) {
+      e.preventDefault();
+      _libSuggestionFocusIdx = Math.min(_libSuggestionFocusIdx + 1, _itemsRef.length - 1);
+      _renderSearchSuggestions(_itemsRef);
+      return;
+    }
+    if (e.key === 'ArrowUp' && menuOpen) {
+      e.preventDefault();
+      _libSuggestionFocusIdx = Math.max(_libSuggestionFocusIdx - 1, 0);
+      _renderSearchSuggestions(_itemsRef);
+      return;
+    }
+    if (e.key === 'Tab' && menuOpen && _itemsRef[_libSuggestionFocusIdx]) {
+      e.preventDefault();
+      _acceptSuggestion(_itemsRef[_libSuggestionFocusIdx]);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (menuOpen && _itemsRef[_libSuggestionFocusIdx]) {
+        _acceptSuggestion(_itemsRef[_libSuggestionFocusIdx]);
+        return;
+      }
+      // No autocomplete match — fall back to a free-text pill.
+      const v = input.value.trim();
+      if (v) {
+        _addSearchPill({ type: 'text', text: v });
+        input.value = '';
+        state._libSearchDraft = '';
+        _hideSearchSuggestions();
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      _hideSearchSuggestions();
+    }
+  });
+}
+
+// Click-to-add: if a recipient chip in the email reader is clicked, drop
+// the person into the library search as a contact pill so the user can
+// pivot to "everything from / to this person" in one tap.
+window.addEventListener('click', (e) => {
+  const chip = e.target.closest && e.target.closest('.recipient-chip');
+  if (!chip) return;
+  // Only hijack inside the email reader area; ignore composer / forms etc.
+  if (!chip.closest('.email-reader-header, .email-card-reader, .email-reader-tab-modal')) return;
+  const email = (chip.dataset && chip.dataset.email) || '';
+  const name = (chip.dataset && chip.dataset.name) || (chip.textContent || '').trim();
+  if (!email) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // Surface the library window if it's hidden, then drop a pill in.
+  try { window.openEmailLibrary && window.openEmailLibrary(); } catch (_) {}
+  _addSearchPill({ type: 'contact', name, email });
+}, true);
 
 async function _doSearch() {
   const seq = ++_libSearchSeq;
