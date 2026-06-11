@@ -15225,15 +15225,11 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   background: none;
   padding-left: 0;
 }
-/* Docked modal: From row stays a flex row so the action cluster
-   sits next to From (or wraps below it when truly cramped). Only
-   the To/Cc detail rows get the grid stack. */
+/* Docked modal: keep all meta rows as flex so From / To / Cc
+   labels align at the same x. Chips already overflow-scroll
+   inside each row when there are too many. */
 .modal.modal-right-docked .email-reader-meta-row:not(.email-reader-meta-from),
 .modal.modal-left-docked .email-reader-meta-row:not(.email-reader-meta-from) {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 2px;
-  align-items: start;
   padding-right: 0;
 }
 /* Docked mode: nudge the From row + inline action cluster up 4px. */
@@ -28103,7 +28099,9 @@ button .spinner-whirlpool {
   flex: 1; min-width: 0;
   opacity: 0.85; line-height: 1.7; font-size: 11px;
 }
-.email-reader-meta-row strong { opacity: 0.5; font-weight: 600; flex-shrink: 0; min-width: 0; }
+/* Reserve a fixed label width so From: / To: / Cc: all align and
+   their chips start at the same x. */
+.email-reader-meta-row strong { opacity: 0.5; font-weight: 600; flex-shrink: 0; min-width: 36px; }
 .email-reader-meta-row > span {
   white-space: nowrap;
   min-width: 0;
@@ -28181,10 +28179,6 @@ button .spinner-whirlpool {
     padding-left: 0;
   }
   .email-reader-meta-row:not(.email-reader-meta-from) {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 2px;
-    align-items: start;
     padding-right: 0;
   }
   .email-reader-meta-row strong {
