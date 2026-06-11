@@ -28091,15 +28091,33 @@ button .spinner-whirlpool {
     position: relative;
     top: -2px;
   }
-  /* Docked panes are tighter — pull From label and action cluster
-     up an extra 2px each. */
+  /* Docked panes are tight — flow the action cluster UNDER the
+     From: row instead of overlaying it. Also pull the whole From
+     row + buttons up 8px to claim back wasted header space. */
+  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from,
+  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from {
+    flex-wrap: wrap;
+    margin-top: -8px;
+    min-height: 0;
+  }
   .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > strong,
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
-    top: -4px;
+    top: 0;
   }
   .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline,
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
-    top: -6px;
+    position: static;
+    flex-basis: 100%;
+    margin-left: 0;
+    background: none;
+    padding-left: 0;
+    justify-content: flex-start;
+  }
+  /* Docked header gets a smaller min-height since the action cluster
+     no longer needs vertical room overlapping the chip. */
+  .modal.modal-right-docked .email-reader-header,
+  .modal.modal-left-docked .email-reader-header {
+    min-height: 0;
   }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
@@ -28126,9 +28144,10 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc, pulled up 8px to sit close under From. */
+  /* 6px between To and Cc, pulled up 6px to sit close under From
+     (2px more breathing room than before). */
   gap: 6px;
-  margin-top: -8px;
+  margin-top: -6px;
 }
 .email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
