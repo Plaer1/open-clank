@@ -1992,6 +1992,13 @@ function _renderSearchSuggestions(items) {
         <span style="font-weight:600;">${esc(s.label)}</span>
       </div>`;
     }
+    if (s.kind === 'email') {
+      return `<div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;font-size:12px;${highlight}">
+        <span style="display:inline-flex;align-items:center;width:13px;height:13px;color:var(--fg-muted, var(--fg));opacity:0.55;flex-shrink:0;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2 6 12 13 22 6"/></svg></span>
+        <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.subject)}</span>
+        ${s.from_name ? `<span style="opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">— ${esc(s.from_name)}</span>` : ''}
+      </div>`;
+    }
     return `<div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;font-size:12px;${highlight}">
       <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name || s.email)}</span>
       ${s.name ? `<span style="opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.email)}</span>` : ''}
@@ -2019,6 +2026,21 @@ function _acceptSuggestion(s) {
   const input = document.getElementById('email-lib-search');
   if (s.kind === 'filter') {
     _addSearchPill({ type: 'filter', value: s.value, label: s.label });
+  } else if (s.kind === 'email') {
+    // Clear the draft + dropdown and open the matching card directly.
+    if (input) input.value = '';
+    state._libSearchDraft = '';
+    _hideSearchSuggestions();
+    _applyPillFilter();
+    const grid = document.getElementById('email-lib-grid');
+    const card = grid?.querySelector(`.doclib-card[data-uid="${CSS.escape(String(s.uid))}"]`);
+    const em = (state._libEmails || []).find(x => String(x.uid) === String(s.uid))
+            || (_libPreSearchEmails || []).find(x => String(x.uid) === String(s.uid));
+    if (card && em) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      _toggleCardPreview(card, em);
+    }
+    return;
   } else {
     _addSearchPill({ type: 'contact', name: s.name, email: s.email });
   }
