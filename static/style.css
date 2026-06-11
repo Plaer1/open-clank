@@ -28067,32 +28067,45 @@ button .spinner-whirlpool {
   min-width: 0;
 }
 /* All action buttons live INSIDE the From row, pinned to the right
-   edge. When the window narrows, the action cluster STAYS on the
-   From line and overlays the chip — the chip's recipient-chips span
-   scrolls horizontally underneath, so the user can drag/scroll to
-   reveal anything tucked under the buttons. */
+   edge. When the chip text grows wide enough to crowd the cluster,
+   the cluster wraps to two (or more) rows of buttons before it has
+   to overlay the chip — at the point where even that doesn't fit,
+   the cluster goes back to position: absolute and slides over the
+   chip (chip scrolls horizontally underneath). */
 .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
-  position: absolute;
-  top: -7px;
-  right: 0;
+  margin-left: auto;
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
   flex-shrink: 0;
+  /* Lift visually so the cluster floats over the From baseline. */
+  position: relative;
+  top: -7px;
   z-index: 2;
-  /* Gradient fade so chips poking out from underneath blend into
-     the action cluster instead of getting visually clipped. */
-  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
-  padding-left: 22px;
 }
-/* From row is the positioning context for the absolute actions
-   cluster, and stays a single non-wrapping row. */
+/* When the From row can no longer fit even a wrapped cluster
+   alongside the chip, the chip span itself wraps to a new row —
+   then the cluster overlays via stacking-context. The overlay
+   guard kicks in via the container query below. */
 .email-reader-meta-row.email-reader-meta-from {
   position: relative;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+}
+/* Pinch point: when the reader pane gets very narrow (< 380px),
+   the action cluster goes absolute top-right and overlays the chip
+   so From: and the buttons stay on a single row. */
+@container docpane (max-width: 380px) {
+  .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
+    position: absolute;
+    top: -7px;
+    right: 0;
+    flex-wrap: nowrap;
+    background: linear-gradient(to right, transparent 0, var(--bg) 18px);
+    padding-left: 22px;
+  }
 }
 /* Desktop only: shift the whole From row up 6px. Mobile keeps the
    original placement (the mobile @media block overrides padding so
