@@ -1539,6 +1539,12 @@ function _makeDraggable(content, modal, fsClass) {
 function _snapEmailModalToLeftSidebar(modal) {
   if (!modal) return false;
   if (window.innerWidth < 900) return false;
+  // "Open in new tab" reader modals (id="email-view-…") are explicitly
+  // floating windows the user already positioned. Replying from one
+  // shouldn't yank it to the left edge — leave it on top in its current
+  // spot. Reply still opens the compose document; the user can drag the
+  // reader away or close it themselves.
+  if ((modal.id || '').startsWith('email-view-')) return false;
   const content = modal.querySelector('.modal-content');
   if (!content) return false;
   // Only dock if currently fullscreen — for a manually-sized window the
