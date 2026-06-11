@@ -5402,9 +5402,18 @@ function _showAiReplyChoice(btn, em, data) {
     'border-radius:7px',
     'box-shadow:0 8px 24px rgba(0,0,0,.28)',
   ].join(';');
+  // Fast = lightning bolt (already used as a 'fast' glyph elsewhere in the app).
+  // Full = layered concentric circles to suggest "more, deeper" — not a fully
+  // filled circle so it reads as a complement to the lightning, not as a "stop".
   menu.innerHTML = `
-    <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft">Fast</button>
-    <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context">Full</button>
+    <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;gap:5px;">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      Fast
+    </button>
+    <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+      Full
+    </button>
   `;
   menu.addEventListener('click', async (ev) => {
     const choice = ev.target.closest('[data-mode]');
