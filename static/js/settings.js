@@ -4024,6 +4024,11 @@ async function initUnifiedIntegrations() {
     try {
       const r = await fetch('/api/contacts/config', { credentials: 'same-origin' }); const d = await r.json();
       el('uf-carddav-url').value = d.url || ''; el('uf-carddav-user').value = d.username || '';
+      // Server masks the password as '***' when one is saved (or '' when
+      // none). Surface that state via the input's placeholder so users
+      // can tell their password is already on file without us echoing it.
+      const passInput = el('uf-carddav-pass');
+      if (passInput && d.password) passInput.placeholder = '(unchanged)';
     } catch (_) {}
     el('uf-carddav-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('uf-carddav-save').addEventListener('click', async () => {
