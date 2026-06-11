@@ -10416,6 +10416,7 @@ textarea.memory-add-input {
   align-items: center;
   gap: 8px;
   padding: 6px 2px;
+  margin-bottom: 2px;
   border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--red) 5%, transparent);
@@ -11086,7 +11087,9 @@ textarea.memory-add-input {
   color: var(--red);
 }
 
-/* Sort select */
+/* Sort select — styled to match the .email-filter-btn look:
+   appearance reset + custom caret so the native chevron doesn't
+   collide with our icon/border treatment. */
 .memory-sort-select {
   position: relative;
   top: 3px;
@@ -11097,10 +11100,20 @@ textarea.memory-add-input {
   font-family: inherit;
   font-size: 11px;
   height: 24px;
-  padding: 0 6px;
+  padding: 0 22px 0 8px;
   cursor: pointer;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 10px 10px;
+  transition: border-color 0.12s, background 0.12s;
 }
-
+.memory-sort-select:hover {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border));
+}
 .memory-sort-select:focus {
   outline: none;
   border-color: var(--red);
@@ -11113,9 +11126,10 @@ textarea.memory-add-input {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+  left: -2px;
 }
 .memory-sort-wrap .memory-sort-select {
-  padding-left: 24px;
+  padding-left: 26px;
 }
 .memory-sort-icon {
   position: absolute;
@@ -11129,6 +11143,7 @@ textarea.memory-add-input {
   height: 13px;
   color: var(--accent, var(--red));
   pointer-events: none;
+  z-index: 1;
 }
 .memory-sort-icon svg { width: 13px; height: 13px; }
 
@@ -28063,6 +28078,10 @@ button .spinner-whirlpool {
   flex-shrink: 0;
   /* Containing block for the absolute action cluster. */
   position: relative;
+  /* Container so the action-cluster wrap breakpoints below react to
+     the reader's own width instead of the page viewport. */
+  container-type: inline-size;
+  container-name: emailreader;
 }
 .email-reader-header > .email-reader-actions {
   margin-left: auto;
@@ -28149,19 +28168,19 @@ button .spinner-whirlpool {
 .email-reader-meta .recipient-chips {
   min-width: 60px;
 }
-/* Medium pane widths: cap the cluster at 3 icons per row so it
+/* Medium reader widths: cap the cluster at 3 icons per row so it
    never wraps past 2 rows (3 top + 3 bottom). Below this break the
    chips start sharing the width with a 2-row cluster instead of
    the icons multiplying into 3+ rows. */
-@container docpane (max-width: 600px) {
+@container emailreader (max-width: 600px) {
   .email-reader-meta > .email-reader-actions-inline {
     max-width: calc(48px * 3 + 4px * 2);
   }
 }
-/* Very narrow undocked panes: once the chip span has shrunk to its
-   ~4-character min, the cluster snaps to absolute overlay with a
-   soft shadow so it visually floats above the truncated chip. */
-@container docpane (max-width: 380px) {
+/* Very narrow reader: once the chip span has shrunk to its ~4
+   character min, the cluster snaps to absolute overlay with a soft
+   shadow so it visually floats above the truncated chip. */
+@container emailreader (max-width: 380px) {
   .email-reader-meta > .email-reader-actions-inline {
     position: absolute;
     top: 1px;
