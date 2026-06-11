@@ -28134,11 +28134,10 @@ button .spinner-whirlpool {
   align-items: flex-start;
   justify-content: flex-end;
   gap: 4px;
-  /* Cluster wraps to 2 rows BEFORE the chip starts shrinking — cap
-     at ~half the meta width so as the pane narrows the icons
-     re-stack into two rows first, then the chip span starts to
-     overflow-scroll once even the half-width can't hold the icons. */
-  max-width: 50%;
+  /* Cluster is locked to a max-width that fits exactly 3 icons per
+     row, so the 6 buttons always lay out as a 3-on-top / 3-on-bottom
+     grid. The chips in col 1 shrink first when the pane narrows. */
+  max-width: calc(48px * 3 + 4px * 2);
   /* Sit visually above the From baseline like the lifted overlay. */
   margin-top: -7px;
 }
@@ -28148,17 +28147,22 @@ button .spinner-whirlpool {
 .email-reader-meta .recipient-chips {
   min-width: 60px;
 }
-/* Very narrow undocked panes: cluster snaps back to absolute overlay
-   so it doesn't push the From chip into a tiny ribbon. */
+/* Very narrow undocked panes: once the chip span has shrunk to its
+   ~4-character min, the cluster snaps to absolute overlay with a
+   soft shadow so it visually floats above the truncated chip. */
 @container docpane (max-width: 380px) {
   .email-reader-meta > .email-reader-actions-inline {
     position: absolute;
     top: 1px;
     right: 0;
     margin-top: 0;
+    max-width: none;
     z-index: 2;
     background: linear-gradient(to right, transparent 0, var(--bg) 18px);
     padding-left: 22px;
+    /* Soft shadow on the left edge so the overlap reads as the
+       cluster "floating over" the chip. */
+    box-shadow: -6px 0 12px -6px rgba(0, 0, 0, 0.25);
   }
 }
 /* Desktop only: shift the whole From row up 6px. Mobile keeps the
