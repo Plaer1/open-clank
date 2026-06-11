@@ -372,6 +372,10 @@ class ToolIndex:
         frozenset({"save contact", "add contact", "new contact", "update contact",
                    "edit contact", "delete contact", "remove contact",
                    "save this person", "add to contacts", "save to contacts",
+                   # "add <name> to (my) contacts" — words between 'add' and
+                   # 'contacts' break the literal phrase match above, so anchor
+                   # on the tail.
+                   "to my contacts", "to contacts", "to address book",
                    # "save this for <person>" / "save it for <person>" — the user
                    # is storing info on a known person without using the literal
                    # word 'contact'. Catches the address/phone-paste pattern.
