@@ -1345,7 +1345,7 @@ function _renderAccountsStrip() {
     const dotTitle = a.is_default ? 'Default account' : 'Set as default';
     html += `<span class="gallery-chip-wrap" style="position:relative;display:inline-flex;align-items:center;">`
          + `<button class="memory-toolbar-btn gallery-chip${active}" data-acc-id="${esc(a.id)}" title="${esc(a.from_address || a.imap_user || '')}${a.is_default ? ' (default)' : ''}" style="padding-right:24px;">${esc(label)}</button>`
-         + `<button class="email-lib-default-dot${a.is_default ? ' is-default' : ''}" data-set-default="${esc(a.id)}" title="${dotTitle}" aria-label="${dotTitle}" style="position:absolute;right:4px;top:calc(50% - 2px);transform:translateY(-50%);background:none;border:0;padding:2px;cursor:pointer;color:${a.is_default ? 'var(--accent, var(--red))' : 'inherit'};opacity:${a.is_default ? '1' : '0.45'};display:inline-flex;align-items:center;line-height:0;">${dot}</button>`
+         + `<button class="email-lib-default-dot${a.is_default ? ' is-default' : ''}" data-set-default="${esc(a.id)}" title="${dotTitle}" aria-label="${dotTitle}" style="position:absolute;right:6px;top:calc(50% - 2px);transform:translateY(-50%);background:none;border:0;padding:2px;cursor:pointer;color:${a.is_default ? 'var(--accent, var(--red))' : 'inherit'};opacity:${a.is_default ? '1' : '0.45'};display:inline-flex;align-items:center;line-height:0;">${dot}</button>`
          + `</span>`;
   }
   strip.innerHTML = html;
