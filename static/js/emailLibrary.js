@@ -1333,16 +1333,16 @@ function _renderAccountsStrip() {
   // 'Default' rather than 'All (default)' — this view shows the account
   // marked is_default; cross-account aggregation is a separate feature.
   let html = `<button class="memory-toolbar-btn gallery-chip${allActive}" data-acc-id="">Default</button>`;
-  const _starFilled = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
-  const _starHollow = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+  const _dotFilled = '<svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>';
+  const _dotHollow = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="6"/></svg>';
   for (const a of state._libAccounts) {
     const active = state._libAccountId === a.id ? ' active' : '';
     const label = a.name || a.from_address || a.imap_user || 'account';
-    const star = a.is_default ? _starFilled : _starHollow;
-    const starTitle = a.is_default ? 'Default account' : 'Set as default';
+    const dot = a.is_default ? _dotFilled : _dotHollow;
+    const dotTitle = a.is_default ? 'Default account' : 'Set as default';
     html += `<span class="gallery-chip-wrap" style="position:relative;display:inline-flex;align-items:center;">`
-         + `<button class="memory-toolbar-btn gallery-chip${active}" data-acc-id="${esc(a.id)}" title="${esc(a.from_address || a.imap_user || '')}${a.is_default ? ' (default)' : ''}" style="padding-right:22px;">${esc(label)}</button>`
-         + `<button class="email-lib-default-star${a.is_default ? ' is-default' : ''}" data-set-default="${esc(a.id)}" title="${starTitle}" aria-label="${starTitle}" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:0;padding:2px;cursor:pointer;color:${a.is_default ? 'var(--accent, var(--red))' : 'inherit'};opacity:${a.is_default ? '1' : '0.45'};display:inline-flex;align-items:center;">${star}</button>`
+         + `<button class="memory-toolbar-btn gallery-chip${active}" data-acc-id="${esc(a.id)}" title="${esc(a.from_address || a.imap_user || '')}${a.is_default ? ' (default)' : ''}" style="padding-right:20px;">${esc(label)}</button>`
+         + `<button class="email-lib-default-dot${a.is_default ? ' is-default' : ''}" data-set-default="${esc(a.id)}" title="${dotTitle}" aria-label="${dotTitle}" style="position:absolute;right:4px;top:calc(50% - 2px);transform:translateY(-50%);background:none;border:0;padding:2px;cursor:pointer;color:${a.is_default ? 'var(--accent, var(--red))' : 'inherit'};opacity:${a.is_default ? '1' : '0.45'};display:inline-flex;align-items:center;line-height:0;">${dot}</button>`
          + `</span>`;
   }
   strip.innerHTML = html;
