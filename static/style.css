@@ -28318,12 +28318,11 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc, pulled up 8px to match where they end up
-     when the cluster snaps to absolute overlay — keeps the position
-     stable across the transition so they don't jump 2px upward at
-     the breakpoint. */
+  /* 6px between To and Cc, pulled up 10px so they sit tight under
+     From (matches the position they end up at when the cluster
+     snaps to absolute overlay, so they don't jump at the break). */
   gap: 6px;
-  margin-top: -8px;
+  margin-top: -10px;
 }
 .email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
