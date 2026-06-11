@@ -28212,6 +28212,8 @@ button .spinner-whirlpool {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  /* Positioning context for the absolute action cluster. */
+  position: relative;
 }
 .email-reader-meta .recipient-chips {
   display: inline-flex;
@@ -28229,17 +28231,6 @@ button .spinner-whirlpool {
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-/* Meta is a plain block stack — From row, then To/Cc details right
-   below — with the action cluster absolute-positioned in the top
-   right. Out of flow means the cluster's height (1 row vs 2 rows
-   vs absolute overlay) never reshapes the From/details row spacing,
-   so To/Cc always hugs From the same way regardless of the cluster's
-   current state. Padding-right on the rows reserves the chip area
-   that the cluster occupies, and is tightened per container query
-   below. */
-.email-reader-meta {
-  position: relative;
 }
 .email-reader-meta-row.email-reader-meta-from {
   position: relative;
@@ -28323,60 +28314,30 @@ button .spinner-whirlpool {
     box-shadow: -6px 0 12px -6px rgba(0, 0, 0, 0.25);
   }
 }
-/* Desktop only: shift the whole From row up 6px. Mobile keeps the
-   original placement (the mobile @media block overrides padding so
-   the header sits flush already). */
-@media (min-width: 769px) {
-  /* From row needs to be at least as tall as the absolute-
-     positioned action cluster (44px buttons) so the buttons
-     don't overflow the header bottom. */
-  .email-reader-meta-row.email-reader-meta-from {
-    min-height: 44px;
-    align-items: center;
-  }
-  /* Nudge the "From:" label up 2px to baseline-balance against
-     the lifted action cluster. */
-  .email-reader-meta-row.email-reader-meta-from > strong {
-    position: relative;
-    top: -2px;
-  }
-  /* Docked panes are tight — flow the action cluster UNDER the
-     From: row instead of overlaying it. The whole From row +
-     chip sits 4px lower than the old -8 position so the chip
-     baseline tracks the "From:" label cleanly. */
-  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from,
-  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from {
-    flex-wrap: wrap;
-    margin-top: -4px;
-    min-height: 0;
-  }
-  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > strong,
-  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
-    top: 0;
-  }
-  /* Docked: ditch the grid layout for a simple flex column so the
-     action cluster naturally flows last — below From, and below
-     To/Cc when expanded. */
-  .modal.modal-right-docked .email-reader-meta,
-  .modal.modal-left-docked .email-reader-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .modal.modal-right-docked .email-reader-meta > .email-reader-actions-inline,
-  .modal.modal-left-docked .email-reader-meta > .email-reader-actions-inline {
-    position: static;
-    margin-top: 4px;
-    background: none;
-    padding-left: 0;
-    justify-content: flex-end;
-  }
-  /* Docked header gets a smaller min-height since the action cluster
-     no longer needs vertical room overlapping the chip. */
-  .modal.modal-right-docked .email-reader-header,
-  .modal.modal-left-docked .email-reader-header {
-    min-height: 0;
-  }
+/* Docked panes: cluster flows under From + details (no overlay)
+   since there's not enough horizontal room. Killed the desktop-only
+   from-row min-height / strong nudges from the old grid layout — the
+   block-flow meta doesn't need them anymore. */
+.modal.modal-right-docked .email-reader-meta > .email-reader-actions-inline,
+.modal.modal-left-docked .email-reader-meta > .email-reader-actions-inline {
+  position: static;
+  margin-top: 4px;
+  background: none;
+  padding-left: 0;
+  box-shadow: none;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: none;
+}
+.modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from,
+.modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from,
+.modal.modal-right-docked .email-reader-meta > .email-reader-meta-details,
+.modal.modal-left-docked .email-reader-meta > .email-reader-meta-details {
+  padding-right: 0;
+}
+.modal.modal-right-docked .email-reader-header,
+.modal.modal-left-docked .email-reader-header {
+  min-height: 0;
 }
 /* Accent-tint the email-search (from-sender) magnifying glass so
    it reads as a deliberate search action against the other icons. */
