@@ -28272,7 +28272,7 @@ button .spinner-whirlpool {
    enough room for 3 icons in a row — without it, grid col 2 could
    shrink below the cap and the cluster fanned out into 4+ short
    rows. */
-@container emailreader (max-width: 600px) {
+@container emailreader (max-width: 450px) {
   .email-reader-meta > .email-reader-actions-inline {
     /* 3 icons (48px each) + 2 gaps (4px each) = 152px exact. Adding
        6px slack so subpixel rounding can't tip a row from 3 to 2
