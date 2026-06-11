@@ -15225,8 +15225,11 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   background: none;
   padding-left: 0;
 }
-.modal.modal-right-docked .email-reader-meta-row,
-.modal.modal-left-docked .email-reader-meta-row {
+/* Docked modal: From row stays a flex row so the action cluster
+   sits next to From (or wraps below it when truly cramped). Only
+   the To/Cc detail rows get the grid stack. */
+.modal.modal-right-docked .email-reader-meta-row:not(.email-reader-meta-from),
+.modal.modal-left-docked .email-reader-meta-row:not(.email-reader-meta-from) {
   display: grid;
   grid-template-columns: 1fr;
   gap: 2px;
@@ -28044,17 +28047,23 @@ button .spinner-whirlpool {
   gap: 6px;
   min-width: 0;
 }
-/* Primary action row (Reply / Reply-all / Forward) lives INSIDE
-   the From row and gets pushed to the right edge. */
-.email-reader-meta-row.email-reader-meta-from > .email-reader-actions-row-primary {
+/* All action buttons live INSIDE the From row, right-aligned. When
+   there's room (undocked) they sit on the same row as From; when
+   docked or narrow they wrap below it. */
+.email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
   margin-left: auto;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   flex-shrink: 0;
 }
-/* Secondary action row (Summary / AI / More) sits below the From
-   row as a sibling, right-aligned. */
-.email-reader-meta > .email-reader-actions-row-secondary {
-  justify-content: flex-end;
-  margin-top: 2px;
+/* From row allows the action cluster to wrap below when narrow. */
+.email-reader-meta-row.email-reader-meta-from {
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
@@ -28165,7 +28174,7 @@ button .spinner-whirlpool {
     background: none;
     padding-left: 0;
   }
-  .email-reader-meta-row {
+  .email-reader-meta-row:not(.email-reader-meta-from) {
     display: grid;
     grid-template-columns: 1fr;
     gap: 2px;
