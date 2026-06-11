@@ -28071,7 +28071,7 @@ button .spinner-whirlpool {
    the header sits flush already). */
 @media (min-width: 769px) {
   .email-reader-meta-row.email-reader-meta-from {
-    margin-top: -6px;
+    margin-top: -8px;
   }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
