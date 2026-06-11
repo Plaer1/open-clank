@@ -4662,8 +4662,9 @@ body.bg-pattern-sparkles {
       .email-reader-tab-modal .email-reader-actions,
       .email-window-modal .email-reader-actions {
         display: flex !important;
-        flex-direction: column !important;
-        align-items: flex-end !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
         gap: 4px !important;
         flex-shrink: 0 !important;
         position: absolute !important;
@@ -28175,19 +28176,20 @@ button .spinner-whirlpool {
   .recipient-chip { flex-shrink: 0; }
 }
 .email-reader-actions {
-  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
+  display: flex; flex-direction: row; gap: 4px; align-items: center;
   flex-shrink: 0;
   margin-top: -4px;
+  flex-wrap: nowrap;
 }
-/* Two stacked rows inside .email-reader-actions:
-     primary   — Summary + More (top)
-     secondary — Reply / Reply all / Forward / AI reply (bottom) */
+/* All six actions in one row — the two action-row children flow
+   side-by-side inside the parent flex row. */
 .email-reader-actions-row {
   display: flex;
   flex-direction: row;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
+  flex-wrap: nowrap;
 }
 .email-reader-atts {
   display: flex; flex-wrap: wrap; gap: 6px;
