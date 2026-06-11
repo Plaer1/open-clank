@@ -4679,12 +4679,9 @@ body.bg-pattern-sparkles {
       #email-lib-modal .email-reader-actions-row,
       .email-reader-tab-modal .email-reader-actions-row,
       .email-window-modal .email-reader-actions-row {
-        display: flex !important;
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        align-items: center !important;
-        justify-content: flex-end !important;
-        gap: 4px !important;
+        /* Flatten the row wrappers so all 6 buttons sit on one
+           row inside the absolute-positioned actions cluster. */
+        display: contents !important;
       }
       /* Horizontal-scroll recipient chip rows on mobile. */
       #email-lib-modal .email-reader-meta,
@@ -28181,15 +28178,12 @@ button .spinner-whirlpool {
   margin-top: -4px;
   flex-wrap: nowrap;
 }
-/* All six actions in one row — the two action-row children flow
-   side-by-side inside the parent flex row. */
+/* The two action-row wrappers (primary / secondary) are layout
+   pass-throughs — `display: contents` flattens them so all 6
+   buttons become direct flex children of .email-reader-actions
+   and render on the same row. */
 .email-reader-actions-row {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  flex-wrap: nowrap;
+  display: contents;
 }
 .email-reader-atts {
   display: flex; flex-wrap: wrap; gap: 6px;
