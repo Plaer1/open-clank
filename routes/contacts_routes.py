@@ -735,16 +735,35 @@ def setup_contacts_routes():
         """Add a new contact."""
         name = (data.get("name") or "").strip()
         email = (data.get("email") or "").strip()
-        if not email:
-            return {"success": False, "error": "Email required"}
-        # Check if already exists
-        contacts = _fetch_contacts()
-        for c in contacts:
-            if email.lower() in [e.lower() for e in c["emails"]]:
-                return {"success": True, "message": "Already exists", "contact": c}
+        phone = (data.get("phone") or "").strip()
+        address = (data.get("address") or "").strip()
+        if not email and not name:
+            return {"success": False, "error": "Name or email required"}
+        # Check if already exists by email
+        if email:
+            contacts = _fetch_contacts()
+            for c in contacts:
+                if email.lower() in [e.lower() for e in c["emails"]]:
+                    return {"success": True, "message": "Already exists", "contact": c}
         if not name:
             name = email.split("@")[0]
-        ok = _create_contact(name, email)
+        ok = _create_contact(name, email, address)
+        # If a phone was provided, do an immediate update to thread it
+        # through (the simple _create_contact signature only takes name +
+        # email + address; phones happen via update).
+        if ok and phone:
+            try:
+                fresh = _fetch_contacts(force=True)
+                created = next((c for c in fresh if name == c.get("name") and (not email or email in c.get("emails", []))), None)
+                if created:
+                    _update_contact(
+                        created["uid"], name,
+                        created.get("emails", []),
+                        [phone],
+                        address,
+                    )
+            except Exception:
+                pass
         return {"success": ok}
 
     @router.post("/import")
@@ -820,7 +839,7 @@ def setup_contacts_routes():
     # match PUT /{uid} with uid="config".
     @router.put("/{uid}")
     async def edit_contact(uid: str, data: dict, _admin: str = Depends(require_admin)):
-        """Edit an existing contact — name / emails / phones."""
+        """Edit an existing contact — name / emails / phones / address."""
         name = (data.get("name") or "").strip()
         emails = data.get("emails")
         phones = data.get("phones")
@@ -828,11 +847,12 @@ def setup_contacts_routes():
             emails = [data["email"]]
         emails = [e.strip() for e in (emails or []) if e and e.strip()]
         phones = [p.strip() for p in (phones or []) if p and p.strip()]
-        if not name and not emails:
-            return {"success": False, "error": "Name or email required"}
+        address = (data.get("address") or "").strip()
+        if not name and not emails and not address:
+            return {"success": False, "error": "Name, email, or address required"}
         if not name and emails:
             name = emails[0].split("@")[0]
-        ok = _update_contact(uid, name, emails, phones)
+        ok = _update_contact(uid, name, emails, phones, address)
         return {"success": ok}
 
     @router.delete("/{uid}")

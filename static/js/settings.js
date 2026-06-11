@@ -4011,11 +4011,14 @@ async function initUnifiedIntegrations() {
           <button class="admin-btn-sm" id="cm-add-toggle">+ Add</button>
           <input type="file" id="cm-import-file" accept=".vcf,.csv,text/vcard,text/csv" multiple style="display:none">
         </div>
-        <div id="cm-add-row" class="contacts-add-row" style="display:none;">
-          <input id="cm-add-name" class="settings-input" placeholder="Name" style="flex:1;min-width:0;">
-          <input id="cm-add-email" class="settings-input" placeholder="email@example.com" style="flex:1;min-width:0;">
-          <button class="admin-btn-sm" id="cm-add-save">Save</button>
+        <div id="cm-add-row" class="contacts-add-row" style="display:none;flex-direction:column;gap:4px;">
+          <input id="cm-add-name" class="settings-input" placeholder="Name">
+          <input id="cm-add-email" class="settings-input" placeholder="email@example.com">
+          <input id="cm-add-phone" class="settings-input" placeholder="Phone (optional)">
+          <input id="cm-add-address" class="settings-input" placeholder="Address (optional)">
+          <div style="display:flex;gap:6px;justify-content:flex-end;"><button class="admin-btn-sm" id="cm-add-save">Save</button></div>
         </div>
+        <input type="text" id="cm-search" class="settings-input" placeholder="Search contacts (name, email, phone, address)" style="margin-top:6px;">
         <div id="cm-list" class="contacts-list"><div style="opacity:0.4;font-size:11px;padding:8px 2px;">Loading…</div></div>
       </div>`;
     try {
@@ -4051,11 +4054,18 @@ async function initUnifiedIntegrations() {
     el('cm-add-save')?.addEventListener('click', async () => {
       const name = el('cm-add-name').value.trim();
       const email = el('cm-add-email').value.trim();
-      if (!email) { el('cm-add-email').focus(); return; }
+      const phone = el('cm-add-phone')?.value.trim() || '';
+      const address = el('cm-add-address')?.value.trim() || '';
+      // Need at least a name or email; address-only entries without a
+      // name aren't useful as a contact.
+      if (!name && !email) { (name ? el('cm-add-email') : el('cm-add-name')).focus(); return; }
       try {
-        await fetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email }) });
+        await fetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, phone, address }) });
       } catch (_) {}
-      el('cm-add-name').value = ''; el('cm-add-email').value = '';
+      el('cm-add-name').value = '';
+      el('cm-add-email').value = '';
+      if (el('cm-add-phone')) el('cm-add-phone').value = '';
+      if (el('cm-add-address')) el('cm-add-address').value = '';
       el('cm-add-row').style.display = 'none';
       await _renderContactsManager();
     });
@@ -4154,33 +4164,66 @@ async function initUnifiedIntegrations() {
     }
     // Sort by name for a stable list.
     contacts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    list.innerHTML = contacts.map(c => {
-      const emails = (c.emails || []).join(', ');
-      const phones = (c.phones || []).join(', ');
-      const sub = [emails, phones].filter(Boolean).join(' · ');
-      return `<div class="contact-row" data-uid="${esc(c.uid)}">
-        <div class="contact-row-view" style="display:flex;align-items:center;gap:8px;">
-          <div style="flex:1;min-width:0;">
-            <div class="contact-name" style="font-size:12px;font-weight:600;">${esc(c.name || '(no name)')}</div>
-            <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
+
+    // Live filter — search across name/emails/phones/address.
+    const searchInput = el('cm-search');
+    const q = (searchInput?.value || '').trim().toLowerCase();
+    const filtered = !q ? contacts : contacts.filter(c => {
+      const hay = [
+        c.name || '',
+        (c.emails || []).join(' '),
+        (c.phones || []).join(' '),
+        c.address || '',
+      ].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+    if (cnt) cnt.textContent = contacts.length ? `(${filtered.length}/${contacts.length})` : '';
+
+    if (!filtered.length) {
+      list.innerHTML = `<div style="opacity:0.4;font-size:11px;padding:8px 2px;">${q ? 'No matches.' : 'No contacts yet.'}</div>`;
+    } else {
+      list.innerHTML = filtered.map(c => {
+        const emails = (c.emails || []).join(', ');
+        const phones = (c.phones || []).join(', ');
+        const address = c.address || '';
+        const sub = [emails, phones, address].filter(Boolean).join(' · ');
+        return `<div class="contact-row" data-uid="${esc(c.uid)}">
+          <div class="contact-row-view" style="display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;min-width:0;">
+              <div class="contact-name" style="font-size:12px;font-weight:600;">${esc(c.name || '(no name)')}</div>
+              <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
+            </div>
+            <button class="admin-btn-sm contact-edit" title="Edit" style="display:inline-flex;align-items:center;gap:4px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Edit
+            </button>
+            <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.85;display:inline-flex;align-items:center;gap:4px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Delete
+            </button>
           </div>
-          <button class="admin-btn-sm contact-edit" title="Edit" style="display:inline-flex;align-items:center;gap:4px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            Edit
-          </button>
-          <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.85;display:inline-flex;align-items:center;gap:4px;">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            Delete
-          </button>
-        </div>
-        <div class="contact-row-edit" style="display:none;flex-direction:column;gap:4px;">
-          <input class="settings-input contact-edit-name" value="${esc(c.name || '')}" placeholder="Name">
-          <input class="settings-input contact-edit-emails" value="${esc(emails)}" placeholder="email1, email2">
-          <input class="settings-input contact-edit-phones" value="${esc(phones)}" placeholder="phone1, phone2">
-          <div style="display:flex;gap:6px;"><button class="admin-btn-sm contact-save">Save</button><button class="admin-btn-sm contact-cancel" style="opacity:0.7;">Cancel</button></div>
-        </div>
-      </div>`;
-    }).join('');
+          <div class="contact-row-edit" style="display:none;flex-direction:column;gap:4px;">
+            <input class="settings-input contact-edit-name" value="${esc(c.name || '')}" placeholder="Name">
+            <input class="settings-input contact-edit-emails" value="${esc(emails)}" placeholder="email1, email2">
+            <input class="settings-input contact-edit-phones" value="${esc(phones)}" placeholder="phone1, phone2">
+            <input class="settings-input contact-edit-address" value="${esc(address)}" placeholder="Address">
+            <div style="display:flex;gap:6px;"><button class="admin-btn-sm contact-save">Save</button><button class="admin-btn-sm contact-cancel" style="opacity:0.7;">Cancel</button></div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // Wire the search input — debounced so we don't refetch on every key.
+    if (searchInput && !searchInput._wired) {
+      searchInput._wired = true;
+      let _t;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(_t);
+        _t = setTimeout(() => _renderContactsManager(), 80);
+      });
+    }
+    // Stash latest contacts so the search input doesn't have to refetch.
+    list._lastContacts = contacts;
     // Wire each row's edit / delete / save / cancel.
     list.querySelectorAll('.contact-row').forEach(row => {
       const uid = row.dataset.uid;
@@ -4199,6 +4242,7 @@ async function initUnifiedIntegrations() {
           name: row.querySelector('.contact-edit-name').value.trim(),
           emails: row.querySelector('.contact-edit-emails').value.split(',').map(s => s.trim()).filter(Boolean),
           phones: row.querySelector('.contact-edit-phones').value.split(',').map(s => s.trim()).filter(Boolean),
+          address: row.querySelector('.contact-edit-address')?.value.trim() || '',
         };
         try {
           await fetch('/api/contacts/' + encodeURIComponent(uid), { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
