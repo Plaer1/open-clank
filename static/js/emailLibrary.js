@@ -1731,13 +1731,57 @@ function _scoreSuggestion(s, needle) {
   return 0;
 }
 
-function _filterSuggestions(needle, limit = 6) {
+// Filter / attachment suggestions surfaced inside the same chip-bar
+// dropdown. Typing 'attachment', 'unread', 'urgent' etc. surfaces the
+// corresponding filter row with its icon; picking it pins a filter
+// pill that drives state._libFilter or the has-attachments toggle.
+const _LIB_FILTER_OPTIONS = [
+  { value: 'filter:has-attachments', label: 'Has attachments', keywords: ['attachment', 'attachments', 'has attachment', 'attach'] },
+  { value: 'filter:unread',          label: 'Unread',          keywords: ['unread', 'new', 'unseen'] },
+  { value: 'filter:favorites',       label: 'Favorites',       keywords: ['favorite', 'favorites', 'starred', 'star', 'flagged'] },
+  { value: 'filter:undone',          label: 'Undone',          keywords: ['undone', 'pending', 'todo'] },
+  { value: 'filter:reminders',       label: 'Reminders',       keywords: ['reminder', 'reminders'] },
+  { value: 'filter:unanswered',      label: 'Unanswered',      keywords: ['unanswered', 'unreplied', 'no reply'] },
+  { value: 'filter:pending_30d',     label: 'Pending · 30d',   keywords: ['pending 30d', 'pending', 'recent pending'] },
+  { value: 'filter:stale_30d',       label: 'Stale · >30d',    keywords: ['stale', 'old', 'stale 30d'] },
+  { value: 'filter:tag:urgent',      label: 'Urgent',          keywords: ['urgent', 'critical'] },
+  { value: 'filter:tag:reply-soon',  label: 'Reply soon',      keywords: ['reply soon', 'reply', 'follow up'] },
+  { value: 'filter:tag:spam',        label: 'Spam',            keywords: ['spam', 'junk'] },
+  { value: 'filter:tag:newsletter',  label: 'Newsletter',      keywords: ['newsletter', 'newsletters', 'subscriptions'] },
+  { value: 'filter:tag:marketing',   label: 'Marketing',       keywords: ['marketing', 'promo', 'promotional'] },
+];
+
+function _libFilterIconFor(value) {
+  // value is 'filter:<X>' — strip prefix and reuse the existing icon map.
+  const v = String(value || '').replace(/^filter:/, '');
+  if (v === 'has-attachments') return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+  return _EMAIL_FILTER_ICONS[v] || _EMAIL_FILTER_ICONS['all'];
+}
+
+function _scoreFilterOption(opt, needle) {
+  for (const kw of opt.keywords) {
+    if (kw === needle) return 4;
+    if (kw.startsWith(needle)) return 3;
+    if (kw.includes(needle)) return 2;
+  }
+  if (opt.label.toLowerCase().includes(needle)) return 2;
+  return 0;
+}
+
+function _filterSuggestions(needle, limit = 8) {
   const n = String(needle || '').trim().toLowerCase();
   if (!n) return [];
+  // Filter / attachment matches first — typing 'unread' should surface
+  // the filter row before contact suggestions, since 'unread' isn't a
+  // person.
+  const filterMatches = _LIB_FILTER_OPTIONS
+    .map(opt => ({ s: { kind: 'filter', value: opt.value, label: opt.label, icon: _libFilterIconFor(opt.value) }, score: _scoreFilterOption(opt, n) }))
+    .filter(x => x.score > 0);
   const src = _libSuggestionCache || [];
-  return src
-    .map(s => ({ s, score: _scoreSuggestion(s, n) }))
-    .filter(x => x.score > 0)
+  const contactMatches = src
+    .map(s => ({ s: { kind: 'contact', ...s }, score: _scoreSuggestion(s, n) }))
+    .filter(x => x.score > 0);
+  return filterMatches.concat(contactMatches)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(x => x.s);
@@ -1752,6 +1796,13 @@ function _emailMatchesPill(em, pill) {
     if (String(em.to || '').toLowerCase().includes(target)) return true;
     if (String(em.cc || '').toLowerCase().includes(target)) return true;
     return false;
+  }
+  if (pill.type === 'filter') {
+    // Filter pills delegate to the server-side filter (state._libFilter)
+    // or the has-attachments toggle. The list is already pre-filtered by
+    // those when this runs, so the pill is effectively always-true here
+    // — it lives in the pill bar purely as a visible affordance.
+    return true;
   }
   // text pill — broad local-match
   const q = (pill.text || '').toLowerCase();
@@ -1817,9 +1868,16 @@ function _renderSearchPills() {
   const pills = state._libSearchPills || [];
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   wrap.innerHTML = pills.map((p, i) => {
-    const label = p.type === 'contact' ? (p.name || p.email || '?') : (p.text || '');
-    return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:2px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:10px;line-height:18px;height:18px;font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
-      <span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
+    let label = '';
+    let leadingIcon = '';
+    if (p.type === 'contact') label = p.name || p.email || '?';
+    else if (p.type === 'filter') {
+      label = p.label || p.value;
+      leadingIcon = `<span style="display:inline-flex;align-items:center;width:11px;height:11px;flex-shrink:0;">${_libFilterIconFor(p.value)}</span>`;
+    }
+    else label = p.text || '';
+    return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:3px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:10px;line-height:18px;height:18px;font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
+      ${leadingIcon}<span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
       <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;position:relative;top:-4px;">×</button>
     </span>`;
   }).join('');
@@ -1832,10 +1890,47 @@ function _renderSearchPills() {
   });
 }
 
+function _applyFilterPillSideEffect(pill) {
+  // Filter pills drive the existing has-attachments toggle / filter
+  // dropdown so the server returns the right list. Only one filter
+  // pill is active at a time (see _addSearchPill).
+  const sel = document.getElementById('email-lib-filter');
+  const attachBtn = document.getElementById('email-attach-btn');
+  if (pill.value === 'filter:has-attachments') {
+    if (!state._libHasAttachments) {
+      state._libHasAttachments = true;
+      if (attachBtn) attachBtn.classList.add('active');
+    }
+    if (sel && sel.value !== 'all') { sel.value = 'all'; sel.dispatchEvent(new Event('change')); }
+    return;
+  }
+  // Any other filter pill — set the dropdown value, clear attachments
+  if (state._libHasAttachments) {
+    state._libHasAttachments = false;
+    if (attachBtn) attachBtn.classList.remove('active');
+  }
+  if (sel) {
+    const v = pill.value.replace(/^filter:/, '');
+    if (sel.value !== v) { sel.value = v; sel.dispatchEvent(new Event('change')); }
+  }
+}
+
+function _clearFilterPillSideEffect() {
+  const sel = document.getElementById('email-lib-filter');
+  const attachBtn = document.getElementById('email-attach-btn');
+  if (state._libHasAttachments) {
+    state._libHasAttachments = false;
+    if (attachBtn) attachBtn.classList.remove('active');
+  }
+  if (sel && sel.value !== 'all') {
+    sel.value = 'all'; sel.dispatchEvent(new Event('change'));
+  }
+}
+
 function _addSearchPill(pill) {
   if (!pill) return;
   if (!Array.isArray(state._libSearchPills)) state._libSearchPills = [];
-  // Dedup by email (contact) or text (text pill).
+  // Dedup by email (contact), text (text pill), or filter value.
   if (pill.type === 'contact') {
     const key = (pill.email || '').toLowerCase();
     if (!key) return;
@@ -1844,6 +1939,13 @@ function _addSearchPill(pill) {
     const t = (pill.text || '').toLowerCase();
     if (!t) return;
     if (state._libSearchPills.some(p => p.type === 'text' && (p.text || '').toLowerCase() === t)) return;
+  } else if (pill.type === 'filter') {
+    // Single-filter rule — drop any existing filter pill before adding.
+    state._libSearchPills = state._libSearchPills.filter(p => p.type !== 'filter');
+    state._libSearchPills.push(pill);
+    _applyFilterPillSideEffect(pill);
+    _renderSearchPills();
+    return;
   }
   state._libSearchPills.push(pill);
   _renderSearchPills();
@@ -1852,7 +1954,9 @@ function _addSearchPill(pill) {
 
 function _removeSearchPillAt(idx) {
   if (!Array.isArray(state._libSearchPills)) return;
+  const removed = state._libSearchPills[idx];
   state._libSearchPills.splice(idx, 1);
+  if (removed && removed.type === 'filter') _clearFilterPillSideEffect();
   _renderSearchPills();
   _applyPillFilter();
 }
@@ -1864,12 +1968,19 @@ function _renderSearchSuggestions(items) {
   if (!menu) return;
   if (!items.length) { menu.style.display = 'none'; menu.innerHTML = ''; return; }
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  menu.innerHTML = items.map((s, i) => `
-    <div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;font-size:12px;${i === _libSuggestionFocusIdx ? 'background:color-mix(in srgb, var(--fg) 8%, transparent);' : ''}">
+  menu.innerHTML = items.map((s, i) => {
+    const highlight = i === _libSuggestionFocusIdx ? 'background:color-mix(in srgb, var(--fg) 8%, transparent);' : '';
+    if (s.kind === 'filter') {
+      return `<div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:12px;${highlight}">
+        <span style="display:inline-flex;align-items:center;width:13px;height:13px;color:var(--accent, var(--red));flex-shrink:0;">${s.icon}</span>
+        <span style="font-weight:600;">${esc(s.label)}</span>
+      </div>`;
+    }
+    return `<div class="email-lib-suggest-item" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:6px 10px;cursor:pointer;font-size:12px;${highlight}">
       <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name || s.email)}</span>
       ${s.name ? `<span style="opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.email)}</span>` : ''}
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
   menu.style.display = '';
   menu.querySelectorAll('.email-lib-suggest-item').forEach(row => {
     row.addEventListener('mousedown', (e) => {
@@ -1890,7 +2001,11 @@ function _hideSearchSuggestions() {
 
 function _acceptSuggestion(s) {
   const input = document.getElementById('email-lib-search');
-  _addSearchPill({ type: 'contact', name: s.name, email: s.email });
+  if (s.kind === 'filter') {
+    _addSearchPill({ type: 'filter', value: s.value, label: s.label });
+  } else {
+    _addSearchPill({ type: 'contact', name: s.name, email: s.email });
+  }
   if (input) input.value = '';
   state._libSearchDraft = '';
   _hideSearchSuggestions();
