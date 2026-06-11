@@ -4651,12 +4651,8 @@ body.bg-pattern-sparkles {
       .email-window-modal .email-reader-header {
         padding: 8px 8px !important;
         gap: 6px !important;
-        /* From/To/Cc on the LEFT, actions cluster floats top-RIGHT.
-           Recipient chip rows scroll horizontally and slide under
-           the action cluster when they overflow. */
         flex-direction: row !important;
-        align-items: flex-start !important;
-        position: relative !important;
+        align-items: center !important;
       }
       #email-lib-modal .email-reader-actions,
       .email-reader-tab-modal .email-reader-actions,
@@ -4667,14 +4663,8 @@ body.bg-pattern-sparkles {
         align-items: center !important;
         gap: 4px !important;
         flex-shrink: 0 !important;
-        position: absolute !important;
-        top: 6px !important;
-        right: 6px !important;
-        z-index: 2 !important;
-        margin-left: 0 !important;
+        margin-left: auto !important;
         order: 0 !important;
-        background: linear-gradient(to right, transparent 0, var(--bg) 16px) !important;
-        padding-left: 18px !important;
       }
       #email-lib-modal .email-reader-actions-row,
       .email-reader-tab-modal .email-reader-actions-row,
@@ -4701,7 +4691,7 @@ body.bg-pattern-sparkles {
         grid-template-columns: none !important;
         align-items: center !important;
         gap: 6px !important;
-        padding-right: 110px !important;
+        padding-right: 0 !important;
         min-width: 0 !important;
       }
       #email-lib-modal .email-reader-meta-row .recipient-chips,
@@ -28008,26 +27998,15 @@ button .spinner-whirlpool {
 .email-reader-header {
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
-  /* Actions cluster absolute-positions inside the header so it can
-     layer ABOVE long recipient lists — chips that don't fit slide
-     underneath and the user can drag-scroll the row to reveal them. */
-  position: relative;
 }
 .email-reader-header > .email-reader-actions {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  /* Subtle gradient fade so chips poking out from underneath aren't
-     visually clipped — they fade into the actions area. */
-  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
-  padding-left: 22px;
+  margin-left: auto;
 }
 /* Meta block stacks the From / To / Cc rows; each row keeps label
    tight to its chip(s) on the same line. The recipient-chips inside
@@ -28055,9 +28034,6 @@ button .spinner-whirlpool {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  /* Reserve space on the right so chips don't sit fully under the
-     floating action cluster on first paint. */
-  padding-right: 180px;
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
