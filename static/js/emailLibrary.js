@@ -1868,16 +1868,18 @@ function _renderSearchPills() {
   const pills = state._libSearchPills || [];
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   wrap.innerHTML = pills.map((p, i) => {
-    let label = '';
-    let leadingIcon = '';
-    if (p.type === 'contact') label = p.name || p.email || '?';
-    else if (p.type === 'filter') {
-      label = p.label || p.value;
-      leadingIcon = `<span style="display:inline-flex;align-items:center;width:11px;height:11px;flex-shrink:0;">${_libFilterIconFor(p.value)}</span>`;
+    // Filter pills render as icon-only (the icon is the affordance);
+    // contact + text pills carry their label as text.
+    if (p.type === 'filter') {
+      const titleAttr = `${(p.label || p.value).replace(/"/g, '&quot;')}`;
+      return `<span class="email-lib-pill" data-pill-idx="${i}" title="${titleAttr}" style="display:inline-flex;align-items:center;gap:2px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));line-height:18px;height:18px;flex-shrink:0;">
+        <span style="display:inline-flex;align-items:center;width:11px;height:11px;flex-shrink:0;">${_libFilterIconFor(p.value)}</span>
+        <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;position:relative;top:-4px;">×</button>
+      </span>`;
     }
-    else label = p.text || '';
+    const label = p.type === 'contact' ? (p.name || p.email || '?') : (p.text || '');
     return `<span class="email-lib-pill" data-pill-idx="${i}" style="display:inline-flex;align-items:center;gap:3px;padding:0 4px 0 6px;border-radius:999px;background:color-mix(in srgb, var(--accent, var(--red)) 14%, transparent);color:var(--accent, var(--red));font-size:10px;line-height:18px;height:18px;font-weight:600;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">
-      ${leadingIcon}<span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;">${esc(label)}</span>
       <button type="button" class="email-lib-pill-x" data-pill-idx="${i}" title="Remove" style="background:transparent;border:0;color:inherit;cursor:pointer;font-size:11px;line-height:1;padding:0 2px;opacity:0.7;position:relative;top:-4px;">×</button>
     </span>`;
   }).join('');
