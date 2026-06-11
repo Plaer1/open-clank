@@ -1321,10 +1321,15 @@ export function openEmailLibrary(opts = {}) {
   document.addEventListener('keydown', state._libEscHandler, true);
 
   _renderAccountsLoading();
-  _loadAccounts();
-  _loadFolders();
-  _loadEmailReminderBellVisibility();
-  _loadEmails();
+  // Await accounts before loading emails so the list request carries the
+  // right account_id from the very first fetch (now that we auto-select
+  // an explicit account instead of relying on a 'Default' chip).
+  (async () => {
+    await _loadAccounts();
+    _loadFolders();
+    _loadEmailReminderBellVisibility();
+    _loadEmails();
+  })();
 }
 
 async function _loadAccounts() {
