@@ -118,7 +118,7 @@ export function init(documentModule) {
       } catch (_) {}
       if (opts.compose) { _composeNew(); return; }
       if (opts.email) {
-        await _openEmail(opts.email, null, opts.emailData, opts.mode || 'reply');
+        await _openEmail(opts.email, null, opts.emailData, opts.mode || 'reply', opts.noteHint || '');
       }
     },
   });
@@ -630,7 +630,7 @@ function _createEmailItem(em) {
   return item;
 }
 
-async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply') {
+async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', noteHint = '') {
   const aiReplyMode = mode === 'ai-reply-fast' ? 'fast' : (mode === 'ai-reply-full' ? 'full' : '');
   const wantsAiReply = mode === 'ai-reply' || !!aiReplyMode;
   let aiSuggestedBody = null;
@@ -690,6 +690,7 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply') {
               uid: String(em.uid || ''),
               folder: _currentFolder,
               fast: aiReplyMode ? aiReplyMode === 'fast' : _shouldUseFastAiReply(data),
+              user_hint: (noteHint || '').trim() || undefined,
             }),
           });
           const result = await res.json();

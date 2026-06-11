@@ -2657,11 +2657,15 @@ def setup_email_routes():
             source_uid = (data.get("uid") or "").strip()
             source_folder = (data.get("folder") or "INBOX").strip()
             fast_reply = bool(data.get("fast", False))
+            user_hint = (data.get("user_hint") or "").strip()
 
             if not original_body:
                 return {"success": False, "error": "No email body provided"}
 
-            if message_id:
+            # Skip cache lookup when the caller supplied a user_hint — the
+            # cached generic reply doesn't reflect the instructions and
+            # would silently override them.
+            if message_id and not user_hint:
                 try:
                     _c = _sql3.connect(SCHEDULED_DB)
                     owner_clause, owner_params = _email_cache_owner_clause(owner)
@@ -2801,8 +2805,13 @@ def setup_email_routes():
             user_msg = (
                 f"Recipient: {to}\nSubject: {subject}\n\n"
                 f"Original email and any current draft:\n{original_body[:6000]}\n\n"
-                f"Draft a reply. Return only the reply body text."
             )
+            if user_hint:
+                user_msg += (
+                    f"User's instructions for THIS reply (follow these — they override "
+                    f"defaults like length/tone):\n{user_hint[:2000]}\n\n"
+                )
+            user_msg += "Draft a reply. Return only the reply body text."
 
             # Build a candidate chain so a stale session-stored API key
             # (the most common cause of "authentication failed" here)
