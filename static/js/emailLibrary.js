@@ -1333,10 +1333,9 @@ function _renderAccountsStrip() {
   // 'Default' rather than 'All (default)' — this view shows the account
   // marked is_default; cross-account aggregation is a separate feature.
   let html = `<button class="memory-toolbar-btn gallery-chip${allActive}" data-acc-id="">Default</button>`;
-  // Small default-account dot — slightly smaller than the previous 10px
-  // version so it doesn't dominate the chip's right edge.
-  const _dotFilled = '<svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
-  const _dotHollow = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="9"/></svg>';
+  // 6px dot — matches the sidebar notification-dot size.
+  const _dotFilled = '<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
+  const _dotHollow = '<svg width="6" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="9"/></svg>';
   for (const a of state._libAccounts) {
     const active = state._libAccountId === a.id ? ' active' : '';
     const label = a.name || a.from_address || a.imap_user || 'account';
