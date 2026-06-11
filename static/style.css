@@ -4652,7 +4652,11 @@ body.bg-pattern-sparkles {
         padding: 8px 8px !important;
         gap: 6px !important;
         flex-direction: row !important;
-        align-items: center !important;
+        /* Top-align meta + actions on mobile. With the two-row action
+           cluster (Summary/More above Reply/Forward/AI), align-items:
+           center pulled the meta's From:/To: rows down into the visual
+           middle of the header, leaving them visibly off-axis. */
+        align-items: flex-start !important;
       }
       #email-lib-modal .email-reader-actions,
       .email-reader-tab-modal .email-reader-actions,
