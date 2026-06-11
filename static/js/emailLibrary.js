@@ -1768,7 +1768,7 @@ function _scoreFilterOption(opt, needle) {
   return 0;
 }
 
-function _filterSuggestions(needle, limit = 8) {
+function _filterSuggestions(needle, limit = 10) {
   const n = String(needle || '').trim().toLowerCase();
   if (!n) return [];
   // Filter / attachment matches first — typing 'unread' should surface
@@ -1781,7 +1781,21 @@ function _filterSuggestions(needle, limit = 8) {
   const contactMatches = src
     .map(s => ({ s: { kind: 'contact', ...s }, score: _scoreSuggestion(s, n) }))
     .filter(x => x.score > 0);
-  return filterMatches.concat(contactMatches)
+  // Email subject / sender-name matches — use the snapshot (unfiltered
+  // list) when available so suggestions don't shrink as pills narrow the
+  // visible grid. Cap to 4 so contacts + filters stay visible.
+  const emails = _libPreSearchEmails || state._libEmails || [];
+  const emailMatches = [];
+  for (const em of emails) {
+    const subj = String(em.subject || '').toLowerCase();
+    const fromN = String(em.from_name || '').toLowerCase();
+    let score = 0;
+    if (subj.startsWith(n) || fromN.startsWith(n)) score = 3;
+    else if (subj.includes(n) || fromN.includes(n)) score = 1;
+    if (score > 0) emailMatches.push({ s: { kind: 'email', uid: em.uid, subject: em.subject || '(no subject)', from_name: em.from_name || em.from_address || '' }, score });
+    if (emailMatches.length >= 4) break;
+  }
+  return filterMatches.concat(contactMatches).concat(emailMatches)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(x => x.s);
@@ -2734,7 +2748,7 @@ function _createCard(em) {
     const star = document.createElement('span');
     star.title = 'Favorited';
     star.style.cssText = 'color:var(--accent, var(--red));opacity:0.85;flex-shrink:0;display:inline-flex;';
-    star.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+    star.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
     titleRow.appendChild(star);
   }
 
@@ -3018,17 +3032,14 @@ async function _toggleCardPreview(card, em) {
     reader.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span></div>
-          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
-            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildRecipients(data.to)}</span></div>` : ''}
-            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
-          </div>` : ''}
-        </div>
-        <div class="email-reader-actions">
-          <div class="email-reader-actions-row email-reader-actions-row-primary">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+          <div class="email-reader-meta-row email-reader-meta-from">
+            <strong>From:</strong>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <div class="email-reader-actions-row email-reader-actions-row-primary">
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
+              ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+            </div>
           </div>
           <div class="email-reader-actions-row email-reader-actions-row-secondary">
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
@@ -3037,6 +3048,10 @@ async function _toggleCardPreview(card, em) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
             </div>
           </div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildRecipients(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
       </div>
       ${attsHtml}
@@ -4716,17 +4731,14 @@ async function _openEmailAsTab(em, folder) {
     reader.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span></div>
-          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
-            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildChips(data.to)}</span></div>` : ''}
-            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
-          </div>` : ''}
-        </div>
-        <div class="email-reader-actions">
-          <div class="email-reader-actions-row email-reader-actions-row-primary">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+          <div class="email-reader-meta-row email-reader-meta-from">
+            <strong>From:</strong>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <div class="email-reader-actions-row email-reader-actions-row-primary">
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
+              ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+            </div>
           </div>
           <div class="email-reader-actions-row email-reader-actions-row-secondary">
             <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
@@ -4736,6 +4748,10 @@ async function _openEmailAsTab(em, folder) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
             </div>
           </div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildChips(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
       </div>
       ${attsHtml}
@@ -4873,17 +4889,14 @@ async function _openEmailWindow(em, folder) {
     bodyEl.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span></div>
-          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
-            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${_chipsFor(data.to)}</span></div>` : ''}
-            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
-          </div>` : ''}
-        </div>
-        <div class="email-reader-actions">
-          <div class="email-reader-actions-row email-reader-actions-row-primary">
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
-            ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+          <div class="email-reader-meta-row email-reader-meta-from">
+            <strong>From:</strong>
+            <span class="recipient-chips">${fromChip}${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</span>
+            <div class="email-reader-actions-row email-reader-actions-row-primary">
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
+              ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
+            </div>
           </div>
           <div class="email-reader-actions-row email-reader-actions-row-secondary">
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
@@ -4892,6 +4905,10 @@ async function _openEmailWindow(em, folder) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
             </div>
           </div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${_chipsFor(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
       </div>
       ${attsHtml}
