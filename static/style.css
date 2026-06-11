@@ -28053,7 +28053,7 @@ button .spinner-whirlpool {
    reveal anything tucked under the buttons. */
 .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
   position: absolute;
-  top: 0;
+  top: -4px;
   right: 0;
   display: flex;
   flex-direction: row;
@@ -28084,6 +28084,12 @@ button .spinner-whirlpool {
   .email-reader-meta-row.email-reader-meta-from {
     min-height: 44px;
     align-items: center;
+  }
+  /* Nudge the "From:" label up 2px to baseline-balance against
+     the lifted action cluster. */
+  .email-reader-meta-row.email-reader-meta-from > strong {
+    position: relative;
+    top: -2px;
   }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
