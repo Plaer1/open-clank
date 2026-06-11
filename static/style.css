@@ -4651,21 +4651,29 @@ body.bg-pattern-sparkles {
       .email-window-modal .email-reader-header {
         padding: 8px 8px !important;
         gap: 6px !important;
-        /* Mobile keeps the same actions-on-top layout as desktop. */
-        flex-direction: column !important;
-        align-items: stretch !important;
+        /* From/To/Cc on the LEFT, actions cluster floats top-RIGHT.
+           Recipient chip rows scroll horizontally and slide under
+           the action cluster when they overflow. */
+        flex-direction: row !important;
+        align-items: flex-start !important;
+        position: relative !important;
       }
       #email-lib-modal .email-reader-actions,
       .email-reader-tab-modal .email-reader-actions,
       .email-window-modal .email-reader-actions {
         display: flex !important;
         flex-direction: column !important;
-        align-items: flex-start !important;
+        align-items: flex-end !important;
         gap: 4px !important;
-        margin-left: 0 !important;
         flex-shrink: 0 !important;
-        position: static !important;
-        order: -1 !important;          /* render above the meta */
+        position: absolute !important;
+        top: 6px !important;
+        right: 6px !important;
+        z-index: 2 !important;
+        margin-left: 0 !important;
+        order: 0 !important;
+        background: linear-gradient(to right, transparent 0, var(--bg) 16px) !important;
+        padding-left: 18px !important;
       }
       #email-lib-modal .email-reader-actions-row,
       .email-reader-tab-modal .email-reader-actions-row,
@@ -4674,9 +4682,44 @@ body.bg-pattern-sparkles {
         flex-direction: row !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        justify-content: flex-start !important;
+        justify-content: flex-end !important;
         gap: 4px !important;
+      }
+      /* Horizontal-scroll recipient chip rows on mobile. */
+      #email-lib-modal .email-reader-meta,
+      .email-reader-tab-modal .email-reader-meta,
+      .email-window-modal .email-reader-meta {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
         width: 100% !important;
+      }
+      #email-lib-modal .email-reader-meta-row,
+      .email-reader-tab-modal .email-reader-meta-row,
+      .email-window-modal .email-reader-meta-row {
+        display: flex !important;
+        grid-template-columns: none !important;
+        align-items: center !important;
+        gap: 6px !important;
+        /* Reserve room on the right so first-row chips don't
+           sit fully underneath the actions on first paint. */
+        padding-right: 110px !important;
+        min-width: 0 !important;
+      }
+      #email-lib-modal .email-reader-meta-row .recipient-chips,
+      .email-reader-tab-modal .email-reader-meta-row .recipient-chips,
+      .email-window-modal .email-reader-meta-row .recipient-chips {
+        display: inline-flex !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        max-width: 100% !important;
+        scrollbar-width: none !important;
+        gap: 4px !important;
+      }
+      #email-lib-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar,
+      .email-reader-tab-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar,
+      .email-window-modal .email-reader-meta-row .recipient-chips::-webkit-scrollbar {
+        display: none !important;
       }
       #email-lib-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
       .email-reader-tab-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
@@ -15180,9 +15223,12 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   flex-direction: column;
   gap: 6px;
 }
-.modal.modal-right-docked .email-reader-actions,
-.modal.modal-left-docked .email-reader-actions {
+.modal.modal-right-docked .email-reader-header > .email-reader-actions,
+.modal.modal-left-docked .email-reader-header > .email-reader-actions {
+  position: static;
   align-self: flex-end;
+  background: none;
+  padding-left: 0;
 }
 .modal.modal-right-docked .email-reader-meta-row,
 .modal.modal-left-docked .email-reader-meta-row {
@@ -15190,6 +15236,7 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   grid-template-columns: 1fr;
   gap: 2px;
   align-items: start;
+  padding-right: 0;
 }
 .modal.modal-right-docked .email-reader-meta-row strong,
 .modal.modal-left-docked .email-reader-meta-row strong {
@@ -27961,27 +28008,55 @@ button .spinner-whirlpool {
 }
 .email-reader-header {
   display: flex;
-  /* Actions sit ABOVE the from/to/cc meta — top toolbar pattern. The
-     existing two action-rows inside .email-reader-actions keep their
-     vertical stacking (Reply/Reply-all/Forward/AI on one row, then
-     Summary/More on another) so nothing has to combine. */
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+  /* Actions cluster absolute-positions inside the header so it can
+     layer ABOVE long recipient lists — chips that don't fit slide
+     underneath and the user can drag-scroll the row to reveal them. */
+  position: relative;
 }
 .email-reader-header > .email-reader-actions {
-  order: -1;          /* render first inside the column */
-  margin-left: 0;
-  align-items: flex-start;
-  width: 100%;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  /* Subtle gradient fade so chips poking out from underneath aren't
+     visually clipped — they fade into the actions area. */
+  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
+  padding-left: 22px;
 }
-.email-reader-header > .email-reader-actions > .email-reader-actions-row {
-  justify-content: flex-start;
-  width: 100%;
+/* Recipient chip rows scroll horizontally — chips don't wrap onto new
+   lines, they run off the right edge under the action cluster. Touch
+   swipe already works via native overflow; desktop users can scroll
+   with shift+wheel or a horizontal touchpad gesture. */
+.email-reader-meta .recipient-chips {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 4px;
+  max-width: 100%;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Right-pad the inside of the scroller so the last chip can be
+     scrolled fully into view without staying tucked under the
+     action cluster. */
+  padding-right: 0;
+}
+.email-reader-meta .recipient-chips::-webkit-scrollbar { display: none; }
+.email-reader-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* Reserve space at the right so chips don't immediately collide
+     with the floating action cluster on the very first row. */
+  padding-right: 180px;
 }
 .email-reader-header > .email-reader-meta {
   flex: 1; min-width: 0;
@@ -28063,14 +28138,20 @@ button .spinner-whirlpool {
     flex-direction: column;
     gap: 6px;
   }
-  .email-reader-actions {
+  .email-reader-header > .email-reader-actions {
+    /* On narrow widths fall back to in-flow so it doesn't overlap
+       the meta entirely. */
+    position: static;
     align-self: flex-end;
+    background: none;
+    padding-left: 0;
   }
   .email-reader-meta-row {
     display: grid;
     grid-template-columns: 1fr;
     gap: 2px;
     align-items: start;
+    padding-right: 0;
   }
   .email-reader-meta-row strong {
     min-width: 0;
