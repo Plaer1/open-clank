@@ -11070,6 +11070,8 @@ textarea.memory-add-input {
   cursor: pointer;
   text-align: left;
   transition: border-color 0.12s, background 0.12s;
+  position: relative;
+  top: -4px;
 }
 .email-filter-btn:hover { border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)); }
 .email-filter-btn:focus-visible {
