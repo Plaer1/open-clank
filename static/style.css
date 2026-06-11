@@ -10427,6 +10427,105 @@ textarea.memory-add-input {
   display: none;
 }
 
+/* Custom Memory sort picker — replaces the native <select> so each
+   option can carry its own SVG icon. Themed to match .email-filter-btn. */
+.memory-sort-picker {
+  position: relative;
+  top: 1px;
+  flex-shrink: 0;
+}
+.memory-sort-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11px;
+  height: 24px;
+  padding: 0 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s, background 0.12s;
+}
+.memory-sort-btn:hover { border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, var(--border)); }
+.memory-sort-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent, var(--red));
+}
+.memory-sort-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.memory-sort-icon-cur {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  color: var(--accent, var(--red));
+  flex-shrink: 0;
+}
+.memory-sort-icon-cur svg { width: 13px; height: 13px; }
+.memory-sort-label { white-space: nowrap; }
+.memory-sort-caret {
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: transform 0.15s;
+}
+.memory-sort-btn[aria-expanded="true"] .memory-sort-caret { transform: rotate(180deg); }
+
+.memory-sort-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 140px;
+  z-index: 100;
+  background: var(--panel, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.22);
+  padding: 4px;
+}
+.memory-sort-item {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg);
+  box-sizing: border-box;
+}
+.memory-sort-item:hover,
+.memory-sort-item:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.memory-sort-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--accent, var(--red));
+  flex-shrink: 0;
+}
+.memory-sort-item-icon svg { width: 13px; height: 13px; }
+.memory-sort-item-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Enabled/Disabled text label next to an admin toggle.
    Matches the .memory-desc treatment (same color + 11px size) so it
    visually belongs to the section description, not the switch. */
@@ -28202,13 +28301,13 @@ button .spinner-whirlpool {
        wider than its content (e.g. a 2-row stack of 3). */
     justify-self: end;
   }
-  /* When the cluster wraps to 2 rows, row 1 grows ~2px (the cluster
-     spans both meta rows so the extra height bleeds into each). Pull
-     the details up another 2px so To/Cc stays at the same vertical
-     offset from From as in the wide layout — no visible jump. */
-  .email-reader-meta > .email-reader-meta-details {
-    margin-top: -12px;
-  }
+}
+/* When the user expands To/Cc, lock the From row at the cluster's
+   2-row height (92px). That makes row 1 the same size regardless of
+   whether the cluster is 1-row or 2-row layout, so window resizing
+   across the 600px breakpoint no longer makes To/Cc "shoot up". */
+.email-reader-meta:has(> .email-reader-meta-details:not([hidden])) > .email-reader-meta-row.email-reader-meta-from {
+  min-height: 92px;
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
    character min, the cluster snaps to absolute overlay with a soft
