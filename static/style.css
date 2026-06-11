@@ -28102,7 +28102,7 @@ button .spinner-whirlpool {
   }
   .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > strong,
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
-    top: 0;
+    top: 4px;
   }
   .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline,
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
