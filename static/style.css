@@ -4662,9 +4662,8 @@ body.bg-pattern-sparkles {
       .email-reader-tab-modal .email-reader-actions,
       .email-window-modal .email-reader-actions {
         display: flex !important;
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        align-items: center !important;
+        flex-direction: column !important;
+        align-items: flex-end !important;
         gap: 4px !important;
         flex-shrink: 0 !important;
         margin-left: auto !important;
@@ -4673,9 +4672,12 @@ body.bg-pattern-sparkles {
       #email-lib-modal .email-reader-actions-row,
       .email-reader-tab-modal .email-reader-actions-row,
       .email-window-modal .email-reader-actions-row {
-        /* Flatten the row wrappers so all 6 buttons sit on one
-           row inside the absolute-positioned actions cluster. */
-        display: contents !important;
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        justify-content: flex-end !important;
+        gap: 4px !important;
       }
       /* Meta on mobile: From / To / Cc each on their own row, label
          tight to chips, chips scroll horizontally per row. */
@@ -28180,17 +28182,19 @@ button .spinner-whirlpool {
   .recipient-chip { flex-shrink: 0; }
 }
 .email-reader-actions {
-  display: flex; flex-direction: row; gap: 4px; align-items: center;
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
   flex-shrink: 0;
   margin-top: -4px;
-  flex-wrap: nowrap;
 }
-/* The two action-row wrappers (primary / secondary) are layout
-   pass-throughs — `display: contents` flattens them so all 6
-   buttons become direct flex children of .email-reader-actions
-   and render on the same row. */
+/* Two stacked rows: Reply/Reply-all/Forward on the From line, with
+   Summary/AI-reply/More on a row below. */
 .email-reader-actions-row {
-  display: contents;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
 }
 .email-reader-atts {
   display: flex; flex-wrap: wrap; gap: 6px;
