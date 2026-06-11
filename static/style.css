@@ -28078,23 +28078,19 @@ button .spinner-whirlpool {
   .recipient-chip { flex-shrink: 0; }
 }
 .email-reader-actions {
-  display: flex; gap: 4px; flex-wrap: wrap; align-items: center;
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
   flex-shrink: 0;
-  justify-content: flex-end;
   margin-top: -4px;
 }
-/* The HTML wraps the buttons in two .email-reader-actions-row divs (primary
-   + secondary). On mobile those flatten via `display: contents` inside the
-   max-width:768px block; apply the same here so the whole row stays on one
-   line on desktop too. */
+/* Two stacked rows inside .email-reader-actions:
+     primary   — Summary + More (top)
+     secondary — Reply / Reply all / Forward / AI reply (bottom) */
 .email-reader-actions-row {
-  display: contents;
-}
-/* Pin the More button to the far right of the flattened flex row — it
-   sits at position 5 in the primary row's source order, so without an
-   explicit order the secondary AI/Summary buttons land after it. */
-.email-reader-actions .email-reader-more-wrap {
-  order: 99;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
 }
 .email-reader-atts {
   display: flex; flex-wrap: wrap; gap: 6px;
