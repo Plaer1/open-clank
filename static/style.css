@@ -28002,7 +28002,9 @@ button .spinner-whirlpool {
 .email-reader-header {
   display: flex;
   flex-direction: row;
-  align-items: center;
+  /* Top-align so when the user expands To/Cc, the action cluster
+     stays on the From line above instead of drifting to the middle. */
+  align-items: flex-start;
   gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
@@ -28011,6 +28013,7 @@ button .spinner-whirlpool {
 }
 .email-reader-header > .email-reader-actions {
   margin-left: auto;
+  flex-shrink: 0;
 }
 /* Meta block stacks the From / To / Cc rows; each row keeps label
    tight to its chip(s) on the same line. The recipient-chips inside
