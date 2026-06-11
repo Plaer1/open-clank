@@ -28059,6 +28059,34 @@ button .spinner-whirlpool {
      floating action cluster on first paint. */
   padding-right: 180px;
 }
+/* Gmail-style chevron — collapsed view shows only From; the chevron
+   reveals the To/Cc details inline below. */
+.email-reader-meta-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.email-reader-meta-toggle:hover { opacity: 1; background: color-mix(in srgb, currentColor 10%, transparent); }
+.email-reader-meta-toggle svg { transition: transform 0.15s ease; }
+.email-reader-meta-toggle.open svg { transform: rotate(180deg); }
+.email-reader-meta-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
   flex: 1; min-width: 0;
   opacity: 0.85; line-height: 1.7; font-size: 11px;

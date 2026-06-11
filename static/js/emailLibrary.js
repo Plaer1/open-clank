@@ -129,6 +129,20 @@ async function _copyTextToClipboard(text) {
   }
 }
 
+function _wireMetaToggle(root) {
+  const toggle = root && root.querySelector('.email-reader-meta-toggle');
+  const details = root && root.querySelector('.email-reader-meta-details');
+  if (!toggle || !details) return;
+  toggle.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const open = details.hasAttribute('hidden');
+    if (open) details.removeAttribute('hidden');
+    else details.setAttribute('hidden', '');
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.classList.toggle('open', open);
+  });
+}
+
 function _recipientChipHtml(full, label, extraClass = '') {
   const fullText = String(full || '').trim();
   const addr = _emailAddressFromRecipientText(fullText);
@@ -2874,9 +2888,11 @@ async function _toggleCardPreview(card, em) {
     reader.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row"><strong>From:</strong><span class="recipient-chips">${fromChip}</span></div>
-          ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildRecipients(data.to)}</span></div>` : ''}
-          ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
+          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}</span>${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildRecipients(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
         <div class="email-reader-actions">
           <div class="email-reader-actions-row email-reader-actions-row-primary">
@@ -2954,6 +2970,7 @@ async function _toggleCardPreview(card, em) {
       ev.stopPropagation();
       await _summarizeEmail(reader, data, ev.currentTarget);
     });
+    _wireMetaToggle(reader);
     // from-sender / thread-search Search button is DISABLED for now —
     // the search + threaded sidebar UX is too buggy to ship. Physically
     // remove it from every reader render path. Re-enable by deleting
@@ -4569,9 +4586,11 @@ async function _openEmailAsTab(em, folder) {
     reader.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row"><strong>From:</strong><span class="recipient-chips">${fromChip}</span></div>
-          ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildChips(data.to)}</span></div>` : ''}
-          ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
+          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}</span>${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${buildChips(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
         <div class="email-reader-actions">
           <div class="email-reader-actions-row email-reader-actions-row-primary">
@@ -4619,6 +4638,7 @@ async function _openEmailAsTab(em, folder) {
       ev.stopPropagation();
       try { await _summarizeEmail(reader, data, ev.currentTarget); } catch {}
     });
+    _wireMetaToggle(reader);
     reader.querySelector('[data-act="from-sender"]')?.remove();
     reader.querySelector('[data-act="from-sender"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
@@ -4723,9 +4743,11 @@ async function _openEmailWindow(em, folder) {
     bodyEl.innerHTML = `
       <div class="email-reader-header">
         <div class="email-reader-meta">
-          <div class="email-reader-meta-row"><strong>From:</strong><span class="recipient-chips">${fromChip}</span></div>
-          ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${_chipsFor(data.to)}</span></div>` : ''}
-          ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
+          <div class="email-reader-meta-row email-reader-meta-from"><strong>From:</strong><span class="recipient-chips">${fromChip}</span>${(data.to || data.cc) ? `<button class="email-reader-meta-toggle" type="button" aria-expanded="false" title="Show recipients"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>` : ''}</div>
+          ${(data.to || data.cc) ? `<div class="email-reader-meta-details" hidden>
+            ${data.to ? `<div class="email-reader-meta-row"><strong>To:</strong><span class="recipient-chips">${_chipsFor(data.to)}</span></div>` : ''}
+            ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
+          </div>` : ''}
         </div>
         <div class="email-reader-actions">
           <div class="email-reader-actions-row email-reader-actions-row-primary">
@@ -4773,6 +4795,7 @@ async function _openEmailWindow(em, folder) {
       ev.stopPropagation();
       try { await _summarizeEmail(bodyEl, data, ev.currentTarget); } catch {}
     });
+    _wireMetaToggle(bodyEl);
     bodyEl.querySelector('[data-act="from-sender"]')?.remove();
     bodyEl.querySelector('[data-act="from-sender"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
