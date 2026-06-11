@@ -1334,6 +1334,15 @@ async function _loadAccounts() {
     const d = await r.json();
     state._libAccounts = d.accounts || [];
   } catch (_) { state._libAccounts = []; }
+  // The 'Default' chip is gone — pick an explicit account so the email
+  // list and any per-email actions (open in new tab, mark read, etc.)
+  // always carry an account_id and can't desync from the server's
+  // is_default state.
+  if (!state._libAccountId && state._libAccounts.length) {
+    const def = state._libAccounts.find(a => a.is_default) || state._libAccounts[0];
+    state._libAccountId = def.id;
+    _publishActiveAccount();
+  }
   _renderAccountsStrip();
 }
 
@@ -1342,10 +1351,11 @@ function _renderAccountsStrip() {
   if (!strip) return;
   strip.style.display = 'flex';
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-  const allActive = !state._libAccountId ? ' active' : '';
-  // 'Default' rather than 'All (default)' — this view shows the account
-  // marked is_default; cross-account aggregation is a separate feature.
-  let html = `<button class="memory-toolbar-btn gallery-chip${allActive}" data-acc-id="">Default</button>`;
+  // The 'Default' chip caused desync bugs (changing the server-side
+  // default via the dot while still on the cached 'default' view would
+  // open the wrong account's emails). Each account renders as its own
+  // chip; the active one is selected explicitly via _loadAccounts.
+  let html = '';
   // 6px dot — matches the sidebar notification-dot size.
   const _dotFilled = '<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
   const _dotHollow = '<svg width="6" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="9"/></svg>';
