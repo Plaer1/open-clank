@@ -28073,7 +28073,7 @@ button .spinner-whirlpool {
    reveal anything tucked under the buttons. */
 .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
   position: absolute;
-  top: -8px;
+  top: -7px;
   right: 0;
   display: flex;
   flex-direction: row;
