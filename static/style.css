@@ -28096,13 +28096,14 @@ button .spinner-whirlpool {
   min-width: 0;
 }
 /* Meta uses CSS grid so the From row sits left of the action cluster
-   in row 1, and the To/Cc details span across row 2 below. The
-   cluster naturally shrinks alongside the chip — when it can't fit
-   on one row, flex-wrap drops it into two rows of icons first; only
-   at very narrow pane widths does it switch back to absolute overlay. */
+   in row 1, and the To/Cc details share col 1 in row 2 below. Track
+   sizing: col 1 = chip natural width clamped to 60–250px (chip span
+   keeps overflow-x scroll so longer names truncate cleanly); col 2
+   takes the remaining space, shrinking first when the pane narrows
+   so the cluster wraps to 2 rows of icons before the chip squeezes. */
 .email-reader-meta {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(60px, 250px) minmax(48px, 1fr);
   grid-auto-rows: auto;
   align-items: start;
   column-gap: 12px;
@@ -28134,10 +28135,11 @@ button .spinner-whirlpool {
   align-items: flex-start;
   justify-content: flex-end;
   gap: 4px;
-  /* Cluster is locked to a max-width that fits exactly 3 icons per
-     row, so the 6 buttons always lay out as a 3-on-top / 3-on-bottom
-     grid. The chips in col 1 shrink first when the pane narrows. */
-  max-width: calc(48px * 3 + 4px * 2);
+  /* Cluster takes its grid column's width — on wide panes col 2 has
+     room for the 6 icons on one row; as the pane narrows, col 2
+     shrinks first (col 1 holds its chip width up to 250px), and
+     flex-wrap drops the buttons to 2 rows once the cluster can't
+     fit in 1. The chips only start to shrink past that. */
   /* Sit visually above the From baseline like the lifted overlay. */
   margin-top: -7px;
 }
