@@ -28283,11 +28283,12 @@ button .spinner-whirlpool {
     padding-right: 170px;
   }
   /* Cluster wrapped to 2 rows (44px + 4 gap + 44px = 92px) sits
-     absolute above the From baseline. Grow the header so its bottom
-     fully contains the cluster instead of letting it peek out.
-     8px top padding + 92px cluster + 8px breathing = ~108. */
-  .email-reader-header {
-    min-height: 108px;
+     absolute above the From baseline. Set min-height on the meta
+     (a descendant of the container, more reliable than targeting
+     the container itself) so the header grows enough to contain
+     the cluster. */
+  .email-reader-meta {
+    min-height: 92px;
   }
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
@@ -28302,7 +28303,10 @@ button .spinner-whirlpool {
     padding-right: 0;
   }
   .email-reader-meta > .email-reader-actions-inline {
-    margin-top: 0;
+    /* Keep the same -7px lift as the medium-width state so the
+       cluster doesn't slide ~4px DOWN when it transitions into
+       overlay mode. */
+    /* margin-top stays inherited at -7px from the base rule. */
     /* 158px content + 22px padding-left so the inner row still fits
        3 icons cleanly. */
     min-width: 180px;
