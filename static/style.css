@@ -28066,6 +28066,14 @@ button .spinner-whirlpool {
   flex-wrap: wrap;
   row-gap: 2px;
 }
+/* Desktop only: shift the whole From row up 4px. Mobile keeps the
+   original placement (the mobile @media block overrides padding so
+   the header sits flush already). */
+@media (min-width: 769px) {
+  .email-reader-meta-row.email-reader-meta-from {
+    margin-top: -4px;
+  }
+}
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
 .email-reader-meta-toggle {
@@ -28090,8 +28098,8 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 4px between To and Cc, pulled up 8px to sit close under From. */
-  gap: 4px;
+  /* 6px between To and Cc, pulled up 8px to sit close under From. */
+  gap: 6px;
   margin-top: -8px;
 }
 .email-reader-meta-details[hidden] { display: none; }
