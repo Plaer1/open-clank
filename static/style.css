@@ -10530,7 +10530,7 @@ textarea.memory-add-input {
    Matches the .memory-desc treatment (same color + 11px size) so it
    visually belongs to the section description, not the switch. */
 .admin-toggle-state {
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.5;
   font-weight: normal;
   letter-spacing: 0.02em;
@@ -28290,6 +28290,13 @@ button .spinner-whirlpool {
   .email-reader-meta-row.email-reader-meta-from,
   .email-reader-meta > .email-reader-meta-details {
     padding-right: 170px;
+  }
+  /* Cluster wrapped to 2 rows (44px + 4 gap + 44px = 92px) sits
+     absolute above the From baseline. Grow the header so its bottom
+     fully contains the cluster instead of letting it peek out.
+     8px top padding + 92px cluster + 8px breathing = ~108. */
+  .email-reader-header {
+    min-height: 108px;
   }
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
