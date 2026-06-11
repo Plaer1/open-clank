@@ -10428,21 +10428,20 @@ textarea.memory-add-input {
 }
 
 /* Enabled/Disabled text label next to an admin toggle.
-   The text auto-flips via :has() on the row containing the input. */
+   Matches the .memory-desc treatment (same color + 11px size) so it
+   visually belongs to the section description, not the switch. */
 .admin-toggle-state {
   font-size: 11px;
+  line-height: 1.5;
   font-weight: normal;
   letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
 }
 .admin-card > div:has(.admin-switch input) .admin-toggle-state::before {
   content: "Disabled";
-  color: var(--fg);
-  opacity: 0.55;
 }
 .admin-card > div:has(.admin-switch input:checked) .admin-toggle-state::before {
   content: "Enabled";
-  color: var(--accent, var(--red));
-  opacity: 1;
 }
 /* Nudge the bulk-bar action buttons up 2px (and Memory's -2px left) to
    align with the row baseline. Covers both the Memory bulk bar
@@ -28208,6 +28207,14 @@ button .spinner-whirlpool {
    character min, the cluster snaps to absolute overlay with a soft
    shadow so it visually floats above the truncated chip. */
 @container emailreader (max-width: 380px) {
+  /* Reserve row-1 height to match the now-absolute cluster so the
+     To/Cc details don't jump up when the cluster goes absolute —
+     without this the grid recalculates row 1 to the From row's
+     natural height and details slide upward, leaving the floating
+     cluster misaligned. */
+  .email-reader-meta-row.email-reader-meta-from {
+    min-height: 88px;
+  }
   .email-reader-meta > .email-reader-actions-inline {
     position: absolute;
     top: 1px;
