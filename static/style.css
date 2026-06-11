@@ -28091,6 +28091,16 @@ button .spinner-whirlpool {
     position: relative;
     top: -2px;
   }
+  /* Docked panes are tighter — pull From label and action cluster
+     up an extra 2px each. */
+  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > strong,
+  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
+    top: -4px;
+  }
+  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline,
+  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
+    top: -6px;
+  }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
