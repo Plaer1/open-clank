@@ -3062,7 +3062,7 @@ async function _toggleCardPreview(card, em) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
               ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
               <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-              ${_aiReplySplitButtonHtml(data)}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
               <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
               <div class="email-reader-more-wrap" style="position:relative">
                 <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
@@ -3119,7 +3119,7 @@ async function _toggleCardPreview(card, em) {
       _snapEmailModalToLeftSidebar(ev.currentTarget.closest('.modal'));
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'reply-all' });
     });
-    reader.querySelector('.ai-reply-split')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
+    reader.querySelector('[data-act="ai-reply"]')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
     reader.querySelector('[data-act="forward"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'forward' });
@@ -4759,7 +4759,7 @@ async function _openEmailAsTab(em, folder) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
               ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
               <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-              ${_aiReplySplitButtonHtml(data)}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
               <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
               <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
               <div class="email-reader-more-wrap" style="position:relative">
@@ -4794,7 +4794,7 @@ async function _openEmailAsTab(em, folder) {
       _snapEmailModalToLeftSidebar(ev.currentTarget.closest('.modal'));
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'reply-all' });
     });
-    reader.querySelector('.ai-reply-split')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
+    reader.querySelector('[data-act="ai-reply"]')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
     reader.querySelector('[data-act="forward"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'forward' });
@@ -4915,7 +4915,7 @@ async function _openEmailWindow(em, folder) {
               <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
               ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
               <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-              ${_aiReplySplitButtonHtml(data)}
+              <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
               <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
               <div class="email-reader-more-wrap" style="position:relative">
                 <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
@@ -4950,7 +4950,7 @@ async function _openEmailWindow(em, folder) {
       _snapEmailModalToLeftSidebar(ev.currentTarget.closest('.modal'));
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'reply-all' });
     });
-    bodyEl.querySelector('.ai-reply-split')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
+    bodyEl.querySelector('[data-act="ai-reply"]')?.addEventListener('click', (ev) => _handleAiReplyButton(ev, em, data));
     bodyEl.querySelector('[data-act="forward"]')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'forward' });
@@ -5865,21 +5865,6 @@ function _summaryIcon(data) {
   return `<svg width="14" height="14" viewBox="0 0 24 24" fill="${fill}"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>`;
 }
 
-// Split-button HTML for AI reply: main button + caret. Main button opens
-// the cached draft if one exists, otherwise generates fast. Caret opens
-// a popover with a custom-instructions textarea.
-function _aiReplySplitButtonHtml(data) {
-  const mainTitle = data?.cached_ai_reply
-    ? 'AI Reply (cached draft ready)'
-    : 'AI Reply (generate a draft)';
-  return `<span class="ai-reply-split memory-toolbar-btn reader-icon-btn" style="padding:0;display:inline-flex;align-items:stretch;overflow:hidden;">
-    <button class="ai-reply-main" data-act="ai-reply" title="${mainTitle}" style="background:transparent;border:0;display:inline-flex;align-items:center;gap:5px;padding:4px 8px;color:inherit;cursor:pointer;font:inherit;">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
-    <button class="ai-reply-caret" data-act="ai-reply-menu" title="Reply with custom instructions" style="background:transparent;border:0;border-left:1px solid color-mix(in srgb, currentColor 25%, transparent);padding:4px 5px;color:inherit;cursor:pointer;display:inline-flex;align-items:center;font:inherit;">
-      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-    </button>
-  </span>`;
-}
-
 async function _runAiReplyFromButton(btn, em, data, mode, noteHint = '') {
   _snapEmailModalToLeftSidebar(btn.closest('.modal'));
   btn.disabled = true;
@@ -5905,79 +5890,102 @@ function _closeAiReplyChoice() {
   document.removeEventListener('click', _closeAiReplyChoice, true);
 }
 
-// Caret popover — just a custom-instructions textarea + generate button.
-// (Old version had Fast / Full / Draft-with-note; user wanted that
-// simplified.)
 function _showAiReplyChoice(btn, em, data) {
   _closeAiReplyChoice();
-  const anchor = btn.closest('.ai-reply-split') || btn;
-  const rect = anchor.getBoundingClientRect();
+  const rect = btn.getBoundingClientRect();
   const menu = document.createElement('div');
   menu.className = 'email-ai-reply-choice';
   menu.style.cssText = [
     'position:fixed',
-    `left:${Math.max(8, Math.min(rect.left, window.innerWidth - 320))}px`,
-    `top:${Math.min(window.innerHeight - 140, rect.bottom + 6)}px`,
+    `left:${Math.max(8, Math.min(rect.left, window.innerWidth - 190))}px`,
+    `top:${Math.min(window.innerHeight - 96, rect.bottom + 6)}px`,
     'z-index:10060',
     'display:flex',
-    'flex-direction:column',
     'gap:6px',
-    'padding:8px',
+    'padding:6px',
     'background:var(--bg,#111)',
     'border:1px solid var(--border,#333)',
     'border-radius:7px',
     'box-shadow:0 8px 24px rgba(0,0,0,.28)',
-    'min-width:260px',
   ].join(';');
+  // Fast = lightning bolt (already used as a 'fast' glyph elsewhere in the app).
+  // Full = layered concentric circles to suggest "more, deeper" — not a fully
+  // filled circle so it reads as a complement to the lightning, not as a "stop".
   menu.innerHTML = `
-    <div style="font-size:11px;opacity:0.7;">Tell the AI how to reply</div>
-    <textarea class="email-ai-reply-note-text" placeholder="e.g. 'thank them and confirm Tuesday at 2', 'decline politely', 'short, professional'" rows="4" style="resize:vertical;width:100%;font-family:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--fg);box-sizing:border-box;"></textarea>
-    <div style="display:flex;justify-content:flex-end;">
-      <button class="memory-toolbar-btn" data-act="note-send" title="Generate with these instructions" style="display:inline-flex;align-items:center;gap:5px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-        Generate
+    <div class="email-ai-reply-row" style="display:flex;align-items:center;gap:4px;">
+      <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;gap:5px;">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        Fast
+      </button>
+      <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="var(--accent, var(--red))"/></svg>
+        Full
+      </button>
+      <button class="memory-toolbar-btn" data-act="note-toggle" title="Add a note about how to reply" style="display:inline-flex;align-items:center;justify-content:center;padding:4px 6px;line-height:1;">
+        <svg width="14" height="4" viewBox="0 0 14 4" fill="var(--accent, var(--red))" aria-hidden="true"><circle cx="2" cy="2" r="1.4"/><circle cx="7" cy="2" r="1.4"/><circle cx="12" cy="2" r="1.4"/></svg>
       </button>
     </div>
+    <div class="email-ai-reply-note" hidden style="display:flex;flex-direction:column;gap:5px;padding-top:6px;border-top:1px solid var(--border);margin-top:6px;">
+      <textarea class="email-ai-reply-note-text" placeholder="Tell the AI how to reply (e.g. 'thank them and confirm Tuesday at 2', 'decline politely')" rows="3" style="resize:vertical;width:100%;min-width:240px;font-family:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--fg);box-sizing:border-box;"></textarea>
+      <div class="email-ai-reply-note-actions" hidden style="display:flex;justify-content:flex-end;">
+        <button class="memory-toolbar-btn" data-act="note-send" title="Draft using this note" style="display:inline-flex;align-items:center;gap:5px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          Draft with note
+        </button>
+      </div>
+    </div>
   `;
+  // Reveal the "Draft with note" button only once the user has typed
+  // something — empty-textarea + visible Draft button looks like an
+  // already-armed action.
+  const _noteText = menu.querySelector('.email-ai-reply-note-text');
+  const _noteActions = menu.querySelector('.email-ai-reply-note-actions');
+  if (_noteText && _noteActions) {
+    _noteText.addEventListener('input', () => {
+      _noteActions.hidden = !_noteText.value.trim();
+    });
+  }
   menu.addEventListener('click', async (ev) => {
-    const send = ev.target.closest('[data-act="note-send"]');
-    if (!send) return;
-    ev.preventDefault(); ev.stopPropagation();
-    const note = (menu.querySelector('.email-ai-reply-note-text')?.value || '').trim();
-    _closeAiReplyChoice();
-    // Run via the original AI-reply target button (so spinner + state
-    // restoration work as before), not the caret.
-    const mainBtn = anchor.querySelector('.ai-reply-main') || btn;
-    await _runAiReplyFromButton(mainBtn, em, data, 'ai-reply-full', note);
-  });
-  menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
-  menu.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') { ev.preventDefault(); _closeAiReplyChoice(); }
-    else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
-      // Cmd/Ctrl+Enter submits the textarea content.
-      ev.preventDefault();
-      menu.querySelector('[data-act="note-send"]')?.click();
+    const noteToggle = ev.target.closest('[data-act="note-toggle"]');
+    if (noteToggle) {
+      ev.preventDefault(); ev.stopPropagation();
+      const panel = menu.querySelector('.email-ai-reply-note');
+      const wasHidden = panel.hidden;
+      panel.hidden = !wasHidden;
+      if (wasHidden) panel.querySelector('textarea')?.focus();
+      return;
     }
+    const noteSend = ev.target.closest('[data-act="note-send"]');
+    if (noteSend) {
+      ev.preventDefault(); ev.stopPropagation();
+      const note = (menu.querySelector('.email-ai-reply-note-text')?.value || '').trim();
+      _closeAiReplyChoice();
+      await _runAiReplyFromButton(btn, em, data, 'ai-reply-full', note);
+      return;
+    }
+    const choice = ev.target.closest('[data-mode]');
+    if (!choice) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const mode = choice.getAttribute('data-mode') || 'ai-reply';
+    _closeAiReplyChoice();
+    await _runAiReplyFromButton(btn, em, data, mode);
   });
+  // Esc closes the popover; ignore plain clicks inside the menu so the
+  // textarea stays focused.
+  menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
   document.body.appendChild(menu);
-  menu.querySelector('textarea')?.focus();
   setTimeout(() => document.addEventListener('click', _closeAiReplyChoice, true), 0);
 }
 
 function _handleAiReplyButton(ev, em, data) {
   ev.stopPropagation();
-  const target = ev.target;
-  // Caret click → open the custom-instructions popover.
-  if (target.closest && target.closest('.ai-reply-caret')) {
-    const caret = target.closest('.ai-reply-caret');
-    _showAiReplyChoice(caret, em, data);
+  const btn = ev.currentTarget;
+  if (data?.cached_ai_reply) {
+    _runAiReplyFromButton(btn, em, data, 'ai-reply');
     return;
   }
-  // Main button click → open cached draft if one exists, else generate
-  // a fast draft inline. No intermediate Fast/Full menu anymore.
-  const btn = target.closest('.ai-reply-main') || ev.currentTarget;
-  const mode = data?.cached_ai_reply ? 'ai-reply' : 'ai-reply-fast';
-  _runAiReplyFromButton(btn, em, data, mode);
+  _showAiReplyChoice(btn, em, data);
 }
 
 function _hasMultipleRecipients(data) {
