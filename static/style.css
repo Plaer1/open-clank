@@ -28193,11 +28193,14 @@ button .spinner-whirlpool {
    rows. */
 @container emailreader (max-width: 600px) {
   .email-reader-meta > .email-reader-actions-inline {
-    min-width: calc(48px * 3 + 4px * 2);
-    max-width: calc(48px * 3 + 4px * 2);
-    /* Right-align the (now wider) cluster so the icons stay glued
-       to the right edge instead of drifting to the middle when the
-       cluster is wider than its content (e.g. a 2-row stack of 3). */
+    /* 3 icons (48px each) + 2 gaps (4px each) = 152px exact. Adding
+       6px slack so subpixel rounding can't tip a row from 3 to 2
+       icons and fan the cluster into a 3rd row. */
+    min-width: 158px;
+    max-width: 158px;
+    /* Right-align the cluster so the icons stay glued to the right
+       edge instead of drifting to the middle when the cluster is
+       wider than its content (e.g. a 2-row stack of 3). */
     justify-self: end;
   }
 }
@@ -28210,7 +28213,11 @@ button .spinner-whirlpool {
     top: 1px;
     right: 0;
     margin-top: 0;
-    max-width: calc(48px * 3 + 4px * 2);
+    /* 158px content + 22px padding-left so the inner row still fits
+       3 icons cleanly. Without the +padding the 3 icons couldn't
+       fit and the cluster fanned into a third row. */
+    min-width: 180px;
+    max-width: 180px;
     z-index: 2;
     background: linear-gradient(to right, transparent 0, var(--bg) 18px);
     padding-left: 22px;
