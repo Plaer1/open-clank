@@ -5419,7 +5419,7 @@ function _showAiReplyChoice(btn, em, data) {
     </div>
     <div class="email-ai-reply-note" hidden style="display:flex;flex-direction:column;gap:5px;padding-top:6px;border-top:1px solid var(--border);margin-top:6px;">
       <textarea class="email-ai-reply-note-text" placeholder="Tell the AI how to reply (e.g. 'thank them and confirm Tuesday at 2', 'decline politely')" rows="3" style="resize:vertical;width:100%;min-width:240px;font-family:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--fg);box-sizing:border-box;"></textarea>
-      <div style="display:flex;justify-content:flex-end;">
+      <div class="email-ai-reply-note-actions" hidden style="display:flex;justify-content:flex-end;">
         <button class="memory-toolbar-btn" data-act="note-send" title="Draft using this note" style="display:inline-flex;align-items:center;gap:5px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           Draft with note
@@ -5427,6 +5427,16 @@ function _showAiReplyChoice(btn, em, data) {
       </div>
     </div>
   `;
+  // Reveal the "Draft with note" button only once the user has typed
+  // something — empty-textarea + visible Draft button looks like an
+  // already-armed action.
+  const _noteText = menu.querySelector('.email-ai-reply-note-text');
+  const _noteActions = menu.querySelector('.email-ai-reply-note-actions');
+  if (_noteText && _noteActions) {
+    _noteText.addEventListener('input', () => {
+      _noteActions.hidden = !_noteText.value.trim();
+    });
+  }
   menu.addEventListener('click', async (ev) => {
     const noteToggle = ev.target.closest('[data-act="note-toggle"]');
     if (noteToggle) {
