@@ -877,7 +877,7 @@ export function openEmailLibrary(opts = {}) {
               <div class="email-lib-chip-bar memory-search-input" id="email-lib-chip-bar" style="width:100%;padding-right:96px;padding-left:26px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;cursor:text;min-height:30px;position:relative;">
                 <svg class="email-lib-chip-bar-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
                 <span id="email-lib-pills" style="display:contents"></span>
-                <input type="text" id="email-lib-search" placeholder="Search by name or text" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;" />
+                <input type="text" id="email-lib-search" placeholder="Search by name or text" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;position:relative;top:-1px;" />
               </div>
               <div id="email-lib-suggest" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:60;background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,0.25);max-height:240px;overflow-y:auto;"></div>
               <button class="memory-toolbar-btn email-undone-toggle email-undone-toggle-inline" id="email-undone-btn" title="Show only emails not marked as done (undone)">
@@ -5918,51 +5918,12 @@ function _showAiReplyChoice(btn, em, data) {
         Fast
       </button>
       <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="var(--accent, var(--red))"/></svg>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
         Full
       </button>
-      <button class="memory-toolbar-btn" data-act="note-toggle" title="Add a note about how to reply" style="display:inline-flex;align-items:center;justify-content:center;padding:4px 6px;line-height:1;">
-        <svg width="14" height="4" viewBox="0 0 14 4" fill="var(--accent, var(--red))" aria-hidden="true"><circle cx="2" cy="2" r="1.4"/><circle cx="7" cy="2" r="1.4"/><circle cx="12" cy="2" r="1.4"/></svg>
-      </button>
-    </div>
-    <div class="email-ai-reply-note" hidden style="display:flex;flex-direction:column;gap:5px;padding-top:6px;border-top:1px solid var(--border);margin-top:6px;">
-      <textarea class="email-ai-reply-note-text" placeholder="Tell the AI how to reply (e.g. 'thank them and confirm Tuesday at 2', 'decline politely')" rows="3" style="resize:vertical;width:100%;min-width:240px;font-family:inherit;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg);color:var(--fg);box-sizing:border-box;"></textarea>
-      <div class="email-ai-reply-note-actions" hidden style="display:flex;justify-content:flex-end;">
-        <button class="memory-toolbar-btn" data-act="note-send" title="Draft using this note" style="display:inline-flex;align-items:center;gap:5px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          Draft with note
-        </button>
-      </div>
     </div>
   `;
-  // Reveal the "Draft with note" button only once the user has typed
-  // something — empty-textarea + visible Draft button looks like an
-  // already-armed action.
-  const _noteText = menu.querySelector('.email-ai-reply-note-text');
-  const _noteActions = menu.querySelector('.email-ai-reply-note-actions');
-  if (_noteText && _noteActions) {
-    _noteText.addEventListener('input', () => {
-      _noteActions.hidden = !_noteText.value.trim();
-    });
-  }
   menu.addEventListener('click', async (ev) => {
-    const noteToggle = ev.target.closest('[data-act="note-toggle"]');
-    if (noteToggle) {
-      ev.preventDefault(); ev.stopPropagation();
-      const panel = menu.querySelector('.email-ai-reply-note');
-      const wasHidden = panel.hidden;
-      panel.hidden = !wasHidden;
-      if (wasHidden) panel.querySelector('textarea')?.focus();
-      return;
-    }
-    const noteSend = ev.target.closest('[data-act="note-send"]');
-    if (noteSend) {
-      ev.preventDefault(); ev.stopPropagation();
-      const note = (menu.querySelector('.email-ai-reply-note-text')?.value || '').trim();
-      _closeAiReplyChoice();
-      await _runAiReplyFromButton(btn, em, data, 'ai-reply-full', note);
-      return;
-    }
     const choice = ev.target.closest('[data-mode]');
     if (!choice) return;
     ev.preventDefault();
