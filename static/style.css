@@ -28136,6 +28136,12 @@ button .spinner-whirlpool {
     min-height: 0;
   }
 }
+/* Accent-tint the email-search (from-sender) magnifying glass so
+   it reads as a deliberate search action against the other icons. */
+.email-reader-actions-inline .reader-icon-btn[data-act="from-sender"] svg {
+  color: var(--accent-primary, var(--red));
+  stroke: var(--accent-primary, var(--red));
+}
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
 .email-reader-meta-toggle {

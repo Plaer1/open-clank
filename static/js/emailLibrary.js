@@ -2167,6 +2167,10 @@ window.addEventListener('click', (e) => {
   // 1) Recipient chips inside the email reader area
   const chip = e.target.closest && e.target.closest('.recipient-chip');
   if (chip && chip.closest('.email-reader-header, .email-card-reader, .email-reader-tab-modal')) {
+    // Don't pivot to library search for chips in the From / To / Cc
+    // meta — clicking those should just toggle the expanded address
+    // view via the per-reader handler.
+    if (chip.closest('.email-reader-meta')) return;
     const email = (chip.dataset && chip.dataset.email) || '';
     const name = (chip.dataset && chip.dataset.name) || (chip.textContent || '').trim();
     if (!email) return;
