@@ -15393,6 +15393,10 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
 .modal.modal-right-docked .email-reader-header,
 .modal.modal-left-docked .email-reader-header {
   flex-direction: column;
+  /* Stretch the meta to the full header width so the absolute
+     action cluster's right:0 lands at the right edge (was sizing
+     meta to chip content width and centering it). */
+  align-items: stretch;
   gap: 6px;
 }
 .modal.modal-right-docked .email-reader-header > .email-reader-actions,
