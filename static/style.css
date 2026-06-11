@@ -28073,6 +28073,12 @@ button .spinner-whirlpool {
   .email-reader-meta-row.email-reader-meta-from {
     margin-top: -8px;
   }
+  /* Pull only the "From:" label up 4px without affecting the chips
+     or action cluster beside it. */
+  .email-reader-meta-row.email-reader-meta-from > strong {
+    position: relative;
+    top: -4px;
+  }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
    reveals the To/Cc details inline below. */
