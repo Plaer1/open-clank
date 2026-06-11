@@ -4651,20 +4651,21 @@ body.bg-pattern-sparkles {
       .email-window-modal .email-reader-header {
         padding: 8px 8px !important;
         gap: 6px !important;
-        flex-direction: row !important;
-        align-items: flex-start !important;
+        /* Mobile keeps the same actions-on-top layout as desktop. */
+        flex-direction: column !important;
+        align-items: stretch !important;
       }
       #email-lib-modal .email-reader-actions,
       .email-reader-tab-modal .email-reader-actions,
       .email-window-modal .email-reader-actions {
         display: flex !important;
         flex-direction: column !important;
-        align-items: flex-end !important;
+        align-items: flex-start !important;
         gap: 4px !important;
-        margin-left: auto !important;
+        margin-left: 0 !important;
         flex-shrink: 0 !important;
-        position: relative !important;
-        top: -3px !important; /* lift the reply/forward/etc. action buttons up on mobile */
+        position: static !important;
+        order: -1 !important;          /* render above the meta */
       }
       #email-lib-modal .email-reader-actions-row,
       .email-reader-tab-modal .email-reader-actions-row,
@@ -4673,8 +4674,9 @@ body.bg-pattern-sparkles {
         flex-direction: row !important;
         flex-wrap: nowrap !important;
         align-items: center !important;
-        justify-content: flex-end !important;
+        justify-content: flex-start !important;
         gap: 4px !important;
+        width: 100% !important;
       }
       #email-lib-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
       .email-reader-tab-modal .email-reader-actions .memory-toolbar-btn.reader-icon-btn,
@@ -27959,13 +27961,27 @@ button .spinner-whirlpool {
 }
 .email-reader-header {
   display: flex;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 12px;
+  /* Actions sit ABOVE the from/to/cc meta — top toolbar pattern. The
+     existing two action-rows inside .email-reader-actions keep their
+     vertical stacking (Reply/Reply-all/Forward/AI on one row, then
+     Summary/More on another) so nothing has to combine. */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+}
+.email-reader-header > .email-reader-actions {
+  order: -1;          /* render first inside the column */
+  margin-left: 0;
+  align-items: flex-start;
+  width: 100%;
+}
+.email-reader-header > .email-reader-actions > .email-reader-actions-row {
+  justify-content: flex-start;
+  width: 100%;
 }
 .email-reader-header > .email-reader-meta {
   flex: 1; min-width: 0;
