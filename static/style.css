@@ -28034,6 +28034,8 @@ button .spinner-whirlpool {
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+  /* Containing block for the absolute action cluster. */
+  position: relative;
 }
 .email-reader-header > .email-reader-actions {
   margin-left: auto;
@@ -28066,46 +28068,25 @@ button .spinner-whirlpool {
   gap: 6px;
   min-width: 0;
 }
-/* All action buttons live INSIDE the From row, pinned to the right
-   edge. When the chip text grows wide enough to crowd the cluster,
-   the cluster wraps to two (or more) rows of buttons before it has
-   to overlay the chip — at the point where even that doesn't fit,
-   the cluster goes back to position: absolute and slides over the
-   chip (chip scrolls horizontally underneath). */
-.email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
-  margin-left: auto;
+/* Action cluster sits as a sibling of the From row inside meta so
+   it can flow under the To/Cc details when expanded in docked mode.
+   In undocked mode it's absolute-positioned top-right of the header
+   so it visually overlays the From line. */
+.email-reader-meta > .email-reader-actions-inline {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  flex-shrink: 0;
-  /* Lift visually so the cluster floats over the From baseline. */
-  position: relative;
-  top: -7px;
+  position: absolute;
+  top: 1px;
+  right: 14px;
   z-index: 2;
 }
-/* When the From row can no longer fit even a wrapped cluster
-   alongside the chip, the chip span itself wraps to a new row —
-   then the cluster overlays via stacking-context. The overlay
-   guard kicks in via the container query below. */
 .email-reader-meta-row.email-reader-meta-from {
   position: relative;
   flex-wrap: wrap;
-}
-/* Pinch point: when the reader pane gets very narrow (< 380px),
-   the action cluster goes absolute top-right and overlays the chip
-   so From: and the buttons stay on a single row. */
-@container docpane (max-width: 380px) {
-  .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
-    position: absolute;
-    top: -7px;
-    right: 0;
-    flex-wrap: nowrap;
-    background: linear-gradient(to right, transparent 0, var(--bg) 18px);
-    padding-left: 22px;
-  }
 }
 /* Desktop only: shift the whole From row up 6px. Mobile keeps the
    original placement (the mobile @media block overrides padding so
@@ -28138,15 +28119,14 @@ button .spinner-whirlpool {
   .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > strong {
     top: 0;
   }
-  .modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline,
-  .modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
+  .modal.modal-right-docked .email-reader-meta > .email-reader-actions-inline,
+  .modal.modal-left-docked .email-reader-meta > .email-reader-actions-inline {
+    /* In docked mode the cluster flows naturally at the bottom of
+       meta — when To/Cc are expanded, the cluster sits below them. */
     position: static;
-    flex-basis: 100%;
-    margin-left: 0;
+    margin-top: 4px;
     background: none;
     padding-left: 0;
-    /* Right-align icons when docked so they sit at the far right
-       of the row below From: instead of the far left. */
     justify-content: flex-end;
   }
   /* Docked header gets a smaller min-height since the action cluster
