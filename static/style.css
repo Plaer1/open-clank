@@ -28048,23 +28048,33 @@ button .spinner-whirlpool {
   gap: 6px;
   min-width: 0;
 }
-/* All action buttons live INSIDE the From row, right-aligned. When
-   there's room (undocked) they sit on the same row as From; when
-   docked or narrow they wrap below it. */
+/* All action buttons live INSIDE the From row, pinned to the right
+   edge. When the window narrows, the action cluster STAYS on the
+   From line and overlays the chip — the chip's recipient-chips span
+   scrolls horizontally underneath, so the user can drag/scroll to
+   reveal anything tucked under the buttons. */
 .email-reader-meta-row.email-reader-meta-from > .email-reader-actions-inline {
-  margin-left: auto;
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
   flex-direction: row;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
   flex-shrink: 0;
+  z-index: 2;
+  /* Gradient fade so chips poking out from underneath blend into
+     the action cluster instead of getting visually clipped. */
+  background: linear-gradient(to right, transparent 0, var(--bg) 18px);
+  padding-left: 22px;
 }
-/* From row allows the action cluster to wrap below when narrow. */
+/* From row is the positioning context for the absolute actions
+   cluster, and stays a single non-wrapping row. */
 .email-reader-meta-row.email-reader-meta-from {
-  flex-wrap: wrap;
-  row-gap: 2px;
+  position: relative;
+  flex-wrap: nowrap;
 }
 /* Desktop only: shift the whole From row up 6px. Mobile keeps the
    original placement (the mobile @media block overrides padding so
