@@ -86,11 +86,13 @@ def _normalize_contact(contact: Dict) -> Dict:
     name = str(contact.get("name") or "").strip()
     if not name and emails:
         name = emails[0].split("@")[0]
+    address = str(contact.get("address") or "").strip()
     return {
         "uid": str(contact.get("uid") or uuid.uuid4()),
         "name": name,
         "emails": emails,
         "phones": phones,
+        "address": address,
     }
 
 
@@ -146,7 +148,7 @@ def _parse_vcards(text: str) -> List[Dict]:
     for block in re.split(r"BEGIN:VCARD", text):
         if not block.strip():
             continue
-        contact = {"name": "", "emails": [], "phones": [], "uid": ""}
+        contact = {"name": "", "emails": [], "phones": [], "uid": "", "address": ""}
         for line in block.split("\n"):
             line = line.strip()
             # Strip an optional RFC 6350 group prefix (e.g. "item1.EMAIL;...")
@@ -169,6 +171,15 @@ def _parse_vcards(text: str) -> List[Dict]:
                     phone = _vunesc(name_part.split(":", 1)[1])
                     if phone and phone not in contact["phones"]:
                         contact["phones"].append(phone)
+            elif name_part.startswith("ADR"):
+                # vCard ADR is 7 semicolon-separated components:
+                # post-office-box;extended-address;street;locality;region;postal-code;country.
+                # Recover a human-readable string by joining non-empty
+                # components with ", ".
+                if ":" in name_part:
+                    raw = name_part.split(":", 1)[1]
+                    parts = [_vunesc(p).strip() for p in raw.split(";")]
+                    contact["address"] = ", ".join(p for p in parts if p)
             elif name_part.startswith("UID:"):
                 contact["uid"] = _vunesc(name_part[4:])
         if contact["name"] or contact["emails"]:
@@ -193,7 +204,8 @@ def _vesc(value: str) -> str:
 
 def _build_vcard(name: str, email: str, uid: Optional[str] = None,
                  emails: Optional[List[str]] = None,
-                 phones: Optional[List[str]] = None) -> str:
+                 phones: Optional[List[str]] = None,
+                 address: Optional[str] = None) -> str:
     """Build a vCard. Accepts either a single `email` (legacy callers) or
     full `emails`/`phones` lists (edit path). The first email is marked
     PREF=1. All values are RFC-6350-escaped."""
@@ -226,6 +238,12 @@ def _build_vcard(name: str, email: str, uid: Optional[str] = None,
         lines.append(f"EMAIL;PREF=1:{_vesc(em)}" if i == 0 else f"EMAIL:{_vesc(em)}")
     for ph in phone_list:
         lines.append(f"TEL:{_vesc(ph)}")
+    # Address: stuff the whole human-readable string into the street
+    # component of ADR. vCard ADR has 7 semicolon-separated components:
+    # post-office-box;extended-address;street;locality;region;postal-code;country.
+    addr = (address or "").strip()
+    if addr:
+        lines.append(f"ADR:;;{_vesc(addr)};;;;")
     lines.append("END:VCARD")
     return "\r\n".join(lines) + "\r\n"
 
@@ -362,7 +380,7 @@ def _resolve_resource_url(uid: str) -> str:
     return _lookup() or _vcard_url(uid)
 
 
-def _create_contact(name: str, email: str) -> bool:
+def _create_contact(name: str, email: str, address: str = "") -> bool:
     """Add a new contact via CardDAV or local contacts."""
     cfg = _get_carddav_config()
     if not _carddav_configured(cfg):
@@ -371,12 +389,12 @@ def _create_contact(name: str, email: str) -> bool:
         for c in contacts:
             if email_l and email_l in [e.lower() for e in c.get("emails", [])]:
                 return True
-        contacts.append(_normalize_contact({"name": name, "emails": [email]}))
+        contacts.append(_normalize_contact({"name": name, "emails": [email], "address": address}))
         _save_local_contacts(contacts)
         return True
 
     contact_uid = str(uuid.uuid4())
-    vcard = _build_vcard(name, email, contact_uid)
+    vcard = _build_vcard(name, email, contact_uid, address=address)
     try:
         url = _carddav_base_url(cfg) + "/" + contact_uid + ".vcf"
         auth = None
@@ -609,7 +627,7 @@ def _contacts_to_csv(contacts: List[Dict]) -> str:
     return out.getvalue()
 
 
-def _update_contact(uid: str, name: str, emails: List[str], phones: List[str]) -> bool:
+def _update_contact(uid: str, name: str, emails: List[str], phones: List[str], address: str = "") -> bool:
     """Rewrite an existing contact via CardDAV or local contacts."""
     cfg = _get_carddav_config()
     if not _carddav_configured(cfg):
@@ -618,16 +636,19 @@ def _update_contact(uid: str, name: str, emails: List[str], phones: List[str]) -
         out = []
         for c in contacts:
             if c.get("uid") == uid:
-                out.append(_normalize_contact({"uid": uid, "name": name, "emails": emails, "phones": phones}))
+                # Preserve existing address when caller passes "" (only
+                # updating name/emails/phones, not touching address).
+                addr = address if address else c.get("address", "")
+                out.append(_normalize_contact({"uid": uid, "name": name, "emails": emails, "phones": phones, "address": addr}))
                 found = True
             else:
                 out.append(c)
         if not found:
-            out.append(_normalize_contact({"uid": uid, "name": name, "emails": emails, "phones": phones}))
+            out.append(_normalize_contact({"uid": uid, "name": name, "emails": emails, "phones": phones, "address": address}))
         _save_local_contacts(out)
         return True
 
-    vcard = _build_vcard(name, "", uid=uid, emails=emails, phones=phones)
+    vcard = _build_vcard(name, "", uid=uid, emails=emails, phones=phones, address=address)
     # Use the real resource href (handles externally-created contacts whose
     # filename != UID); falls back to the <uid>.vcf guess.
     try:
