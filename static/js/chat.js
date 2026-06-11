@@ -628,8 +628,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
       }
       let _userMsgEl = null;
+      // Capture which mode the user picked at send time so the message
+      // header can show "Chat" or "Agent" next to the timestamp.
+      const _sendMode = (toggleState.mode || 'chat') === 'agent' ? 'agent' : 'chat';
       if (!skipBubble) {
-        _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
+        const _userMeta = { mode: _sendMode };
+        if (_pendingAttachInfo) _userMeta.attachments = _pendingAttachInfo;
+        _userMsgEl = addMessage('user', userDisplay, null, _userMeta);
       }
       messageInput.value = '';
       messageInput.style.height = '';
@@ -3423,6 +3428,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (holder.parentNode) holder.remove();
       const model = meta && meta.model;
       const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
+      // Carry the send-time mode through so the assistant header gets
+      // the same Chat/Agent tag next to its timestamp.
+      meta_.mode = (toggleState.mode || 'chat') === 'agent' ? 'agent' : 'chat';
       chatRenderer.addMessage('assistant', roundText, model, meta_);
       uiModule.scrollHistory();
       return true;

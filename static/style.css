@@ -3247,6 +3247,26 @@ body.bg-pattern-sparkles {
     .role-timestamp {
       font-size:0.7rem; color:var(--color-muted-alt); font-weight:normal; margin-left:6px;
     }
+    /* Mode tag (Chat / Agent) sits right after the timestamp so users
+       can tell at a glance which path a message took. Subtle pill —
+       no accent background, just text + thin border. */
+    .role-mode-tag {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 5px;
+      font-size: 0.62rem;
+      line-height: 1.6;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+      opacity: 0.7;
+    }
+    .role-mode-tag.role-mode-agent {
+      color: var(--accent, var(--red));
+      border-color: color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+    }
     .msg-footer {
       display:flex; align-items:center; gap:6px;
       flex-wrap: wrap;
