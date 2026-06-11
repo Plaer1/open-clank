@@ -10426,6 +10426,24 @@ textarea.memory-add-input {
 .memory-bulk-bar.hidden {
   display: none;
 }
+
+/* Enabled/Disabled text label next to an admin toggle.
+   The text auto-flips via :has() on the row containing the input. */
+.admin-toggle-state {
+  font-size: 11px;
+  font-weight: normal;
+  letter-spacing: 0.02em;
+}
+.admin-card > div:has(.admin-switch input) .admin-toggle-state::before {
+  content: "Disabled";
+  color: var(--fg);
+  opacity: 0.55;
+}
+.admin-card > div:has(.admin-switch input:checked) .admin-toggle-state::before {
+  content: "Enabled";
+  color: var(--accent, var(--red));
+  opacity: 1;
+}
 /* Nudge the bulk-bar action buttons up 2px (and Memory's -2px left) to
    align with the row baseline. Covers both the Memory bulk bar
    (Cancel/Delete) and the Skills bulk bar (Cancel/Approve/Delete) — both
@@ -28169,12 +28187,18 @@ button .spinner-whirlpool {
   min-width: 60px;
 }
 /* Medium reader widths: cap the cluster at 3 icons per row so it
-   never wraps past 2 rows (3 top + 3 bottom). Below this break the
-   chips start sharing the width with a 2-row cluster instead of
-   the icons multiplying into 3+ rows. */
+   never wraps past 2 rows. min-width forces the cluster to reserve
+   enough room for 3 icons in a row — without it, grid col 2 could
+   shrink below the cap and the cluster fanned out into 4+ short
+   rows. */
 @container emailreader (max-width: 600px) {
   .email-reader-meta > .email-reader-actions-inline {
+    min-width: calc(48px * 3 + 4px * 2);
     max-width: calc(48px * 3 + 4px * 2);
+    /* Right-align the (now wider) cluster so the icons stay glued
+       to the right edge instead of drifting to the middle when the
+       cluster is wider than its content (e.g. a 2-row stack of 3). */
+    justify-self: end;
   }
 }
 /* Very narrow reader: once the chip span has shrunk to its ~4
