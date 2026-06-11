@@ -15232,11 +15232,6 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
 .modal.modal-left-docked .email-reader-meta-row:not(.email-reader-meta-from) {
   padding-right: 0;
 }
-/* Docked mode: nudge the From row + inline action cluster up 4px. */
-.modal.modal-right-docked .email-reader-meta-row.email-reader-meta-from,
-.modal.modal-left-docked .email-reader-meta-row.email-reader-meta-from {
-  margin-top: -4px;
-}
 .modal.modal-right-docked .email-reader-meta-row strong,
 .modal.modal-left-docked .email-reader-meta-row strong {
   min-width: 0;
@@ -28012,7 +28007,10 @@ button .spinner-whirlpool {
      stays on the From line above instead of drifting to the middle. */
   align-items: flex-start;
   gap: 12px;
-  padding: 10px 14px;
+  /* Taller header so the 44px-tall absolute-positioned action
+     cluster inside the From row has vertical breathing room. */
+  padding: 8px 14px;
+  min-height: 60px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
@@ -28080,14 +28078,12 @@ button .spinner-whirlpool {
    original placement (the mobile @media block overrides padding so
    the header sits flush already). */
 @media (min-width: 769px) {
+  /* From row needs to be at least as tall as the absolute-
+     positioned action cluster (44px buttons) so the buttons
+     don't overflow the header bottom. */
   .email-reader-meta-row.email-reader-meta-from {
-    margin-top: -8px;
-  }
-  /* Pull only the "From:" label up 4px without affecting the chips
-     or action cluster beside it. */
-  .email-reader-meta-row.email-reader-meta-from > strong {
-    position: relative;
-    top: -4px;
+    min-height: 44px;
+    align-items: center;
   }
 }
 /* Gmail-style chevron — collapsed view shows only From; the chevron
