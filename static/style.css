@@ -34531,6 +34531,13 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
   pointer-events: none;
 }
 #email-lib-grid { position: relative; }
+/* Nudge the subject + sender/date meta line 4px right inside each
+   email card so they don't sit flush against the read/unread/done
+   markers on the left. */
+#email-lib-grid .email-card-titlerow,
+#email-lib-grid .memory-item-meta {
+  padding-left: 4px;
+}
 .email-loading-label {
   font-size: 11px;
   opacity: 0.6;
