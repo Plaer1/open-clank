@@ -15408,6 +15408,17 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   margin-top: 2px;
   gap: 4px;
 }
+/* Docked: always show To/Cc — there's vertical room reserved for
+   the action cluster already and the chevron toggle just adds
+   friction. Force the hidden attribute open and hide the chevron. */
+.modal.modal-right-docked .email-reader-meta-details[hidden],
+.modal.modal-left-docked .email-reader-meta-details[hidden] {
+  display: flex !important;
+}
+.modal.modal-right-docked .email-reader-meta-toggle,
+.modal.modal-left-docked .email-reader-meta-toggle {
+  display: none;
+}
 .modal.modal-right-docked .email-reader-header > .email-reader-actions,
 .modal.modal-left-docked .email-reader-header > .email-reader-actions {
   position: static;
