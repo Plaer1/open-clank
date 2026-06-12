@@ -28297,25 +28297,6 @@ button .spinner-whirlpool {
 .email-reader-meta .recipient-chips {
   min-width: 60px;
 }
-/* Inside the email reader meta, chips show their FULL name — no
-   per-chip max-width / ellipsis truncation. The chip span itself
-   scrolls horizontally so the user can swipe/drag to reveal any
-   chip that's clipped off the right edge. */
-.email-reader-meta .recipient-chip {
-  max-width: none;
-  overflow: visible;
-}
-.email-reader-meta .recipient-chip .recipient-chip-label {
-  overflow: visible;
-  text-overflow: clip;
-}
-/* Lock the From: / To: / Cc: labels to their natural width so they
-   never get truncated when the row is narrow — flex-shrink:0 +
-   white-space:nowrap means the text always renders in full. */
-.email-reader-meta-row > strong {
-  white-space: nowrap;
-  flex-shrink: 0;
-}
 /* Medium reader widths: cap the cluster at 3 icons per row so it
    never wraps past 2 rows. min-width forces the cluster to reserve
    enough room for 3 icons in a row — without it, grid col 2 could
