@@ -28348,10 +28348,13 @@ button .spinner-whirlpool {
   }
 }
 /* Mobile: drop the overlay shadow (gradient fade alone reads cleaner
-   on phone screens) and lift the cluster 1px more. */
+   on phone screens) and lift the cluster 1px more. !important
+   needed because the @container query overlay rule above has the
+   same selector specificity and the cascade isn't reliably picking
+   the later rule when both fire. */
 @media (max-width: 768px) {
   .email-reader-meta > .email-reader-actions-inline {
-    box-shadow: none;
+    box-shadow: none !important;
     margin-top: -10px;
   }
 }
