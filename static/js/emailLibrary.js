@@ -6093,11 +6093,24 @@ function _showLibRemindSubmenu(em, parentDropdown) {
     tmp.addEventListener('blur', () => setTimeout(() => tmp.remove(), 200));
   });
   parentDropdown.appendChild(customItem);
+  // "Just a note" — same payload but without a due_date, so it lives
+  // in notes without a timer/reminder firing.
+  const noteItem = document.createElement('div');
+  noteItem.className = 'dropdown-item-compact';
+  noteItem.innerHTML = '<span>Note (no timer)</span>';
+  noteItem.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    parentDropdown.remove();
+    await _createEmailReplyReminder(em, null);
+  });
+  parentDropdown.appendChild(noteItem);
 }
 
 async function _createEmailReplyReminder(em, dueDate) {
   const pad = n => String(n).padStart(2,'0');
-  const iso = `${dueDate.getFullYear()}-${pad(dueDate.getMonth()+1)}-${pad(dueDate.getDate())}T${pad(dueDate.getHours())}:${pad(dueDate.getMinutes())}`;
+  const iso = dueDate
+    ? `${dueDate.getFullYear()}-${pad(dueDate.getMonth()+1)}-${pad(dueDate.getDate())}T${pad(dueDate.getHours())}:${pad(dueDate.getMinutes())}`
+    : null;
   const fullFrom = em.from || em.sender || '';
   // Extract just the first name from "First Last <email@x>" or fall back to email local part
   let from = 'someone';
@@ -6120,9 +6133,9 @@ async function _createEmailReplyReminder(em, dueDate) {
     ],
     content: `Open email: ${deepLink}`,
     label: 'email reminder',
-    due_date: iso,
     source: 'email',
   };
+  if (iso) payload.due_date = iso;
   try {
     const res = await fetch(`${API_BASE}/api/notes`, {
       method: 'POST', credentials: 'same-origin',
@@ -6131,8 +6144,12 @@ async function _createEmailReplyReminder(em, dueDate) {
     });
     if (!res.ok) throw new Error('Failed');
     const { showToast } = await import('./ui.js');
-    const fmt = dueDate.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
-    showToast(`Todo reminder set for ${fmt}`);
+    if (dueDate) {
+      const fmt = dueDate.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+      showToast(`Todo reminder set for ${fmt}`);
+    } else {
+      showToast('Reply note saved');
+    }
     if ('Notification' in window && Notification.permission === 'default') {
       try { Notification.requestPermission(); } catch {}
     }
