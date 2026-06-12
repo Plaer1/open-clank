@@ -6093,20 +6093,53 @@ function _showLibRemindSubmenu(em, parentDropdown) {
     tmp.addEventListener('blur', () => setTimeout(() => tmp.remove(), 200));
   });
   parentDropdown.appendChild(customItem);
-  // "Just a note" — same payload but without a due_date, so it lives
-  // in notes without a timer/reminder firing.
+  // "Note" — prompts for free-text and saves it as a note without a
+  // due_date, so no timer/reminder fires.
   const noteItem = document.createElement('div');
   noteItem.className = 'dropdown-item-compact';
-  noteItem.innerHTML = '<span>Note (no timer)</span>';
-  noteItem.addEventListener('click', async (e) => {
+  noteItem.innerHTML = '<span>Note</span>';
+  noteItem.addEventListener('click', (e) => {
     e.stopPropagation();
     parentDropdown.remove();
-    await _createEmailReplyReminder(em, null);
+    _promptEmailNote(em);
   });
   parentDropdown.appendChild(noteItem);
 }
 
-async function _createEmailReplyReminder(em, dueDate) {
+function _promptEmailNote(em) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;min-width:280px;max-width:min(420px, 92vw);display:flex;flex-direction:column;gap:8px;box-shadow:0 12px 32px rgba(0,0,0,0.4);';
+  const subject = em.subject || '(no subject)';
+  card.innerHTML = `
+    <div style="font-size:11px;opacity:0.6;">Note about ${_esc(subject)}</div>
+    <textarea data-note placeholder="Write your note…" rows="4" style="resize:vertical;min-height:80px;font-family:inherit;font-size:12px;padding:7px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg-elev,#1a1a1a);color:var(--fg);box-sizing:border-box;width:100%;"></textarea>
+    <div style="display:flex;gap:6px;justify-content:flex-end;">
+      <button class="memory-toolbar-btn" data-act="cancel">Cancel</button>
+      <button class="memory-toolbar-btn active" data-act="save">Save</button>
+    </div>
+  `;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+  const ta = card.querySelector('[data-note]');
+  setTimeout(() => ta.focus(), 0);
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+  card.querySelector('[data-act="cancel"]').addEventListener('click', close);
+  card.querySelector('[data-act="save"]').addEventListener('click', async () => {
+    const text = (ta.value || '').trim();
+    if (!text) { ta.focus(); return; }
+    close();
+    await _createEmailReplyReminder(em, null, text);
+  });
+  ta.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') close();
+    else if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') card.querySelector('[data-act="save"]').click();
+  });
+}
+
+async function _createEmailReplyReminder(em, dueDate, customText = '') {
   const pad = n => String(n).padStart(2,'0');
   const iso = dueDate
     ? `${dueDate.getFullYear()}-${pad(dueDate.getMonth()+1)}-${pad(dueDate.getDate())}T${pad(dueDate.getHours())}:${pad(dueDate.getMinutes())}`
@@ -6125,11 +6158,12 @@ async function _createEmailReplyReminder(em, dueDate) {
   const subject = em.subject || '(no subject)';
   const folder = state._libFolder || 'INBOX';
   const deepLink = `${window.location.origin}/#email=${encodeURIComponent(folder)}:${em.uid}`;
+  const itemText = customText || `Reply to ${from}: ${subject}`;
   const payload = {
     title: `Reply: ${subject}`,
     note_type: 'todo',
     items: [
-      { text: `Reply to ${from}: ${subject}`, checked: false },
+      { text: itemText, checked: false },
     ],
     content: `Open email: ${deepLink}`,
     label: 'email reminder',
