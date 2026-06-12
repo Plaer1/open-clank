@@ -15399,6 +15399,15 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   align-items: stretch;
   gap: 6px;
 }
+/* Docked panes don't get the 4px nudge below From — keep details
+   tight against the From row since vertical space is constrained.
+   gap matches the meta's own gap (2px) so From→To and To→Cc are
+   the same vertical distance. */
+.modal.modal-right-docked .email-reader-meta-details,
+.modal.modal-left-docked .email-reader-meta-details {
+  margin-top: 0;
+  gap: 2px;
+}
 .modal.modal-right-docked .email-reader-header > .email-reader-actions,
 .modal.modal-left-docked .email-reader-header > .email-reader-actions {
   position: static;
@@ -15408,11 +15417,12 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
 }
 /* Docked modal: keep all meta rows as flex so From / To / Cc
    labels align at the same x. Chips already overflow-scroll
-   inside each row when there are too many. */
+   inside each row when there are too many. No per-row margin-top
+   here — the spacing between rows comes entirely from
+   .email-reader-meta-details gap so From→To and To→Cc match. */
 .modal.modal-right-docked .email-reader-meta-row:not(.email-reader-meta-from),
 .modal.modal-left-docked .email-reader-meta-row:not(.email-reader-meta-from) {
   padding-right: 0;
-  margin-top: 4px;
 }
 .modal.modal-right-docked .email-reader-meta-row strong,
 .modal.modal-left-docked .email-reader-meta-row strong {
