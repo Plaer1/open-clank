@@ -28309,6 +28309,10 @@ button .spinner-whirlpool {
        icons and fan the cluster into a 3rd row. */
     min-width: 158px;
     max-width: 158px;
+    /* Solid background so the email body content behind the cluster
+       doesn't peek through the gaps between icons or the slack on
+       the right edge when the cluster's wrapped to 2 rows. */
+    background: var(--bg);
   }
   /* Tighten the right-side padding now that the cluster is 158px
      wide (instead of the ~308 wide 1-row layout). */
