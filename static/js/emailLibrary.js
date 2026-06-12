@@ -875,7 +875,7 @@ export function openEmailLibrary(opts = {}) {
             <div class="email-search-row" style="display:flex;gap:6px;align-items:flex-start;">
             <div class="email-search-wrap" style="position:relative;flex:1;min-width:140px;">
               <div class="email-lib-chip-bar memory-search-input" id="email-lib-chip-bar" style="width:100%;padding-right:96px;padding-left:26px;display:flex;align-items:center;flex-wrap:wrap;gap:4px;cursor:text;min-height:30px;position:relative;">
-                <svg class="email-lib-chip-bar-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);opacity:0.45;pointer-events:none;color:var(--fg);"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+                <svg class="email-lib-chip-bar-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--accent, var(--red));"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
                 <span id="email-lib-pills" style="display:contents"></span>
                 <input type="text" id="email-lib-search" placeholder="Search by name or text" autocomplete="off" style="flex:1;min-width:80px;border:0;outline:none;background:transparent;color:inherit;font:inherit;padding:0;position:relative;top:-1px;" />
               </div>
@@ -5916,25 +5916,63 @@ function _showAiReplyChoice(btn, em, data) {
   // Full = layered concentric circles to suggest "more, deeper" — not a fully
   // filled circle so it reads as a complement to the lightning, not as a "stop".
   menu.innerHTML = `
-    <div class="email-ai-reply-row" style="display:flex;align-items:center;gap:4px;">
-      <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;gap:5px;">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        Fast
-      </button>
-      <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
-        Full
-      </button>
+    <div class="email-ai-reply-row" style="display:flex;flex-direction:column;gap:6px;min-width:180px;">
+      <div style="display:flex;align-items:center;gap:4px;">
+        <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;gap:5px;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Fast
+        </button>
+        <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Uses the fuller reply context" style="display:inline-flex;align-items:center;gap:5px;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
+          Full
+        </button>
+        <button class="memory-toolbar-btn" data-act="note-toggle" title="Add a note about how to reply" style="display:inline-flex;align-items:center;justify-content:center;padding:4px 6px;line-height:1;margin-left:auto;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+        </button>
+      </div>
+      <div data-note-panel hidden style="display:flex;flex-direction:column;gap:4px;">
+        <textarea data-note-input rows="2" placeholder="e.g. reply nicely but say no" style="resize:vertical;min-height:38px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
+        <div data-note-actions hidden style="display:flex;gap:4px;">
+          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" data-note="1" title="Draft with this note (fast)" style="display:inline-flex;align-items:center;gap:5px;flex:1;justify-content:center;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Draft fast
+          </button>
+          <button class="memory-toolbar-btn" data-mode="ai-reply-full" data-note="1" title="Draft with this note (full)" style="display:inline-flex;align-items:center;gap:5px;flex:1;justify-content:center;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
+            Draft full
+          </button>
+        </div>
+      </div>
     </div>
   `;
+  const notePanel = menu.querySelector('[data-note-panel]');
+  const noteInput = menu.querySelector('[data-note-input]');
+  const noteActions = menu.querySelector('[data-note-actions]');
+  menu.querySelector('[data-act="note-toggle"]').addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const opening = notePanel.hasAttribute('hidden');
+    if (opening) {
+      notePanel.removeAttribute('hidden');
+      setTimeout(() => noteInput.focus(), 0);
+    } else {
+      notePanel.setAttribute('hidden', '');
+    }
+  });
+  noteInput.addEventListener('input', () => {
+    if (noteInput.value.trim()) noteActions.removeAttribute('hidden');
+    else noteActions.setAttribute('hidden', '');
+  });
   menu.addEventListener('click', async (ev) => {
     const choice = ev.target.closest('[data-mode]');
     if (!choice) return;
     ev.preventDefault();
     ev.stopPropagation();
     const mode = choice.getAttribute('data-mode') || 'ai-reply';
+    const useNote = choice.getAttribute('data-note') === '1';
+    const noteHint = useNote ? (noteInput.value || '').trim() : '';
     _closeAiReplyChoice();
-    await _runAiReplyFromButton(btn, em, data, mode);
+    await _runAiReplyFromButton(btn, em, data, mode, noteHint);
   });
   // Esc closes the popover; ignore plain clicks inside the menu so the
   // textarea stays focused.
