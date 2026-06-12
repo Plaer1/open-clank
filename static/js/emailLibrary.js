@@ -5992,9 +5992,18 @@ function _showAiReplyChoice(btn, em, data) {
 function _handleAiReplyButton(ev, em, data) {
   ev.stopPropagation();
   const btn = ev.currentTarget;
-  // Always open the Fast/Full + context menu — even when a cached
-  // reply exists — so the user can ask for a fresh draft with new
-  // steering instead of being locked into the cached one.
+  // First click on a cached email surfaces the cached draft. Second
+  // click clears the cache and opens the Fast/Full + context menu so
+  // the user can ask for a fresh draft (with new steering).
+  if (data?.cached_ai_reply && !btn.dataset.shownOnce) {
+    btn.dataset.shownOnce = '1';
+    _runAiReplyFromButton(btn, em, data, 'ai-reply');
+    return;
+  }
+  if (data?.cached_ai_reply) {
+    data.cached_ai_reply = null;
+    btn.dataset.shownOnce = '';
+  }
   _showAiReplyChoice(btn, em, data);
 }
 
