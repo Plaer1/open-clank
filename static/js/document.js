@@ -3860,11 +3860,13 @@ import * as Modals from './modalManager.js';
             <label>Cc</label>
             <input type="text" id="doc-email-cc" placeholder="cc@example.com" autocomplete="off" />
             <div id="doc-email-cc-suggestions" class="email-autocomplete" style="display:none"></div>
+            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
           <div class="email-field" id="doc-email-bcc-row" style="display:none;position:relative">
             <label>Bcc</label>
             <input type="text" id="doc-email-bcc" placeholder="bcc@example.com" autocomplete="off" />
             <div id="doc-email-bcc-suggestions" class="email-autocomplete" style="display:none"></div>
+            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
           <div class="email-field"><label>Subject</label><input type="text" id="doc-email-subject" placeholder="Subject" /></div>
           <div id="doc-email-attachments" class="email-attachments" style="display:none"></div>
@@ -4487,6 +4489,25 @@ import * as Modals from './modalManager.js';
       if (bccRow) bccRow.style.display = '';
       document.getElementById('doc-email-show-cc').style.display = 'none';
       _syncEmailHeaderSummary();
+    });
+
+    // Cc/Bcc close — X buttons inside the Cc and Bcc fields hide both
+    // rows + clear their inputs + restore the Cc opener on the To row.
+    document.querySelectorAll('[data-cc-close]').forEach(closeBtn => {
+      closeBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const ccRow = document.getElementById('doc-email-cc-row');
+        const bccRow = document.getElementById('doc-email-bcc-row');
+        const ccInput = document.getElementById('doc-email-cc');
+        const bccInput = document.getElementById('doc-email-bcc');
+        if (ccRow) ccRow.style.display = 'none';
+        if (bccRow) bccRow.style.display = 'none';
+        if (ccInput) ccInput.value = '';
+        if (bccInput) bccInput.value = '';
+        const ccToggle = document.getElementById('doc-email-show-cc');
+        if (ccToggle) ccToggle.style.display = '';
+        _syncEmailHeaderSummary();
+      });
     });
 
     // Autocomplete for To / Cc / Bcc — typed fragment after the last
@@ -8527,6 +8548,19 @@ import * as Modals from './modalManager.js';
     // `body:has(.doc-editor-pane.doc-fullscreen) .doc-divider-collapse` slides
     // it into a forced-inside position). Hiding the divider here would hide
     // the chevron with it.
+
+    // Hide the tab bar during the layout shift so any in-flight smooth
+    // scroll / reflow doesn't visibly "fly" the active tab across the
+    // pane as it expands. Restored after the layout settles.
+    const tabBar = document.getElementById('doc-tab-bar');
+    if (tabBar) {
+      tabBar.style.visibility = 'hidden';
+      clearTimeout(tabBar._fsHideTimer);
+      tabBar._fsHideTimer = setTimeout(() => {
+        tabBar.style.visibility = '';
+      }, 240);
+    }
+
     if (pane.classList.contains('doc-fullscreen')) {
       pane.classList.remove('doc-fullscreen');
       if (container) container.style.display = '';

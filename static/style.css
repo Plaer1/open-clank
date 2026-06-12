@@ -30110,8 +30110,25 @@ body.doc-find-active mark.doc-find-mark.current {
   position: absolute; right: 6px; top: calc(50% + 8px); transform: translateY(-50%);
   z-index: 2;
 }
+/* X close button inside Cc / Bcc fields. */
+.email-field .email-cc-close {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; color: var(--fg);
+  opacity: 0.4; cursor: pointer;
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  padding: 0;
+  z-index: 2;
+}
+.email-field .email-cc-close:hover {
+  opacity: 1;
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
 .email-field input { padding-right: 60px; }
-.email-field #doc-email-cc, .email-field #doc-email-bcc, .email-field #doc-email-subject { padding-right: 8px; }
+.email-field #doc-email-cc, .email-field #doc-email-bcc { padding-right: 32px; }
+.email-field #doc-email-subject { padding-right: 8px; }
 
 .doc-email-actions {
   display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px;
@@ -34088,6 +34105,12 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
 .cal-quickadd-hint .qa-hint-accent { color: var(--accent, var(--red)); }
 /* ↵ enter glyph in the hint — makes it obvious the field submits on Enter. */
 .cal-quickadd-hint .qa-hint-enter { vertical-align: -2px; color: var(--accent, var(--red)); opacity: 0.8; }
+/* Cycling example text fades out before swap, then fades back in. */
+.cal-quickadd-hint .qa-hint-example {
+  display: inline-block;
+  transition: opacity 0.18s ease;
+}
+.cal-quickadd-hint .qa-hint-example.qa-hint-fade { opacity: 0; }
 /* Matching ↵ hint at the right of the event title while it's empty; hidden once
    editing (the ✓ Done button takes over then). */
 /* Title placeholder overlay: the prompt text with a ↵ enter glyph right after
