@@ -863,7 +863,7 @@ export function openEmailLibrary(opts = {}) {
                 </button>
                 <div class="email-filter-menu" id="email-filter-menu" role="listbox" hidden></div>
               </div>
-              <button class="memory-toolbar-btn email-filter-select-btn" id="email-lib-select-btn">Select</button>
+              <button class="memory-toolbar-btn email-filter-select-btn" id="email-lib-select-btn"><svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>Select</button>
               <button class="memory-toolbar-btn email-filter-refresh-btn" id="email-lib-refresh-btn" title="Refresh">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
               </button>
@@ -1233,10 +1233,20 @@ export function openEmailLibrary(opts = {}) {
     }
   }
 
-  // Select mode toggle
+  // Select mode toggle — icon + label swap matches the brain memories
+  // select button (dot+Select ↔ X+Cancel).
+  const _SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
+  const _SELECT_BTN_X_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  const _setSelectBtnState = (on) => {
+    const btn = document.getElementById('email-lib-select-btn');
+    if (!btn) return;
+    if (on) { btn.classList.add('active'); btn.innerHTML = _SELECT_BTN_X_SVG + 'Cancel'; }
+    else { btn.classList.remove('active'); btn.innerHTML = _SELECT_BTN_DOT_SVG + 'Select'; }
+  };
   document.getElementById('email-lib-select-btn').addEventListener('click', () => {
     state._selectMode = !state._selectMode;
     state._selectedUids.clear();
+    _setSelectBtnState(state._selectMode);
     _updateBulkBar();
     _renderGrid();
   });
@@ -1256,6 +1266,7 @@ export function openEmailLibrary(opts = {}) {
   document.getElementById('email-lib-bulk-cancel')?.addEventListener('click', () => {
     state._selectMode = false;
     state._selectedUids.clear();
+    _setSelectBtnState(false);
     _updateBulkBar();
     _renderGrid();
   });
