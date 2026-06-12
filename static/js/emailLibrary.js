@@ -5899,10 +5899,17 @@ function _showAiReplyChoice(btn, em, data) {
   const rect = btn.getBoundingClientRect();
   const menu = document.createElement('div');
   menu.className = 'email-ai-reply-choice';
+  /* Clamp width to viewport minus 16px margin so the menu (now wider
+     because of the note textarea) never spills off the right edge
+     on narrow mobile screens. */
+  const menuMaxW = Math.min(220, window.innerWidth - 16);
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuMaxW - 8));
   menu.style.cssText = [
     'position:fixed',
-    `left:${Math.max(8, Math.min(rect.left, window.innerWidth - 190))}px`,
+    `left:${left}px`,
     `top:${Math.min(window.innerHeight - 96, rect.bottom + 6)}px`,
+    `max-width:${menuMaxW}px`,
+    'box-sizing:border-box',
     'z-index:10060',
     'display:flex',
     'gap:6px',
@@ -5930,24 +5937,13 @@ function _showAiReplyChoice(btn, em, data) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
         </button>
       </div>
-      <div data-note-panel hidden style="display:flex;flex-direction:column;gap:4px;">
-        <textarea data-note-input rows="2" placeholder="e.g. reply nicely but say no" style="resize:vertical;min-height:38px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
-        <div data-note-actions hidden style="display:flex;gap:4px;">
-          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" data-note="1" title="Draft with this note (fast)" style="display:inline-flex;align-items:center;gap:5px;flex:1;justify-content:center;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            Draft fast
-          </button>
-          <button class="memory-toolbar-btn" data-mode="ai-reply-full" data-note="1" title="Draft with this note (full)" style="display:inline-flex;align-items:center;gap:5px;flex:1;justify-content:center;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
-            Draft full
-          </button>
-        </div>
+      <div data-note-panel hidden>
+        <textarea data-note-input rows="2" placeholder="e.g. reply nicely but say no" style="width:100%;box-sizing:border-box;resize:vertical;min-height:38px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
       </div>
     </div>
   `;
   const notePanel = menu.querySelector('[data-note-panel]');
   const noteInput = menu.querySelector('[data-note-input]');
-  const noteActions = menu.querySelector('[data-note-actions]');
   menu.querySelector('[data-act="note-toggle"]').addEventListener('click', (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -5959,18 +5955,15 @@ function _showAiReplyChoice(btn, em, data) {
       notePanel.setAttribute('hidden', '');
     }
   });
-  noteInput.addEventListener('input', () => {
-    if (noteInput.value.trim()) noteActions.removeAttribute('hidden');
-    else noteActions.setAttribute('hidden', '');
-  });
   menu.addEventListener('click', async (ev) => {
     const choice = ev.target.closest('[data-mode]');
     if (!choice) return;
     ev.preventDefault();
     ev.stopPropagation();
     const mode = choice.getAttribute('data-mode') || 'ai-reply';
-    const useNote = choice.getAttribute('data-note') === '1';
-    const noteHint = useNote ? (noteInput.value || '').trim() : '';
+    // Always pick up whatever's in the textarea — empty = no note,
+    // typed = passed through as steering context.
+    const noteHint = (noteInput.value || '').trim();
     _closeAiReplyChoice();
     await _runAiReplyFromButton(btn, em, data, mode, noteHint);
   });
