@@ -5971,7 +5971,15 @@ function _showAiReplyChoice(btn, em, data) {
   // textarea stays focused.
   menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
   document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', _closeAiReplyChoice, true), 0);
+  // Outside-click closer: only fires when the click target is OUTSIDE
+  // the menu. The original handler closed on any click which made
+  // focusing the textarea immediately dismiss the popover.
+  const outsideClose = (ev) => {
+    if (menu.contains(ev.target)) return;
+    document.removeEventListener('click', outsideClose, true);
+    _closeAiReplyChoice();
+  };
+  setTimeout(() => document.addEventListener('click', outsideClose, true), 0);
 }
 
 function _handleAiReplyButton(ev, em, data) {
