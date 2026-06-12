@@ -28259,7 +28259,10 @@ button .spinner-whirlpool {
 }
 .email-reader-meta-row.email-reader-meta-from {
   position: relative;
-  flex-wrap: wrap;
+  /* Never wrap "From:" off the chip onto its own line — the chip
+     span has overflow-x scroll built in, so it shrinks/scrolls
+     instead of jumping to a new row. */
+  flex-wrap: nowrap;
   min-width: 0;
   /* Reserve space on the right for the 1-row cluster in wide mode. */
   padding-right: 320px;
