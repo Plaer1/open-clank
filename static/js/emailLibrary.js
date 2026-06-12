@@ -5899,16 +5899,30 @@ function _showAiReplyChoice(btn, em, data) {
   const rect = btn.getBoundingClientRect();
   const menu = document.createElement('div');
   menu.className = 'email-ai-reply-choice';
-  /* Clamp width to viewport minus 16px margin so the menu (now wider
-     because of the note textarea) never spills off the right edge
-     on narrow mobile screens. */
+  /* Clamp width to viewport minus 16px margin so the menu (textarea
+     + Fast/Full buttons) never spills off the right edge on narrow
+     mobile screens. */
   const menuMaxW = Math.min(220, window.innerWidth - 16);
   const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuMaxW - 8));
+  /* Vertical placement: prefer below the button, but flip above if
+     there's not enough room (e.g. button near bottom of viewport).
+     Estimated menu height is ~150px (textarea + buttons + padding). */
+  const estHeight = 150;
+  const spaceBelow = window.innerHeight - rect.bottom - 8;
+  const spaceAbove = rect.top - 8;
+  let top;
+  if (spaceBelow >= estHeight || spaceBelow >= spaceAbove) {
+    top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - estHeight - 8));
+  } else {
+    top = Math.max(8, rect.top - estHeight - 6);
+  }
   menu.style.cssText = [
     'position:fixed',
     `left:${left}px`,
-    `top:${Math.min(window.innerHeight - 96, rect.bottom + 6)}px`,
+    `top:${top}px`,
     `max-width:${menuMaxW}px`,
+    `max-height:${window.innerHeight - 16}px`,
+    'overflow:auto',
     'box-sizing:border-box',
     'z-index:10060',
     'display:flex',
