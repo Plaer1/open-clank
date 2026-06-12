@@ -30107,7 +30107,7 @@ body.doc-find-active mark.doc-find-mark.current {
    from the To input. Anchored to the input's vertical center + 4px
    nudge so the label sits where the user expects it. */
 .email-field .email-cc-toggle {
-  position: absolute; right: 6px; top: calc(50% + 4px); transform: translateY(-50%);
+  position: absolute; right: 6px; top: calc(50% + 8px); transform: translateY(-50%);
   z-index: 2;
 }
 .email-field input { padding-right: 60px; }
