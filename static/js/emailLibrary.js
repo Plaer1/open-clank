@@ -788,6 +788,10 @@ export function openEmailLibrary(opts = {}) {
   state._libOffset = 0;
   state._libSearch = '';
   state._libSearchDraft = '';
+  // Reset select-mode on each open so the toolbar Select button
+  // never opens already-toggled-on after a previous session.
+  state._selectMode = false;
+  if (state._selectedUids) state._selectedUids.clear();
   state._libSearchPills = [];
   _libSuggestionCache = null;
   state._libFilter = 'all';
