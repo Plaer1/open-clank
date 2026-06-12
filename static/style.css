@@ -28347,6 +28347,14 @@ button .spinner-whirlpool {
     box-shadow: -6px 0 12px -6px rgba(0, 0, 0, 0.25);
   }
 }
+/* Mobile: drop the overlay shadow (gradient fade alone reads cleaner
+   on phone screens) and lift the cluster 1px more. */
+@media (max-width: 768px) {
+  .email-reader-meta > .email-reader-actions-inline {
+    box-shadow: none;
+    margin-top: -10px;
+  }
+}
 /* Docked panes used to flow the cluster under the meta; now they
    share the same absolute-top-right + wrap behaviour as undocked.
    No docked-specific overrides — the container queries below pick
