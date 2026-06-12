@@ -34533,9 +34533,12 @@ button.cal-add-btn.cal-add-btn-text.cal-add-btn-sm:hover .cal-add-label {
 #email-lib-grid { position: relative; }
 /* Nudge the subject + sender/date meta line 4px right inside each
    email card so they don't sit flush against the read/unread/done
-   markers on the left. */
+   markers on the left. Includes #email-lib-modal selector to
+   override the expanded card's `padding: 4px 0 6px` shorthand
+   which was zeroing out the title's padding-left. */
 #email-lib-grid .email-card-titlerow,
-#email-lib-grid .memory-item-meta {
+#email-lib-grid .memory-item-meta,
+#email-lib-modal .doclib-card-expanded .email-card-titlerow {
   padding-left: 4px;
 }
 .email-loading-label {
