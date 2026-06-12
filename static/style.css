@@ -30103,15 +30103,12 @@ body.doc-find-active mark.doc-find-mark.current {
     width: 100%;
   }
 }
-/* Cc toggle and attach button are absolute so they don't steal width from the To input */
+/* Cc toggle and attach button are absolute so they don't steal width
+   from the To input. Anchored to the input's vertical center so it
+   tracks the field height regardless of padding/border tweaks. */
 .email-field .email-cc-toggle {
-  position: absolute; right: 6px; top: calc(50% + 4px); transform: translateY(-50%);
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   z-index: 2;
-}
-@media (min-width: 769px) {
-  .email-field .email-cc-toggle {
-    top: calc(50% + 4px);
-  }
 }
 .email-field input { padding-right: 60px; }
 .email-field #doc-email-cc, .email-field #doc-email-bcc, .email-field #doc-email-subject { padding-right: 8px; }
@@ -30345,10 +30342,6 @@ body.doc-find-active mark.doc-find-mark.current {
   background: none; border: none; color: var(--fg);
   opacity: 0.4; font-size: 11px; cursor: pointer;
   padding: 4px 8px; font-family: inherit;
-  /* Nudge 2px down so the label baseline-aligns with the To: field
-     chips beside it. */
-  position: relative;
-  top: 2px;
 }
 .email-cc-toggle:hover {
   opacity: 1;
