@@ -28357,9 +28357,9 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc, plus 2px breathing room below From. */
+  /* 6px between To and Cc, plus 4px breathing room below From. */
   gap: 6px;
-  margin-top: 2px;
+  margin-top: 4px;
 }
 .email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
