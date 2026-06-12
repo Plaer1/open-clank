@@ -28399,11 +28399,26 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc, plus 4px breathing room below From. */
   gap: 6px;
-  margin-top: 4px;
 }
 .email-reader-meta-details[hidden] { display: none; }
+/* When expanded, To/Cc pop up as a floating panel below the From
+   row instead of pushing the email body down. From-row stays
+   exactly where it was; nothing else has to reflow, which kills
+   all the jump/realign quirks. */
+.email-reader-meta > .email-reader-meta-details:not([hidden]) {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  z-index: 5;
+}
 .email-reader-header > .email-reader-meta {
   flex: 1; min-width: 0;
   opacity: 0.85; line-height: 1.7; font-size: 11px;
