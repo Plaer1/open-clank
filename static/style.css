@@ -28357,10 +28357,9 @@ button .spinner-whirlpool {
 .email-reader-meta-details {
   display: flex;
   flex-direction: column;
-  /* 6px between To and Cc. Meta is plain block flow now, so no need
-     to compensate for grid row gaps — details naturally hugs From. */
+  /* 6px between To and Cc, plus 2px breathing room below From. */
   gap: 6px;
-  margin-top: 0;
+  margin-top: 2px;
 }
 .email-reader-meta-details[hidden] { display: none; }
 .email-reader-header > .email-reader-meta {
