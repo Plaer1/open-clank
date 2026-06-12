@@ -5992,10 +5992,9 @@ function _showAiReplyChoice(btn, em, data) {
 function _handleAiReplyButton(ev, em, data) {
   ev.stopPropagation();
   const btn = ev.currentTarget;
-  if (data?.cached_ai_reply) {
-    _runAiReplyFromButton(btn, em, data, 'ai-reply');
-    return;
-  }
+  // Always open the Fast/Full + context menu — even when a cached
+  // reply exists — so the user can ask for a fresh draft with new
+  // steering instead of being locked into the cached one.
   _showAiReplyChoice(btn, em, data);
 }
 

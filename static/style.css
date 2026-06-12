@@ -30345,6 +30345,10 @@ body.doc-find-active mark.doc-find-mark.current {
   background: none; border: none; color: var(--fg);
   opacity: 0.4; font-size: 11px; cursor: pointer;
   padding: 4px 8px; font-family: inherit;
+  /* Nudge 2px down so the label baseline-aligns with the To: field
+     chips beside it. */
+  position: relative;
+  top: 2px;
 }
 .email-cc-toggle:hover {
   opacity: 1;
