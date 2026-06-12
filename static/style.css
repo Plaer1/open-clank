@@ -15399,14 +15399,14 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   align-items: stretch;
   gap: 6px;
 }
-/* Docked panes don't get the 4px nudge below From — keep details
-   tight against the From row since vertical space is constrained.
-   gap matches the meta's own gap (2px) so From→To and To→Cc are
-   the same vertical distance. */
+/* Docked panes: 4px between From→To and 4px between To→Cc.
+   Meta has its own 2px gap (From→details) so an extra 2px on
+   details margin-top gives a 4px From→To distance, and gap:4 on
+   the details flex column gives 4px between To and Cc. */
 .modal.modal-right-docked .email-reader-meta-details,
 .modal.modal-left-docked .email-reader-meta-details {
-  margin-top: 0;
-  gap: 2px;
+  margin-top: 2px;
+  gap: 4px;
 }
 .modal.modal-right-docked .email-reader-header > .email-reader-actions,
 .modal.modal-left-docked .email-reader-header > .email-reader-actions {
