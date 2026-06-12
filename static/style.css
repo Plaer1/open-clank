@@ -4128,6 +4128,12 @@ body.bg-pattern-sparkles {
         transition: transform 0.25s ease, opacity 0.25s ease !important;
         opacity: 1 !important;
         overflow: visible !important;
+        /* Force opaque background — Firefox mobile renders the
+           backdrop-filter+background combo as semi-transparent on
+           the slide-out drawer, letting the chat input model picker
+           label show through the sidebar. */
+        background: var(--panel) !important;
+        backdrop-filter: none !important;
       }
       .sidebar.hidden {
         width: 80% !important;
