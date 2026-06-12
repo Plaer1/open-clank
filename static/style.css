@@ -28347,14 +28347,15 @@ button .spinner-whirlpool {
     box-shadow: -6px 0 12px -6px rgba(0, 0, 0, 0.25);
   }
 }
-/* Mobile: drop the overlay shadow (gradient fade alone reads cleaner
-   on phone screens) and lift the cluster 1px more. !important
-   needed because the @container query overlay rule above has the
-   same selector specificity and the cascade isn't reliably picking
-   the later rule when both fire. */
+/* Mobile: drop the box-shadow AND the left-edge gradient fade —
+   either can read as a shadow under the icons on phone screens.
+   Also lift the cluster 1px more.  !important needed because the
+   @container query overlay rule has the same selector specificity. */
 @media (max-width: 768px) {
   .email-reader-meta > .email-reader-actions-inline {
     box-shadow: none !important;
+    background: none !important;
+    padding-left: 0 !important;
     margin-top: -10px;
   }
 }
