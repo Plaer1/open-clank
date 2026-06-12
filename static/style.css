@@ -28283,7 +28283,7 @@ button .spinner-whirlpool {
   gap: 4px;
   z-index: 2;
   /* Sit visually above the From baseline like the lifted overlay. */
-  margin-top: -7px;
+  margin-top: -9px;
 }
 /* Recipient chip span keeps at least ~4 characters visible (60px)
    before the overflow-scroll kicks in, so the sender / first
