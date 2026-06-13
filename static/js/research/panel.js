@@ -7,6 +7,26 @@ import createResearchSynapse from '../researchSynapse.js';
 import spinnerModule from '../spinner.js';
 import { sortModelIds } from '../modelSort.js';
 
+// Rotating research textarea placeholders — pick one at random each
+// time the panel is rendered so the example keeps feeling fresh.
+const _RESEARCH_HINTS = [
+  "e.g. Trace Odysseus's ten-year journey home from Troy — every island, monster, and detour, and why each one cost him",
+  "e.g. Compare Rust and Go for building a high-throughput web API in 2026",
+  "e.g. Fact-check whether honey actually never spoils",
+  "e.g. How to roast a duck so the skin stays crispy",
+  "e.g. The collapse of Bronze Age civilizations — leading theories and the evidence behind each",
+  "e.g. Best M.2 NVMe SSDs under $200 for a home AI workstation",
+  "e.g. Why do cats knead with their paws? Cover the leading behavioural explanations",
+  "e.g. Side effects and benefits of long-term creatine supplementation",
+  "e.g. How does end-to-end encryption work in Signal, step by step",
+  "e.g. The history of the printing press in East Asia, 700 CE → 1600 CE",
+];
+function _pickResearchHint() {
+  const i = Math.floor(Math.random() * _RESEARCH_HINTS.length);
+  // Escape double-quotes so we can safely splice into a placeholder="…" attribute.
+  return _RESEARCH_HINTS[i].replace(/"/g, '&quot;');
+}
+
 // jobId -> { synapse, status } — survives across _renderJobs() rebuilds so
 // the SVG keeps its accumulated nodes/edges between progress events.
 const _jobSynapses = new Map();
@@ -354,7 +374,7 @@ function _buildPanelHTML() {
           <span>Multi-step web research with an LLM-in-the-loop agent</span>
         </p>
         <div id="research-no-past-hint" class="memory-desc doclib-desc" style="display:none;margin-top:-2px;font-size:11px;opacity:0.7;">All past research found in <button type="button" class="research-library-link">Library, Research</button></div>
-        <textarea id="research-query" class="research-query" placeholder="e.g. Trace Odysseus's ten-year journey home from Troy — every island, monster, and detour, and why each one cost him" rows="4"></textarea>
+        <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
         <div class="research-category-row" id="research-category-row">
           <button class="research-cat active" data-cat="" title="LLM auto-detects the best format">Auto</button>
           <button class="research-cat" data-cat="product">Product</button>
