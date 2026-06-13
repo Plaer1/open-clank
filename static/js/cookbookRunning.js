@@ -2099,57 +2099,43 @@ export function _renderRunningTab() {
         dropdown.className = 'cookbook-task-dropdown';
 
         const items = [];
+        // ── Run section ─────────────────────────────────────────────
         // Queued download: let the user jump the queue and start it immediately
         // (downloads otherwise run one-at-a-time per server).
         if (task.type === 'download' && task.status === 'queued') {
-          items.push({ label: 'Start now', action: 'start-now', custom: () => {
+          items.push({ group: 'run', label: 'Start now', action: 'start-now', custom: () => {
             _startQueuedDownload(task);
             _renderRunningTab();
           }});
         }
         if (task.status !== 'running' && task.status !== 'queued') {
-          items.push({ label: 'Reconnect tmux', action: 'reconnect' });
+          items.push({ group: 'run', label: 'Reconnect tmux', action: 'reconnect' });
         }
         if (task.status === 'running') {
-          items.push({ label: 'Stop', action: 'stop', danger: true });
+          items.push({ group: 'run', label: 'Stop', action: 'stop', danger: true });
         }
-        items.push({ label: 'Restart', action: 'retry' });
-        // Edit serve — open the full serve panel (same as the edit icon),
-        // switching to this task's server first so the model is found.
+        items.push({ group: 'run', label: 'Restart', action: 'retry' });
+        // ── Edit section ────────────────────────────────────────────
+        // Merged "Edit & relaunch" — opens the structured serve panel
+        // pre-filled with this task's config. The old standalone "Edit
+        // cmd & relaunch" raw-text dialog is now reachable from inside
+        // that panel (Show command). Single entry-point per task.
         if (task.type === 'serve' && task.payload?.repo_id) {
-          items.push({ label: 'Edit in serve panel', action: 'edit-panel', tooltip: 'Open the full Serve config panel pre-filled with this task — pick a different backend, change GPUs, edit env vars, then Launch from there', custom: () => _openEdit() });
+          items.push({ group: 'edit', label: 'Edit & relaunch', action: 'edit-panel', tooltip: 'Open the Serve config panel pre-filled with this task — pick a different backend, change GPUs, edit env vars or the raw cmd, then Launch.', custom: () => _openEdit() });
         }
-        // Save serve — save current launch config as a preset.
         if (task.type === 'serve' && task.payload?._cmd) {
-          items.push({ label: 'Save serve', action: 'save', custom: () => {
+          items.push({ group: 'edit', label: 'Save serve', action: 'save', custom: () => {
             if (!_saveTaskAsPreset(task)) { uiModule.showToast('Already saved'); return; }
             uiModule.showToast('Saved to presets');
             _renderRunningTab();
           }});
         }
-        // Edit command — only meaningful for serve tasks that aren't running.
-        // Lets the user tweak flags after a crash/error and relaunch.
-        if (task.type === 'serve' && task.status !== 'running' && task.payload?._cmd) {
-          items.push({ label: 'Edit cmd & relaunch', action: 'edit', tooltip: 'Edit the raw vllm/llama-server cmd string in a dialog and relaunch immediately on the same host', custom: async () => {
-            const newCmd = await _promptEditServeCmd(task.payload._cmd);
-            if (newCmd == null) return; // cancelled
-            try {
-              await fetch('/api/shell/exec', {
-                method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
-              });
-            } catch {}
-            _removeTask(task.sessionId);
-            // Relaunch on the task's OWN host, not the current global selection.
-            _launchServeTask(task.name, task.payload.repo_id, newCmd, task.payload._fields, task.remoteHost || '');
-          }});
-        }
+        // ── Endpoint section ────────────────────────────────────────
         // Manual endpoint registration — fallback for when auto-add fails
         // (e.g. probe timeout on a remote that's slow). Forces adding this
         // serve to the model-endpoints list regardless of prior flag state.
         if (task.type === 'serve' && task.payload?._cmd) {
-          items.push({ label: 'Register endpoint', action: 'register-endpoint', custom: async () => {
+          items.push({ group: 'endpoint', label: 'Register endpoint', action: 'register-endpoint', custom: async () => {
             const host = _connectHostFromRemote(task.remoteHost);
             const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
             const port = portMatch ? portMatch[1] : '8000';
@@ -2194,31 +2180,32 @@ export function _renderRunningTab() {
             }
           }});
         }
+        // ── Copy section ────────────────────────────────────────────
         if (_isWindows(task)) {
           const host = task.remoteHost;
           const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
           const logCmd = host
             ? `ssh ${_sshPrefix(_getPort(task))}${host} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`
             : `powershell -Command "Get-Content (Join-Path $env:TEMP 'odysseus-tmux\\${task.sessionId}.log') -Wait"`;
-          items.push({ label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
+          items.push({ group: 'copy', label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);
           }});
         } else {
           // Just the tmux command itself — no ssh wrapper.
           const tmuxAttach = `tmux attach -t ${task.sessionId}`;
-          items.push({ label: 'Copy tmux', action: 'copy-tmux', custom: () => {
+          items.push({ group: 'copy', label: 'Copy tmux', action: 'copy-tmux', custom: () => {
             _copyText(tmuxAttach);
           }});
         }
         if (_shouldOfferCrashReport(task)) {
-          items.push({ label: 'Copy crash report', action: 'copy-crash-report', custom: () => {
+          items.push({ group: 'copy', label: 'Copy crash report', action: 'copy-crash-report', custom: () => {
             const out = (el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
             _copyText(_buildCrashReport(task, out));
             uiModule.showToast('Copied crash report');
           }});
         }
         // Copy the last 50 lines of the task's output/log.
-        items.push({ label: 'Copy last 50 lines', action: 'copy-log', custom: () => {
+        items.push({ group: 'copy', label: 'Copy last 50 lines', action: 'copy-log', custom: () => {
           const out = (el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
           const last = out.split('\n').slice(-50).join('\n');
           if (!last.trim()) {
@@ -2232,8 +2219,10 @@ export function _renderRunningTab() {
         // the live tmux session and (for serve tasks) deletes the
         // matching model-endpoint, THEN animates the task card out.
         // Just "Remove" hid that it stops the live serve too.
+        // ── Danger section ──────────────────────────────────────────
         const _isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
         items.push({
+          group: 'danger',
           label: _isLive ? 'Stop and remove' : 'Remove',
           action: 'kill',
           tooltip: _isLive
@@ -2241,10 +2230,8 @@ export function _renderRunningTab() {
             : 'Remove this row',
           danger: true,
         });
-        // Cancel = mobile-only dismiss item. Same pattern as the email kebab:
-        // the `dropdown-cancel-mobile` class is hidden on desktop and styled
-        // as a separated bottom row on mobile (border-top + extra padding).
-        items.push({ label: 'Cancel', action: 'cancel', mobileOnly: true, custom: () => {} });
+        // Cancel = mobile-only dismiss item. Same pattern as the email kebab.
+        items.push({ group: 'danger', label: 'Cancel', action: 'cancel', mobileOnly: true, custom: () => {} });
 
         const _MENU_ICONS = {
           'start-now': '<polygon points="6 4 20 12 6 20 6 4"/>',
@@ -2261,7 +2248,18 @@ export function _renderRunningTab() {
           kill: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
           cancel: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
         };
+        let _lastGroup = null;
         for (const item of items) {
+          // Insert a thin divider whenever the group changes, so the
+          // user can visually scan Run / Edit / Endpoint / Copy / Danger
+          // blocks instead of one long undifferentiated list.
+          if (item.group && _lastGroup && item.group !== _lastGroup) {
+            const sep = document.createElement('div');
+            sep.className = 'cookbook-dropdown-divider';
+            sep.style.cssText = 'height:1px;margin:4px 6px;background:color-mix(in srgb, var(--fg) 12%, transparent);pointer-events:none;';
+            dropdown.appendChild(sep);
+          }
+          _lastGroup = item.group || _lastGroup;
           const div = document.createElement('div');
           div.className = 'dropdown-item-compact'
             + (item.danger ? ' cookbook-dropdown-danger' : '')
