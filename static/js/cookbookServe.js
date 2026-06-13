@@ -753,10 +753,6 @@ function _rerenderCachedModels() {
       panelHtml += `</div><div class="hwfit-serve-row hwfit-backend-diffusers">`;
       panelHtml += `<label>Harmonize GPU${_h('Separate GPU for img2img/harmonize. Leave empty to use same GPU')}<input type="text" class="hwfit-sf" data-field="diff_harmonize_gpu" value="${esc(sv('diff_harmonize_gpu', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `</div>`;
-      // Row 4: Extra args
-      panelHtml += `<div class="hwfit-serve-extra">`;
-      panelHtml += `<label>Extra args<input type="text" class="hwfit-sf" data-field="extra" value="${esc(sv('extra', ''))}" placeholder="--flag value" /></label>`;
-      panelHtml += `</div>`;
       // Model-specific optimizations. The checks row always renders for the
       // vLLM backend so the Speculative (MTP) control is ALWAYS reachable —
       // even for models the auto-detector doesn't recognize. Expert-parallel,
@@ -780,6 +776,11 @@ function _rerenderCachedModels() {
         panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
       }
       if (_opts2.envVars.length) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
+      panelHtml += `</div>`;
+      // Extra args sits below the vLLM checks (Reasoning Parser + Spec)
+      // so it reads as "after the advanced toggles, any other flags".
+      panelHtml += `<div class="hwfit-serve-extra">`;
+      panelHtml += `<label>Extra args<input type="text" class="hwfit-sf" data-field="extra" value="${esc(sv('extra', ''))}" placeholder="--flag value" /></label>`;
       panelHtml += `</div>`;
       // ── End Advanced fold ──
       panelHtml += `</details>`;

@@ -1847,8 +1847,8 @@ function _renderRecipes() {
 
   // Tabs
   html += '<div class="cookbook-tabs">';
-  html += '<button class="cookbook-tab active" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-1px;margin-right:3px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Run</button>';
-  html += '<button class="cookbook-tab" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
+  html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-1px;margin-right:3px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Run</button>';
+  html += '<button class="cookbook-tab active" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
   html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
   html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
   html += '</div>';
@@ -2063,6 +2063,31 @@ function _renderRecipes() {
   html += '</select>';
   html += '</div>';
   html += '<p class="memory-desc doclib-desc">Optional packages that extend Odysseus capabilities.</p>';
+  // Manual install hints (collapsed). Useful when the in-app Install button
+  // can't run (offline server, custom torch backend, etc.) — three vetted
+  // recipes the user can copy verbatim into a terminal on the target box.
+  html += '<details class="cookbook-deps-manual" style="margin:4px 0 8px;font-size:11px;">';
+  html += '<summary style="cursor:pointer;opacity:0.75;user-select:none;">Manual install (vLLM): uv venv · pip/uv · Docker</summary>';
+  html += '<div style="margin-top:6px;display:flex;flex-direction:column;gap:8px;">';
+  const _depCmdBlock = (label, body) =>
+    `<div class="cookbook-deps-cmd-block">`
+    + `<div style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">${label}</div>`
+    + `<pre class="cookbook-deps-cmd" style="margin:0;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre;">${body}</pre>`
+    + `</div>`;
+  html += _depCmdBlock(
+    'uv (recommended — fast, isolated venv)',
+    'uv venv\nsource .venv/bin/activate\nuv pip install -U vllm --torch-backend auto'
+  );
+  html += _depCmdBlock(
+    'pip',
+    'python -m venv .venv\nsource .venv/bin/activate\npip install -U vllm'
+  );
+  html += _depCmdBlock(
+    'Docker',
+    'docker pull vllm/vllm-openai:latest'
+  );
+  html += '</div>';
+  html += '</details>';
   html += '<div class="doclib-grid" id="cookbook-deps-list"></div>';
   html += '</div></div>';
 
