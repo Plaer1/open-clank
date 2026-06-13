@@ -917,7 +917,45 @@ async function _fetchDependencies() {
 
     // Wire the alternative-install "Run" buttons in the Manual block.
     // Each action launches the underlying command as a tmux task on the
-    // currently selected deps server, same as Reinstall does.
+    // currently selected deps server, same as Reinstall does. The exact
+    // command varies by detected GPU vendor — NVIDIA gets the standard
+    // vllm package + vllm/vllm-openai docker image; AMD gets the ROCm
+    // index/wheel + rocm/vllm-dev docker image.
+    const _detectedBackend = () => {
+      try {
+        const sys = window._hwfitSystemCache || {};
+        const b = String(sys.backend || '').toLowerCase();
+        if (b === 'rocm' || b === 'amd' || b === 'hip') return 'rocm';
+        return 'cuda';
+      } catch { return 'cuda'; }
+    };
+    const _depsCmdFor = (action, backend) => {
+      if (backend === 'rocm') {
+        if (action === 'vllm-uv') {
+          return 'uv venv && . .venv/bin/activate && uv pip install -U vllm --torch-backend rocm';
+        }
+        if (action === 'vllm-docker') {
+          return 'docker pull rocm/vllm-dev:main';
+        }
+      }
+      // NVIDIA / CUDA default
+      if (action === 'vllm-uv') {
+        return 'uv venv && . .venv/bin/activate && uv pip install -U vllm --torch-backend auto';
+      }
+      if (action === 'vllm-docker') {
+        return 'docker pull vllm/vllm-openai:latest';
+      }
+      return '';
+    };
+    // Re-paint the <pre> blocks with the backend-appropriate command so
+    // the preview matches what Run will actually launch.
+    const _backend = _detectedBackend();
+    document.querySelectorAll('.cookbook-deps-run-btn').forEach(btn => {
+      const block = btn.closest('.cookbook-deps-cmd-block');
+      const pre = block && block.querySelector('.cookbook-deps-cmd');
+      const cmd = _depsCmdFor(btn.dataset.depsAction, _backend);
+      if (pre && cmd) pre.textContent = cmd;
+    });
     document.querySelectorAll('.cookbook-deps-run-btn').forEach(btn => {
       if (btn._wired) return;
       btn._wired = true;
@@ -928,14 +966,12 @@ async function _fetchDependencies() {
         if (sel) _applyServerSelection(sel.value);
         const host = _envState.remoteHost || '';
         const where = host || 'this server';
-        const cmds = {
-          'vllm-uv':     'uv venv && . .venv/bin/activate && uv pip install -U vllm --torch-backend auto',
-          'vllm-docker': 'docker pull vllm/vllm-openai:latest',
-        };
-        const cmd = cmds[action];
+        const backend = _detectedBackend();
+        const cmd = _depsCmdFor(action, backend);
         if (!cmd) return;
-        if (!confirm(`Run on ${where}?\n\n${cmd}\n\nLaunches as a tmux task — watch progress in the Active tab.`)) return;
-        _launchServeTask(`deps-${action}`, 'deps-install', cmd);
+        const tag = backend === 'rocm' ? 'AMD ROCm' : 'NVIDIA CUDA';
+        if (!confirm(`Run on ${where} (${tag})?\n\n${cmd}\n\nLaunches as a tmux task — watch progress in the Active tab.`)) return;
+        _launchServeTask(`deps-${action}-${backend}`, 'deps-install', cmd);
       });
     });
 
