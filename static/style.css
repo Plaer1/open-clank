@@ -30087,7 +30087,7 @@ body.doc-find-active mark.doc-find-mark.current {
    from the To input. Anchored to the input's vertical center + 4px
    nudge so the label sits where the user expects it. */
 .email-field .email-cc-toggle {
-  position: absolute; right: 6px; top: calc(50% + 2px); transform: translateY(-50%);
+  position: absolute; right: 6px; top: calc(50% + 1px); transform: translateY(-50%);
   z-index: 2;
 }
 /* Accent-tinted prefix label (To / Cc / Bcc / Subject) sitting at
@@ -30109,7 +30109,7 @@ body.doc-find-active mark.doc-find-mark.current {
 .email-field #doc-email-subject { padding-left: 64px; }
 /* X close button inside Cc / Bcc fields. */
 .email-field .email-cc-close {
-  position: absolute; right: 6px; top: calc(50% + 2px); transform: translateY(-50%);
+  position: absolute; right: 6px; top: calc(50% + 1px); transform: translateY(-50%);
   background: none; border: none; color: var(--fg);
   opacity: 0.4; cursor: pointer;
   width: 22px; height: 22px;
