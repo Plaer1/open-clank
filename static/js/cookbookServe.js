@@ -546,7 +546,14 @@ function _rerenderCachedModels() {
           : (_es.gpus || detectedGpuIds));
       const tpOpts = [1,2,4,8].map(n => `<option${defaultTp==String(n)?' selected':''}>${n}</option>`).join('');
       const dtypeOpts = ['auto','float16','bfloat16'].map(d => `<option value="${d}"${sv('dtype','auto')===d?' selected':''}>${d}</option>`).join('');
-      const vllmKvCacheOpts = ['auto','fp8'].map(d => `<option value="${d}"${sv('vllm_kv_cache_dtype','auto')===d?' selected':''}>${d}</option>`).join('');
+      // KV cache default — most models are fine on auto, but a few
+      // (e.g. DeepSeek-V3/V4/R1 MoE) need fp8 explicitly or the launch
+      // OOMs. _detectModelOptimizations seeds opts.kvCacheDtype for
+      // those families; honour it unless the user has a saved override.
+      const _kvOptsCheck = _detectModelOptimizations(repo);
+      const _kvAutoDefault = (_kvOptsCheck && _kvOptsCheck.kvCacheDtype) || 'auto';
+      const _kvSelected = sv('vllm_kv_cache_dtype', _kvAutoDefault);
+      const vllmKvCacheOpts = ['auto','fp8'].map(d => `<option value="${d}"${_kvSelected===d?' selected':''}>${d}</option>`).join('');
       const _l = (name, tip) => `<span>${name}<span class="hwfit-hint" title="${tip}">?</span></span>`;
       const _ggufChoices = _runnableGgufFiles(m);
       const _savedGguf = String(sv('gguf_file', '') || '');

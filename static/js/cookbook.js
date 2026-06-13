@@ -249,10 +249,14 @@ function _detectModelOptimizations(modelName) {
   }
   // DeepSeek MoE — V3 / V3.1 / V4 (and future Vx), R1 / R2 reasoning.
   // Anything v-{integer} or r-{integer} family from DeepSeek is MoE in
-  // current architectures.
+  // current architectures. These models also require fp8 KV cache to
+  // fit at meaningful context with current tensor-parallel layouts —
+  // the launch crashes otherwise (--kv-cache-dtype auto → bf16 OOMs).
   else if (n.includes('deepseek') && /\b(v[3-9]|v\d{2,}|r[1-9])\b/.test(n)) {
     opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE expert parallel for DeepSeek');
+    opts.kvCacheDtype = 'fp8';
+    opts.tips.push('fp8 KV cache required — bf16 OOMs at usable context');
   }
   // Reasoning parser — applies independently of MoE detection. Without this
   // flag, models like MiniMax-M2.x, DeepSeek-R1, Qwen3 reasoning, GLM-4.x,
