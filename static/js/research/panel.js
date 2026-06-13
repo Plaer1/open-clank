@@ -369,11 +369,11 @@ function _buildPanelHTML() {
         <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
           <h2 style="margin:0;padding:0;line-height:1;">Research <span id="research-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
         </div>
-        <p class="memory-desc doclib-desc" style="margin-top:6px;display:flex;align-items:center;gap:6px;">
+        <p class="memory-desc doclib-desc" style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.8;"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 1 0 0-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 0 1-2-2V6h4v4a2 2 0 0 1-2 2Z"/><path d="M12 6V3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/></svg>
           <span>Multi-step web research with an LLM-in-the-loop agent</span>
+          <span id="research-no-past-hint" style="display:none;font-size:11px;opacity:0.7;">— past runs in <button type="button" class="research-library-link" style="background:none;border:none;padding:0;font:inherit;color:var(--accent, var(--red));cursor:pointer;text-decoration:underline;">Library, Research</button></span>
         </p>
-        <div id="research-no-past-hint" class="memory-desc doclib-desc" style="display:none;margin-top:-2px;font-size:11px;opacity:0.7;">All past research found in <button type="button" class="research-library-link">Library, Research</button></div>
         <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
         <div class="research-category-row" id="research-category-row">
           <button class="research-cat active" data-cat="" title="LLM auto-detects the best format">Auto</button>
