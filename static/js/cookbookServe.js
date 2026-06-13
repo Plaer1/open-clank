@@ -700,11 +700,21 @@ function _rerenderCachedModels() {
       panelHtml += `<label>Height${_h('Default output height')} <input type="text" class="hwfit-sf" data-field="diff_height" value="${esc(sv('diff_height', ''))}" placeholder="1024" /></label>`;
       panelHtml += `</div>`;
       // Row 3: Checkboxes (vLLM)
+      // Order: Trust Remote → Auto Tool → Reasoning Parser (when the
+      // model has one) → Enforce Eager → Prefix Caching. Reasoning
+      // Parser was previously in a separate row below; the user wanted
+      // it inline with the other vLLM toggles between Auto Tool and
+      // Enforce Eager so the "what the model needs" decisions sit
+      // together at the top.
+      const _opts2_row3 = _detectModelOptimizations(repo);
+      const _rp_flag = _opts2_row3.flags.find(f => f.includes('--reasoning-parser'));
+      const _rp_name = _rp_flag ? _rp_flag.split(' ')[1] : '';
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="trust_remote"${sv('trust_remote',false)?' checked':''} /> Trust Remote Code${_h('Allow model to run custom code from HuggingFace')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="auto_tool"${sv('auto_tool',false)?' checked':''} /> Auto Tool Choice${_h('Enable function/tool calling for agent mode')}</label>`;
+      if (_rp_name) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name}" /> Reasoning Parser <span class="hwfit-parser-tag">${_rp_name}</span></label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
       panelHtml += `</div>`;
       // Row 2c: llama.cpp fit/perf flags (set by Auto profiles, editable by hand)
       const _kvOpts = ['', 'q4_0', 'q8_0', 'f16'].map(k => `<option value="${k}"${sv('cache_type','')===k?' selected':''}>${k||'default'}</option>`).join('');
@@ -760,7 +770,9 @@ function _rerenderCachedModels() {
       const _opts2 = _detectModelOptimizations(repo);
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm">`;
       if (_opts2.flags.includes('--enable-expert-parallel')) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel</label>`;
-      if (_opts2.flags.some(f => f.includes('--reasoning-parser'))) { const rp = _opts2.flags.find(f => f.includes('--reasoning-parser')).split(' ')[1]; panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${rp}" /> Reasoning Parser <span class="hwfit-parser-tag">${rp}</span></label>`; }
+      // Reasoning Parser moved to Row 3 (inline with Trust Remote / Auto
+      // Tool) so the per-model toggles sit together — the duplicate that
+      // lived here previously left two copies of the same checkbox.
       {
         // Speculative decoding (vLLM --speculative-config). Default OFF; the
         // method/token defaults come from auto-detection when available,
@@ -773,7 +785,7 @@ function _rerenderCachedModels() {
         if (!_specMethods.includes(_specMethod)) _specMethods.unshift(_specMethod);
         const _specOpts = _specMethods.map(m =>
           `<option value="${m}"${m === _specMethod ? ' selected' : ''}>${m}</option>`).join('');
-        panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
+        panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" style="width:44px;" /><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
       }
       if (_opts2.envVars.length) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
       panelHtml += `</div>`;
