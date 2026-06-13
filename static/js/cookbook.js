@@ -1896,9 +1896,10 @@ function _renderRecipes() {
   // Image tab removed — text→image gen is gone from this build (only inpaint
    // remains, which uses its own settings panel). Vision (multimodal) stays.
   html += '<option value="multimodal">Vision</option></select>';
-  // Engine sits next to the type filter so the "what category / which serving
-  // path" filters live together; Quant + Context are storage-format and budget
-  // levers, grouped to the right.
+  // Search moved next to the Type filter so the two primary picks
+  // (what category + free text) sit together; the more advanced
+  // levers (Engine / Quant / Context) live to the right.
+  html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
   html += '<span class="hwfit-engine-wrap">';
   html += '<select class="cookbook-field-input hwfit-engine" id="hwfit-engine" style="height:28px;" title="Filter by serving engine">';
   html += '<option value="">Engine</option>';
@@ -1926,9 +1927,6 @@ function _renderRecipes() {
   html += '<label class="hwfit-ctx-control" title="Context length for fit estimates. Lower it to find more models that could fit your hardware.">';
   html += '<span>Context</span><span class="hwfit-help-chip hwfit-help-chip-inline" title="Context length. Lower it to find more models that could fit your hardware; raise it when you need longer chats or documents.">?</span><input type="range" id="hwfit-context" min="0" max="5" step="1" value="3" />';
   html += '<output id="hwfit-context-label">50k</output></label>';
-  // Search lives at the far right of the toolbar so the controls (Type/Quant/
-  // Engine/Context) read as a row of compact filters followed by free-text.
-  html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
   html += '</div>';
   html += '<div class="hwfit-toolbar" style="margin-top:7px;">';
   html += '<select class="cookbook-field-input hwfit-server-select" id="hwfit-server-select" style="height:28px;min-width:88px;position:relative;top:0px;">';
@@ -1941,10 +1939,10 @@ function _renderRecipes() {
   // Sort state — the clickable column headers read/write this (pewds' original
   // sort paradigm). Newest is reachable by clicking the Model column header.
   html += '<select class="cookbook-field-input hwfit-sort" id="hwfit-sort" style="display:none">';
+  html += '<option value="newest" selected>Newest</option>';
   html += '<option value="fit">Fit</option><option value="score">Score</option><option value="vram">VRAM</option>';
   html += '<option value="speed">Speed</option><option value="params">Params</option>';
-  html += '<option value="context">Context</option>';
-  html += '<option value="newest">Newest</option></select>';
+  html += '<option value="context">Context</option></select>';
   html += '</div>';
   html += '<div class="hwfit-manual-panel hidden" id="hwfit-manual-panel">';
   html += '<span class="hwfit-manual-note" style="font-size:10px;opacity:0.6;width:100%;margin-bottom:2px;">Simulator — these values REPLACE detected hardware.</span>';
