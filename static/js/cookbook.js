@@ -1570,9 +1570,9 @@ function _wireTabEvents(body) {
     document.getElementById('hwfit-server-select')?.addEventListener('change', _onServerChange);
   }
 
-  // Browse Ollama library — popular models from ollama.com via cached backend
-  // proxy. Click a row → fills the download input with `<name>:<size>` so the
-  // existing Download button kicks off `ollama pull`.
+  // Browse Ollama library popup removed — Engine = Ollama in the
+  // Scan / Download filter covers this use case. The handler below is a
+  // no-op now because the elements no longer exist.
   const olToggle = document.getElementById('cookbook-ollama-toggle');
   const olArrow = document.getElementById('cookbook-ollama-arrow');
   const olList = document.getElementById('cookbook-ollama-list');
@@ -1773,8 +1773,8 @@ function _renderRecipes() {
 
   // Tabs
   html += '<div class="cookbook-tabs">';
-  html += '<button class="cookbook-tab active" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
-  html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>Serve</button>';
+  html += '<button class="cookbook-tab active" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>Serve</button>';
+  html += '<button class="cookbook-tab" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
   html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
   html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
   html += '</div>';
@@ -1787,7 +1787,7 @@ function _renderRecipes() {
   // State persisted to localStorage so the fold survives reloads.
   const _dlTabFolded = (() => { try { return localStorage.getItem('cookbook_dl_tab_folded_v1') === '1'; } catch { return false; } })();
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">';
-  html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
+  html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Direct Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
   html += '</div>';
   html += `<div id="cookbook-dl-tab-fold-body" style="${_dlTabFolded ? 'display:none;' : ''}">`;
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
@@ -1819,36 +1819,25 @@ function _renderRecipes() {
   // silently sending downloads to the wrong server. An empty selection means Local; the user
   // chooses a remote server explicitly via the dropdown.
 
-  // Manual download input
-  html += `<div style="margin-top:7px;margin-bottom:2px;display:flex;gap:4px;align-items:center;">`;
+  // Manual download input — server picker on the same row as the repo input,
+  // on the left. The standalone "add server" button is gone (use Settings).
+  html += `<div class="cookbook-dl-input" style="margin-top:7px;display:flex;gap:4px;align-items:center;">`;
   if (_es.servers.length > 1) {
-    html += `<select class="cookbook-field-input hwfit-dl-server" id="hwfit-dl-server" style="height:28px;position:relative;top:0px;">`;
+    html += `<select class="cookbook-field-input hwfit-dl-server" id="hwfit-dl-server" style="height:28px;flex-shrink:0;">`;
     html += _buildServerOpts(true);
     html += `</select>`;
   } else {
     html += `<input type="hidden" id="hwfit-dl-server" value="local" />`;
   }
-  html += `<button class="memory-toolbar-btn cookbook-dl-add-server" title="Add server in Settings" style="height:28px;">add server</button>`;
-  html += `</div>`;
-  html += `<div class="cookbook-dl-input" style="margin-top:0;">`;
-  html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="org/model-name, qwen2.5:14b, or HF URL" />`;
+  html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="org/model-name, qwen2.5:14b, or HF URL" style="flex:1;min-width:0;" />`;
   html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">Download</button>`;
   html += `</div>`;
-  // Browse Ollama library — fetches popular models from ollama.com via the
-  // /api/cookbook/ollama/library cached proxy, click → fills the input with
-  // `<name>:<size>` so the existing Download button kicks off `ollama pull`.
-  html += `<div style="margin-top:5px;position:relative;top:-3px;">`;
-  html += `<div style="display:flex;gap:4px;align-items:center;">`;
-  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
-  html += `<span id="cookbook-ollama-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">▸</span>`;
-  html += `<span style="pointer-events:none;">Browse Ollama library</span>`;
-  html += `</button>`;
-  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-refresh" title="Refresh" style="height:26px;width:26px;padding:0;border-radius:4px;">↻</button>`;
-  html += `</div>`;
-  html += `<div id="cookbook-ollama-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
-  html += `</div>`;
+  // Ollama-library browse used to live here as its own collapsible dropdown,
+  // but that duplicated the Engine filter (which already has Ollama). The
+  // standalone UI is gone — to find Ollama models, set Engine = Ollama in
+  // the Scan / Download section below.
   // Latest HF models that fit — collapsible card list
-  html += `<div style="margin-top:5px;position:relative;top:-3px;">`;
+  html += `<div style="margin-top:5px;position:relative;top:-11px;">`;
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
   html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
   html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">\u25B8</span>`;
@@ -1914,15 +1903,16 @@ function _renderRecipes() {
   html += _buildServerOpts(false);
   html += '</select>';
   html += '<div class="hwfit-gpu-toggles" id="hwfit-gpu-toggles"></div>';
-  // Scan/refresh button (icon-only) where the quant dropdown used to sit.
-  html += '<button type="button" class="hwfit-gpu-btn" id="hwfit-rescan" title="Re-scan hardware" style="flex-shrink:0;position:relative;top:-3px;left:-1px;">↻ RESCAN</button>';
+  // (Rescan button removed — Edit handles manual hardware updates;
+  // automatic re-probe runs on container restart.)
   html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-manual-btn" id="hwfit-hw-manual-btn" title="Set hardware manually" style="flex-shrink:0;position:relative;top:-3px;left:-1px;display:inline-flex;align-items:center;gap:3px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>EDIT</button>';
   // Sort state — the clickable column headers read/write this (pewds' original
   // sort paradigm). Newest is reachable by clicking the Model column header.
   html += '<select class="cookbook-field-input hwfit-sort" id="hwfit-sort" style="display:none">';
   html += '<option value="fit">Fit</option><option value="score">Score</option><option value="vram">VRAM</option>';
   html += '<option value="speed">Speed</option><option value="params">Params</option>';
-  html += '<option value="context">Context</option></select>';
+  html += '<option value="context">Context</option>';
+  html += '<option value="newest">Newest</option></select>';
   html += '</div>';
   html += '<div class="hwfit-manual-panel hidden" id="hwfit-manual-panel">';
   html += '<span class="hwfit-manual-note" style="font-size:10px;opacity:0.6;width:100%;margin-bottom:2px;">Simulator — these values REPLACE detected hardware.</span>';
