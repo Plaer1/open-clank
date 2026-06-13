@@ -10946,7 +10946,7 @@ textarea.memory-add-input {
   border-radius: 4px;
   font-family: inherit;
   font-size: 9px;
-  padding: 2px 3px;
+  padding: 2px 8px;
   cursor: pointer;
   flex-shrink: 0;
 }
@@ -19497,6 +19497,24 @@ body.gallery-selecting .gallery-dl-btn,
 #cookbook-dl-tab-fold.is-folded {
   border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent) !important;
   padding-bottom: 6px !important;
+}
+/* Smooth open/close for the Direct Download body — replaces the
+   instant display:none toggle with a max-height + opacity slide so
+   auto-fold and auto-expand don't feel jarring. 1200px is a safe
+   upper bound for the body height; the slide only fires up to the
+   actual content height because content stops there. */
+#cookbook-dl-tab-fold-body {
+  overflow: hidden;
+  max-height: 1200px;
+  opacity: 1;
+  transition: max-height 0.28s ease, opacity 0.18s ease, margin 0.28s ease;
+}
+#cookbook-dl-tab-fold-body.is-folded {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  pointer-events: none;
 }
 /* Center the "?" glyph inside the help chip. Without text-align it sits 0.5px
    left of true center because of the character's natural baseline offset. */
