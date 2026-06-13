@@ -1415,29 +1415,27 @@ function _wireTabEvents(body) {
       const folded = dlFoldBody.style.display === 'none';
       _setFolded(!folded);
     });
-    // Auto-fold when the user scrolls past the Direct Download header.
-    // Use IntersectionObserver — fires whenever the header element
-    // crosses the viewport edge, regardless of which scroll container
-    // moved (cookbook-body, modal-content, hwfit-list, viewport, etc).
-    // Doesn't auto-unfold; the chevron ▸ still expands manually.
-    let _ioPrimed = false;
-    const _io = new IntersectionObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      // Skip the initial firing where the header is already in view.
-      if (!_ioPrimed) {
-        _ioPrimed = true;
-        if (entry.isIntersecting) return;
-      }
-      if (entry.isIntersecting) return;
-      // Only fold when scrolled ABOVE the viewport (not when the modal
-      // closes / detaches under it). boundingClientRect.top < 0 means
-      // the header was pushed off the top.
-      if (entry.boundingClientRect.top >= 0) return;
+    // Auto-fold when the user scrolls inside any scroll container —
+    // the outer cookbook-body / modal-content (which moves the header
+    // out of view) OR the nested hwfit results list (which doesn't
+    // move the header but signals the user is now focused on results).
+    // Doesn't auto-unfold; chevron ▸ still expands manually.
+    const _maybeFold = () => {
       if (dlFoldBody.style.display === 'none') return;
       _setFolded(true, /* persist */ false);
-    }, { threshold: 0 });
-    _io.observe(dlFold);
+    };
+    // Catch every scroll event anywhere inside the cookbook modal
+    // (capture phase so even non-bubbling scrolls on nested scrollers
+    // like .hwfit-list hit us).
+    const _modal = dlFold.closest('#cookbook-modal') || document;
+    let _lastY = 0;
+    _modal.addEventListener('scroll', (e) => {
+      // Only fold on scroll DOWN — ignore upward / horizontal scrolls.
+      const tgt = e.target;
+      const y = (tgt && typeof tgt.scrollTop === 'number') ? tgt.scrollTop : 0;
+      if (y > _lastY) _maybeFold();
+      _lastY = y;
+    }, true);
   }
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
