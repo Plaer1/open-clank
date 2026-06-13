@@ -247,8 +247,10 @@ function _detectModelOptimizations(modelName) {
     opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE optimizations: expert parallel');
   }
-  // DeepSeek MoE
-  else if (n.includes('deepseek') && (n.includes('v3') || n.includes('r1'))) {
+  // DeepSeek MoE — V3 / V3.1 / V4 (and future Vx), R1 / R2 reasoning.
+  // Anything v-{integer} or r-{integer} family from DeepSeek is MoE in
+  // current architectures.
+  else if (n.includes('deepseek') && /\b(v[3-9]|v\d{2,}|r[1-9])\b/.test(n)) {
     opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE expert parallel for DeepSeek');
   }
@@ -268,7 +270,7 @@ function _detectModelOptimizations(modelName) {
   if (n.includes('qwen3-next') || (n.includes('qwen3.5') && (n.includes('a10b') || n.includes('a22b')))) {
     specDefault = { method: 'qwen3_next_mtp', tokens: 2 };
   } else if (
-    (n.includes('deepseek') && (n.includes('v3') || n.includes('v3.1') || n.includes('r1'))) ||
+    (n.includes('deepseek') && /\b(v[3-9]|v\d{2,}|r[1-9])\b/.test(n)) ||
     n.includes('kimi-k2') || n.includes('kimi_k2') ||
     n.includes('glm-4.5') || n.includes('glm4.5') ||
     n.includes('minimax-m1') || n.includes('minimax_m1')
