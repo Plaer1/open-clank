@@ -12407,7 +12407,7 @@ textarea.memory-add-input {
   background: none;
   border: none;
   color: var(--fg);
-  opacity: 0.35;
+  opacity: 0.85;
   padding: 4px 7px;
   font-family: inherit;
   font-size: 11px;
@@ -12420,6 +12420,11 @@ textarea.memory-add-input {
   align-items: center;
   justify-content: center;
 }
+/* Some toolbar buttons baked in svg{opacity:0.7} via inline styles, which
+   compounded with the button's own opacity to look almost invisible.
+   Force the inline svg opacity back to 1 inside the toolbar — the button
+   wrapper's 0.85 is the only fade we need. */
+.doc-md-toolbar button svg[style*="opacity"] { opacity: 1 !important; }
 .doc-md-toolbar button:hover {
   opacity: 1;
 }
@@ -19113,6 +19118,16 @@ body.gallery-selecting .gallery-dl-btn,
   opacity: 0.8;
   border-color: var(--accent, var(--red));
   color: var(--accent, var(--red));
+}
+/* In the Trending models list the HF pill is the row's main affordance —
+   tint it accent so it stands out next to the model name. */
+#cookbook-hf-latest-list .cookbook-hf-link {
+  color: var(--accent, var(--red));
+  opacity: 0.85;
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 30%, transparent);
+}
+#cookbook-hf-latest-list .cookbook-hf-link:hover {
+  opacity: 1;
 }
 
 /* Running tab sections */
