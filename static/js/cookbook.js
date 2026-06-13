@@ -1403,16 +1403,34 @@ function _wireTabEvents(body) {
   const dlFoldBody = document.getElementById('cookbook-dl-tab-fold-body');
   const dlFoldChevron = document.getElementById('cookbook-dl-tab-chevron');
   if (dlFold && dlFoldBody && dlFoldChevron) {
+    const _setFolded = (folded, persist = true) => {
+      dlFoldBody.style.display = folded ? 'none' : '';
+      dlFoldChevron.textContent = folded ? '▸' : '▾';
+      dlFold.classList.toggle('is-folded', folded);
+      if (persist) {
+        try { localStorage.setItem('cookbook_dl_tab_folded_v1', folded ? '1' : '0'); } catch {}
+      }
+    };
     dlFold.addEventListener('click', () => {
       const folded = dlFoldBody.style.display === 'none';
-      dlFoldBody.style.display = folded ? '' : 'none';
-      dlFoldChevron.textContent = folded ? '▾' : '▸';
-      // Toggle is-folded class on the h2 so the line under it only shows when
-      // the section is collapsed (the body's content normally provides
-      // separation; with no body visible, the line gives the h2 definition).
-      dlFold.classList.toggle('is-folded', !folded);
-      try { localStorage.setItem('cookbook_dl_tab_folded_v1', folded ? '0' : '1'); } catch {}
+      _setFolded(!folded);
     });
+    // Auto-fold when the user scrolls past the Direct Download header.
+    // Watches the header element: once its bottom edge passes above the
+    // scroll container's top, fold the body so the scan section below has
+    // the full viewport. Doesn't auto-unfold (user can click ▸ to expand).
+    const _scrollHost = dlFold.closest('.modal-body, .cookbook-content, .doclib-modal-content') || document.scrollingElement || document.body;
+    let _autoFolded = false;
+    const _onScroll = () => {
+      if (dlFoldBody.style.display === 'none') return;
+      const r = dlFold.getBoundingClientRect();
+      const top = (_scrollHost && _scrollHost.getBoundingClientRect) ? _scrollHost.getBoundingClientRect().top : 0;
+      if (r.bottom < top + 4) {
+        _autoFolded = true;
+        _setFolded(true, /* persist */ false);
+      }
+    };
+    _scrollHost.addEventListener('scroll', _onScroll, { passive: true });
   }
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
