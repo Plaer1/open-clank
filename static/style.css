@@ -30112,7 +30112,7 @@ body.doc-find-active mark.doc-find-mark.current {
 }
 /* X close button inside Cc / Bcc fields. */
 .email-field .email-cc-close {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: 6px; top: calc(50% + 4px); transform: translateY(-50%);
   background: none; border: none; color: var(--fg);
   opacity: 0.4; cursor: pointer;
   width: 22px; height: 22px;
@@ -35157,8 +35157,7 @@ button.cal-view-btn {
   top: 50%;
   transform: translateY(-50%);
   pointer-events: none;
-  opacity: 0.45;
-  color: var(--fg);
+  color: var(--accent, var(--red));
 }
 .cal-day-search-meta { font-size:10px; opacity:0.5; margin:0 2px 6px; }
 .cal-search-results { display:flex; flex-direction:column; gap:4px; }
