@@ -91,7 +91,18 @@ export async function loadSkills(cascade = false) {
   try {
     const res = await fetch(`${API}/api/skills`);
     const data = await res.json();
-    skills = data.skills || [];
+    // Dedupe by name (case-insensitive) — the API has occasionally
+    // returned the same skill twice (built-in shadow + user copy, or
+    // a write-then-read race), and rendering both made the duplicate
+    // detector mark BOTH entries as the "recommended" keeper.
+    const _seen = new Set();
+    skills = (data.skills || []).filter(sk => {
+      const k = String(sk?.name || sk?.id || '').toLowerCase();
+      if (!k) return true;
+      if (_seen.has(k)) return false;
+      _seen.add(k);
+      return true;
+    });
     _loadSkillApprovalThreshold();
     // Built-in capabilities are no longer surfaced in the Skills menu.
     loaded = true;
@@ -392,21 +403,11 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   };
   if (isPublished) mk(_ICON.unpublish, 'Unpublish', {}, () => _setSkillStatus(name, 'draft'));
   else mk(_ICON.approve, 'Publish', {}, () => _setSkillStatus(name, 'published'));
-  mk(_ICON.edit, 'Edit', {}, async () => {
-    if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
-    _toggleSkillEdit(card, name);
-  });
-  mk(_ICON.test, 'Test', {}, () => _testSkill(card, name));
-  // Audit kicks off the bulk audit-all loop (test → judge → fix → retry → demote).
-  // Starts at the top of the list and walks down.
-  mk(_ICON.test, 'Audit', {}, () => _auditAllSkills());
-  mk(_ICON.del, 'Delete', { danger: true }, () => _deleteSkill(name, card));
-
-  // Select — enters bulk-select mode and pre-selects this skill. Same pattern
-  // as the email/documents/brain Select item, with the email bullet icon.
+  // Select — moved up to 2nd so it sits next to Publish/Unpublish
+  // (bulk actions cluster at the top of the menu).
   const selItem = document.createElement('button');
   selItem.className = 'skill-kebab-item';
-  selItem.innerHTML = '<span style="display:inline-flex;width:14px;height:14px;align-items:center;justify-content:center;"><span style="font-size:16px;line-height:1;">●</span></span><span>Select</span>';
+  selItem.innerHTML = '<svg class="memory-select-btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg><span>Select</span>';
   selItem.addEventListener('click', (e) => {
     e.stopPropagation();
     menu.remove();
@@ -415,6 +416,15 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
     renderSkillsList();
   });
   menu.appendChild(selItem);
+
+  mk(_ICON.edit, 'Edit', {}, async () => {
+    if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
+    _toggleSkillEdit(card, name);
+  });
+  mk(_ICON.test, 'Test', {}, () => _testSkill(card, name));
+  // Audit kicks off the bulk audit-all loop (test → judge → fix → retry → demote).
+  mk(_ICON.test, 'Audit', {}, () => _auditAllSkills());
+  mk(_ICON.del, 'Delete', { danger: true }, () => _deleteSkill(name, card));
 
   // Mobile-only Cancel — mirrors the email/documents/brain popup pattern.
   // CSS hides `.dropdown-cancel-mobile` on desktop where outside-click
