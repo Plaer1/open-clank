@@ -159,8 +159,17 @@ export function _renderGpuToggles(system) {
   // visual highlight. Before this, _activeCount stayed undefined → no
   // gpu_count param sent → backend's fallback could rank against RAM on
   // mixed-resource boxes ("tightest" sorted by RAM instead of GPU).
-  if (container._activeCount === undefined && validCounts.length) {
-    container._activeCount = maxGpu;
+  //
+  // On boxes where total RAM > total VRAM, default to RAM (count=0) instead
+  // — RAM is the dominant pool so it's the better starting filter.
+  if (container._activeCount === undefined) {
+    const ramGb = Number(system.total_ram_gb) || 0;
+    const vramGb = Number(system.gpu_vram_gb) || 0;
+    if (ramGb > vramGb) {
+      container._activeCount = 0;
+    } else if (validCounts.length) {
+      container._activeCount = maxGpu;
+    }
   }
   html += '<button class="hwfit-gpu-btn" data-count="0" title="CPU / RAM only">RAM</button>';
   const hasExplicitCount = typeof container._activeCount === 'number';
@@ -363,7 +372,7 @@ function _scanSig() {
     hk: _currentServerValue(),
     u: document.getElementById('hwfit-usecase')?.value || '',
     s: document.getElementById('hwfit-search')?.value?.trim() || '',
-    o: sortEl?.value || 'score',
+    o: sortEl?.value || 'newest',
     r: sortEl?.dataset.reverse === '1' ? 1 : 0,
     q: document.getElementById('hwfit-quant')?.value || '',
     c: _ctxValue(),
@@ -582,7 +591,7 @@ export async function _hwfitFetch(fresh = false) {
       }).catch(() => {});
   }
   try {
-    const sortBy = document.getElementById('hwfit-sort')?.value || 'score';
+    const sortBy = document.getElementById('hwfit-sort')?.value || 'newest';
     const quantPref = document.getElementById('hwfit-quant')?.value || '';
     const targetCtx = _ctxValue();
     // Get active GPU count from toggles
@@ -710,7 +719,7 @@ export async function _hwfitFetch(fresh = false) {
     // 1st click on a column = highest first; clicking it again = lowest first.
     if (!isImageMode) {
       const sortSel = document.getElementById('hwfit-sort');
-      const sortKey = sortSel?.value || 'score';
+      const sortKey = sortSel?.value || 'newest';
       const asc = sortSel?.dataset.reverse === '1';   // reversed → ascending (lowest first)
       if (sortKey === 'fit') {
         // fit_level is categorical (perfect→good→marginal→too_tight), not numeric,
@@ -722,6 +731,18 @@ export async function _hwfitFetch(fresh = false) {
           if (ar !== br) return asc ? ar - br : br - ar;
           const as = Number(a.score) || 0, bs = Number(b.score) || 0;
           return asc ? as - bs : bs - as;
+        });
+      } else if (sortKey === 'newest') {
+        // release_date is an ISO-ish "YYYY-MM-DD" string — lexical sort is
+        // chronological. Default direction: newest first (reverse=undefined).
+        data.models.sort((a, b) => {
+          const ad = String(a.release_date || ''), bd = String(b.release_date || '');
+          if (ad === bd) return 0;
+          // Empty dates land last regardless of direction so the column never
+          // floats undated rows above real releases.
+          if (!ad) return 1;
+          if (!bd) return -1;
+          return asc ? (ad < bd ? -1 : 1) : (ad < bd ? 1 : -1);
         });
       } else {
         const field = { score: 'score', vram: 'required_gb', speed: 'speed_tps', params: 'params_b', context: 'context' }[sortKey] || 'score';
@@ -968,7 +989,7 @@ function _modeLabel(model) {
 
 export const _hwfitColumns = [
   { key: 'fit', label: 'Fit',    cls: 'hwfit-fit' },
-  { key: null,    label: 'Model',  cls: 'hwfit-name' },
+  { key: 'newest', label: 'Model (latest)',  cls: 'hwfit-name' },
   { key: 'params',label: 'Param', cls: 'hwfit-c-params' },
   { key: null,    label: 'Quant',  cls: 'hwfit-c-quant' },
   { key: 'vram',  label: 'VRAM',   cls: 'hwfit-c-vram' },
@@ -998,7 +1019,7 @@ export function _hwfitRenderList(el, models) {
     return;
   }
   const sortSel = document.getElementById('hwfit-sort');
-  const currentSort = sortSel?.value || 'score';
+  const currentSort = sortSel?.value || 'newest';
   const isReversed = sortSel?.dataset.reverse === '1';
   // Active budget for the Fit column label \u2014 make it obvious whether the
   // ranking is against GPU or RAM so "tightest" can't be ambiguous on a
@@ -1026,6 +1047,13 @@ export function _hwfitRenderList(el, models) {
       label = `<span class="hwfit-fit-dot${_fitOnly ? ' active' : ''}" title="${_fitOnly ? 'Showing only models that fit. Click to also show too-tight rows.' : 'Click to show only models that fit your hardware.'}" data-fit-dot>●</span>${col.label}`;
       // (Budget tag removed — the GPU/RAM/N-GPU suffix next to "Fit" was noise;
       // the toggle row already shows which budget is active.)
+    }
+    // The Model column's "(newest)" / "(oldest)" suffix flips with the sort
+    // direction so the user can see at a glance which way they're sorted.
+    if (col.key === 'newest' && col.key === currentSort) {
+      label = isReversed ? 'Model (oldest)' : 'Model (latest)';
+    } else if (col.key === 'newest') {
+      label = 'Model (latest)';
     }
     html += `<span class="hwfit-col ${col.cls}${sortable}${active}"${dataAttr}>${label}${arrow}</span>`;
   }
