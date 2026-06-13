@@ -628,18 +628,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
       }
       let _userMsgEl = null;
-      // Capture which mode the user picked at send time so the message
-      // header can show "Chat" or "Agent" next to the timestamp.
-      // toggleState is declared later in this function — load fresh here.
-      let _sendMode = 'chat';
-      try {
-        const _ts = Storage.loadToggleState();
-        if ((_ts.mode || 'chat') === 'agent') _sendMode = 'agent';
-      } catch (_) {}
       if (!skipBubble) {
-        const _userMeta = { mode: _sendMode };
-        if (_pendingAttachInfo) _userMeta.attachments = _pendingAttachInfo;
-        _userMsgEl = addMessage('user', userDisplay, null, _userMeta);
+        _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
       }
       messageInput.value = '';
       messageInput.style.height = '';
@@ -3433,13 +3423,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (holder.parentNode) holder.remove();
       const model = meta && meta.model;
       const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
-      // Carry the send-time mode through so the assistant header gets
-      // the same Chat/Agent tag next to its timestamp. toggleState
-      // isn't in scope here — read fresh.
-      try {
-        const _ts = Storage.loadToggleState();
-        meta_.mode = ((_ts.mode || 'chat') === 'agent') ? 'agent' : 'chat';
-      } catch (_) {}
       chatRenderer.addMessage('assistant', roundText, model, meta_);
       uiModule.scrollHistory();
       return true;

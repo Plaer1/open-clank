@@ -832,10 +832,8 @@ export function updateSessionCostUI() {
 
 /** Create a timestamp span for role labels.
  * Pass an ISO string / Date / epoch-ms to render the message's own time
- * (used when replaying history). Falls back to "now" when no value is given.
- * Optionally pass `mode` ('chat' | 'agent') to append a small badge so the
- * reader can tell at a glance which path the message went through. */
-export function roleTimestamp(when, mode) {
+ * (used when replaying history). Falls back to "now" when no value is given. */
+export function roleTimestamp(when) {
   const ts = document.createElement('span');
   ts.className = 'role-timestamp';
   let d;
@@ -846,12 +844,6 @@ export function roleTimestamp(when, mode) {
   if (isNaN(d.getTime())) d = new Date();
   ts.textContent = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
   ts.title = d.toLocaleString();
-  if (mode === 'agent' || mode === 'chat') {
-    const tag = document.createElement('span');
-    tag.className = 'role-mode-tag role-mode-' + mode;
-    tag.textContent = mode === 'agent' ? 'Agent' : 'Chat';
-    ts.appendChild(tag);
-  }
   return ts;
 }
 
@@ -2013,7 +2005,7 @@ export function addMessage(role, content, modelName, metadata) {
             roleEl.title = pair.requestedModel + ' -> ' + contModel;
           }
           applyModelColor(roleEl, contModel);
-          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp, metadata?.mode));
+          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
           body.className = 'body';
@@ -2173,7 +2165,7 @@ export function addMessage(role, content, modelName, metadata) {
         r.title = replyModels.requestedModel + ' -> ' + resolvedModel;
       }
       if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
-      r.appendChild(roleTimestamp(metadata?.timestamp, metadata?.mode));
+      r.appendChild(roleTimestamp(metadata?.timestamp));
     }
 
     const b = document.createElement('div');
@@ -2418,7 +2410,7 @@ export function addMessage(role, content, modelName, metadata) {
       if (metadata) displayMetrics(wrap, metadata);
     } else {
       // Add timestamp to user header (like AI messages)
-      r.appendChild(roleTimestamp(metadata?.timestamp, metadata?.mode));
+      r.appendChild(roleTimestamp(metadata?.timestamp));
 
       wrap.appendChild(createUserMsgFooter(wrap));
     }
