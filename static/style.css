@@ -19139,6 +19139,14 @@ body.gallery-selecting .gallery-dl-btn,
   margin-bottom: 6px;
   overflow: hidden;
 }
+/* Divider between server-group sections in the Active tab so the
+   transition between e.g. local + remote-host server blocks reads
+   visually instead of running into each other. */
+.cookbook-group[data-backend-group="Running"] > [class*="cookbook-server-section-"] + [class*="cookbook-server-section-"] {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
 .cookbook-section-header {
   display: flex;
   align-items: center;
@@ -19577,7 +19585,7 @@ body.gallery-selecting .gallery-dl-btn,
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
-  font-size: 12px;  /* match .cookbook-field-input so Context reads same size as Engine/Quant */
+  font-size: 11px;  /* slightly smaller than .cookbook-field-input so Context reads quieter next to Engine/Quant */
 }
 .hwfit-ctx-control span {
   /* Match Quant/Engine select label style: no uppercase, no letter-spacing. */
@@ -21417,7 +21425,8 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-toolbar input:focus { outline: none; border-color: var(--red); }
 .hwfit-toolbar .hwfit-server-select { min-width: 70px; flex-shrink: 0; }
 .hwfit-toolbar .hwfit-usecase { min-width: 70px; flex-shrink: 0; }
-.hwfit-toolbar .hwfit-quant { min-width: 50px; flex-shrink: 0; }
+.hwfit-toolbar .hwfit-quant { min-width: 0; width: 78px; flex-shrink: 0; font-size: 10px; }
+.hwfit-toolbar .hwfit-engine { min-width: 0; width: 86px; flex-shrink: 0; font-size: 10px; }
 .hwfit-toolbar .hwfit-search { flex: 1; min-width: 80px; }
 /* Lower-opacity "Search models..." placeholder so it reads as a hint, not
    a label — matches the muted form-field feel of the inline filters. */
