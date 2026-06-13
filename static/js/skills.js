@@ -1591,13 +1591,16 @@ function _renderAuditPanel(panel, st) {
 
 // ---- Select mode / bulk actions ----
 
+const _SKILLS_SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
+const _SKILLS_SELECT_BTN_X_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
 function _enterSelectMode() {
   _selectMode = true;
   _selectedNames.clear();
   const bar = document.getElementById('skills-bulk-bar');
   const btn = document.getElementById('skills-select-btn');
   if (bar) bar.classList.remove('hidden');
-  if (btn) { btn.classList.add('active'); btn.textContent = 'Cancel'; }
+  if (btn) { btn.classList.add('active'); btn.innerHTML = _SKILLS_SELECT_BTN_X_SVG + 'Cancel'; }
   _updateBulkBar();
   renderSkillsList();
 }
@@ -1609,7 +1612,7 @@ function _exitSelectMode() {
   const btn = document.getElementById('skills-select-btn');
   const all = document.getElementById('skills-select-all');
   if (bar) bar.classList.add('hidden');
-  if (btn) { btn.classList.remove('active'); btn.textContent = 'Select'; }
+  if (btn) { btn.classList.remove('active'); btn.innerHTML = _SKILLS_SELECT_BTN_DOT_SVG + 'Select'; }
   if (all) all.checked = false;
   renderSkillsList();
 }
