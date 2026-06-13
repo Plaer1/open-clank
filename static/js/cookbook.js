@@ -1415,26 +1415,30 @@ function _wireTabEvents(body) {
       const folded = dlFoldBody.style.display === 'none';
       _setFolded(!folded);
     });
-    // Auto-fold when the user scrolls inside any scroll container —
-    // the outer cookbook-body / modal-content (which moves the header
-    // out of view) OR the nested hwfit results list (which doesn't
-    // move the header but signals the user is now focused on results).
-    // Doesn't auto-unfold; chevron ▸ still expands manually.
+    // Auto-fold on any downward scroll inside the cookbook modal,
+    // and auto-expand when the user scrolls all the way back to the
+    // top of whichever scroller they're in. The chevron ▸ still
+    // toggles manually.
     const _maybeFold = () => {
       if (dlFoldBody.style.display === 'none') return;
       _setFolded(true, /* persist */ false);
     };
-    // Catch every scroll event anywhere inside the cookbook modal
-    // (capture phase so even non-bubbling scrolls on nested scrollers
-    // like .hwfit-list hit us).
+    const _maybeExpand = () => {
+      if (dlFoldBody.style.display !== 'none') return;
+      _setFolded(false, /* persist */ false);
+    };
+    // Capture phase so scrolls on nested scrollers (.hwfit-list,
+    // .cookbook-body, .modal-content) all hit us.
     const _modal = dlFold.closest('#cookbook-modal') || document;
-    let _lastY = 0;
+    const _lastY = new WeakMap();
     _modal.addEventListener('scroll', (e) => {
-      // Only fold on scroll DOWN — ignore upward / horizontal scrolls.
       const tgt = e.target;
-      const y = (tgt && typeof tgt.scrollTop === 'number') ? tgt.scrollTop : 0;
-      if (y > _lastY) _maybeFold();
-      _lastY = y;
+      if (!tgt || typeof tgt.scrollTop !== 'number') return;
+      const y = tgt.scrollTop;
+      const prev = _lastY.get(tgt) || 0;
+      if (y > prev) _maybeFold();
+      else if (y <= 0) _maybeExpand();
+      _lastY.set(tgt, y);
     }, true);
   }
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
@@ -1862,13 +1866,13 @@ function _renderRecipes() {
   // Latest HF models that fit — collapsible card list
   html += `<div style="margin-top:5px;position:relative;top:-11px;">`;
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
-  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:34px;font-size:13px;display:flex;align-items:center;gap:8px;border-radius:5px;">`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:28px;font-size:11px;display:flex;align-items:center;gap:6px;border-radius:5px;">`;
   // Trending-up icon (accent) so the section reads as "what's hot".
-  html += `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;pointer-events:none;"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`;
+  html += `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;pointer-events:none;"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`;
   html += `<span style="pointer-events:none;flex:1;">Trending models that fit your hardware</span>`;
   // Chevron moved to the RIGHT \u2014 collapsed = pointing right, expanded
   // = rotated 90deg into a down chevron (handled by existing toggle CSS).
-  html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;opacity:0.6;font-size:14px;">\u25B8</span>`;
+  html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;opacity:0.6;font-size:11px;">\u25B8</span>`;
   html += `</button>`;
   html += `</div>`;
   html += `<div id="cookbook-hf-latest-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
