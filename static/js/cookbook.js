@@ -233,22 +233,33 @@ function _detectModelOptimizations(modelName) {
   const n = (modelName || '').toLowerCase();
   const opts = { envVars: [], flags: [], tips: [] };
 
-  // Qwen3.5 MoE models
+  // Qwen3.5 MoE models — MoE-specific env vars + expert-parallel.
+  // The --reasoning-parser flag is added uniformly below via
+  // _detectReasoningParser, no longer hardcoded here.
   if (n.includes('qwen3.5') || n.includes('qwen3-') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1', 'VLLM_USE_FLASHINFER_SAMPLER=0', 'OMP_NUM_THREADS=4');
-    opts.flags.push('--enable-expert-parallel', '--reasoning-parser qwen3');
+    opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE optimizations: expert parallel + flashinfer MoE kernels');
   }
   // Qwen3 MoE (non-3.5)
   else if (n.includes('qwen3') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1');
-    opts.flags.push('--enable-expert-parallel', '--reasoning-parser qwen3');
+    opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE optimizations: expert parallel');
   }
   // DeepSeek MoE
   else if (n.includes('deepseek') && (n.includes('v3') || n.includes('r1'))) {
     opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE expert parallel for DeepSeek');
+  }
+  // Reasoning parser — applies independently of MoE detection. Without this
+  // flag, models like MiniMax-M2.x, DeepSeek-R1, Qwen3 reasoning, GLM-4.x,
+  // gpt-oss leak <think> blocks as plain text instead of separating them
+  // into the reasoning_content channel.
+  const _reasoningParser = _detectReasoningParser(modelName);
+  if (_reasoningParser) {
+    opts.flags.push(`--reasoning-parser ${_reasoningParser}`);
+    opts.tips.push(`Reasoning parser (${_reasoningParser}): splits <think> tokens into a separate channel`);
   }
   // Speculative decoding — pick the right MTP method per model family.
   // opts.spec.{method,tokens} seed the UI dropdown/input; the actual flag is
@@ -271,6 +282,36 @@ function _detectModelOptimizations(modelName) {
   }
 
   return opts;
+}
+
+/** Detect the right vLLM --reasoning-parser based on model name.
+ *  Returns the parser slug (matches vLLM's official list) or null when the
+ *  model isn't a reasoning model. Without the right parser, thinking tokens
+ *  leak as plain text instead of being split into a separate channel.
+ *  Source: vllm/reasoning/__init__.py registered parsers.
+ */
+export function _detectReasoningParser(modelName) {
+  const n = (modelName || '').toLowerCase();
+  // MiniMax M2 / M2.5 / M2.7 — released with a dedicated parser. Catch M2
+  // before plain "minimax" so M2.x doesn't fall through to a wrong parser.
+  if (n.includes('minimax') && n.match(/\bm2(?:\.\d)?\b/)) return 'minimax_m2';
+  // DeepSeek-R1 / V3-Thinking / V3.1-Thinking variants. Bare V3/V3.1 (non-
+  // thinking) skip this — they're not reasoning models.
+  if (n.includes('deepseek') && (n.includes('r1') || n.includes('thinking'))) return 'deepseek_r1';
+  // Qwen3 / Qwen3.5 reasoning models. Qwen3-Coder + Qwen3-Instruct don't
+  // emit <think> blocks, so skip the parser there.
+  if (n.includes('qwen3') && !n.includes('coder') && !n.includes('instruct')) return 'qwen3';
+  // GLM-4 / GLM-4.5 / GLM-4.6 with reasoning.
+  if (n.includes('glm-4') || n.includes('glm-5')) return 'glm45';
+  // OpenAI gpt-oss family.
+  if (n.includes('gpt-oss')) return 'gpt_oss';
+  // Hunyuan A13B reasoning.
+  if (n.includes('hunyuan') && n.includes('a13b')) return 'hunyuan_a13b';
+  // IBM Granite reasoning.
+  if (n.includes('granite') && (n.includes('reason') || n.includes('think'))) return 'granite';
+  // InternLM reasoning.
+  if (n.includes('internlm')) return 'internlm';
+  return null;
 }
 
 /** Detect the right vLLM tool-call-parser based on model name.
@@ -1436,6 +1477,10 @@ function _wireTabEvents(body) {
     _modal.addEventListener('scroll', (e) => {
       const tgt = e.target;
       if (!tgt || typeof tgt.scrollTop !== 'number') return;
+      // Ignore scrolls that originate INSIDE the Direct Download body
+      // (e.g. the Trending models list) — those are local to the
+      // section and shouldn't auto-fold the section that owns them.
+      if (dlFoldBody.contains && (tgt === dlFoldBody || dlFoldBody.contains(tgt))) return;
       const y = tgt.scrollTop;
       const prev = _lastY.get(tgt) || 0;
       if (y > prev) _maybeFold();
