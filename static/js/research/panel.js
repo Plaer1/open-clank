@@ -805,22 +805,26 @@ function _renderJobs() {
     });
     const body = document.createElement('div');
     body.className = 'research-section-body';
-    // Hint inside the "Past research" header (second line, styled like the main
-    // Research description) — past research is kept in the Library's Research tab.
+    // Past Research header: link goes INLINE next to the title instead
+    // of on a second row. Append it to the title span as a small chip.
     if (key === 'past') {
-      const hint = document.createElement('div');
-      hint.className = 'memory-desc doclib-desc research-library-hint';
-      hint.innerHTML = 'All past research found in <button type="button" class="research-library-link">Library, Research</button>';
-      hint.querySelector('.research-library-link').addEventListener('click', (e) => {
-        e.stopPropagation();
-        // Close the research panel first so the Library opens ABOVE it on mobile
-        // (otherwise it stacks under the full-screen panel).
-        closePanel();
-        if (window.documentModule && window.documentModule.openLibrary) {
-          window.documentModule.openLibrary({ tab: 'research' });
-        }
-      });
-      header.appendChild(hint);
+      const titleEl = header.querySelector('.research-section-title');
+      if (titleEl) {
+        const hint = document.createElement('span');
+        hint.className = 'research-library-hint research-library-hint-inline';
+        hint.style.cssText = 'margin-left:8px;font-size:10.5px;opacity:0.65;font-weight:normal;';
+        hint.innerHTML = '— all in <button type="button" class="research-library-link" style="background:none;border:none;padding:0;font:inherit;color:var(--accent, var(--red));cursor:pointer;text-decoration:underline;">Library, Research</button>';
+        hint.querySelector('.research-library-link').addEventListener('click', (e) => {
+          e.stopPropagation();
+          // Close the research panel first so the Library opens ABOVE it on mobile
+          // (otherwise it stacks under the full-screen panel).
+          closePanel();
+          if (window.documentModule && window.documentModule.openLibrary) {
+            window.documentModule.openLibrary({ tab: 'research' });
+          }
+        });
+        titleEl.appendChild(hint);
+      }
     }
     arr.forEach(j => body.appendChild(_buildJobCard(j)));
     sec.appendChild(header);
