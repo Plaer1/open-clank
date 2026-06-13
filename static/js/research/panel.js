@@ -69,13 +69,12 @@ try { _settingsCollapsed = localStorage.getItem(_COLLAPSE_KEY) === '1'; } catch 
 
 function _saveSettingsToStorage() {
   try {
-    const activeCat = document.querySelector('.research-cat.active');
     localStorage.setItem(_SETTINGS_KEY, JSON.stringify({
       max_rounds: document.getElementById('research-rounds')?.value || '0',
       search_provider: document.getElementById('research-search-provider')?.value || '',
       endpoint_id: document.getElementById('research-endpoint')?.value || '',
       model: document.getElementById('research-model')?.value || '',
-      category: activeCat?.dataset.cat || '',
+      category: document.getElementById('research-category')?.value || '',
     }));
   } catch {}
 }
@@ -374,13 +373,6 @@ function _buildPanelHTML() {
           <span id="research-no-past-hint" style="display:none;font-size:11px;opacity:0.7;position:relative;top:-4px;">— past runs in <button type="button" class="research-library-link" style="background:none;border:none;padding:0;font:inherit;color:var(--accent, var(--red));cursor:pointer;text-decoration:underline;">Library, Research</button></span>
         </p>
         <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
-        <div class="research-category-row" id="research-category-row">
-          <button class="research-cat active" data-cat="" title="LLM auto-detects the best format">Auto</button>
-          <button class="research-cat" data-cat="product">Product</button>
-          <button class="research-cat" data-cat="comparison">Compare</button>
-          <button class="research-cat" data-cat="howto">How-to</button>
-          <button class="research-cat" data-cat="factcheck">Fact-check</button>
-        </div>
         <button id="research-settings-toggle" class="research-settings-toggle${chevronCls}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings<span class="research-settings-chevron">${_chevronIcon}</span>
         </button>
@@ -388,6 +380,16 @@ function _buildPanelHTML() {
           <label class="research-setting">
             <span class="research-setting-label">Rounds <span class="hwfit-help-chip hwfit-help-chip-inline" title="How many search → read → reflect rounds the agent runs. More rounds = deeper coverage, longer wait, more tokens.">?</span></span>
             <select id="research-rounds">${roundOpts}</select>
+          </label>
+          <label class="research-setting">
+            <span class="research-setting-label">Format <span class="hwfit-help-chip hwfit-help-chip-inline" title="Auto lets the LLM pick the output shape. Override when you specifically want a Compare table, How-to, Product, or Fact-check.">?</span></span>
+            <select id="research-category">
+              <option value="" selected>Auto</option>
+              <option value="product">Product</option>
+              <option value="comparison">Compare</option>
+              <option value="howto">How-to</option>
+              <option value="factcheck">Fact-check</option>
+            </select>
           </label>
           <label class="research-setting">
             <span class="research-setting-label">Search engine</span>
@@ -437,8 +439,8 @@ function _dismissKeyboard(input) {
 
 /** Reset the category selector back to "Auto" (called after each start). */
 function _resetCategoryToAuto() {
-  document.querySelectorAll('.research-cat').forEach(b =>
-    b.classList.toggle('active', (b.dataset.cat || '') === ''));
+  const sel = document.getElementById('research-category');
+  if (sel) sel.value = '';
 }
 
 function _wireEvents(pane) {
@@ -451,13 +453,6 @@ function _wireEvents(pane) {
   });
   pane.querySelector('#research-start-btn').addEventListener('click', _handleStart);
   pane.querySelector('#research-add-btn').addEventListener('click', _handleAdd);
-
-  pane.querySelectorAll('.research-cat').forEach(btn => {
-    btn.addEventListener('click', () => {
-      pane.querySelectorAll('.research-cat').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-    });
-  });
 
   pane.querySelector('#research-settings-toggle').addEventListener('click', () => {
     const body = document.getElementById('research-settings-body');
@@ -484,8 +479,7 @@ function _wireEvents(pane) {
 }
 
 function _readSettings() {
-  const activeCat = document.querySelector('.research-cat.active');
-  const category = activeCat?.dataset.cat || undefined;
+  const category = document.getElementById('research-category')?.value || undefined;
   const settings = {
     max_rounds: parseInt(document.getElementById('research-rounds')?.value || '0', 10),
     search_provider: document.getElementById('research-search-provider')?.value || undefined,
@@ -524,9 +518,8 @@ function _editJob(job) {
   }
   // Restore category
   const cat = job.category || '';
-  document.querySelectorAll('.research-cat').forEach(b => {
-    b.classList.toggle('active', b.dataset.cat === cat);
-  });
+  const catSel = document.getElementById('research-category');
+  if (catSel) catSel.value = cat;
   // Restore settings
   const s = job.settings || {};
   const roundsEl = document.getElementById('research-rounds');
@@ -613,9 +606,8 @@ function _restoreSavedSettings() {
   const saved = _loadSettingsFromStorage();
   if (!saved) return;
   if (saved.category !== undefined) {
-    document.querySelectorAll('.research-cat').forEach(b => {
-      b.classList.toggle('active', b.dataset.cat === saved.category);
-    });
+    const catSel = document.getElementById('research-category');
+    if (catSel) catSel.value = saved.category;
   }
   // Rounds intentionally defaults to "Auto" on every open — don't restore.
   // Users can pick a specific cap each time if needed.
