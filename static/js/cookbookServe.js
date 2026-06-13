@@ -573,11 +573,16 @@ function _rerenderCachedModels() {
         ? `${_modelPresets.length} saved launch config${_modelPresets.length === 1 ? '' : 's'} for ${_repoShort} — click ▾ to load or delete`
         : `No saved launch configs for ${_repoShort} yet — click Save to add one`;
       let _slotsHtml = `<div class="cookbook-serve-slots cookbook-saved-split">`
-        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current config"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>`
+        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current config"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Settings</button>`
         + `<button type="button" class="cookbook-slot-btn cookbook-saved-arrow" title="${esc(_arrowTitle)}">${_arrowLabel}</button>`
         + `</div>`;
 
       let panelHtml = `<div class="hwfit-serve-panel">`;
+      // Runtime-readiness note pinned at the top of the serve area so the
+      // user sees "vLLM ready on …" before scrolling into the configure
+      // form. Hidden until the readiness probe returns. The × button
+      // dismisses it for this panel only (re-shows on re-expand).
+      panelHtml += `<div class="hwfit-serve-runtime-note" style="display:none;font-size:11px;line-height:1.35;color:var(--fg-muted);margin:0 0 8px;padding:6px 28px 6px 10px;border-radius:5px;background:color-mix(in srgb, var(--fg) 4%, transparent);border:1px solid color-mix(in srgb, var(--border) 60%, transparent);position:relative;"><span class="hwfit-serve-runtime-text"></span><button type="button" class="hwfit-serve-runtime-close" title="Dismiss" aria-label="Dismiss" style="position:absolute;top:-8px;right:5px;background:none;border:0;color:inherit;cursor:pointer;padding:2px 4px;line-height:1;font-size:13px;opacity:0.6;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>`;
       // Warn when serving a model whose download hasn't fully completed —
       // the user CAN still hit Launch (vLLM/llama-server will start, then
       // crash trying to read missing shards), but they should know.
@@ -596,7 +601,13 @@ function _rerenderCachedModels() {
         ? [['llamacpp','llama.cpp'],['ollama','Ollama']]
         : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
-      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
+      // Custom Backend picker — native <select> can't host SVG inside
+      // options, so we render a button + menu that show the backend logo
+      // beside its name. The hidden <select.hwfit-sf data-field="backend">
+      // stays as the source-of-truth so every existing change handler
+      // (updateBackendVisibility, runtime readiness, command builder)
+      // still fires via dispatchEvent('change') on selection.
+      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:28px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
@@ -614,7 +625,7 @@ function _rerenderCachedModels() {
       // so it shares the same baseline as the rest of the top controls.
       panelHtml += _slotsHtml;
       panelHtml += `</div>`;
-      panelHtml += `<div class="hwfit-serve-runtime-note" style="display:none;font-size:11px;line-height:1.35;color:var(--fg-muted);margin-top:-4px;"></div>`;
+      // (hwfit-serve-runtime-note moved to the top of the panel — see above.)
       if (_ggufChoices.length > 1) {
         // Show the GGUF File dropdown for BOTH llama.cpp and Ollama — Ollama
         // also needs to know which exact .gguf to import via the new
@@ -631,7 +642,11 @@ function _rerenderCachedModels() {
       // TP / Context / GPU / GPU Mem / Max Seqs / Dtype. Everything else
       // (Swap, KV Cache, Attention backend, Env vars, llama.cpp batch/ubatch)
       // moved to the Advanced fold below to keep this row scannable.
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp hwfit-backend-ollama">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-serve-row-core hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp hwfit-backend-ollama">`;
+      // Order: Dtype → TP → Context → GPU → GPU Mem → Max Seqs.
+      // Dtype moved left of TP at user's request — it's the first knob
+      // people typically check when matching the model to the box.
+      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
       // ctx resets to the model's max on every panel open (the real ctx slider
       // lives in the Scan/Download toolbar — see cookbook.js .hwfit-ctx-control).
@@ -639,7 +654,6 @@ function _rerenderCachedModels() {
       panelHtml += `<label>${_l('GPU','Which GPU to use. Leave empty for default')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
-      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       panelHtml += `</div>`;
       // ── Advanced (collapsed by default) ──
       // Everything below the fold is tuning users only touch occasionally:
@@ -958,13 +972,107 @@ function _rerenderCachedModels() {
         if (ok === false) clearInterval(_vramTimer);
       }, 4000);
 
-      // Show/hide backend-specific sections
+      // Backend icons — accent color, rendered via currentColor. vLLM gets
+      // a stylized double-V mark, the others fall back to a recognizable
+      // glyph for the engine family. Shown beside each option in the
+      // custom picker so the dropdown lists "[V] vLLM", "[⚡] SGLang", etc.
+      const _BACKEND_GLYPHS = {
+        vllm:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
+        sglang: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+        llamacpp: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>',
+        ollama: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 10a6 6 0 0 1 12 0v4a4 4 0 0 1-8 0v-1"/><circle cx="10" cy="9" r="1"/><circle cx="14" cy="9" r="1"/></svg>',
+        diffusers: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>',
+      };
+
+      // ── Custom Backend picker wiring ────────────────────────────────
+      // Reads the option list from the hidden <select.hwfit-backend-source>
+      // so the canonical (value, label) pairs come from one place.
+      const _backendPicker = panel.querySelector('[data-backend-picker]');
+      const _backendSource = panel.querySelector('.hwfit-backend-source');
+      const _backendBtn = panel.querySelector('[data-backend-btn]');
+      const _backendMenu = panel.querySelector('[data-backend-menu]');
+      const _backendBtnLabel = panel.querySelector('[data-backend-label]');
+      const _backendBtnIconSlot = _backendBtn?.querySelector('[data-backend-icon-slot]');
+
+      function _setBackendBtnState(v) {
+        if (!_backendBtn) return;
+        const opt = _backendSource?.querySelector(`option[value="${CSS.escape(v)}"]`);
+        const label = opt ? opt.textContent : v;
+        if (_backendBtnLabel) _backendBtnLabel.textContent = label;
+        if (_backendBtnIconSlot) _backendBtnIconSlot.innerHTML = _BACKEND_GLYPHS[v] || _BACKEND_GLYPHS.vllm;
+      }
+
+      function _renderBackendMenu() {
+        if (!_backendMenu || !_backendSource) return;
+        const items = Array.from(_backendSource.options).map(o => ({ value: o.value, label: o.textContent }));
+        _backendMenu.innerHTML = items.map(it => `
+          <button type="button" role="option" class="hwfit-backend-item" data-value="${it.value}" style="all:unset;display:flex;align-items:center;gap:8px;width:100%;padding:6px 9px;border-radius:5px;font-size:12px;cursor:pointer;color:var(--fg);box-sizing:border-box;">
+            <span class="hwfit-backend-item-icon" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;color:var(--accent, var(--red));flex-shrink:0;">${_BACKEND_GLYPHS[it.value] || _BACKEND_GLYPHS.vllm}</span>
+            <span class="hwfit-backend-item-label" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${it.label}</span>
+          </button>
+        `).join('');
+        // Hover styling (no global CSS rule — keep it self-contained).
+        _backendMenu.querySelectorAll('.hwfit-backend-item').forEach(btn => {
+          btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
+          btn.addEventListener('mouseleave', () => { btn.style.background = ''; });
+          btn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const v = btn.dataset.value;
+            if (_backendSource && _backendSource.value !== v) {
+              _backendSource.value = v;
+              _backendSource.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            _setBackendBtnState(v);
+            _closeBackendMenu();
+          });
+        });
+      }
+
+      function _openBackendMenu() {
+        if (!_backendMenu || !_backendBtn) return;
+        _backendMenu.hidden = false;
+        _backendBtn.setAttribute('aria-expanded', 'true');
+      }
+      function _closeBackendMenu() {
+        if (!_backendMenu || !_backendBtn) return;
+        _backendMenu.hidden = true;
+        _backendBtn.setAttribute('aria-expanded', 'false');
+      }
+      if (_backendBtn) {
+        _backendBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (_backendMenu.hidden) _openBackendMenu();
+          else _closeBackendMenu();
+        });
+        document.addEventListener('click', (ev) => {
+          if (!_backendMenu.hidden && !_backendPicker?.contains(ev.target)) _closeBackendMenu();
+        });
+        document.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Escape' && !_backendMenu.hidden) {
+            ev.stopPropagation();
+            _closeBackendMenu();
+          }
+        }, { capture: true });
+      }
+      _renderBackendMenu();
+      _setBackendBtnState(_backendSource?.value || defaultBackend);
+
       function updateBackendVisibility() {
         const b = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
         panel.querySelectorAll('[class*="hwfit-backend-"]').forEach(el => {
+          // Skip the entire backend-picker subtree — the picker's own
+          // classes (`hwfit-backend-picker`, `-btn`, `-menu`, `-item`,
+          // `-btn-icon`, `-btn-label`, `-item-icon`, `-item-label`) all
+          // match the wildcard and would get hidden as if they were
+          // "backend-specific form sections", which left the dropdown
+          // looking empty / collapsed.
+          if (el.closest('.hwfit-backend-picker')) return;
           const show = el.classList.contains(`hwfit-backend-${b}`);
           el.style.display = show ? '' : 'none';
         });
+        _setBackendBtnState(b);
       }
       updateBackendVisibility();
 
@@ -974,51 +1082,58 @@ function _rerenderCachedModels() {
         // Mirror the message into a small chip next to the model title at
         // the top of the card, so the readiness state is visible without
         // having to look down into the panel body.
+        // Clean up any title chip from previous versions — the readiness
+        // text now lives inside the panel at the top, not in the card title.
         const card = panel.closest('.doclib-card, .memory-item');
         const titleEl = card ? card.querySelector('.memory-item-title') : null;
-        let titleChip = titleEl ? titleEl.querySelector('.hwfit-serve-runtime-chip') : null;
-        const ensureChip = () => {
-          if (!titleEl) return null;
-          if (!titleChip) {
-            titleChip = document.createElement('span');
-            titleChip.className = 'hwfit-serve-runtime-chip';
-            titleChip.style.cssText = 'margin-left:8px;font-size:10.5px;font-weight:400;opacity:0.7;white-space:normal;line-height:1.3;';
-            titleEl.appendChild(titleChip);
-          }
-          return titleChip;
-        };
+        const titleChip = titleEl ? titleEl.querySelector('.hwfit-serve-runtime-chip') : null;
+        if (titleChip) titleChip.remove();
         const backend = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
+        const noteText = note.querySelector('.hwfit-serve-runtime-text');
+        const _writeNote = (s) => { if (noteText) noteText.textContent = s; else note.textContent = s; };
         if (!['vllm', 'sglang', 'llamacpp', 'diffusers'].includes(backend)) {
           note.style.display = 'none';
-          note.textContent = '';
-          if (titleChip) titleChip.remove();
+          _writeNote('');
           return;
         }
+        // Wire dismiss once per note element.
+        const _closeBtn = note.querySelector('.hwfit-serve-runtime-close');
+        if (_closeBtn && !_closeBtn._wired) {
+          _closeBtn._wired = true;
+          _closeBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            note.style.display = 'none';
+            panel._runtimeNoteDismissed = true;
+          });
+        }
+        // If the user dismissed it earlier on this panel, don't re-show.
+        if (panel._runtimeNoteDismissed) return;
         const seq = (panel._runtimeReadinessSeq || 0) + 1;
         panel._runtimeReadinessSeq = seq;
-        // The in-panel note becomes a hidden source-of-truth; the visible
-        // copy lives in the title chip.
-        note.style.display = 'none';
-        const chip = ensureChip();
-        if (chip) chip.textContent = 'Checking runtime on selected server…';
+        note.style.display = '';
+        _writeNote('Checking runtime on selected server…');
+        note.style.borderColor = '';
+        note.style.color = 'var(--fg-muted)';
         try {
           const { pkg, target } = await _fetchServeRuntimePackage(panel, backend);
           if (panel._runtimeReadinessSeq !== seq) return;
-          const text = _runtimeNoteText(backend, pkg, target);
-          note.textContent = text;
-          if (chip) {
-            chip.textContent = text;
-            chip.style.color = pkg?.installed ? 'inherit' : 'var(--red)';
-            chip.style.opacity = pkg?.installed ? '0.7' : '1';
+          _writeNote(_runtimeNoteText(backend, pkg, target));
+          if (!pkg?.installed) {
+            note.style.color = 'var(--red)';
+            note.style.borderColor = 'color-mix(in srgb, var(--red) 40%, transparent)';
+            note.style.background = 'color-mix(in srgb, var(--red) 8%, transparent)';
+          } else {
+            // Healthy / ready → green so the user reads "good to go" at a
+            // glance instead of scanning fg-muted for a state.
+            note.style.color = 'var(--green, #4caf50)';
+            note.style.borderColor = 'color-mix(in srgb, var(--green, #4caf50) 40%, transparent)';
+            note.style.background = 'color-mix(in srgb, var(--green, #4caf50) 8%, transparent)';
           }
         } catch (err) {
           if (panel._runtimeReadinessSeq !== seq) return;
-          const text = `Runtime readiness unavailable: ${err?.message || err}`;
-          note.textContent = text;
-          if (chip) {
-            chip.textContent = text;
-            chip.style.color = 'var(--fg-muted)';
-          }
+          _writeNote(`Runtime readiness unavailable: ${err?.message || err}`);
+          note.style.color = 'var(--fg-muted)';
         }
       }
       updateRuntimeReadinessNote();
@@ -1717,15 +1832,39 @@ function _rerenderCachedModels() {
       // Cancel button — collapses the serve config panel (same effect as
       // tapping the row to toggle it shut). Mobile users wanted an explicit
       // "back out" affordance next to Launch.
-      panel.querySelector('.hwfit-serve-cancel')?.addEventListener('click', (ev) => {
-        ev.stopPropagation();
+      const _collapsePanel = () => {
         panel._cleanupRuntimeReadiness?.();
         panel.remove();
         item.classList.remove('doclib-card-expanded');
         item.style.flexDirection = '';
         item.style.alignItems = '';
         if (list) { list.style.minHeight = ''; list.style.maxHeight = ''; }
+      };
+      panel.querySelector('.hwfit-serve-cancel')?.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        _collapsePanel();
       });
+      // Esc anywhere on the page closes the open serve panel. Skips when
+      // the user is typing in a field — they want Esc to deselect / blur
+      // those, not collapse the form they're configuring.
+      const _onEscClose = (ev) => {
+        if (ev.key !== 'Escape') return;
+        if (!panel.isConnected) {
+          document.removeEventListener('keydown', _onEscClose, true);
+          return;
+        }
+        const t = ev.target;
+        const inField = t && (
+          t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable
+        );
+        if (inField) return;
+        // Skip when one of the dropdown/menu popovers is open — the
+        // popovers handle their own Esc and use stopPropagation, so any
+        // Esc that bubbles here means nothing else claimed it.
+        ev.stopPropagation();
+        _collapsePanel();
+      };
+      document.addEventListener('keydown', _onEscClose, true);
 
       // Launch button
       panel.querySelector('.hwfit-serve-launch').addEventListener('click', async (ev) => {
@@ -1780,6 +1919,50 @@ function _rerenderCachedModels() {
           else serveState[el.dataset.field] = el.value;
         });
         serveState.backend = serveState.backend || (_detectBackend(m).backend) || 'vllm';
+
+        // Pre-launch: check our own task list for a serve already running
+        // on this host. Offer to stop+launch as the default action — the
+        // SSH-based port probe below is more thorough but it can miss
+        // when SSH glitches or `ss` isn't installed. This catches the
+        // common case instantly without waiting for a network round-trip.
+        try {
+          const _runningMod = await import('./cookbookRunning.js');
+          const _hostStr = _envState.remoteHost || '';
+          const _active = (_runningMod._loadTasks ? _runningMod._loadTasks() : []).filter(t =>
+            t && t.type === 'serve'
+            && (t.remoteHost || '') === _hostStr
+            && (t.status === 'running' || t.status === 'ready' || t._serveReady)
+          );
+          if (_active.length) {
+            const _names = _active.map(t => t.payload?.repo_id || t.repo || t.name || '?').filter(Boolean);
+            const _ok = await window.styledConfirm(
+              `${_active.length} model${_active.length === 1 ? '' : 's'} already serving on ${_hostStr || 'local'} (${_names.join(', ')}). Port 8000 will collide. Stop the running model and launch this one?`,
+              { title: 'Server already running', confirmText: 'Stop & launch', cancelText: 'Cancel' },
+            );
+            if (!_ok) { _restoreLaunchBtn(); return; }
+            // Kill each active serve; prefer the rendered Stop button so
+            // endpoint cleanup + Ollama unload run normally. Fall back to
+            // a raw tmux kill when the Active tab isn't in the DOM.
+            for (const t of _active) {
+              try {
+                const _el = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
+                const _btn = _el?.querySelector('.cookbook-task-action-stop');
+                if (_btn) {
+                  _btn.click();
+                } else if (_runningMod._tmuxGracefulKill) {
+                  await fetch('/api/shell/exec', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: _runningMod._tmuxGracefulKill(t) }),
+                  });
+                }
+              } catch (_killErr) { /* best-effort */ }
+            }
+            // Give the OS a beat to release port 8000.
+            await new Promise(r => setTimeout(r, 2500));
+          }
+        } catch (_e) { /* best-effort */ }
+
         const backendWarning = _serveBackendWarning(m, repo, serveState.backend, serveState);
         if (backendWarning) {
           _restoreLaunchBtn();
