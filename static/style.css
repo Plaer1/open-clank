@@ -14379,6 +14379,15 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   flex-shrink: 0; color: var(--fg); opacity: 0.85;
 }
 .adm-provider-logo svg { width: 14px; height: 14px; }
+/* Pull the settings-select 4px closer to its logo chip so the row
+   reads as logo+select instead of having an extra gap. */
+.adm-model-logo + .settings-select { margin-left: -4px; }
+/* Fallback rows: stretch the model select so the trash button on
+   the right aligns with the right edge of the Endpoint and Model
+   dropdowns above the fallback list. Without flex:1 the model
+   select shrinks to its content and the trash button rides up
+   tight to it. */
+.settings-fallback-row > .settings-select { flex: 1 1 0; min-width: 0; }
 /* Constrain logo SVGs in settings dropdown chips. Many provider
    icons in providers.js declare only viewBox (no width/height),
    so without this rule the browser falls back to 300x150 and
@@ -19568,7 +19577,11 @@ body.gallery-selecting .gallery-dl-btn,
 .cookbook-dep-installed-btn:hover { filter: brightness(1.15); }
 .hwfit-serve-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  /* Min was 110px which was wrapping Dtype to a new line on the core
+     row. 78px fits TP / GPU Mem / Max Seqs / Dtype on one line on
+     mid-width modals while still leaving room for the wider Context
+     and Backend cells (which size to content via 1fr). */
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
   gap: 6px;
   margin-bottom: 6px;
 }
