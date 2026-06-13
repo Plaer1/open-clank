@@ -915,6 +915,30 @@ async function _fetchDependencies() {
       });
     });
 
+    // Wire the alternative-install "Run" buttons in the Manual block.
+    // Each action launches the underlying command as a tmux task on the
+    // currently selected deps server, same as Reinstall does.
+    document.querySelectorAll('.cookbook-deps-run-btn').forEach(btn => {
+      if (btn._wired) return;
+      btn._wired = true;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.depsAction;
+        const sel = document.getElementById('hwfit-deps-server');
+        if (sel) _applyServerSelection(sel.value);
+        const host = _envState.remoteHost || '';
+        const where = host || 'this server';
+        const cmds = {
+          'vllm-uv':     'uv venv && . .venv/bin/activate && uv pip install -U vllm --torch-backend auto',
+          'vllm-docker': 'docker pull vllm/vllm-openai:latest',
+        };
+        const cmd = cmds[action];
+        if (!cmd) return;
+        if (!confirm(`Run on ${where}?\n\n${cmd}\n\nLaunches as a tmux task — watch progress in the Active tab.`)) return;
+        _launchServeTask(`deps-${action}`, 'deps-install', cmd);
+      });
+    });
+
     // Wire the ⋮ menu on installed packages — currently just "Update".
     function _showDepMenu(anchor) {
       document.querySelectorAll('.cookbook-dep-menu').forEach(d => d.remove());
@@ -2063,28 +2087,29 @@ function _renderRecipes() {
   html += '</select>';
   html += '</div>';
   html += '<p class="memory-desc doclib-desc">Optional packages that extend Odysseus capabilities.</p>';
-  // Manual install hints (collapsed). Useful when the in-app Install button
-  // can't run (offline server, custom torch backend, etc.) — three vetted
-  // recipes the user can copy verbatim into a terminal on the target box.
+  // Alternative install methods — Odysseus runs each in a tmux task on
+  // the selected server (watch in the Running tab). Wired to event
+  // delegation below; no need for per-button click handlers.
   html += '<details class="cookbook-deps-manual" style="margin:4px 0 8px;font-size:11px;">';
-  html += '<summary style="cursor:pointer;opacity:0.75;user-select:none;">Manual install (vLLM): uv venv · pip/uv · Docker</summary>';
+  html += '<summary style="cursor:pointer;opacity:0.75;user-select:none;">Install vLLM (alternatives): uv venv · Docker</summary>';
   html += '<div style="margin-top:6px;display:flex;flex-direction:column;gap:8px;">';
-  const _depCmdBlock = (label, body) =>
-    `<div class="cookbook-deps-cmd-block">`
-    + `<div style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">${label}</div>`
-    + `<pre class="cookbook-deps-cmd" style="margin:0;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre;">${body}</pre>`
+  const _depRunBlock = (label, body, action) =>
+    `<div class="cookbook-deps-cmd-block" style="display:flex;flex-direction:column;gap:3px;">`
+    + `<div style="display:flex;align-items:center;gap:6px;">`
+    +   `<div style="font-size:10px;opacity:0.6;text-transform:uppercase;letter-spacing:0.5px;flex:1;">${label}</div>`
+    +   `<button type="button" class="cookbook-btn cookbook-deps-run-btn" data-deps-action="${esc(action)}" style="padding:3px 9px;font-size:11px;">Run</button>`
+    + `</div>`
+    + `<pre class="cookbook-deps-cmd" style="margin:0;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre;">${esc(body)}</pre>`
     + `</div>`;
-  html += _depCmdBlock(
+  html += _depRunBlock(
     'uv (recommended — fast, isolated venv)',
-    'uv venv\nsource .venv/bin/activate\nuv pip install -U vllm --torch-backend auto'
+    'uv venv && source .venv/bin/activate && uv pip install -U vllm --torch-backend auto',
+    'vllm-uv'
   );
-  html += _depCmdBlock(
-    'pip',
-    'python -m venv .venv\nsource .venv/bin/activate\npip install -U vllm'
-  );
-  html += _depCmdBlock(
+  html += _depRunBlock(
     'Docker',
-    'docker pull vllm/vllm-openai:latest'
+    'docker pull vllm/vllm-openai:latest',
+    'vllm-docker'
   );
   html += '</div>';
   html += '</details>';
