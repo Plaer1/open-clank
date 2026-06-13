@@ -971,25 +971,54 @@ function _rerenderCachedModels() {
       async function updateRuntimeReadinessNote() {
         const note = panel.querySelector('.hwfit-serve-runtime-note');
         if (!note) return;
+        // Mirror the message into a small chip next to the model title at
+        // the top of the card, so the readiness state is visible without
+        // having to look down into the panel body.
+        const card = panel.closest('.doclib-card, .memory-item');
+        const titleEl = card ? card.querySelector('.memory-item-title') : null;
+        let titleChip = titleEl ? titleEl.querySelector('.hwfit-serve-runtime-chip') : null;
+        const ensureChip = () => {
+          if (!titleEl) return null;
+          if (!titleChip) {
+            titleChip = document.createElement('span');
+            titleChip.className = 'hwfit-serve-runtime-chip';
+            titleChip.style.cssText = 'margin-left:8px;font-size:10.5px;font-weight:400;opacity:0.7;white-space:normal;line-height:1.3;';
+            titleEl.appendChild(titleChip);
+          }
+          return titleChip;
+        };
         const backend = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
         if (!['vllm', 'sglang', 'llamacpp', 'diffusers'].includes(backend)) {
           note.style.display = 'none';
           note.textContent = '';
+          if (titleChip) titleChip.remove();
           return;
         }
         const seq = (panel._runtimeReadinessSeq || 0) + 1;
         panel._runtimeReadinessSeq = seq;
-        note.style.display = '';
-        note.textContent = 'Checking runtime on selected server...';
+        // The in-panel note becomes a hidden source-of-truth; the visible
+        // copy lives in the title chip.
+        note.style.display = 'none';
+        const chip = ensureChip();
+        if (chip) chip.textContent = 'Checking runtime on selected server…';
         try {
           const { pkg, target } = await _fetchServeRuntimePackage(panel, backend);
           if (panel._runtimeReadinessSeq !== seq) return;
-          note.textContent = _runtimeNoteText(backend, pkg, target);
-          note.style.color = pkg?.installed ? 'var(--fg-muted)' : 'var(--red)';
+          const text = _runtimeNoteText(backend, pkg, target);
+          note.textContent = text;
+          if (chip) {
+            chip.textContent = text;
+            chip.style.color = pkg?.installed ? 'inherit' : 'var(--red)';
+            chip.style.opacity = pkg?.installed ? '0.7' : '1';
+          }
         } catch (err) {
           if (panel._runtimeReadinessSeq !== seq) return;
-          note.textContent = `Runtime readiness unavailable: ${err?.message || err}`;
-          note.style.color = 'var(--fg-muted)';
+          const text = `Runtime readiness unavailable: ${err?.message || err}`;
+          note.textContent = text;
+          if (chip) {
+            chip.textContent = text;
+            chip.style.color = 'var(--fg-muted)';
+          }
         }
       }
       updateRuntimeReadinessNote();
