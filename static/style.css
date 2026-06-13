@@ -30110,6 +30110,12 @@ body.doc-find-active mark.doc-find-mark.current {
   position: absolute; right: 6px; top: calc(50% + 4px); transform: translateY(-50%);
   z-index: 2;
 }
+/* Tint the placeholder hint (To / Cc / Bcc + example) accent so
+   the field names read as a label even without the <label> tag. */
+.email-field input::placeholder {
+  color: var(--accent-primary, var(--red));
+  opacity: 0.65;
+}
 /* X close button inside Cc / Bcc fields. */
 .email-field .email-cc-close {
   position: absolute; right: 6px; top: calc(50% + 2px); transform: translateY(-50%);
