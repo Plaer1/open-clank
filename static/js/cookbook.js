@@ -1416,17 +1416,20 @@ function _wireTabEvents(body) {
       _setFolded(!folded);
     });
     // Auto-fold when the user scrolls past the Direct Download header.
-    // Watches the header element: once its bottom edge passes above the
-    // scroll container's top, fold the body so the scan section below has
-    // the full viewport. Doesn't auto-unfold (user can click ▸ to expand).
-    const _scrollHost = dlFold.closest('.modal-body, .cookbook-content, .doclib-modal-content') || document.scrollingElement || document.body;
-    let _autoFolded = false;
+    // Desktop scroll container is .cookbook-body; mobile is the modal
+    // .modal-content. Walk up via .closest() to find whichever is
+    // actually scrollable. Doesn't auto-unfold — chevron ▸ still
+    // expands manually.
+    const _scrollHost = dlFold.closest('.cookbook-body')
+      || dlFold.closest('#cookbook-modal .modal-content')
+      || dlFold.closest('.modal-content')
+      || document.scrollingElement
+      || document.body;
     const _onScroll = () => {
       if (dlFoldBody.style.display === 'none') return;
       const r = dlFold.getBoundingClientRect();
       const top = (_scrollHost && _scrollHost.getBoundingClientRect) ? _scrollHost.getBoundingClientRect().top : 0;
       if (r.bottom < top + 4) {
-        _autoFolded = true;
         _setFolded(true, /* persist */ false);
       }
     };
