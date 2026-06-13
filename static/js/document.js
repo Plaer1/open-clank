@@ -3851,24 +3851,21 @@ import * as Modals from './modalManager.js';
         </button>
         <div id="doc-email-fields" class="doc-email-fields">
           <div class="email-field" style="position:relative">
-            <label>To</label>
-            <input type="text" id="doc-email-to" placeholder="recipient@example.com" autocomplete="off" />
+            <input type="text" id="doc-email-to" placeholder="To  recipient@example.com" autocomplete="off" />
             <div id="doc-email-to-suggestions" class="email-autocomplete" style="display:none"></div>
             <button type="button" id="doc-email-show-cc" class="email-cc-toggle" title="Show Cc/Bcc">Cc</button>
           </div>
           <div class="email-field" id="doc-email-cc-row" style="display:none;position:relative">
-            <label>Cc</label>
-            <input type="text" id="doc-email-cc" placeholder="cc@example.com" autocomplete="off" />
+            <input type="text" id="doc-email-cc" placeholder="Cc  cc@example.com, example2" autocomplete="off" />
             <div id="doc-email-cc-suggestions" class="email-autocomplete" style="display:none"></div>
             <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
           <div class="email-field" id="doc-email-bcc-row" style="display:none;position:relative">
-            <label>Bcc</label>
-            <input type="text" id="doc-email-bcc" placeholder="bcc@example.com" autocomplete="off" />
+            <input type="text" id="doc-email-bcc" placeholder="Bcc  bcc@example.com" autocomplete="off" />
             <div id="doc-email-bcc-suggestions" class="email-autocomplete" style="display:none"></div>
             <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
-          <div class="email-field"><label>Subject</label><input type="text" id="doc-email-subject" placeholder="Subject" /></div>
+          <div class="email-field"><input type="text" id="doc-email-subject" placeholder="Subject" /></div>
           <div id="doc-email-attachments" class="email-attachments" style="display:none"></div>
           <div id="doc-email-compose-atts" class="email-compose-atts" style="display:none"></div>
         </div>
