@@ -35825,7 +35825,7 @@ body.research-panel-view #research-divider { display:none; }
   border:1px solid var(--border); border-radius:6px;
   padding:8px 10px; font-size:12px; font-family:inherit;
   box-sizing:border-box;
-  margin-top: 6px;
+  margin-top: 2px;
 }
 .research-query:focus { outline:none; border-color:var(--accent-primary, var(--red)); }
 .research-settings-row {
@@ -35918,6 +35918,20 @@ body.research-panel-view #research-divider { display:none; }
 .research-settings-toggle:hover { color:var(--fg); border-color:var(--fg); }
 .research-settings-chevron { display:inline-flex; transition:transform 0.2s; margin-left:auto; }
 .research-settings-toggle.collapsed .research-settings-chevron { transform:rotate(-90deg); }
+/* When settings is EXPANDED, merge the toggle bar visually into the
+   settings body so it's clear the row below is the toggle's content
+   (no gap, no doubled border between them). */
+.research-settings-toggle:not(.collapsed) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.research-settings-toggle:not(.collapsed) + .research-settings-row {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top-color: color-mix(in srgb, var(--border) 50%, transparent);
+}
 .research-add-btn {
   padding:6px 14px; border:1px solid var(--border); border-radius:6px;
   background:transparent; color:var(--fg); font-size:12px; cursor:pointer;
