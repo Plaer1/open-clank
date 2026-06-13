@@ -1839,9 +1839,13 @@ function _renderRecipes() {
   // Latest HF models that fit — collapsible card list
   html += `<div style="margin-top:5px;position:relative;top:-11px;">`;
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
-  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
-  html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">\u25B8</span>`;
-  html += `<span style="pointer-events:none;">Trending models that fit your hardware</span>`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:34px;font-size:13px;display:flex;align-items:center;gap:8px;border-radius:5px;">`;
+  // Trending-up icon (accent) so the section reads as "what's hot".
+  html += `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;pointer-events:none;"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`;
+  html += `<span style="pointer-events:none;flex:1;">Trending models that fit your hardware</span>`;
+  // Chevron moved to the RIGHT \u2014 collapsed = pointing right, expanded
+  // = rotated 90deg into a down chevron (handled by existing toggle CSS).
+  html += `<span id="cookbook-hf-latest-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;opacity:0.6;font-size:14px;">\u25B8</span>`;
   html += `</button>`;
   html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-refresh" title="Refresh" style="height:26px;width:26px;padding:0;border-radius:4px;">\u21BB</button>`;
   html += `</div>`;
