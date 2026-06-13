@@ -1416,24 +1416,28 @@ function _wireTabEvents(body) {
       _setFolded(!folded);
     });
     // Auto-fold when the user scrolls past the Direct Download header.
-    // Desktop scroll container is .cookbook-body; mobile is the modal
-    // .modal-content. Walk up via .closest() to find whichever is
-    // actually scrollable. Doesn't auto-unfold — chevron ▸ still
-    // expands manually.
-    const _scrollHost = dlFold.closest('.cookbook-body')
-      || dlFold.closest('#cookbook-modal .modal-content')
-      || dlFold.closest('.modal-content')
-      || document.scrollingElement
-      || document.body;
-    const _onScroll = () => {
-      if (dlFoldBody.style.display === 'none') return;
-      const r = dlFold.getBoundingClientRect();
-      const top = (_scrollHost && _scrollHost.getBoundingClientRect) ? _scrollHost.getBoundingClientRect().top : 0;
-      if (r.bottom < top + 4) {
-        _setFolded(true, /* persist */ false);
+    // Use IntersectionObserver — fires whenever the header element
+    // crosses the viewport edge, regardless of which scroll container
+    // moved (cookbook-body, modal-content, hwfit-list, viewport, etc).
+    // Doesn't auto-unfold; the chevron ▸ still expands manually.
+    let _ioPrimed = false;
+    const _io = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      // Skip the initial firing where the header is already in view.
+      if (!_ioPrimed) {
+        _ioPrimed = true;
+        if (entry.isIntersecting) return;
       }
-    };
-    _scrollHost.addEventListener('scroll', _onScroll, { passive: true });
+      if (entry.isIntersecting) return;
+      // Only fold when scrolled ABOVE the viewport (not when the modal
+      // closes / detaches under it). boundingClientRect.top < 0 means
+      // the header was pushed off the top.
+      if (entry.boundingClientRect.top >= 0) return;
+      if (dlFoldBody.style.display === 'none') return;
+      _setFolded(true, /* persist */ false);
+    }, { threshold: 0 });
+    _io.observe(dlFold);
   }
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
