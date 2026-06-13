@@ -239,6 +239,7 @@ function _fillEndpointSelect(selectEl, endpoints, selected, keepBlank) {
   } else if (blankText !== null) {
     selectEl.value = '';
   }
+  _syncEndpointLogo(selectEl);
 }
 
 // Mirror the selected model's provider logo into a sibling <span id="<selectId>-logo">.
@@ -252,6 +253,25 @@ function _syncModelLogo(selectEl) {
   apply();
   if (!selectEl.dataset.logoSync) {
     selectEl.dataset.logoSync = '1';
+    selectEl.addEventListener('change', apply);
+  }
+}
+
+// Same idea but for endpoint dropdowns where the <option value="…">
+// is an opaque endpoint UUID — fall back to the option's text label
+// so providerLogo() can pattern-match (Anthropic, OpenAI, Ollama, …).
+function _syncEndpointLogo(selectEl) {
+  if (!selectEl) return;
+  const logoEl = document.getElementById(selectEl.id + '-logo');
+  if (!logoEl) return;
+  const apply = () => {
+    const opt = selectEl.options[selectEl.selectedIndex];
+    const label = (opt && opt.textContent) || selectEl.value || '';
+    logoEl.innerHTML = providerLogo(label) || '';
+  };
+  apply();
+  if (!selectEl.dataset.epLogoSync) {
+    selectEl.dataset.epLogoSync = '1';
     selectEl.addEventListener('change', apply);
   }
 }

@@ -14379,6 +14379,17 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   flex-shrink: 0; color: var(--fg); opacity: 0.85;
 }
 .adm-provider-logo svg { width: 14px; height: 14px; }
+/* Constrain logo SVGs in settings dropdown chips. Many provider
+   icons in providers.js declare only viewBox (no width/height),
+   so without this rule the browser falls back to 300x150 and
+   blows up the row. */
+.settings-fallback-row > span[style*="width:18px"] svg:not([width]),
+.settings-row > span[style*="width:18px"] svg:not([width]),
+span[id$="-logo"] svg:not([width]) {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
 .adm-provider-logo:empty {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
   border-radius: 50%;
