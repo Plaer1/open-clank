@@ -127,7 +127,12 @@ export function _renderGpuToggles(system) {
     _gpuToggleTotal = 0;
     return;
   }
-  if (!_gpuToggleTotal) _gpuToggleTotal = total;
+  // Update on every scan that returns a positive total — previously this
+   // only set on the first scan, so switching servers (e.g. local 1-GPU
+   // first, then a 4-GPU remote) left the Run-panel GPU buttons stuck on
+   // the original count. Zero/missing totals still don't clobber a known
+   // good value (avoids flicker during an in-flight re-probe).
+  if (total > 0) _gpuToggleTotal = total;
 
   container._groups = groups;
   if (container._activeGroup === undefined) container._activeGroup = 0;  // auto = largest pool
@@ -1209,6 +1214,34 @@ function _syncHostFromScanDropdown() {
   return host;
 }
 
+// Map the detected GPU + the model's quant to SGLang's URL-hash params so
+// the cookbook page lands on the right preset. SGLang supports:
+//   hw      = b200 | b300 | gb200 | gb300 | mi300x | mi325x | mi350x | mi355x | h200
+//   quant   = mxfp8 | bf16
+//   variant = default        strategy = balanced       nodes = single
+// We only set what we can confidently infer; anything missing degrades to
+// SGLang's own default (which is `h200` + bf16 single-node balanced).
+function _sglangHashFor(modelData) {
+  const sys = (typeof _hwfitCache !== 'undefined' ? _hwfitCache?.system : null) || {};
+  const gpuName = String(sys.gpu_name || '').toLowerCase();
+  let hw = '';
+  if (/\bgb300/.test(gpuName)) hw = 'gb300';
+  else if (/\bgb200/.test(gpuName)) hw = 'gb200';
+  else if (/\bb300/.test(gpuName)) hw = 'b300';
+  else if (/\bb200/.test(gpuName)) hw = 'b200';
+  else if (/\bh200/.test(gpuName)) hw = 'h200';
+  else if (/mi355/.test(gpuName)) hw = 'mi355x';
+  else if (/mi350/.test(gpuName)) hw = 'mi350x';
+  else if (/mi325/.test(gpuName)) hw = 'mi325x';
+  else if (/mi300/.test(gpuName)) hw = 'mi300x';
+  const qRaw = String(modelData?.quant || '').toLowerCase();
+  // mxfp8 covers fp8 / mxfp8 / nvfp4; bf16 covers everything else cheap.
+  const quant = /fp8|mxfp|nvfp/.test(qRaw) ? 'mxfp8' : 'bf16';
+  const parts = ['variant=default', `quant=${quant}`, 'strategy=balanced', 'nodes=single'];
+  if (hw) parts.unshift(`hw=${hw}`);
+  return '#' + parts.join('&');
+}
+
 export function _expandModelRow(row, modelData) {
   const list = row.closest('.hwfit-list');
   if (!list) return;
@@ -1231,11 +1264,23 @@ export function _expandModelRow(row, modelData) {
 
   const dlSource = _downloadSourceRepo(modelData, backend);
   const hfUrl = `https://huggingface.co/${dlSource.repo}`;
+  // Official vendor recipe deep-links. These point to vLLM / SGLang's curated
+  // hardware-specific launch-command pages. They 404 for uncatalogued models \u2014
+  // a known tradeoff; user just gets the vendor's "model not found" page.
+  const _recipeRepo = modelData.name || '';
+  const _vllmUrl = _recipeRepo ? `https://recipes.vllm.ai/${_recipeRepo}` : '';
+  const _sglangUrl = _recipeRepo ? `https://docs.sglang.io/cookbook/autoregressive/${_recipeRepo}${_sglangHashFor(modelData)}` : '';
   let html = `<div class="hwfit-action-panel" data-model-name="${esc(modelData.name)}">`;
   html += `<div class="hwfit-panel-header">`;
   html += `<span class="hwfit-panel-model">${esc(modelData.name)}${dlSource.kind ? ` <span style="opacity:0.5;font-size:10px;">(${esc(dlSource.kind)} ${esc(modelData.quant || '')})</span>` : (modelData.quant_repo ? ` <span style="opacity:0.5;font-size:10px;">(${esc(modelData.quant)})</span>` : '')}</span>`;
   html += `<span class="hwfit-panel-badge">${esc(label)}</span>`;
   html += `<a href="${esc(hfUrl)}" target="_blank" rel="noopener" class="hwfit-panel-hf-link" title="View download source on HuggingFace">HF \u2197</a>`;
+  if (backend === 'vllm' && _vllmUrl) {
+    html += `<a href="${esc(_vllmUrl)}" target="_blank" rel="noopener" class="hwfit-panel-hf-link" title="vLLM official recipe (curated launch command). 404s if this model isn't in vLLM's recipes catalog.">vLLM \u2197</a>`;
+  }
+  if (backend === 'sglang' && _sglangUrl) {
+    html += `<a href="${esc(_sglangUrl)}" target="_blank" rel="noopener" class="hwfit-panel-hf-link" title="SGLang cookbook (hash pre-filled with your detected hardware). 404s if this model isn't in SGLang's cookbook catalog.">SGLang \u2197</a>`;
+  }
   html += `</div>`;
   html += `<div class="hwfit-panel-actions">`;
   html += `<button class="cookbook-btn hwfit-dl-btn">Download</button>`;
