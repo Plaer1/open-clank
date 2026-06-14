@@ -868,21 +868,21 @@ async function _fetchDependencies() {
       const initial = pickRecipe(backend, '') || candidates[0];
       const initialVariant = RECIPE_DEFAULT_VARIANT;
       const initialCmds = recipeCommands(initial, initialVariant);
-      const _variantBtn = (v, label) =>
-        `<button type="button" class="cookbook-dep-tag cookbook-dep-variant${v === initialVariant ? ' is-active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="${esc(v)}" style="font-size:10px;padding:3px 8px;cursor:pointer;${v === initialVariant ? 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));' : 'opacity:0.7;'}">${label}</button>`;
+      const rightActive = initialVariant === 'docker' ? ' mode-right' : '';
       return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" data-dep-recipe-active-variant="${esc(initialVariant)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
             <select class="settings-select cookbook-dep-recipe-pick" data-dep-recipe-pick="${esc(backend)}" style="flex:1;font-size:11px;padding:3px 6px;">${opts}</select>
+            <div class="mode-toggle${rightActive}" data-dep-recipe-variants="${esc(backend)}" style="flex-shrink:0;">
+              <button type="button" class="mode-toggle-btn${initialVariant === 'pip' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="pip" aria-pressed="${initialVariant === 'pip'}">Pip/uv</button>
+              <button type="button" class="mode-toggle-btn${initialVariant === 'docker' ? ' active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="docker" aria-pressed="${initialVariant === 'docker'}">Docker</button>
+            </div>
           </div>
-          <div style="display:flex;gap:4px;margin-bottom:6px;align-items:center;">
-            <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Install via</span>
-            ${_variantBtn('pip', 'Pip / uv')}
-            ${_variantBtn('docker', 'Docker')}
+          <div style="position:relative;">
+            <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initialCmds.join('\n'))}" style="margin:0;padding:8px 36px 8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initialCmds, initialVariant))}</pre>
+            <button type="button" id="recipe-copy-${esc(backend)}" class="cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" title="Copy" aria-label="Copy" style="position:absolute;top:6px;right:6px;padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           </div>
-          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initialCmds.join('\n'))}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initialCmds, initialVariant))}</pre>
           <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-            <button type="button" class="cookbook-dep-tag cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
             <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
           </div>
         </div>`;
@@ -1028,7 +1028,9 @@ async function _fetchDependencies() {
     list.querySelectorAll('[data-dep-recipe-pick]').forEach(sel => {
       sel.addEventListener('change', () => _refreshRecipePre(sel.dataset.depRecipePick));
     });
-    // Variant pill (Pip/uv vs Docker): toggles the active install variant.
+    // Variant toggle (Pip/uv vs Docker): mirrors the agent/chat mode-toggle
+    // pattern — buttons get .active, container gets .mode-right when the
+    // right slot is selected so the sliding pill animates over.
     list.querySelectorAll('[data-dep-recipe-variant]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1037,13 +1039,12 @@ async function _fetchDependencies() {
         const panel = list.querySelector(`[data-dep-recipe-panel="${CSS.escape(backend)}"]`);
         if (!panel) return;
         panel.dataset.depRecipeActiveVariant = variant;
-        // Reflect active state on the pills.
+        const container = panel.querySelector('.mode-toggle[data-dep-recipe-variants]');
+        if (container) container.classList.toggle('mode-right', variant === 'docker');
         panel.querySelectorAll('[data-dep-recipe-variant]').forEach(b => {
           const on = b.dataset.variant === variant;
-          b.classList.toggle('is-active', on);
-          b.style.background = on ? 'color-mix(in srgb, var(--accent, var(--red)) 18%, transparent)' : '';
-          b.style.color = on ? 'var(--accent, var(--red))' : '';
-          b.style.opacity = on ? '' : '0.7';
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-pressed', on ? 'true' : 'false');
         });
         _refreshRecipePre(backend);
       });

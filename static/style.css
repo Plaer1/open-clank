@@ -2672,7 +2672,8 @@ body.bg-pattern-sparkles {
       transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
       z-index: 0;
     }
-    .mode-toggle.mode-chat::before {
+    .mode-toggle.mode-chat::before,
+    .mode-toggle.mode-right::before {
       transform: translateX(100%);
     }
     #mode-agent-btn {
@@ -18958,12 +18959,12 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .cookbook-gpu-group {
   display: flex;
-  gap: 2px;
+  gap: 3px;
   margin-top: -4px;
 }
 .cookbook-gpu-btn {
-  width: 22px; height: 22px;
-  font-size: 10px;
+  width: 28px; height: 26px;
+  font-size: 12px;
   font-family: 'Fira Code', monospace;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -19594,6 +19595,15 @@ body.gallery-selecting .gallery-dl-btn,
   position: relative;
   top: -4px;
 }
+/* The Settings label wraps the Save split — right-align its title text
+   so the word "Settings" sits above the right-aligned Save button
+   instead of floating off to the left of its grid cell. 8px right
+   padding now (16px → 8px) per follow-up tweak, brings the title back
+   over the actual Save button instead of overshooting it. */
+.hwfit-serve-row label:has(> .cookbook-serve-slots) {
+  text-align: right;
+  padding-right: 8px;
+}
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
    minus chrome and gives it its own internal scroll, so the surrounding
@@ -19771,11 +19781,19 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-spec-tokens-bare {
   -moz-appearance: textfield;
   appearance: textfield;
+  /* Tighten + center now that the spinner column is gone — without this
+     the input still reserves the old 44px and the number floats with a
+     dead gutter on the right. !important beats the inline width=44px
+     that ships in the markup. */
+  width: 30px !important;
+  padding-right: 4px !important;
+  text-align: center;
 }
 .hwfit-spec-tokens-bare::-webkit-outer-spin-button,
 .hwfit-spec-tokens-bare::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+  display: none;
 }
 /* Themed step buttons replacing the native number-input spinner. */
 .hwfit-numstep {
@@ -19851,7 +19869,7 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-sf-cb input[type="checkbox"]::after {
   content: '';
   position: absolute;
-  top: 1.5px;
+  top: 1px;
   left: 2px;
   width: 10px;
   height: 10px;
