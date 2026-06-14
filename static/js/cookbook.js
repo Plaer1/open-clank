@@ -8,6 +8,7 @@ import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis, _runQuickCmd, ERROR_PATTERNS } from './cookbook-diagnosis.js';
+import { RECIPE_BACKENDS, recipesForBackend, pickRecipe } from './cookbook-deps-recipes.js';
 import { _hwfitCache, _hwfitDebounce, _hwfitFetch, _hwfitInit, _hwfitRenderList, _hwfitRenderHw, _renderGpuToggles, _expandModelRow, _fitColors, _hwfitColumns, _cachedModelIds, _gpuToggleTotal, _resetGpuToggleState } from './cookbook-hwfit.js';
 
 // Sub-modules
@@ -811,6 +812,13 @@ async function _fetchDependencies() {
       } else if (pkg.name === 'sglang' && pkg.installed) {
         _rebuildBtn = `<button type="button" class="cookbook-dep-tag cookbook-dep-rebuild cookbook-dep-reinstall" data-reinstall-pkg="sglang" title="Force-reinstall SGLang (pulls a matching torch). Runs as a tmux task in the Running tab.">Reinstall</button>`;
       }
+      // For backends with a recipe catalog (vllm / sglang / llama_cpp),
+      // append a caret button that toggles a per-row recipe panel below.
+      const hasRecipe = RECIPE_BACKENDS.has(pkg.name);
+      const recipeCaret = hasRecipe
+        ? `<button class="cookbook-dep-tag cookbook-dep-recipe-caret" data-dep-recipe-toggle="${esc(pkg.name)}" title="Pick a model to see the exact install commands" aria-expanded="false" style="background:none;border:1px solid var(--border);padding:2px 6px;display:inline-flex;align-items:center;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s"><polyline points="6 9 12 15 18 9"/></svg></button>`
+        : '';
+      const recipePanel = hasRecipe ? _recipePanelHtml(pkg.name) : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
         + `<div class="cookbook-dep-info">`
         + `<div class="memory-item-title">${esc(pkg.name)}</div>`
@@ -821,8 +829,30 @@ async function _fetchDependencies() {
         + _rebuildBtn
         + `<span class="cookbook-dep-tag cookbook-dep-cat">${esc(pkg.category)}</span>`
         + _statusTag(pkg, isLocal, isSystemDep, winBlocked)
-        + `</div>`;
+        + recipeCaret
+        + `</div>`
+        + recipePanel;
     };
+
+    // Per-backend recipe panel (model picker + commands + Copy/Run).
+    // Lives directly below the row it expands and starts collapsed.
+    function _recipePanelHtml(backend) {
+      const candidates = recipesForBackend(backend);
+      if (!candidates.length) return '';
+      const opts = candidates.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join('');
+      const initial = candidates[0];
+      return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
+            <select class="settings-select cookbook-dep-recipe-pick" data-dep-recipe-pick="${esc(backend)}" style="flex:1;font-size:11px;padding:3px 6px;">${opts}</select>
+          </div>
+          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(initial.commands.join('\n'))}</pre>
+          <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
+            <button type="button" class="cookbook-dep-tag cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
+            <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
+          </div>
+        </div>`;
+    }
 
     const _section = (title, note, items) =>
       items.length
@@ -920,12 +950,95 @@ async function _fetchDependencies() {
     }
 
     // Wire install buttons (not-installed packages)
-    list.querySelectorAll('.cookbook-dep-install').forEach(btn => {
+    list.querySelectorAll('.cookbook-dep-install:not(.cookbook-dep-recipe-run)').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const pipName = btn.dataset.depPip;
         const pkgName = btn.closest('.cookbook-dep-row')?.querySelector('.memory-item-title')?.textContent || pipName;
         await _installDep(pipName, pkgName, btn.dataset.depTarget === 'local', !!btn.dataset.upgrade, btn);
+      });
+    });
+
+    // ── Recipe panel wiring (per-backend dropdown with model + commands) ──
+    // Caret toggle: shows/hides the panel directly below the backend row.
+    list.querySelectorAll('[data-dep-recipe-toggle]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const backend = btn.dataset.depRecipeToggle;
+        const panel = list.querySelector(`[data-dep-recipe-panel="${CSS.escape(backend)}"]`);
+        if (!panel) return;
+        const open = panel.style.display === 'none' || !panel.style.display;
+        panel.style.display = open ? 'block' : 'none';
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        const caret = btn.querySelector('svg');
+        if (caret) caret.style.transform = open ? 'rotate(180deg)' : '';
+      });
+    });
+    // Model select: re-pick the matching recipe and refresh the <pre>.
+    list.querySelectorAll('[data-dep-recipe-pick]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const backend = sel.dataset.depRecipePick;
+        const candidates = recipesForBackend(backend);
+        const recipe = candidates[parseInt(sel.value, 10) || 0];
+        if (!recipe) return;
+        const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
+        if (pre) pre.textContent = recipe.commands.join('\n');
+      });
+    });
+    // Copy: drop the visible command block on the clipboard.
+    list.querySelectorAll('[data-dep-recipe-copy]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const backend = btn.dataset.depRecipeCopy;
+        const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
+        if (!pre) return;
+        try {
+          await navigator.clipboard.writeText(pre.textContent);
+          uiModule.showToast('Copied');
+        } catch {
+          // Fallback for non-secure contexts: select the pre's text so
+          // the user can Ctrl+C themselves.
+          const sel = window.getSelection(); const range = document.createRange();
+          range.selectNodeContents(pre); sel.removeAllRanges(); sel.addRange(range);
+        }
+      });
+    });
+    // Run: launch the joined `cmd1 && cmd2 && …` as a tmux task on the
+    // currently-selected deps server, same plumbing as Install.
+    list.querySelectorAll('[data-dep-recipe-run]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const backend = btn.dataset.depRecipeRun;
+        const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
+        if (!pre) return;
+        const cmd = pre.textContent.split('\n').map(s => s.trim()).filter(Boolean).join(' && ');
+        const depsSel = document.getElementById('hwfit-deps-server');
+        if (depsSel) _applyServerSelection(depsSel.value);
+        const targetHost = _envState.remoteHost || 'local';
+        const reqBody = {
+          repo_id: `${backend} setup`,
+          cmd: cmd,
+          remote_host: _envState.remoteHost || undefined,
+          ssh_port: _getPort(_envState.remoteHost) || undefined,
+          platform: _envState.platform || undefined,
+        };
+        try {
+          const res = await fetch('/api/model/serve', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqBody),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.ok) {
+            uiModule.showToast('Run failed: ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 200));
+            return;
+          }
+          const payload = { repo_id: `${backend} setup`, _cmd: cmd, remote_host: _envState.remoteHost || '', _dep: true };
+          _addTask(data.session_id, `${backend} setup`, 'download', payload);
+          uiModule.showToast(`Running ${backend} setup on ${targetHost}…`);
+        } catch (err) {
+          uiModule.showToast('Run failed: ' + err.message);
+        }
       });
     });
 
