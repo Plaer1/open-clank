@@ -31,6 +31,44 @@ import {
 } from './cookbook.js';
 import uiModule from './ui.js';
 import spinnerModule from './spinner.js';
+import { _loadTasks, _tmuxGracefulKill } from './cookbookRunning.js';
+import { openCookbookDependencies } from './cookbook-diagnosis.js';
+
+// Map a serve-backend code (vllm / sglang / llamacpp) → the package name
+// the Dependencies API reports. Used to look up "is this backend installed
+// on the target server" before firing a launch.
+const _BACKEND_PKG = { vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp' };
+
+// Pre-launch: ask the deps API whether the chosen backend is present on
+// the target server. Returns true if it's good to go, false if we should
+// block and route the user into Dependencies.
+async function _ensureBackendInstalled(runBackend, host, port, envPath, modelName) {
+  const pkgName = _BACKEND_PKG[runBackend];
+  if (!pkgName) return true; // unknown backend — don't block
+  try {
+    const params = new URLSearchParams();
+    if (host) {
+      params.set('host', host);
+      if (port) params.set('ssh_port', String(port));
+      if (envPath) params.set('venv', envPath);
+    }
+    const r = await fetch('/api/cookbook/packages' + (params.toString() ? '?' + params : ''));
+    const d = await r.json();
+    const pkg = (d.packages || []).find(p => p.name === pkgName);
+    if (pkg && pkg.installed) return true;
+  } catch (_) {
+    // If we can't tell, don't block — the server's own serve route will
+    // surface a clearer error anyway.
+    return true;
+  }
+  const targetLabel = host || 'this server';
+  uiModule.showToast(
+    `${pkgName} not installed on ${targetLabel}. Opening Dependencies — pick your model and click Run.`,
+    6000
+  );
+  openCookbookDependencies(pkgName, { expandRecipe: pkgName, model: modelName });
+  return false;
+}
 
 // ── What Fits? (hardware model fitting) ──
 
@@ -1214,6 +1252,44 @@ function _syncHostFromScanDropdown() {
   return host;
 }
 
+// Minimum backend version a given model needs. Returns a semver string like
+// "0.10.0" or null when the model has no known floor. Hardcoded for now —
+// when the vLLM-recipes integration lands we can pull this from the upstream
+// recipe page instead. Keep this conservative: a null return means "any
+// installed version passes", so we don't false-positive launches.
+function _minBackendVersion(modelName, backend) {
+  const n = (modelName || '').toLowerCase();
+  if (backend === 'vllm') {
+    // MiniMax M2 / M2.5 / M2.7 — minimax_m2 parser shipped in 0.10.0
+    if (n.includes('minimax') && n.match(/\bm2(?:\.\d)?\b/)) return '0.10.0';
+    // MiniMax M3 — newer parser registered in 0.11.x
+    if (n.includes('minimax') && n.includes('m3')) return '0.11.0';
+    // DeepSeek V3 / V3.1 / R1 — MoE expert-parallel paths matured in 0.7.0+
+    if (n.includes('deepseek') && (n.includes('v3') || n.includes('r1'))) return '0.7.0';
+    // Qwen3 reasoning models — qwen3 reasoning parser added in 0.7.0
+    if (n.includes('qwen3') && !n.includes('coder') && !n.includes('instruct')) return '0.7.0';
+    // GLM-4.5 / GLM-4.6 — glm45 reasoning parser added in 0.8.0
+    if (n.includes('glm-4.5') || n.includes('glm-4.6') || n.includes('glm-5')) return '0.8.0';
+    // gpt-oss reasoning models — gpt_oss parser
+    if (n.includes('gpt-oss')) return '0.10.0';
+    // Llama-4 multimodal — landed in 0.7.0
+    if (n.includes('llama-4') || n.includes('llama4')) return '0.7.0';
+  }
+  return null;
+}
+
+// Tiny semver compare: returns <0 / 0 / >0 like strcmp. Tolerates "0.10",
+// "0.10.0", "0.10.0+cu124" — pre-release / build suffixes are stripped.
+function _cmpSemver(a, b) {
+  const _parse = (s) => String(s || '').split(/[.+-]/).filter(p => /^\d+$/.test(p)).map(Number);
+  const A = _parse(a), B = _parse(b);
+  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+    const av = A[i] || 0, bv = B[i] || 0;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+
 // Map the detected GPU + the model's quant to SGLang's URL-hash params so
 // the cookbook page lands on the right preset. SGLang supports:
 //   hw      = b200 | b300 | gb200 | gb300 | mi300x | mi325x | mi350x | mi355x | h200
@@ -1349,6 +1425,133 @@ export function _expandModelRow(row, modelData) {
         return;
       }
 
+      // ─── Pre-launch: stop the model already serving on this host ───────
+      // Two servers can't share port 8000. Without this, the new launch
+      // silently collided and the user saw no feedback. We surface the
+      // conflict and offer to kill the running one first as the default
+      // action (it's almost always what the user wants).
+      try {
+        const _qrHostStr = _envState.remoteHost || '';
+        const _activeServes = _loadTasks().filter(t =>
+          t && t.type === 'serve'
+          && (t.remoteHost || '') === _qrHostStr
+          && (t.status === 'running' || t.status === 'ready' || t._serveReady)
+        );
+        if (_activeServes.length) {
+          const _names = _activeServes.map(t => t.payload?.repo_id || t.repo || t.name || '?').filter(Boolean);
+          const _ok = await window.styledConfirm?.(
+            `${_names.length} model${_names.length === 1 ? '' : 's'} already serving on ${_qrHostStr || 'local'} (${_names.join(', ')}). Port 8000 will collide. Stop the running model and launch this one?`,
+            { confirmText: 'Stop & launch', cancelText: 'Cancel' }
+          );
+          if (!_ok) return;
+          // Mark + kill each running serve, then wait briefly for the
+          // tmux session to actually go down before we kick off the new
+          // launch. Otherwise vLLM still races against the dying socket.
+          quickRunBtn.disabled = true;
+          quickRunBtn.textContent = 'Stopping…';
+          for (const t of _activeServes) {
+            try {
+              // Use that task's own Stop button if it's rendered (handles
+              // endpoint cleanup, Ollama unload, fade-out). Falls back to
+              // a direct tmux kill if the Active tab isn't in the DOM yet.
+              const _taskEl = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
+              const _stopBtn = _taskEl?.querySelector('.cookbook-task-action-stop');
+              if (_stopBtn) {
+                _stopBtn.click();
+              } else {
+                await fetch('/api/shell/exec', {
+                  method: 'POST',
+                  credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ command: _tmuxGracefulKill(t) }),
+                });
+              }
+            } catch (_killErr) { /* best-effort */ }
+          }
+          // Give the OS a beat to release port 8000.
+          await new Promise(r => setTimeout(r, 2500));
+        }
+      } catch (_e) { /* best-effort */ }
+
+      // ─── Pre-launch driver check ─────────────────────────────────────
+      // vLLM/SGLang need a working CUDA/ROCm driver. nvidia-smi failures
+      // surface as system.gpu_error from our hardware probe; "no GPU
+      // detected" is the other common case. Bail with a clear message
+      // before kicking off the long install/launch chain — otherwise the
+      // user watches `pip install vllm` finish, then sees a cryptic CUDA
+      // error 10 minutes later. (llama.cpp / Ollama have CPU fallbacks
+      // so they skip this gate.)
+      const _qrBackendDetect = _detectBackend(modelData);
+      const _qrRunBackend = _qrBackendDetect.backend || 'vllm';
+      if (_qrRunBackend === 'vllm' || _qrRunBackend === 'sglang') {
+        const _sys = _hwfitCache?.system || {};
+        if (_sys.gpu_error) {
+          uiModule.showError(`Can't launch: GPU driver error — ${_sys.gpu_error}. Reinstall or repair the NVIDIA driver, then re-scan.`);
+          return;
+        }
+        if (!_sys.has_gpu || !(_sys.gpu_count > 0)) {
+          uiModule.showError(`Can't launch: no GPU detected by nvidia-smi. ${_qrRunBackend === 'vllm' ? 'vLLM' : 'SGLang'} needs a working CUDA or ROCm device.`);
+          return;
+        }
+      }
+
+      // ─── Pre-launch install + version check ─────────────────────────
+      // Catches:
+      //   a) "command not found" (binary not in PATH)
+      //   b) "version too old" (model needs e.g. vllm >= 0.10.0 for the
+      //      reasoning/tool parser registered for it).
+      // Both cases would otherwise fail 10s-3min into the launch with a
+      // cryptic shell error. Best-effort: a venv activated only by the
+      // launch wrapper can false-negative the PATH check, in which case
+      // the launch proceeds and the existing diagnosis layer handles it.
+      if (_qrRunBackend === 'vllm' || _qrRunBackend === 'sglang') {
+        try {
+          const _qrHostStr = _envState.remoteHost || '';
+          const _coreCheck = _qrRunBackend === 'vllm'
+            ? "command -v vllm >/dev/null 2>&1 && vllm --version 2>&1 | grep -oE '[0-9]+\\.[0-9]+(\\.[0-9]+)?' | head -1 || echo MISSING"
+            : "python3 -c 'import sglang, sys; sys.stdout.write(sglang.__version__)' 2>/dev/null || echo MISSING";
+          const _wrappedCheck = _qrHostStr
+            ? `ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${_qrHostStr} "bash -lc ${JSON.stringify(_coreCheck)}"`
+            : `bash -lc ${JSON.stringify(_coreCheck)}`;
+          const _chkRes = await fetch('/api/shell/exec', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: _wrappedCheck, timeout: 10 }),
+          });
+          if (_chkRes.ok) {
+            const _chk = await _chkRes.json();
+            const _stdout = String(_chk.stdout || '').trim();
+            const _stderr = String(_chk.stderr || '').trim();
+            const _out = `${_stdout}\n${_stderr}`;
+            if (_out.includes('MISSING')) {
+              const _pkg = _qrRunBackend === 'vllm' ? 'vLLM' : 'SGLang';
+              const _hint = _qrRunBackend === 'vllm'
+                ? 'uv pip install -U vllm --torch-backend auto'
+                : "pip install -U 'sglang[all]'";
+              uiModule.showError(`Can't launch: ${_pkg} isn't installed${_qrHostStr ? ' on ' + _qrHostStr : ''}. Install it first:\n${_hint}`);
+              return;
+            }
+            // Version-floor check. _minBackendVersion returns null when this
+            // model has no known requirement — in which case any installed
+            // version passes.
+            const _minVer = _minBackendVersion(modelData.name, _qrRunBackend);
+            const _verMatch = _stdout.match(/(\d+\.\d+(?:\.\d+)?)/);
+            const _curVer = _verMatch ? _verMatch[1] : '';
+            if (_minVer && _curVer && _cmpSemver(_curVer, _minVer) < 0) {
+              const _pkg = _qrRunBackend === 'vllm' ? 'vLLM' : 'SGLang';
+              const _hint = _qrRunBackend === 'vllm'
+                ? 'uv pip install -U vllm --torch-backend auto'
+                : "pip install -U 'sglang[all]'";
+              uiModule.showError(`Can't launch: ${modelData.name} needs ${_pkg} ≥ ${_minVer}, but ${_curVer} is installed${_qrHostStr ? ' on ' + _qrHostStr : ''}. Upgrade:\n${_hint}`);
+              return;
+            }
+          }
+        } catch (_e) {
+          // Network/exec failed — fall through and let the launch try.
+        }
+      }
+
       quickRunBtn.disabled = true;
       quickRunBtn.textContent = 'Starting...';
 
@@ -1426,6 +1629,23 @@ export function _expandModelRow(row, modelData) {
       // schema (repo_id + cmd) — sending `command`/`model` failed Pydantic
       // validation (422), which is why Run silently did nothing.
       const _srv = _serverByVal(_envState.remoteServerKey || host);
+
+      // Pre-flight: if the backend isn't installed on the target server,
+      // route the user into Dependencies → recipe panel for that backend
+      // instead of launching into an obvious "command not found" failure.
+      const _ok = await _ensureBackendInstalled(
+        runBackend,
+        host,
+        (_srv && _srv.port) || undefined,
+        _envState.envPath || '',
+        modelData.name,
+      );
+      if (!_ok) {
+        quickRunBtn.disabled = false;
+        quickRunBtn.textContent = 'Run';
+        return;
+      }
+
       const payload = {
         repo_id: modelData.name,
         cmd: cmd,

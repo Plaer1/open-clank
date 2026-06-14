@@ -65,7 +65,13 @@ import spinnerModule from './spinner.js';
 
 // ── Error diagnosis ──
 
-function _openCookbookDependencies(pkgName = '') {
+// Re-exported so callers (Launch-tab pre-flight) can deep-link into the
+// Dependencies tab + auto-expand a specific backend's recipe panel and
+// pre-select the model they were trying to launch.
+export function openCookbookDependencies(pkgName = '', opts = {}) {
+  _openCookbookDependencies(pkgName, opts);
+}
+function _openCookbookDependencies(pkgName = '', opts = {}) {
   const cookbook = window.cookbookModule;
   if (cookbook && typeof cookbook.open === 'function') {
     cookbook.open({ tab: 'Dependencies' });
@@ -94,6 +100,26 @@ function _openCookbookDependencies(pkgName = '') {
       row.scrollIntoView({ block: 'center' });
       row.classList.add('cookbook-pkg-flash');
       setTimeout(() => row.classList.remove('cookbook-pkg-flash'), 1800);
+      // Pre-flight deep link: auto-expand the recipe panel + pre-select
+      // the model the user was trying to launch.
+      if (opts.expandRecipe) {
+        const caret = row.querySelector('[data-dep-recipe-toggle]');
+        if (caret && caret.getAttribute('aria-expanded') !== 'true') caret.click();
+        if (opts.model) {
+          const sel = document.querySelector(`[data-dep-recipe-pick="${CSS.escape(opts.expandRecipe)}"]`);
+          if (sel) {
+            // Find first matching recipe; if none, leave on default.
+            for (let i = 0; i < sel.options.length; i++) {
+              const label = (sel.options[i].textContent || '').toLowerCase();
+              if (/minimax/i.test(opts.model) && /minimax/i.test(label)) {
+                sel.value = String(i);
+                sel.dispatchEvent(new Event('change'));
+                break;
+              }
+            }
+          }
+        }
+      }
     }
   };
   tryHighlight();
