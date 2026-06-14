@@ -836,11 +836,23 @@ async function _fetchDependencies() {
 
     // Per-backend recipe panel (model picker + commands + Copy/Run).
     // Lives directly below the row it expands and starts collapsed.
+    // The model picker lists every downloaded model from _cachedModelIds
+    // (the same set the Launch tab uses); pickRecipe() then finds the
+    // best-matching recipe for whatever the user selects, with the
+    // backend's generic entry as the fallback.
     function _recipePanelHtml(backend) {
       const candidates = recipesForBackend(backend);
       if (!candidates.length) return '';
-      const opts = candidates.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join('');
-      const initial = candidates[0];
+      const downloadedIds = _cachedModelIds ? Array.from(_cachedModelIds).sort() : [];
+      const modelOptions = downloadedIds.length
+        ? downloadedIds.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('')
+        : '';
+      // "Other" entry: user types/pastes an id, OR uses the generic fallback
+      // when no models have been downloaded yet.
+      const otherOpt = `<option value="">Other (generic ${esc(backend)} install)</option>`;
+      const opts = modelOptions + otherOpt;
+      // Initial recipe: the generic fallback (matches first time, no model id).
+      const initial = pickRecipe(backend, '') || candidates[0];
       return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
@@ -974,12 +986,12 @@ async function _fetchDependencies() {
         if (caret) caret.style.transform = open ? 'rotate(180deg)' : '';
       });
     });
-    // Model select: re-pick the matching recipe and refresh the <pre>.
+    // Model select: pickRecipe matches the model id against the catalog
+    // (e.g. minimax-m2.7 → MiniMax recipe; anything else → generic).
     list.querySelectorAll('[data-dep-recipe-pick]').forEach(sel => {
       sel.addEventListener('change', () => {
         const backend = sel.dataset.depRecipePick;
-        const candidates = recipesForBackend(backend);
-        const recipe = candidates[parseInt(sel.value, 10) || 0];
+        const recipe = pickRecipe(backend, sel.value || '');
         if (!recipe) return;
         const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
         if (pre) pre.textContent = recipe.commands.join('\n');

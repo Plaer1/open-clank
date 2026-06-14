@@ -101,22 +101,30 @@ function _openCookbookDependencies(pkgName = '', opts = {}) {
       row.classList.add('cookbook-pkg-flash');
       setTimeout(() => row.classList.remove('cookbook-pkg-flash'), 1800);
       // Pre-flight deep link: auto-expand the recipe panel + pre-select
-      // the model the user was trying to launch.
+      // the model the user was trying to launch. The dropdown values are
+      // now full model ids (sourced from _cachedModelIds), so we match by
+      // exact value first, then fall back to a substring match.
       if (opts.expandRecipe) {
         const caret = row.querySelector('[data-dep-recipe-toggle]');
         if (caret && caret.getAttribute('aria-expanded') !== 'true') caret.click();
         if (opts.model) {
           const sel = document.querySelector(`[data-dep-recipe-pick="${CSS.escape(opts.expandRecipe)}"]`);
           if (sel) {
-            // Find first matching recipe; if none, leave on default.
+            const wanted = String(opts.model);
+            let matched = false;
             for (let i = 0; i < sel.options.length; i++) {
-              const label = (sel.options[i].textContent || '').toLowerCase();
-              if (/minimax/i.test(opts.model) && /minimax/i.test(label)) {
-                sel.value = String(i);
-                sel.dispatchEvent(new Event('change'));
-                break;
+              if (sel.options[i].value === wanted) {
+                sel.value = wanted; matched = true; break;
               }
             }
+            if (!matched) {
+              for (let i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value && wanted.includes(sel.options[i].value)) {
+                  sel.value = sel.options[i].value; matched = true; break;
+                }
+              }
+            }
+            if (matched) sel.dispatchEvent(new Event('change'));
           }
         }
       }
