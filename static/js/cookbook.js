@@ -8,7 +8,7 @@ import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { _diagnose, _showDiagnosis, _clearDiagnosis, _runQuickCmd, ERROR_PATTERNS } from './cookbook-diagnosis.js';
-import { RECIPE_BACKENDS, recipesForBackend, pickRecipe } from './cookbook-deps-recipes.js';
+import { RECIPE_BACKENDS, recipesForBackend, pickRecipe, recipeCommands, RECIPE_DEFAULT_VARIANT } from './cookbook-deps-recipes.js';
 import { _hwfitCache, _hwfitDebounce, _hwfitFetch, _hwfitInit, _hwfitRenderList, _hwfitRenderHw, _renderGpuToggles, _expandModelRow, _fitColors, _hwfitColumns, _cachedModelIds, _gpuToggleTotal, _resetGpuToggleState } from './cookbook-hwfit.js';
 
 // Sub-modules
@@ -834,10 +834,12 @@ async function _fetchDependencies() {
         + recipePanel;
     };
 
-    // Prepend the configured venv's activate line (when one is set) so the
-    // user sees the full sequence they'd need to paste, while Run keeps
-    // using env_prefix to activate the same venv before the pip command.
-    function _recipeDisplayText(commands) {
+    // Prepend the configured venv's activate line (pip variant only) so
+    // the user sees a paste-ready sequence; Run keeps using env_prefix to
+    // activate the same venv before the pip command. Docker variant skips
+    // the activate line — `docker pull` doesn't need a venv.
+    function _recipeDisplayText(commands, variant) {
+      if (variant === 'docker') return commands.join('\n');
       const envPath = (_envState.envPath || '').replace(/\/+$/, '');
       const activate = envPath
         ? `source ${envPath}${envPath.endsWith('/bin/activate') ? '' : '/bin/activate'}`
@@ -864,12 +866,21 @@ async function _fetchDependencies() {
       const opts = modelOptions + otherOpt;
       // Initial recipe: the generic fallback (matches first time, no model id).
       const initial = pickRecipe(backend, '') || candidates[0];
-      return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
+      const initialVariant = RECIPE_DEFAULT_VARIANT;
+      const initialCmds = recipeCommands(initial, initialVariant);
+      const _variantBtn = (v, label) =>
+        `<button type="button" class="cookbook-dep-tag cookbook-dep-variant${v === initialVariant ? ' is-active' : ''}" data-dep-recipe-variant="${esc(backend)}" data-variant="${esc(v)}" style="font-size:10px;padding:3px 8px;cursor:pointer;${v === initialVariant ? 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));' : 'opacity:0.7;'}">${label}</button>`;
+      return `<div class="cookbook-dep-recipe-panel" data-dep-recipe-panel="${esc(backend)}" data-dep-recipe-active-variant="${esc(initialVariant)}" style="display:none;margin:-4px 0 8px;padding:8px 12px 10px;background:rgba(0,0,0,0.04);border:1px solid var(--border);border-top:none;border-radius:0 0 6px 6px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Serving which model?</span>
             <select class="settings-select cookbook-dep-recipe-pick" data-dep-recipe-pick="${esc(backend)}" style="flex:1;font-size:11px;padding:3px 6px;">${opts}</select>
           </div>
-          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initial.commands.join('\n'))}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initial.commands))}</pre>
+          <div style="display:flex;gap:4px;margin-bottom:6px;align-items:center;">
+            <span style="font-size:11px;opacity:0.75;flex-shrink:0;">Install via</span>
+            ${_variantBtn('pip', 'Pip / uv')}
+            ${_variantBtn('docker', 'Docker')}
+          </div>
+          <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initialCmds.join('\n'))}" style="margin:0;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initialCmds, initialVariant))}</pre>
           <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
             <button type="button" class="cookbook-dep-tag cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
             <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
@@ -997,20 +1008,44 @@ async function _fetchDependencies() {
         if (caret) caret.style.transform = open ? 'rotate(180deg)' : '';
       });
     });
-    // Model select: pickRecipe matches the model id against the catalog
-    // (e.g. minimax-m2.7 → MiniMax recipe; anything else → generic).
-    // Visible text gets the activate-line prefix; the actual install
-    // command stays on data-dep-recipe-install so Run knows what to send.
+    // Re-render the <pre> for a backend using the currently-active variant
+    // (pip / docker) and the currently-picked model. Used by every input
+    // that changes which install sequence we should show.
+    function _refreshRecipePre(backend) {
+      const panel = list.querySelector(`[data-dep-recipe-panel="${CSS.escape(backend)}"]`);
+      if (!panel) return;
+      const variant = panel.dataset.depRecipeActiveVariant || RECIPE_DEFAULT_VARIANT;
+      const sel = panel.querySelector('[data-dep-recipe-pick]');
+      const recipe = pickRecipe(backend, (sel && sel.value) || '');
+      const cmds = recipeCommands(recipe, variant);
+      const pre = panel.querySelector('[data-dep-recipe-cmds]');
+      if (pre) {
+        pre.textContent = _recipeDisplayText(cmds, variant);
+        pre.dataset.depRecipeInstall = cmds.join('\n');
+      }
+    }
+    // Model select: pickRecipe matches the model id against the catalog.
     list.querySelectorAll('[data-dep-recipe-pick]').forEach(sel => {
-      sel.addEventListener('change', () => {
-        const backend = sel.dataset.depRecipePick;
-        const recipe = pickRecipe(backend, sel.value || '');
-        if (!recipe) return;
-        const pre = list.querySelector(`[data-dep-recipe-cmds="${CSS.escape(backend)}"]`);
-        if (pre) {
-          pre.textContent = _recipeDisplayText(recipe.commands);
-          pre.dataset.depRecipeInstall = recipe.commands.join('\n');
-        }
+      sel.addEventListener('change', () => _refreshRecipePre(sel.dataset.depRecipePick));
+    });
+    // Variant pill (Pip/uv vs Docker): toggles the active install variant.
+    list.querySelectorAll('[data-dep-recipe-variant]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const backend = btn.dataset.depRecipeVariant;
+        const variant = btn.dataset.variant;
+        const panel = list.querySelector(`[data-dep-recipe-panel="${CSS.escape(backend)}"]`);
+        if (!panel) return;
+        panel.dataset.depRecipeActiveVariant = variant;
+        // Reflect active state on the pills.
+        panel.querySelectorAll('[data-dep-recipe-variant]').forEach(b => {
+          const on = b.dataset.variant === variant;
+          b.classList.toggle('is-active', on);
+          b.style.background = on ? 'color-mix(in srgb, var(--accent, var(--red)) 18%, transparent)' : '';
+          b.style.color = on ? 'var(--accent, var(--red))' : '';
+          b.style.opacity = on ? '' : '0.7';
+        });
+        _refreshRecipePre(backend);
       });
     });
     // Copy: drop the visible command block on the clipboard.
