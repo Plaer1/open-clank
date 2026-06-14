@@ -617,7 +617,24 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   // the full error+context for a forum/discord paste.
   const toolbar = document.createElement('div');
   toolbar.className = 'cookbook-diag-toolbar';
-  toolbar.style.cssText = 'display:flex;justify-content:flex-end;align-items:center;gap:4px;margin-bottom:-2px;';
+  // Left side carries the diagnosis text (message + suggestion); buttons
+  // stay on the right. Was a separate body row below the toolbar, but
+  // the message reads more like "this is what the toolbar is for" when
+  // it sits inline with Copy / × Dismiss.
+  toolbar.style.cssText = 'display:flex;align-items:flex-start;gap:8px;margin-bottom:-2px;';
+
+  const textWrap = document.createElement('div');
+  textWrap.style.cssText = 'flex:1;min-width:0;font-size:11px;line-height:1.35;';
+  const msg = document.createElement('div');
+  msg.className = 'cookbook-diag-message';
+  msg.textContent = diagnosis.message;
+  textWrap.appendChild(msg);
+  const suggestion = document.createElement('div');
+  suggestion.className = 'cookbook-diag-suggestion';
+  suggestion.textContent = suggestionText;
+  suggestion.style.cssText = 'opacity:0.75;margin-top:1px;';
+  textWrap.appendChild(suggestion);
+  toolbar.appendChild(textWrap);
 
   const copyBtn = document.createElement('button');
   copyBtn.type = 'button';
@@ -650,18 +667,6 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   toolbar.appendChild(copyBtn);
   toolbar.appendChild(dismissBtn);
   diag.appendChild(toolbar);
-
-  const body = document.createElement('div');
-  body.className = 'cookbook-diag-body';
-  const msg = document.createElement('div');
-  msg.className = 'cookbook-diag-message';
-  msg.textContent = diagnosis.message;
-  body.appendChild(msg);
-  const suggestion = document.createElement('div');
-  suggestion.className = 'cookbook-diag-suggestion';
-  suggestion.textContent = suggestionText;
-  body.appendChild(suggestion);
-  diag.appendChild(body);
 
   const runFix = async (fix, button, busyLabel = fix.label, onStart = null, onDone = null) => {
     if (!fix || !button || button.dataset.busy) return;
