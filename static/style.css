@@ -19577,13 +19577,36 @@ body.gallery-selecting .gallery-dl-btn,
 .cookbook-dep-installed-btn:hover { filter: brightness(1.15); }
 .hwfit-serve-row {
   display: grid;
-  /* Min was 110px which was wrapping Dtype to a new line on the core
-     row. 78px fits TP / GPU Mem / Max Seqs / Dtype on one line on
-     mid-width modals while still leaving room for the wider Context
-     and Backend cells (which size to content via 1fr). */
-  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 6px;
   margin-bottom: 6px;
+}
+/* Tighter min on the core-knobs row only so Dtype / TP / GPU Mem / Max
+   Seqs fit on one line without crushing Row 1's GPU button strip or
+   the Backend picker. */
+.hwfit-serve-row-core {
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+}
+/* Save / saved-config split aligned to the right end of Row 1 and
+   nudged up 4px so it sits flush with the rest of the row. */
+.hwfit-serve-row .cookbook-serve-slots {
+  justify-self: end;
+  position: relative;
+  top: -4px;
+}
+/* Expanded serve panel — make sure it can be scrolled past when it
+   grows taller than the visible viewport. Caps panel height to viewport
+   minus chrome and gives it its own internal scroll, so the surrounding
+   cached-list scroll isn't the only escape route. */
+.hwfit-cached-item .hwfit-serve-panel {
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (max-width: 768px) {
+  .hwfit-cached-item .hwfit-serve-panel {
+    max-height: calc(100svh - 120px);
+  }
 }
 .hwfit-serve-row label {
   font-size: 10px;
@@ -19742,6 +19765,18 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .hwfit-spec-group .hwfit-spec-method { min-width: 110px; }
 .hwfit-spec-group .hwfit-spec-tokens { width: 44px; text-align: center; }
+/* The vLLM Speculative input was a bare <input type="number"> with the
+   native browser up/down spinner showing. Hide the spinner so it
+   matches the cleaner MTP-spec input next to it. */
+.hwfit-spec-tokens-bare {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.hwfit-spec-tokens-bare::-webkit-outer-spin-button,
+.hwfit-spec-tokens-bare::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
 /* Themed step buttons replacing the native number-input spinner. */
 .hwfit-numstep {
   display: inline-flex;
@@ -23135,6 +23170,22 @@ details.hwfit-serve-advanced > .hwfit-serve-cmd-wrap,
 details.hwfit-serve-advanced > .hwfit-serve-extra {
   margin-top: 0;
   margin-bottom: 0;
+}
+/* Inside Advanced, tighten the per-row grid gap and the label →
+   select gap so rows of single-line dropdowns don't visually sit
+   on top of half a row of empty space. Outside Advanced (Core,
+   etc.) the original ~6px breathing room stays. */
+details.hwfit-serve-advanced > .hwfit-serve-row {
+  gap: 4px;
+  row-gap: 4px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row label select,
+details.hwfit-serve-advanced > .hwfit-serve-row label input {
+  margin-top: 1px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-checks {
+  gap: 4px;
+  row-gap: 4px;
 }
 /* Pull the vLLM/SGLang checks row, Extra args, and the trailing
    model-specific (Speculative) checks row up tight against the row
