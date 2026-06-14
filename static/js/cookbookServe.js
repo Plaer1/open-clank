@@ -9,6 +9,7 @@ import spinnerModule from './spinner.js';
 import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { openCookbookDependencies } from './cookbook-diagnosis.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -579,10 +580,15 @@ function _rerenderCachedModels() {
       const _arrowTitle = _modelPresets.length > 0
         ? `${_modelPresets.length} saved launch config${_modelPresets.length === 1 ? '' : 's'} for ${_repoShort} — click ▾ to load or delete`
         : `No saved launch configs for ${_repoShort} yet — click Save to add one`;
-      let _slotsHtml = `<div class="cookbook-serve-slots cookbook-saved-split">`
-        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current config"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Settings</button>`
+      // Wrap the Save split in a <label> so it picks up the same "field
+      // title + ?-help" treatment as Backend / venv / Port / GPUs sitting
+      // beside it in Row 1. Button text is "Save" (the action), label is
+      // "Settings" (what the saved blob represents).
+      let _slotsHtml = `<label>${_l('Settings','Saved launch configurations for this model — click ▾ to load or delete')}`
+        + `<div class="cookbook-serve-slots cookbook-saved-split">`
+        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current config"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>`
         + `<button type="button" class="cookbook-slot-btn cookbook-saved-arrow" title="${esc(_arrowTitle)}">${_arrowLabel}</button>`
-        + `</div>`;
+        + `</div></label>`;
 
       let panelHtml = `<div class="hwfit-serve-panel">`;
       // Runtime-readiness note pinned at the top of the serve area so the
@@ -617,6 +623,10 @@ function _rerenderCachedModels() {
       panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:28px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
+      // Dtype lives in Row 1 (next to venv) — it's the first knob people
+      // change when matching the model to the box, so it earns top-row
+      // real estate over Row 2's launch-tuning controls.
+      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
       panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', defaultPort))}" /></label>`;
       const _activeGpus = (defaultGpus || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -627,9 +637,13 @@ function _rerenderCachedModels() {
         const on = _activeGpus.includes(String(i));
         _gpuBtnsHtml += `<button type="button" class="cookbook-gpu-btn${on ? ' active' : ''}" data-gpu="${i}">${i}</button>`;
       }
-      panelHtml += `<label>${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
-      // Save / saved-configs split button — moved into Row 1 (next to GPUs)
-      // so it shares the same baseline as the rest of the top controls.
+      // GPUs button strip moved to Row 2 (next to GPU Mem) below. 4px
+      // margin on the left, 8px on the right — extra 4px right-side gap
+      // separates the GPU chiclets from the GPU Mem field that follows
+      // (asked-for breathing room; 4px on either side felt cramped on
+      // the GPU-Mem boundary).
+      const _gpusLabelHtml = `<label class="hwfit-gpus-label" style="margin:0 8px 0 4px;">${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
+      // Save / saved-configs split button — sits at the right end of Row 1.
       panelHtml += _slotsHtml;
       panelHtml += `</div>`;
       // (hwfit-serve-runtime-note moved to the top of the panel — see above.)
@@ -650,17 +664,21 @@ function _rerenderCachedModels() {
       // (Swap, KV Cache, Attention backend, Env vars, llama.cpp batch/ubatch)
       // moved to the Advanced fold below to keep this row scannable.
       panelHtml += `<div class="hwfit-serve-row hwfit-serve-row-core hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp hwfit-backend-ollama">`;
-      // Order: Dtype → TP → Context → GPU → GPU Mem → Max Seqs.
-      // Dtype moved left of TP at user's request — it's the first knob
-      // people typically check when matching the model to the box.
-      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
+      // Order: TP → Context → Max Seqs → GPUs → GPU Mem.
+      // Dtype moved up to Row 1. GPUs moved here next to GPU Mem so the
+      // "which devices + how much of them" decisions sit adjacent. Max
+      // Seqs follows Context per the "request-shape" cluster.
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
       // ctx resets to the model's max on every panel open (the real ctx slider
       // lives in the Scan/Download toolbar — see cookbook.js .hwfit-ctx-control).
       panelHtml += `<label>${_l('Context','Max tokens per request — resets to the model max on every open. Lower = less VRAM')}<input type="text" class="hwfit-sf" data-field="ctx" value="${esc(m.context_length || m.context || '20000')}" /></label>`;
-      panelHtml += `<label>${_l('GPU','Which GPU to use. Leave empty for default')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
+      // GPU "auto" field removed — the GPU button strip below already
+      // writes data-field="gpus" (the canonical comma-separated device
+      // list) and the command builders now read from that single source.
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
+      // GPUs button strip at the far right of Row 2.
+      panelHtml += _gpusLabelHtml;
       panelHtml += `</div>`;
       // ── Advanced (collapsed by default) ──
       // Everything below the fold is tuning users only touch occasionally:
@@ -688,7 +706,10 @@ function _rerenderCachedModels() {
       // tuning, or any other KEY=VALUE pair that doesn't have a dedicated
       // field. After the venv activate runs, $VIRTUAL_ENV / $PATH / etc. are
       // already exported so they expand correctly here.
-      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang" style="flex:1 1 100%;">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). Example: CUDACXX=$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc — points flashinfer at the venv-bundled nvcc when the system one is too old for your GPU.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(sv('extra_env',''))}" placeholder="CUDACXX=/path/to/nvcc NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
+      // grid-column: 1 / -1 makes Env span every column of the Advanced
+      // row's CSS grid (the old flex:1 1 100% did nothing in a grid
+      // container — left an empty trailing column gap on wide modals).
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang" style="grid-column:1 / -1;">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). Example: CUDACXX=$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc — points flashinfer at the venv-bundled nvcc when the system one is too old for your GPU.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(sv('extra_env',''))}" placeholder="CUDACXX=/path/to/nvcc NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Advanced llama.cpp row (Batch / UBatch — moved out of Core for the
       // same "rarely touched" reason as the vLLM extras above).
@@ -722,6 +743,21 @@ function _rerenderCachedModels() {
       if (_rp_name) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name}" /> Reasoning Parser <span class="hwfit-parser-tag">${_rp_name}</span></label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
+      // Inline the previously-second vLLM checks row so Expert Parallel /
+      // Speculative / MoE Env sit next to Prefix Caching with no gap. All
+      // three are vLLM-only — class-gated so they hide on SGLang.
+      if (_opts2_row3.flags.includes('--enable-expert-parallel')) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel</label>`;
+      {
+        const _specDef = _opts2_row3.spec || { method: 'mtp', tokens: 3 };
+        const _specMethod = sv('spec_method', _specDef.method);
+        const _specTokens = sv('spec_tokens', String(_specDef.tokens));
+        const _specMethods = ['mtp', 'qwen3_next_mtp', 'eagle', 'medusa', 'ngram'];
+        if (!_specMethods.includes(_specMethod)) _specMethods.unshift(_specMethod);
+        const _specOpts = _specMethods.map(m =>
+          `<option value="${m}"${m === _specMethod ? ' selected' : ''}>${m}</option>`).join('');
+        panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" style="width:44px;" /><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
+      }
+      if (_opts2_row3.envVars.length) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
       panelHtml += `</div>`;
       // Row 2c: llama.cpp fit/perf flags (set by Auto profiles, editable by hand)
       const _kvOpts = ['', 'q4_0', 'q8_0', 'f16'].map(k => `<option value="${k}"${sv('cache_type','')===k?' selected':''}>${k||'default'}</option>`).join('');
@@ -774,28 +810,8 @@ function _rerenderCachedModels() {
       // vLLM backend so the Speculative (MTP) control is ALWAYS reachable —
       // even for models the auto-detector doesn't recognize. Expert-parallel,
       // reasoning-parser and MoE-env still only appear when auto-detected.
-      const _opts2 = _detectModelOptimizations(repo);
-      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm">`;
-      if (_opts2.flags.includes('--enable-expert-parallel')) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel</label>`;
-      // Reasoning Parser moved to Row 3 (inline with Trust Remote / Auto
-      // Tool) so the per-model toggles sit together — the duplicate that
-      // lived here previously left two copies of the same checkbox.
-      {
-        // Speculative decoding (vLLM --speculative-config). Default OFF; the
-        // method/token defaults come from auto-detection when available,
-        // else fall back to MTP/3. Toggling the checkbox is what actually
-        // adds the flag at launch (see cookbook.js command builder).
-        const _specDef = _opts2.spec || { method: 'mtp', tokens: 3 };
-        const _specMethod = sv('spec_method', _specDef.method);
-        const _specTokens = sv('spec_tokens', String(_specDef.tokens));
-        const _specMethods = ['mtp', 'qwen3_next_mtp', 'eagle', 'medusa', 'ngram'];
-        if (!_specMethods.includes(_specMethod)) _specMethods.unshift(_specMethod);
-        const _specOpts = _specMethods.map(m =>
-          `<option value="${m}"${m === _specMethod ? ' selected' : ''}>${m}</option>`).join('');
-        panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" style="width:44px;" /><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
-      }
-      if (_opts2.envVars.length) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
-      panelHtml += `</div>`;
+      // Expert Parallel / Speculative / MoE Env moved into Row 3 above so
+      // the vLLM-only toggles sit next to Prefix Caching with no gap.
       // Extra args sits below the vLLM checks (Reasoning Parser + Spec)
       // so it reads as "after the advanced toggles, any other flags".
       panelHtml += `<div class="hwfit-serve-extra">`;
@@ -1143,6 +1159,22 @@ function _rerenderCachedModels() {
             note.style.color = 'var(--red)';
             note.style.borderColor = 'color-mix(in srgb, var(--red) 40%, transparent)';
             note.style.background = 'color-mix(in srgb, var(--red) 8%, transparent)';
+            // Append an accent-color link straight to the Dependencies
+            // recipe panel for this backend so the user has one click
+            // to the fix instead of hunting for the right row.
+            if (noteText) {
+              const pkgName = pkg?.name || ({ vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp', diffusers: 'diffusers' }[backend]);
+              const repo = (panel.closest('.doclib-card, .memory-item')?.dataset?.repo) || '';
+              const link = document.createElement('a');
+              link.href = '#';
+              link.textContent = ' Install in Dependencies →';
+              link.style.cssText = 'color:var(--accent, var(--red));text-decoration:underline;font-weight:600;margin-left:4px;';
+              link.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                if (pkgName) openCookbookDependencies(pkgName, { expandRecipe: pkgName, model: repo });
+              });
+              noteText.appendChild(link);
+            }
           } else {
             // Healthy / ready → green so the user reads "good to go" at a
             // glance instead of scanning fg-muted for a state.
