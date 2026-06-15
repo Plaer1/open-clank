@@ -32,7 +32,7 @@ def create_office_document(
         DocumentVersion,
         Session as DbSession,
     )
-    from src.tool_implementations import set_active_document
+    from src.agent_tools.document_tools import set_active_document
 
     if not body_text or not body_text.strip():
         return None

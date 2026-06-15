@@ -373,6 +373,13 @@ function _buildPanelHTML() {
           <span id="research-no-past-hint" style="display:none;font-size:11px;opacity:0.7;position:relative;top:-4px;">— past runs in <button type="button" class="research-library-link" style="background:none;border:none;padding:0;font:inherit;color:var(--accent, var(--red));cursor:pointer;text-decoration:underline;">Library, Research</button></span>
         </p>
         <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
+        <div class="research-category-row" id="research-category-row">
+          <button class="research-cat active" data-cat="" title="LLM auto-detects the best format">Auto</button>
+          <button class="research-cat" data-cat="product">Product</button>
+          <button class="research-cat" data-cat="comparison">Compare</button>
+          <button class="research-cat" data-cat="howto">How-to</button>
+          <button class="research-cat" data-cat="factcheck">Fact-check</button>
+        </div>
         <button id="research-settings-toggle" class="research-settings-toggle${chevronCls}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings<span class="research-settings-chevron">${_chevronIcon}</span>
         </button>
