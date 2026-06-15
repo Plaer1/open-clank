@@ -1564,9 +1564,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       .replace(/<channel\|>/gi, '');
                     thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
                     _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
-                    // Keep thinking box scrolled to bottom
+                    // Keep thinking box scrolled to bottom, but let user scroll up
                     var thinkBox = _liveThinkInner.closest('.thinking-content');
-                    if (thinkBox) thinkBox.scrollTop = thinkBox.scrollHeight;
+                    if (thinkBox) {
+                      var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
+                      if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
+                    }
                   }
                   uiModule.scrollHistory();
                   continue;
