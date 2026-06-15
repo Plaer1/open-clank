@@ -19,6 +19,7 @@ from src.upload_limits import (
     GALLERY_TRANSFORM_UPLOAD_MAX_BYTES,
 )
 from src.constants import GENERATED_IMAGES_DIR
+from src.optional_deps import patch_realesrgan_torchvision_compat
 
 from routes.gallery_helpers import (
     GalleryPatch, _extract_exif, _image_to_dict, _owner_filter, _human_size,
@@ -1467,6 +1468,7 @@ def setup_gallery_routes() -> APIRouter:
         img_bytes = base64.b64decode(image_b64)
         src = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         try:
+            patch_realesrgan_torchvision_compat()
             from realesrgan import RealESRGANer
         except ImportError:
             return {"error": "realesrgan not installed. Install it from Cookbook → Dependencies (search 'realesrgan')."}
@@ -1516,6 +1518,7 @@ def setup_gallery_routes() -> APIRouter:
         img_bytes = base64.b64decode(image_b64)
         src = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         try:
+            patch_realesrgan_torchvision_compat()
             from basicsr.archs.rrdbnet_arch import RRDBNet
             from realesrgan import RealESRGANer
         except ImportError:
