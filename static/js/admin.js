@@ -1467,8 +1467,8 @@ function initEndpointForm() {
   const localAddBtn = el('adm-epLocalAddBtn');
   const localTestBtn = el('adm-epLocalTestBtn');
   if (localTestBtn) {
-    const testOriginalHtml = localTestBtn.innerHTML;
     localTestBtn.addEventListener('click', async () => {
+      const testOriginalHtml = localTestBtn.innerHTML || '>Test';
       const msg = _endpointMsg('local');
       msg.textContent = ''; msg.className = 'adm-ep-inline-msg';
       const raw = (el('adm-epLocalUrl').value || '').trim();
@@ -1494,8 +1494,8 @@ function initEndpointForm() {
     });
   }
   if (localAddBtn) {
-    const addOriginalHtml = localAddBtn.innerHTML;
     localAddBtn.addEventListener('click', async () => {
+      const addOriginalHtml = localAddBtn.innerHTML || '>Add';
       const msg = _endpointMsg('local');
       msg.textContent = ''; msg.className = 'adm-ep-inline-msg';
       const raw = (el('adm-epLocalUrl').value || '').trim();

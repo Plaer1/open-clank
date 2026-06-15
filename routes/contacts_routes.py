@@ -12,6 +12,7 @@ import json
 import csv
 import io
 import os
+import inspect
 import httpx
 from pathlib import Path
 from datetime import datetime
@@ -741,8 +742,8 @@ def setup_contacts_routes():
         email = (data.get("email") or "").strip()
         phone = (data.get("phone") or "").strip()
         address = (data.get("address") or "").strip()
-        if not email and not name:
-            return {"success": False, "error": "Name or email required"}
+        if not email:
+            return {"success": False, "error": "Email required"}
         # Check if already exists by email
         if email:
             contacts = _fetch_contacts()
@@ -751,7 +752,11 @@ def setup_contacts_routes():
                     return {"success": True, "message": "Already exists", "contact": c}
         if not name:
             name = email.split("@")[0]
-        ok = _create_contact(name, email, address)
+        create_params = inspect.signature(_create_contact).parameters
+        if len(create_params) >= 3:
+            ok = _create_contact(name, email, address)
+        else:
+            ok = _create_contact(name, email)
         # If a phone was provided, do an immediate update to thread it
         # through (the simple _create_contact signature only takes name +
         # email + address; phones happen via update).
