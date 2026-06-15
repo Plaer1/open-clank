@@ -108,6 +108,32 @@ def _visible_image_endpoint_for_base(db, base: str, owner: str | None):
     return fallback
 
 
+async def _fetch_result_image_b64(url: str) -> Optional[str]:
+    """Fetch an image URL returned in an upstream response body, base64-encoded
+    (or None on a non-200).
+
+    The URL comes from the diffusion/OpenAI server's response, not from our own
+    config, so a malicious or compromised endpoint could otherwise steer this
+    fetch at an internal or cloud-metadata address. Validate it the same way the
+    client-supplied endpoint is validated before the first request.
+    """
+    import base64
+    import httpx
+    from src.url_safety import check_outbound_url
+
+    ok, reason = check_outbound_url(
+        url,
+        block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
+    )
+    if not ok:
+        raise HTTPException(502, f"Upstream returned an unsafe image URL: {reason}")
+    async with httpx.AsyncClient(timeout=60) as c2:
+        ir = await c2.get(url)
+        if ir.status_code == 200:
+            return base64.b64encode(ir.content).decode()
+    return None
+
+
 def setup_gallery_routes() -> APIRouter:
     router = APIRouter(tags=["gallery"])
 
@@ -1142,10 +1168,7 @@ def setup_gallery_routes() -> APIRouter:
                         if item.get("b64_json"):
                             raw_b64 = item["b64_json"]
                         elif item.get("url"):
-                            async with httpx.AsyncClient(timeout=60) as c2:
-                                img_r = await c2.get(item["url"])
-                                if img_r.status_code == 200:
-                                    raw_b64 = base64.b64encode(img_r.content).decode()
+                            raw_b64 = await _fetch_result_image_b64(item["url"])
                     if not raw_b64:
                         raise HTTPException(502, "OpenAI returned no image")
 
@@ -1206,7 +1229,7 @@ def setup_gallery_routes() -> APIRouter:
         original and regenerates `strength` fraction. With strength ~0.4
         you get edge blending + lighting unification while keeping the
         composition recognisable."""
-        import httpx, base64 as _b64
+        import httpx
         user = require_privilege(request, "can_generate_images")
         body = await request.json()
 
@@ -1382,10 +1405,9 @@ def setup_gallery_routes() -> APIRouter:
                             if item.get("b64_json"):
                                 return {"image": item["b64_json"]}
                             if item.get("url"):
-                                async with httpx.AsyncClient(timeout=60) as c2:
-                                    ir = await c2.get(item["url"])
-                                    if ir.status_code == 200:
-                                        return {"image": _b64.b64encode(ir.content).decode()}
+                                img_b64 = await _fetch_result_image_b64(item["url"])
+                                if img_b64:
+                                    return {"image": img_b64}
                     last_err = f"{path}: server returned no image"
                 except httpx.ConnectError as e:
                     raise HTTPException(502, f"Can't reach diffusion server at {base}: {e}")
