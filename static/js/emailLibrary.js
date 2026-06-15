@@ -30,6 +30,7 @@ let _libLoadSeq = 0;
 let _libFolderSeq = 0;
 let _libSearchSeq = 0;
 let _libSearchHadResults = false;
+let _libSearchInFlight = false;
 let _activeEmailReaderForSelectAll = null;
 
 function _isEmailTypingTarget(t) {
@@ -61,6 +62,52 @@ function _markEmailReaderActive(reader) {
   reader.addEventListener('pointerdown', () => { _activeEmailReaderForSelectAll = reader; }, true);
   reader.addEventListener('focusin', () => { _activeEmailReaderForSelectAll = reader; }, true);
 }
+
+// Stash the email identity (uid + folder + account) on the reader element
+// so chat submits and other code paths can ask "what email is the user
+// currently looking at?" without re-deriving from the DOM hierarchy.
+function _stampReaderContext(reader, em, folder, account) {
+  if (!reader || !em) return;
+  reader.dataset.emailUid = String(em.uid || '');
+  reader.dataset.emailFolder = String(folder || state._libFolder || 'INBOX');
+  reader.dataset.emailAccount = String(account || state._libAccountId || '');
+  if (em.subject) reader.dataset.emailSubject = String(em.subject);
+  if (em.from_address || em.from_name) {
+    reader.dataset.emailFrom = String(em.from_address || em.from_name);
+  }
+}
+
+// Returns { uid, folder, account, subject, from } for the email the user
+// is most likely referring to — the last reader they interacted with, then
+// any open reader-modal as a fallback. Returns null when no email reader
+// is open. Exported below for chat.js to read on submit.
+function _getActiveEmailContext() {
+  const candidates = [];
+  if (_activeEmailReaderForSelectAll && _activeEmailReaderForSelectAll.isConnected) {
+    candidates.push(_activeEmailReaderForSelectAll);
+  }
+  // Visible reader-tab modals (popped-out windows).
+  document.querySelectorAll('.modal[id^="email-reader-"]:not(.hidden):not(.modal-minimized) .email-card-reader').forEach(el => candidates.push(el));
+  // Expanded inline reader in the library list.
+  document.querySelectorAll('#email-lib-modal:not(.hidden) .doclib-card.email-card-expanded .email-card-reader').forEach(el => candidates.push(el));
+  for (const r of candidates) {
+    const uid = r?.dataset?.emailUid;
+    if (uid) {
+      return {
+        uid,
+        folder: r.dataset.emailFolder || 'INBOX',
+        account: r.dataset.emailAccount || '',
+        subject: r.dataset.emailSubject || '',
+        from: r.dataset.emailFrom || '',
+      };
+    }
+  }
+  return null;
+}
+
+// Frontend reads via the global so chat.js doesn't need a separate import
+// path (emailLibrary loads lazily in some entry points).
+try { window.__odysseusGetActiveEmailContext = _getActiveEmailContext; } catch (_) {}
 
 const _COPY_EMAIL_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
@@ -710,7 +757,7 @@ async function _prewarmDefaultEmailView() {
   } catch (_) {}
 
   const accountQS = accountId ? `&account_id=${encodeURIComponent(accountId)}` : '';
-  const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${accountQS}&limit=100&offset=0&filter=${filter}`, {
+  const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${accountQS}&limit=500&offset=0&filter=${filter}`, {
     credentials: 'same-origin',
   });
   if (!res.ok) return;
@@ -1876,8 +1923,21 @@ function _applyPillFilter() {
     return;
   }
   const source = _libPreSearchEmails || state._libEmails || [];
-  const draftPill = draft.length >= 1 ? { type: 'text', text: draft } : null;
-  const effective = draftPill ? pills.concat([draftPill]) : pills;
+  // If the active server search covers a piece of text (either the live
+  // draft OR an Enter-committed text pill), skip the local re-filter for
+  // it — _emailMatchesPill only checks subject/from_name/from_address/
+  // snippet (no BODY), so it was dropping legitimate server hits where
+  // the match was in body text. Real pills (contact, filter chips) still
+  // apply, and other text pills with different strings still apply.
+  const libSearchLower = (_libSearchHadResults ? (state._libSearch || '').trim().toLowerCase() : '');
+  const serverHandledDraft = !!(libSearchLower && draft && libSearchLower === draft.toLowerCase());
+  const draftPill = (!serverHandledDraft && draft.length >= 1) ? { type: 'text', text: draft } : null;
+  // Filter out text pills whose text matches the active server search —
+  // those were the trigger for the IMAP query and don't need re-checking.
+  const effectiveBasePills = libSearchLower
+    ? pills.filter(p => !(p.type === 'text' && (p.text || '').toLowerCase() === libSearchLower))
+    : pills;
+  const effective = draftPill ? effectiveBasePills.concat([draftPill]) : effectiveBasePills;
   // AND across pills — "alice + bob" should mean both alice AND bob are
   // somewhere on the email (from/to/cc), not "from alice OR from bob".
   const filtered = source.filter(em => effective.every(p => _emailMatchesPill(em, p)));
@@ -1990,6 +2050,24 @@ function _removeSearchPillAt(idx) {
   state._libSearchPills.splice(idx, 1);
   if (removed && removed.type === 'filter') _clearFilterPillSideEffect();
   _renderSearchPills();
+  // Pill cleared all the way: if we got into search-result mode via the
+  // IMAP search, the pre-search snapshot is now those results too (set
+  // in _doSearch). Restoring from it would leave the user staring at
+  // the same results with the pill bar empty. Re-fetch the real inbox
+  // so removing the last pill genuinely "goes back".
+  const noPillsLeft = (state._libSearchPills || []).length === 0
+    && !(state._libSearchDraft || '').trim();
+  if (noPillsLeft && _libSearchHadResults) {
+    _libSearchHadResults = false;
+    _libPreSearchEmails = null;
+    _libPreSearchTotal = 0;
+    state._libSearch = '';
+    state._libOffset = 0;
+    const _searchInput = document.getElementById('email-lib-search');
+    if (_searchInput) _searchInput.value = '';
+    _loadEmails({ useCache: true });
+    return;
+  }
   _applyPillFilter();
 }
 
@@ -2059,6 +2137,15 @@ function _acceptSuggestion(s) {
     return;
   } else {
     _addSearchPill({ type: 'contact', name: s.name, email: s.email });
+    // Same as the text-pill path in the Enter handler: trigger the IMAP
+    // search so unloaded emails (older than the current page) show up
+    // when picking a contact. The local pill filter then narrows the
+    // search results to that contact's address.
+    const _q = (s.email || s.name || '').trim();
+    if (_q && _q.length >= 2) {
+      state._libSearch = _q;
+      _doSearch();
+    }
   }
   if (input) input.value = '';
   state._libSearchDraft = '';
@@ -2099,10 +2186,47 @@ async function _initEmailSearchChipBar() {
   };
 
   input.addEventListener('focus', _refreshSuggestions);
+  // Debounced IMAP search — fires ~500ms after the user stops typing so
+  // searches for names/text not in the current inbox page actually surface
+  // hits, instead of just locally filtering the visible window.
+  //
+  // Live local filtering on EVERY keystroke was clobbering server hits:
+  // _emailMatchesPill / _matchesQuery check subject/from_name/from_address/
+  // snippet but never body, so intermediate text like "sam" reduced the
+  // 61 server results to whatever matched just those four fields (often
+  // 0). User saw "no emails" while typing. So local filter is gone from
+  // the typing path — debounced server search drives the grid. Pill
+  // add/remove still re-runs the local filter through _applyPillFilter
+  // directly.
+  let _libSearchTypingTimer = null;
   input.addEventListener('input', async () => {
     state._libSearchDraft = input.value;
+    try { console.log('[email-search] input event, value=', JSON.stringify(input.value)); } catch {}
     await _refreshSuggestions();
-    _applyPillFilter();
+    if (_libSearchTypingTimer) clearTimeout(_libSearchTypingTimer);
+    const v = input.value.trim();
+    if (v.length >= 2) {
+      _libSearchTypingTimer = setTimeout(() => {
+        const cur = (input.value || '').trim();
+        if (cur === v && cur.length >= 2) {
+          state._libSearch = cur;
+          try { console.log('[email-search] firing _doSearch for', cur); } catch {}
+          _doSearch();
+        } else {
+          try { console.log('[email-search] debounce expired but input changed (was', v, 'now', cur, ')'); } catch {}
+        }
+      }, 500);
+    } else if (!v && _libSearchHadResults) {
+      // Cleared the input → restore the inbox the same way the pill-clear
+      // path does. Otherwise the stale search results stayed up after the
+      // user backspaced everything out.
+      _libSearchHadResults = false;
+      _libPreSearchEmails = null;
+      _libPreSearchTotal = 0;
+      state._libSearch = '';
+      state._libOffset = 0;
+      _loadEmails({ useCache: true });
+    }
   });
   input.addEventListener('blur', () => {
     // Delay so click/mousedown on a suggestion fires first.
@@ -2154,6 +2278,14 @@ async function _initEmailSearchChipBar() {
         input.value = '';
         state._libSearchDraft = '';
         _hideSearchSuggestions();
+        // Pill-only filtering used to only check emails already loaded into
+        // state._libEmails (the visible page of the inbox). Searches for
+        // names/text that aren't in the current page returned "no emails"
+        // even when matches existed on the server. Trigger the IMAP
+        // search so state._libEmails is replaced with the actual hits,
+        // then the pill filter narrows to matches.
+        state._libSearch = v;
+        _doSearch();
       }
       return;
     }
@@ -2232,9 +2364,16 @@ async function _doSearch() {
   const stats = document.getElementById('email-lib-stats');
   const originalStatsText = stats?.textContent || '';
   if (stats) stats.textContent = 'Searching…';
+  _libSearchInFlight = true;
+  // Force a re-render so the "Searching…" empty-state shows (and any
+  // existing "No emails" gets replaced) while the fetch is in flight.
+  _renderGrid();
 
+  const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
   try {
-    const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
+    // Single fast fetch — limit=100 so the IMAP fetch loop doesn't spend
+    // 60 s pulling 500 headers serially. We can wire "Load more" later
+    // off `state._libTotal` if needed.
     const res = await fetch(`${API_BASE}/api/email/search?folder=${encodeURIComponent(folderAtStart)}${accountQS}&q=${encodeURIComponent(q)}&limit=100`);
     const data = await res.json();
     if (
@@ -2251,11 +2390,36 @@ async function _doSearch() {
     _libSearchHadResults = true;
     state._libEmails = results;  // temporarily replace with search results
     state._libTotal = data.total || results.length;
+    // Refresh the pre-search snapshot so any subsequent _applyPillFilter
+    // call (focus / pill edit / etc.) sources from the actual search
+    // results, not the stale inbox page that was loaded before the
+    // search ran. Without this, active pills (a contact pill from the
+    // suggestion the user just clicked) would filter the inbox snapshot
+    // → near-always empty → user sees "no emails" even though the
+    // server search succeeded.
+    _libPreSearchEmails = results.slice();
+    _libPreSearchTotal = state._libTotal;
+    // If pills are active (and they usually are after a contact-pill or
+    // text-pill add), re-run the pill filter so the visible grid is the
+    // pill-narrowed intersection of the new search results. Otherwise
+    // _renderGrid below would render the raw server response, which
+    // might not match the active pills the user just added.
+    if ((state._libSearchPills || []).length) {
+      _applyPillFilter();
+      // Fall back to rendering the raw results if the pill intersection
+      // hid everything but the user just confirmed they want this query.
+      if (!(state._libEmails || []).length) state._libEmails = results;
+    }
     _renderGrid();
 
-    if (stats) stats.textContent = `${data.total || results.length} match${(data.total || results.length) === 1 ? '' : 'es'}`;
+    const count = data.total || results.length;
+    if (stats) stats.textContent = `${count} match${count === 1 ? '' : 'es'} on server`;
+    try { console.log('[email-search]', JSON.stringify({ q, folder: folderAtStart, count, returned: results.length })); } catch {}
   } catch (e) {
     if (stats) stats.textContent = originalStatsText || 'Search failed';
+    try { console.error('[email-search] fetch failed:', e); } catch {}
+  } finally {
+    _libSearchInFlight = false;
   }
 }
 
@@ -2584,6 +2748,7 @@ function _renderGrid() {
   grid.innerHTML = '';
 
   let filtered = state._libEmails;
+  try { console.log('[email-search] _renderGrid: state._libEmails.length=', (state._libEmails || []).length, 'pills=', (state._libSearchPills || []).length, 'draft=', JSON.stringify(state._libSearchDraft || ''), 'libSearch=', JSON.stringify(state._libSearch || '')); } catch {}
 
   // Apply sort
   if (state._libSort === 'unread') {
@@ -2592,8 +2757,39 @@ function _renderGrid() {
     filtered = [...filtered].sort((a, b) => Number(b.is_flagged) - Number(a.is_flagged));
   }
   // 'recent' is the default order from the API
+  // Stable secondary sort: favorited (is_flagged) emails ALWAYS bubble to
+  // the top of whatever order the sort above produced. This pins the
+  // user's flagged items so they're the first thing in the inbox no
+  // matter which sort mode is active.
+  filtered = [...filtered].sort((a, b) => Number(!!b.is_flagged) - Number(!!a.is_flagged));
 
   if (filtered.length === 0) {
+    // Active search — don't flash "No emails": the IMAP fetch is still
+    // running. Show a "Searching…" placeholder until _doSearch resolves
+    // and renders again. Without this the user saw an empty state
+    // smiley for ~500ms between the optimistic pill-filter clear and
+    // the server response landing.
+    if (_libSearchInFlight) {
+      grid.innerHTML = '';
+      const wrap = document.createElement('div');
+      wrap.className = 'email-loading';
+      wrap.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;padding:24px;opacity:0.75;';
+      grid.appendChild(wrap);
+      // Whirlpool spinner for parity with the rest of the cookbook /
+      // doclib loaders. Falls back to plain text if the import fails.
+      import('./spinner.js').then(sp => {
+        if (!wrap.isConnected) return;
+        const w = sp.default.createWhirlpool(20);
+        w.element.style.cssText = 'margin:0;display:block;';
+        wrap.appendChild(w.element);
+        const lbl = document.createElement('span');
+        lbl.textContent = 'Searching…';
+        wrap.appendChild(lbl);
+      }).catch(() => {
+        wrap.textContent = 'Searching…';
+      });
+      return;
+    }
     // Inbox-zero is a win — pair the message with a small smiley so the
     // empty state reads as "all caught up", not "something's broken".
     const _smileyIco = '<span style="vertical-align:-3px;margin-left:6px;">' + emptyStateIcon('smiley') + '</span>';
@@ -2930,13 +3126,19 @@ function _prefetchAdjacentEmails(card, count = 1) {
   const target = targets.find(t => t?.dataset?.uid);
   const uid = target?.dataset?.uid;
   if (!uid) return;
-  const key = `${state._libAccountId || ''}|${state._libFolder}|${uid}`;
+  // Use the email's actual folder when it was stamped by the search
+  // endpoint; otherwise default to the currently-selected folder.
+  const _emFold = (() => {
+    const emObj = (state._libEmails || []).find(e => String(e.uid) === String(uid));
+    return (emObj && emObj.folder) || state._libFolder || 'INBOX';
+  })();
+  const key = `${state._libAccountId || ''}|${_emFold}|${uid}`;
   if (_emailReadPrefetching.has(key) || _emailReadPrefetching.size > 0) return;
   if (_emailReadPrefetchTimer) clearTimeout(_emailReadPrefetchTimer);
   _emailReadPrefetchTimer = setTimeout(() => {
     _emailReadPrefetchTimer = null;
     _emailReadPrefetching.add(key);
-    fetch(`${API_BASE}/api/email/read/${encodeURIComponent(uid)}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&mark_seen=false`)
+    fetch(`${API_BASE}/api/email/read/${encodeURIComponent(uid)}?folder=${encodeURIComponent(_emFold)}${_acct()}&mark_seen=false`)
       .catch(() => {})
       .finally(() => _emailReadPrefetching.delete(key));
   }, 900);
@@ -2944,7 +3146,10 @@ function _prefetchAdjacentEmails(card, count = 1) {
 
 async function _toggleCardPreview(card, em) {
   const accountAtStart = state._libAccountId || '';
-  const folderAtStart = state._libFolder || 'INBOX';
+  // Prefer the per-email folder stamped by the search endpoint (results
+  // from "All Mail" carry folder="[Gmail]/All Mail"). Falls back to the
+  // currently-selected folder for normal inbox cards.
+  const folderAtStart = (em && em.folder) || state._libFolder || 'INBOX';
   const uidAtStart = String(em?.uid || card?.dataset?.uid || '');
   const grid = card.closest('.doclib-grid');
   const gridRect = grid?.getBoundingClientRect?.();
@@ -3036,6 +3241,7 @@ async function _toggleCardPreview(card, em) {
     // Mark as read locally
     _syncEmailReadState(em.uid, true);
     _prefetchAdjacentEmails(card);
+    _stampReaderContext(reader, { ...em, ...data }, state._libFolder, state._libAccountId);
 
     // Build the attachments wrap using the shared helper so the signature-
     // image filter (small inline PNGs/JPGs, Outlook image001 placeholders,
@@ -3083,10 +3289,10 @@ async function _toggleCardPreview(card, em) {
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildRecipients(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
@@ -4758,6 +4964,7 @@ async function _openEmailAsTab(em, folder) {
       return;
     }
     _syncEmailReadState(em.uid, true);
+    _stampReaderContext(reader, { ...em, ...data }, useFolder, state._libAccountId);
     const buildChips = (str) => {
       if (!str) return '';
       return _splitRecipientList(str).map(a => {
@@ -4780,10 +4987,10 @@ async function _openEmailAsTab(em, folder) {
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${buildChips(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="from-sender" title="Search text in this thread"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span class="reader-btn-label">Search</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
@@ -4936,10 +5143,10 @@ async function _openEmailWindow(em, folder) {
             ${data.cc ? `<div class="email-reader-meta-row"><strong>Cc:</strong><span class="recipient-chips">${_chipsFor(data.cc)}</span></div>` : ''}
           </div>` : ''}
           <div class="email-reader-actions-inline">
+            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="reply" title="Reply"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg><span class="reader-btn-label">Reply</span></button>
             ${_hasMultipleRecipients(data) ? `<button class="memory-toolbar-btn reader-icon-btn" data-act="reply-all" title="Reply All"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 17 2 12 7 7"/><polyline points="12 17 7 12 12 7"/><path d="M22 18v-2a4 4 0 0 0-4-4H7"/></svg><span class="reader-btn-label">Reply all</span></button>` : ''}
             <button class="memory-toolbar-btn reader-icon-btn" data-act="forward" title="Forward"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></svg><span class="reader-btn-label">Forward</span></button>
-            <button class="memory-toolbar-btn reader-icon-btn" data-act="ai-reply" title="${data.cached_ai_reply ? 'AI Reply (cached draft ready)' : 'AI Reply (suggest a draft)'}">${_aiReplyIcon(data)}<span class="reader-btn-label">AI reply</span></button>
             <button class="memory-toolbar-btn reader-icon-btn" data-act="summarize" title="Summarize">${_summaryIcon(data)}<span class="reader-btn-label">Summary</span></button>
             <div class="email-reader-more-wrap" style="position:relative">
               <button class="memory-toolbar-btn reader-icon-btn" data-act="more" title="More actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg><span class="reader-btn-label">More</span></button>
@@ -5338,6 +5545,27 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       },
     },
     {
+      // Favorite (pin to top). Same bookmark glyph we use for the
+      // sidebar-pin / favorites filter so the visual language stays
+      // consistent. Toggling updates em.is_flagged and re-sorts via
+      // _renderGrid (favorited rows are always pinned at the top).
+      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
+      action: async () => {
+        const next = !em.is_flagged;
+        em.is_flagged = next;
+        _renderGrid();
+        try {
+          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
+        } catch (e) {
+          // Roll back the optimistic flip if the server didn't take it.
+          em.is_flagged = !next;
+          _renderGrid();
+          console.error('Failed to toggle favorite:', e);
+        }
+      },
+    },
+    {
       label: em.is_answered ? 'Mark as Not Done' : 'Mark as Done',
       icon: _checkIcon,
       action: async () => {
@@ -5552,6 +5780,22 @@ function _showCardMenu(em, anchor) {
       },
     });
     actions.push({
+      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
+      action: async () => {
+        const next = !em.is_flagged;
+        em.is_flagged = next;
+        _renderGrid();
+        try {
+          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
+        } catch (e) {
+          em.is_flagged = !next;
+          _renderGrid();
+          console.error('Failed to toggle favorite:', e);
+        }
+      },
+    });
+    actions.push({
       label: 'Archive',
       icon: _archIcon,
       action: async () => {
@@ -5563,6 +5807,22 @@ function _showCardMenu(em, anchor) {
       },
     });
   } else {
+    actions.push({
+      label: em.is_flagged ? 'Unfavorite' : 'Favorite (pin to top)',
+      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="' + (em.is_flagged ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
+      action: async () => {
+        const next = !em.is_flagged;
+        em.is_flagged = next;
+        _renderGrid();
+        try {
+          await fetch(`${API_BASE}/api/email/flag/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}&on=${next ? 'true' : 'false'}`, { method: 'POST' });
+        } catch (e) {
+          em.is_flagged = !next;
+          _renderGrid();
+          console.error('Failed to toggle favorite:', e);
+        }
+      },
+    });
     actions.push({
       label: 'Archive',
       icon: _archIcon,

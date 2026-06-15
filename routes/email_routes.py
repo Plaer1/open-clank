@@ -1068,7 +1068,12 @@ def setup_email_routes():
         account_id: str | None = Query(None),
         owner: str = Depends(require_owner),
     ):
-        """Search emails server-side via IMAP SEARCH. Matches subject, from, or body text."""
+        """Search emails server-side via IMAP SEARCH. Matches subject, from, or body text.
+
+        When the caller asks for INBOX and the account has an "All Mail"
+        folder (Gmail does), we transparently swap to All Mail so the
+        search surfaces archived / labelled emails too. Plain IMAP
+        accounts fall back to whatever folder the caller specified."""
         if not q or len(q) < 2:
             return {"emails": [], "total": 0, "query": q}
         # CRLF in q would terminate the IMAP command early — reject defensively.
@@ -1076,7 +1081,27 @@ def setup_email_routes():
             raise HTTPException(400, "Invalid query")
         try:
             with _imap(account_id, owner=owner) as conn:
-                conn.select(_q(folder), readonly=True)
+                # If the user asked for INBOX, try to upgrade to All Mail —
+                # one folder == every email on Gmail-class servers.
+                effective_folder = folder
+                if (folder or "").upper() == "INBOX":
+                    try:
+                        status, folder_lines = conn.list()
+                        if status == "OK" and folder_lines:
+                            for raw in folder_lines:
+                                if isinstance(raw, bytes):
+                                    raw = raw.decode("utf-8", errors="replace")
+                                m = re.match(r"\((?P<flags>[^)]*)\)\s+\"[^\"]*\"\s+(?P<name>.+)", raw)
+                                if not m:
+                                    continue
+                                flags = (m.group("flags") or "").lower()
+                                name = m.group("name").strip().strip('"')
+                                if "\\all" in flags or "all mail" in name.lower():
+                                    effective_folder = name
+                                    break
+                    except Exception:
+                        pass
+                conn.select(_q(effective_folder), readonly=True)
 
                 # Escape backslash and quote for the IMAP-SEARCH quoted-string.
                 q_escaped = q.replace('\\', '\\\\').replace('"', '\\"')
@@ -1084,7 +1109,7 @@ def setup_email_routes():
 
                 status, data = _imap_uid_search(conn, search_cmd)
                 if status != "OK" or not data[0]:
-                    return {"emails": [], "total": 0, "query": q}
+                    return {"emails": [], "total": 0, "query": q, "folder": effective_folder}
 
                 uid_list = data[0].split()
                 total = len(uid_list)
@@ -1148,6 +1173,13 @@ def setup_email_routes():
                             "is_flagged": "\\Flagged" in flags,
                             "flags": flags,
                             "has_attachments": has_attachments,
+                            # Stamp the folder so the frontend opens each
+                            # email from the folder it actually lives in
+                            # (the search may have run against All Mail
+                            # even though the caller asked for INBOX),
+                            # otherwise clicks open whatever happens to
+                            # have the same UID in INBOX → wrong email.
+                            "folder": effective_folder,
                         })
                     except Exception as e:
                         logger.warning(f"Error parsing search result {uid}: {e}")
@@ -1691,6 +1723,22 @@ def setup_email_routes():
             return {"success": True}
         except Exception as e:
             logger.error(f"Failed to mark unread {uid}: {e}")
+            return {"success": False, "error": "Mail operation failed"}
+
+    @router.post("/flag/{uid}")
+    async def flag_email(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None),
+                         on: bool = Query(True), owner: str = Depends(require_owner)):
+        """Toggle the \\Flagged flag (a.k.a. favorite / star) on an email.
+        Pass `on=true` to favorite, `on=false` to unfavorite."""
+        try:
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder))
+                if not _store_email_flag(conn, uid, "\\Flagged", add=bool(on)):
+                    return {"success": False, "error": "Email not found"}
+            _invalidate_list_cache(account_id, folder)
+            return {"success": True, "flagged": bool(on)}
+        except Exception as e:
+            logger.error(f"Failed to flag {uid}: {e}")
             return {"success": False, "error": "Mail operation failed"}
 
     @router.post("/mark-read/{uid}")

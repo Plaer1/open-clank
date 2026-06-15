@@ -125,12 +125,12 @@ export function init(documentModule) {
   _watchDocOpenToReDockEmail();
 }
 
-export async function openReplyDraft(uid, folder = 'INBOX', mode = 'reply') {
+export async function openReplyDraft(uid, folder = 'INBOX', mode = 'reply', prefilledBody = '') {
   if (!uid) return;
   const previousFolder = _currentFolder;
   _currentFolder = folder || 'INBOX';
   try {
-    await _openEmail({ uid: String(uid), subject: '' }, null, null, mode || 'reply');
+    await _openEmail({ uid: String(uid), subject: '' }, null, null, mode || 'reply', '', prefilledBody || '');
   } finally {
     _currentFolder = previousFolder || _currentFolder;
   }
@@ -630,10 +630,13 @@ function _createEmailItem(em) {
   return item;
 }
 
-async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', noteHint = '') {
+async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', noteHint = '', prefilledBody = '') {
   const aiReplyMode = mode === 'ai-reply-fast' ? 'fast' : (mode === 'ai-reply-full' ? 'full' : '');
   const wantsAiReply = mode === 'ai-reply' || !!aiReplyMode;
-  let aiSuggestedBody = null;
+  // Body pre-fill from the agent's open_email_reply tool call takes the
+  // same insertion slot as an AI-suggested body — both land just before
+  // the quoted-original block.
+  let aiSuggestedBody = (typeof prefilledBody === 'string' && prefilledBody.trim()) ? prefilledBody.trim() : null;
   if (wantsAiReply) {
     // Fall through to reply-all (not plain reply) so the generated AI
     // draft addresses everyone on the original thread. On single-

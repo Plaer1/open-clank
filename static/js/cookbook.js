@@ -792,6 +792,22 @@ async function _fetchDependencies() {
       return `<button class="cookbook-dep-tag cookbook-dep-install" data-dep-pip="${esc(pkg.pip)}" data-dep-target="${isLocal ? 'local' : 'remote'}">Install</button>`;
     };
 
+    // Per-package inline glyphs — same accent-coloured marks used in the
+    // Backend picker on the Run page, so the Dependencies row visually
+    // matches the engine you're configuring. Unknown packages get no
+    // icon (the name alone is fine for librosa, hf_transfer, etc.).
+    const _DEP_GLYPHS = {
+      vllm:    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
+      sglang:  '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+      llama_cpp: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>',
+      ollama:  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 10a6 6 0 0 1 12 0v4a4 4 0 0 1-8 0v-1"/><circle cx="10" cy="9" r="1"/><circle cx="14" cy="9" r="1"/></svg>',
+      diffusers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>',
+    };
+    const _depGlyphHtml = (name) => {
+      const g = _DEP_GLYPHS[name];
+      return g ? `<span class="cookbook-dep-glyph" aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;color:var(--accent, var(--red));margin-right:5px;vertical-align:-2px;">${g}</span>` : '';
+    };
+
     const _depRow = (pkg) => {
       const isLocal = pkg.target === 'local';
       const isSystemDep = pkg.kind === 'system';
@@ -821,7 +837,7 @@ async function _fetchDependencies() {
       const recipePanel = hasRecipe ? _recipePanelHtml(pkg.name) : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
         + `<div class="cookbook-dep-info">`
-        + `<div class="memory-item-title">${esc(pkg.name)}</div>`
+        + `<div class="memory-item-title">${_depGlyphHtml(pkg.name)}${esc(pkg.name)}</div>`
         + `<div class="memory-item-meta" style="font-size:10px;opacity:0.5;margin-top:2px;">${esc(pkg.desc)}</div>`
         + note
         + updateNote

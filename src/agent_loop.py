@@ -843,6 +843,7 @@ def _build_system_prompt(
     compact: bool = False,
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
+    active_email: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -1022,6 +1023,66 @@ def _build_system_prompt(
             )
     else:
         set_active_document(None)
+
+    # Active email reader — frontend told us the user has an email open.
+    # Inject a context block so "reply", "summarize this", "what does it say"
+    # resolve to the real UID instead of the agent inventing a fresh .md
+    # draft with fake headers. This is the email equivalent of _doc_message.
+    _email_message = None
+    if active_email and active_email.get("uid"):
+        _em_uid = active_email.get("uid", "")
+        _em_folder = active_email.get("folder", "INBOX")
+        _em_account = active_email.get("account", "")
+        _em_subject = active_email.get("subject", "") or "(no subject)"
+        _em_from = active_email.get("from", "") or "(unknown sender)"
+        _em_preview = (active_email.get("body_preview", "") or "").strip()
+        _preview_block = f"\nBody preview:\n```\n{_em_preview[:1800]}\n```" if _em_preview else ""
+        _acct_arg = f" {_em_account}" if _em_account else ""
+        email_ctx = (
+            f"ACTIVE EMAIL OPEN (the user has this email open in a reader window right now)\n"
+            f"UID: {_em_uid}\n"
+            f"Folder: {_em_folder}\n"
+            f"Account: {_em_account or '(default)'}\n"
+            f"From: {_em_from}\n"
+            f"Subject: {_em_subject}{_preview_block}\n\n"
+            f"CRITICAL DEFAULT — every request about email this turn refers to "
+            f"THIS email unless the user names a DIFFERENT specific recipient "
+            f"(a name, an email address, or another thread). Examples that "
+            f"ALL mean reply-to-the-open-email:\n"
+            f"  • 'reply' / 'reply to this' / 'respond'\n"
+            f"  • 'write email saying X' / 'send email saying X' / 'draft something'\n"
+            f"  • 'tell them X' / 'say hi' / 'thanks' / 'ack' / 'lmk'\n"
+            f"  • 'summarize it' / 'what does it say' / 'tldr'\n"
+            f"  • 'forward this' / 'forward to <addr>'\n"
+            f"DO NOT ASK THE USER 'who do you want to send this to?' — the "
+            f"answer is ALWAYS the sender of the open email (above) unless they "
+            f"named someone else. Asking that is the wrong move every time.\n\n"
+            f"RULES for the open email:\n"
+            f"1. DRAFT a reply (default for any 'write/send/reply/tell them' "
+            f"request without a different recipient): call `ui_control` with "
+            f"`action=\"open_email_reply\"` and `extra=\"{_em_uid} {_em_folder} "
+            f"reply\"`. This opens the proper reply doc with To/Subject/"
+            f"In-Reply-To pre-filled by the backend. The user will see and edit "
+            f"it before sending. DO NOT `create_document` a markdown file with "
+            f"hand-written `To:` / `Subject:` / `In-Reply-To:` headers — that "
+            f"is wrong every time.\n"
+            f"2. SEND a reply immediately (skip the draft): call "
+            f"`reply_to_email` with the UID above. Only do this when the user "
+            f"explicitly says 'send' / 'send the reply' / 'reply and send'.\n"
+            f"3. READ the full body (the preview above may be truncated): "
+            f"call `read_email` with the UID/folder/account above.\n"
+            f"4. SUMMARIZE / answer questions about it: read it first, then "
+            f"answer in chat. Don't create a document for a summary unless "
+            f"the user explicitly asks for one.\n"
+            f"5. Never ask the user to paste the email or 'share it with you' "
+            f"— you already have its identity above and can read the full body.\n"
+            f"6. The ONLY time you ask 'who to send to?' is when the user "
+            f"explicitly says 'send a NEW email to someone else' or names a "
+            f"recipient you can't identify. A bare 'send email saying X' = the "
+            f"open email's sender.\n"
+        )
+        _email_message = untrusted_context_message("active email reader", email_ctx)
+        _email_message["_protected"] = True
 
     # Inject writing style for any email writing path. This is deliberately
     # broader than read/list: models may compose via send_email, reply_to_email,
@@ -1230,6 +1291,9 @@ def _build_system_prompt(
     if _doc_message:
         merged.insert(last_user_idx, _doc_message)
         last_user_idx += 1  # the document message is now at last_user_idx
+    if _email_message:
+        merged.insert(last_user_idx, _email_message)
+        last_user_idx += 1
     if _skills_message:
         merged.insert(last_user_idx, _skills_message)
 
@@ -1712,6 +1776,7 @@ async def stream_agent_loop(
     max_tool_calls: int = 0,
     context_length: int = 0,
     active_document=None,
+    active_email: Optional[Dict[str, str]] = None,
     session_id: Optional[str] = None,
     disabled_tools: Optional[Set[str]] = None,
     owner: Optional[str] = None,
@@ -1944,6 +2009,7 @@ async def stream_agent_loop(
         compact=_is_api_model,
         owner=owner,
         suppress_local_context=guide_only,
+        active_email=active_email,
     )
     if workspace and not guide_only:
         # PREPEND (not append) so it dominates the large base prompt — appended
@@ -2794,7 +2860,19 @@ async def stream_agent_loop(
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
             if "ui_event" in result:
                 tool_output_data["ui_event"] = result["ui_event"]
-                for k in ("toggle_name", "state", "mode", "model", "endpoint_url", "theme_name", "colors"):
+                for k in (
+                    "toggle_name", "state", "mode", "model", "endpoint_url",
+                    "theme_name", "colors",
+                    # ui_control open_email_reply payload — without these the
+                    # frontend openReplyDraft bails on undefined uid and the
+                    # reply window silently never opens.
+                    "uid", "folder", "account_id",
+                    # Optional pre-filled body for open_email_reply so the
+                    # agent can compose-and-open in one tool call.
+                    "body",
+                    # ui_control open_panel payload
+                    "panel",
+                ):
                     if k in result:
                         tool_output_data[k] = result[k]
             # Forward image data from generate_image tool

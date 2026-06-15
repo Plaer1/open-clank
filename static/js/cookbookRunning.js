@@ -807,7 +807,7 @@ function _winSessionCmd(task, tmuxArgs) {
   return host ? `ssh ${pf}${host} 'tmux ${tmuxArgs}' 2>/dev/null` : `tmux ${tmuxArgs} 2>/dev/null`;
 }
 
-function _tmuxGracefulKill(task) {
+export function _tmuxGracefulKill(task) {
   if (_isWindows(task)) {
     const host = task.remoteHost;
     const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
@@ -822,6 +822,48 @@ function _tmuxGracefulKill(task) {
     return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} 'tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
   }
   return `tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null`;
+}
+
+// Force-kill escalation: SIGKILL the tmux pane's owning PID and any children,
+// then nuke the session. Use AFTER the graceful kill when the process is
+// still detected — vLLM sometimes ignores SIGINT during model init, and a
+// stuck CUDA context can survive `tmux kill-session` alone.
+export function _tmuxForceKill(task) {
+  if (_isWindows(task)) {
+    // Windows graceful path already does Stop-Process -Force, so the same
+    // command serves as the "force" variant.
+    return _tmuxGracefulKill(task);
+  }
+  const sid = task.sessionId;
+  const inner =
+    `PIDS=$(tmux list-panes -t ${sid} -F "#{pane_pid}" 2>/dev/null); ` +
+    `if [ -n "$PIDS" ]; then ` +
+    `  for P in $PIDS; do ` +
+    `    pkill -KILL -P "$P" 2>/dev/null; ` +
+    `    kill -9 "$P" 2>/dev/null; ` +
+    `  done; ` +
+    `fi; ` +
+    `tmux kill-session -t ${sid} 2>/dev/null`;
+  if (task.remoteHost) {
+    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(inner)}`;
+  }
+  return inner;
+}
+
+// Returns a shell snippet that prints "ALIVE" if the tmux session still
+// exists (or its main PID is still listed in /proc), "DEAD" otherwise.
+// Used by the Stop-all escalation to decide whether to force-kill.
+export function _tmuxIsAliveCheck(task) {
+  if (_isWindows(task)) {
+    // Skip the check on Windows — the graceful path already force-kills.
+    return null;
+  }
+  const sid = task.sessionId;
+  const inner = `if tmux has-session -t ${sid} 2>/dev/null; then echo ALIVE; else echo DEAD; fi`;
+  if (task.remoteHost) {
+    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(inner)}`;
+  }
+  return inner;
 }
 
 function _shQuote(value) {
@@ -1668,7 +1710,11 @@ export function _renderRunningTab() {
     group = document.createElement('div');
     group.className = 'cookbook-group hidden';
     group.dataset.backendGroup = 'Running';
-    group.innerHTML = '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">' +
+    // No `flex:1` on the card — with overflow:visible (forced via #cookbook-modal
+    // .cookbook-group > .admin-card), flex:1 collapsed the card to body height
+    // and the body's scrollHeight stopped tracking the overflowing children.
+    // Sized-to-content means cookbook-body's overflow-y:auto kicks in naturally.
+    group.innerHTML = '<div class="admin-card" style="display:flex;flex-direction:column;">' +
       '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">' +
       '<h2 style="margin:0;padding:0;line-height:1;">Active <span id="running-count" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal">' + activeCount + '</span></h2>' +
       '</div>' +
@@ -1761,9 +1807,21 @@ export function _renderRunningTab() {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();  // don't toggle the section collapse (was an inline onclick, blocked by CSP)
       const host = btn.dataset.clearServer;
-      if (!await window.styledConfirm(`Clear finished tasks on ${_serverName(host)}?`, { confirmText: 'Clear' })) return;
       const allTasks = _loadTasks();
       const toRemove = allTasks.filter(t => (t.remoteHost || '') === host && _canClearTask(t));
+      // Bail with a clear message instead of silently doing nothing when
+      // every task on this server is still running (nothing finished to
+      // clear yet) — the previous behavior looked like the button was dead.
+      if (!toRemove.length) {
+        const stillRunning = allTasks.filter(t => (t.remoteHost || '') === host && t.status === 'running').length;
+        const _msg = stillRunning
+          ? `No finished tasks on ${_serverName(host)} — ${stillRunning} still running. Stop them first to clear.`
+          : `No finished tasks on ${_serverName(host)}.`;
+        if (window.uiModule?.showToast) window.uiModule.showToast(_msg);
+        else alert(_msg);
+        return;
+      }
+      if (!await window.styledConfirm(`Clear ${toRemove.length} finished task${toRemove.length === 1 ? '' : 's'} on ${_serverName(host)}?`, { confirmText: 'Clear' })) return;
       const remaining = allTasks.filter(t => (t.remoteHost || '') !== host || !_canClearTask(t));
       _saveTasks(remaining);
       // Fade/slide each finished card out (same exit as the per-card clear)
