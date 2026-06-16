@@ -1,6 +1,7 @@
 # app.py — slim orchestrator
 import mimetypes
 import os
+import sys
 
 
 def register_static_mime_types() -> None:
@@ -438,7 +439,7 @@ class _RevalidatingStatic(StaticFiles):
         return resp
 
 
-app.mount("/static", _RevalidatingStatic(directory="static"), name="static")
+app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")
 
 # ========= GENERATED IMAGES =========
 @app.get("/api/generated-image/{filename}")
@@ -1172,3 +1173,12 @@ async def _shutdown_event():
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
     logger.info("Application shutdown complete")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    bind_host = os.getenv("APP_BIND", "127.0.0.1")
+    bind_port = int(os.getenv("APP_PORT", "7000"))
+
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
