@@ -141,6 +141,13 @@ async function _openDownloadForGgufTask(task) {
 function _terminalServeDiagnosis(task, outputText) {
   const out = String(outputText || task?.output || '');
   if (!task || task.type !== 'serve' || !['stopped', 'error', 'crashed', 'failed'].includes(task.status) || !out.trim()) return null;
+  // Suppress the crash diagnosis when the output proves the server
+  // actually became reachable — e.g. an early `exit 127` from a failed
+  // build attempt was followed by the shim/Python fallback successfully
+  // starting Uvicorn. Without this, the user sees a confusing "build
+  // stopped before the server became reachable" toast while the server
+  // is right there serving requests.
+  if (_serveOutputLooksReady(task)) return null;
   // Pip tasks (Reinstall vLLM, Upgrade torch, etc.) ride on the serve task
   // type so they get a tmux session + show up in Running tab — but they are
   // NOT serve invocations. Their output is pip's own; the generic
