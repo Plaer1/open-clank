@@ -24,6 +24,31 @@ if ! getent passwd "$PUID" >/dev/null 2>&1; then
     useradd -u "$PUID" -g "$PGID" -M -s /bin/sh -d /app odysseus
 fi
 
+# Docker-socket group plumbing. When /var/run/docker.sock is bind-
+# mounted (cookbook uses `docker exec` to reach sibling containers
+# like ollama-rocm), the socket is owned by root:docker on the host.
+# We need the in-container odysseus user to be in the matching group
+# so `gosu PUID:PGID` doesn't strip it. compose's `group_add` only
+# applies to the initial root process — gosu drop resets supplementary
+# groups — so detect the socket's GID here and add the user via the
+# username form `gosu odysseus` below.
+DOCKER_SOCK="${DOCKER_SOCK:-/var/run/docker.sock}"
+if [ -S "$DOCKER_SOCK" ]; then
+    SOCK_GID="$(stat -c '%g' "$DOCKER_SOCK" 2>/dev/null || echo '')"
+    if [ -n "$SOCK_GID" ] && [ "$SOCK_GID" != "0" ]; then
+        # Create the group locally if missing, then add odysseus to it.
+        if ! getent group "$SOCK_GID" >/dev/null 2>&1; then
+            groupadd -g "$SOCK_GID" docker_host || true
+        fi
+        SOCK_GROUP="$(getent group "$SOCK_GID" | cut -d: -f1)"
+        if [ -n "$SOCK_GROUP" ]; then
+            ODY_USER="$(getent passwd "$PUID" | cut -d: -f1)"
+            [ -z "$ODY_USER" ] && ODY_USER=odysseus
+            usermod -aG "$SOCK_GROUP" "$ODY_USER" 2>/dev/null || true
+        fi
+    fi
+fi
+
 # Repair ownership on every writable path the app touches at runtime.
 #
 # Bind-mounted dirs (/app/data, /app/logs) are the obvious ones, but
@@ -83,9 +108,13 @@ export PATH="/app/.local/bin:$PATH"
 # Run first-time setup as the app user so data/ files get the right ownership.
 # setup.py is idempotent — skips auth.json / .env if they already exist.
 # || true so a setup failure never prevents the container from starting.
-gosu "$PUID:$PGID" python /app/setup.py || true
+# Use the username form (no :GID) so supplementary groups from /etc/group
+# (including the docker-socket group set above) flow through to the child.
+ODY_USER="$(getent passwd "$PUID" | cut -d: -f1)"
+[ -z "$ODY_USER" ] && ODY_USER="$PUID:$PGID"
+gosu "$ODY_USER" python /app/setup.py || true
 
 # Drop root and run the actual app. `gosu` is preferred over `su` /
 # `sudo` because it cleans up the process tree (no extra shell layer)
 # so signals (SIGTERM from `docker stop`) reach uvicorn directly.
-exec gosu "$PUID:$PGID" "$@"
+exec gosu "$ODY_USER" "$@"
