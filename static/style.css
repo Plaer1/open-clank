@@ -15930,6 +15930,17 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
     flex: 0 0 auto !important;
     height: auto !important;
   }
+  /* Launch tab's cached-list normally has `flex: 1 1 0; min-height: 0`
+     (so it fills the modal on desktop). On mobile the parent now has
+     `height: auto`, which collapses `flex: 1 1 0` to ZERO PX —
+     models render but the list area is invisible because the flex
+     basis is 0 and there's no free space to grow into. Switch to
+     content-sized flex so the list grows with its children. */
+  #cookbook-modal .cookbook-group[data-backend-group="Serve"] > .admin-card > .hwfit-cached-list,
+  #cookbook-modal .cookbook-group[data-backend-group="Serve"] > .admin-card > #hwfit-cached-list {
+    flex: 0 0 auto !important;
+    overflow: visible !important;
+  }
 }
 #cookbook-modal .hwfit-cached-list {
   flex-shrink: 0;
@@ -18560,7 +18571,7 @@ body.gallery-selecting .gallery-dl-btn,
    label and center it vertically so the descenders don't clip. */
 #hwfit-cache-select {
   min-width: 58px;
-  height: 32px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -19316,7 +19327,7 @@ body.gallery-selecting .gallery-dl-btn,
   margin-bottom: 4px;
 }
 .cookbook-slot-btn {
-  min-width: 22px; height: 22px;
+  min-width: 22px; height: 28px;
   padding: 0 6px;
   font-size: 10px; font-weight: 600;
   border: 1px solid var(--border);
@@ -19733,11 +19744,12 @@ body.gallery-selecting .gallery-dl-btn,
   font-size: 12px;
   padding: 0 6px;
   height: 28px;
+  box-sizing: border-box;
 }
 .hwfit-sf[data-field="backend"],
 .hwfit-sf[data-field="dtype"],
 .hwfit-sf[data-field="tp"] {
-  height: 32px;
+  height: 28px;
   box-sizing: border-box;
   width: 100%;
 }
@@ -23569,7 +23581,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   width: 51px;
 }
 #serve-search {
-  height: 32px;
+  height: 28px;
 }
 #cookbook-dl-btn {
   position: relative;

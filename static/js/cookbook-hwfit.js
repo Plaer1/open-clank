@@ -578,7 +578,9 @@ export async function _hwfitFetch(fresh = false) {
   const _cached = fresh ? null : _readScanCache(_sig);
   const wp = spinnerModule.createWhirlpool(18);
   if (_cached) {
-    _hwfitCache = _cached;
+    // Tag the restored cache with its host too (scan-sig keys cache per
+    // host, so a hit here is always for the current remoteHost).
+    _hwfitCache = { ..._cached, _scannedHost: remoteHost || '' };
     _hwfitRenderHw(hw, _cached.system);
     if (!remoteHost && _cached.system && _cached.system.platform) {
       _envState.platform = _cached.system.platform;
@@ -750,7 +752,11 @@ export async function _hwfitFetch(fresh = false) {
         : _olRows;
       data.models = (data.models || []).concat(_olFiltered);
     }
-    _hwfitCache = data;
+    // Tag the cache with the host this scan was for, so downstream
+    // code (_gpuEnvVarName, backend-aware command builders) can avoid
+    // trusting a stale scan when the user switches the server picker
+    // to a different target without re-running hwfit.
+    _hwfitCache = { ...data, _scannedHost: remoteHost || '' };
     _hwfitRenderHw(hw, data.system);
     // Propagate local platform from hardware probe so _isWindows(task) works
     // for local tasks (menu items, shell commands, etc.).
@@ -1679,7 +1685,7 @@ export function _expandModelRow(row, modelData) {
       } else if (runBackend === 'llamacpp') {
         const dir = `"$HOME/.cache/huggingface/hub/models--${modelData.name.replace(/\//g, '--')}/snapshots"`;
         const ggufPath = `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
-        cmd = `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host. Download a GGUF quant or switch backend."; exit 1; } && llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8080 -ngl 99 -c ${maxCtx} || python3 -m llama_cpp.server --model "$MODEL_FILE" --host 0.0.0.0 --port 8080 --n_gpu_layers 99 --n_ctx ${maxCtx}`;
+        cmd = `llama-server --model "${ggufPath}" --host 0.0.0.0 --port 8080 -ngl 99 -c ${maxCtx} --flash-attn auto`;
       } else {
         cmd = `vllm serve ${modelData.name} --host 0.0.0.0 --port ${port}`;
         cmd += ` --tensor-parallel-size ${tp}`;

@@ -259,6 +259,15 @@ function _detectModelOptimizations(modelName) {
     opts.kvCacheDtype = 'fp8';
     opts.tips.push('fp8 KV cache required — bf16 OOMs at usable context');
   }
+  // MiniMax MoE — Abab/M1/M2/M2.5/M2.7 are all MoE (Lightning Attention +
+  // MoE in M1, full sparse MoE from M2 onward). They benefit from the
+  // same --enable-expert-parallel flag as the Qwen/DeepSeek families,
+  // and the toggle has to be detectable here for the Expert Parallel
+  // checkbox in the serve form to render at all.
+  else if (n.includes('minimax')) {
+    opts.flags.push('--enable-expert-parallel');
+    opts.tips.push('MoE expert parallel for MiniMax');
+  }
   // Reasoning parser — applies independently of MoE detection. Without this
   // flag, models like MiniMax-M2.x, DeepSeek-R1, Qwen3 reasoning, GLM-4.x,
   // gpt-oss leak <think> blocks as plain text instead of separating them
@@ -419,6 +428,38 @@ export function _psQuote(value) {
   return "'" + String(value ?? '').replace(/'/g, "''") + "'";
 }
 
+// Pick the GPU-pinning env-var name for the detected backend. NVIDIA uses
+// CUDA_VISIBLE_DEVICES; ROCm/HIP uses HIP_VISIBLE_DEVICES; Vulkan and
+// Apple Metal don't take an index env var at all (and CUDA_VISIBLE_DEVICES
+// is a silent no-op on those, which silently hides "wrong backend" config
+// bugs). Returns 'cmd ' style prefix ('CUDA_VISIBLE_DEVICES=0 ') or '' when
+// the backend doesn't support pinning. Pass isWindows=true to get PowerShell
+// `$env:` syntax instead. backend defaults to whatever hwfit detected.
+function _gpuEnvVarName() {
+  // Only emit a pinning env var when we POSITIVELY know the backend AND
+  // the hwfit scan was actually run against the currently-targeted host.
+  // Without the target-match guard, switching the server picker from an
+  // NVIDIA box (cuda) to a local/Vulkan target preserved the stale
+  // `cuda` backend in the cache, leaking `CUDA_VISIBLE_DEVICES=` into
+  // launches that don't have an NVIDIA GPU at all. Default to "" when
+  // unsure — the user sees a clean command and is prompted to scan.
+  const cachedHost = String(_hwfitCache?._scannedHost || '');
+  const currentHost = String(_envState.remoteHost || '');
+  if (cachedHost !== currentHost) return '';
+  const sb = String(_hwfitCache?.system?.backend || '').toLowerCase();
+  if (sb === 'cuda') return 'CUDA_VISIBLE_DEVICES';
+  if (sb === 'rocm') return 'HIP_VISIBLE_DEVICES';
+  return ''; // vulkan / metal / mps / apple / cpu / generic / unknown — no env-var pinning
+}
+function _gpuEnvPrefix(gpuId, isWindows = false) {
+  const id = String(gpuId || '').trim();
+  if (!id) return '';
+  const varName = _gpuEnvVarName();
+  if (!varName) return '';
+  if (isWindows) return `$env:${varName}="${id}"; `;
+  return `${varName}=${id} `;
+}
+
 export function _buildEnvPrefix() {
   if (_isWindows()) return _buildEnvPrefixWindows();
   let parts = [];
@@ -431,7 +472,8 @@ export function _buildEnvPrefix() {
   }
   let envVars = [];
   if (_envState.hfToken) envVars.push('export HF_TOKEN=' + _shellQuote(_envState.hfToken));
-  if (_envState.gpus) envVars.push('export CUDA_VISIBLE_DEVICES=' + _shellQuote(_envState.gpus));
+  const _envGpuVar = _gpuEnvVarName();
+  if (_envState.gpus && _envGpuVar) envVars.push(`export ${_envGpuVar}=` + _shellQuote(_envState.gpus));
   if (envVars.length) parts.push(envVars.join(' && '));
   if (parts.length === 0) return '';
   return parts.join(' && ') + ' &&';
@@ -447,7 +489,8 @@ function _buildEnvPrefixWindows() {
     parts.push('conda activate ' + _psQuote(_envState.envPath));
   }
   if (_envState.hfToken) parts.push('$env:HF_TOKEN=' + _psQuote(_envState.hfToken));
-  if (_envState.gpus) parts.push('$env:CUDA_VISIBLE_DEVICES=' + _psQuote(_envState.gpus));
+  const _winGpuVar = _gpuEnvVarName();
+  if (_envState.gpus && _winGpuVar) parts.push(`$env:${_winGpuVar}=` + _psQuote(_envState.gpus));
   if (parts.length === 0) return '';
   return parts.join('; ') + ';';
 }
@@ -468,10 +511,18 @@ export function _buildServeCmd(f, modelName, backend) {
     // the bare "auto" input that used to back gpu_id is gone, and the
     // button strip is the only source for which devices to pin.
     const gpuId = (f.gpus || f.gpu_id || '').toString().trim();
-    if (gpuId) cmd += `CUDA_VISIBLE_DEVICES=${gpuId} `;
+    cmd += _gpuEnvPrefix(gpuId);
     if (f.moe_env) {
       const _opts = _detectModelOptimizations(modelName);
-      if (_opts.envVars.length) cmd += _opts.envVars.join(' ') + ' ';
+      if (_opts.envVars.length) {
+        cmd += _opts.envVars.join(' ') + ' ';
+      } else {
+        // Fallback when the user toggles MoE Env on for a model the
+        // family detector didn't classify as MoE — emit the generic
+        // vLLM MoE optimization env vars so the toggle is never a
+        // silent no-op (was the case before the "always show" change).
+        cmd += 'VLLM_USE_DEEP_GEMM=0 VLLM_USE_FLASHINFER_MOE_FP16=1 OMP_NUM_THREADS=4 ';
+      }
     }
     // Pinned attention backend (Attention field). Empty = let vLLM pick.
     const _attn = (f.vllm_attn_backend ?? '').toString().trim();
@@ -513,7 +564,7 @@ export function _buildServeCmd(f, modelName, backend) {
     // the bare "auto" input that used to back gpu_id is gone, and the
     // button strip is the only source for which devices to pin.
     const gpuId = (f.gpus || f.gpu_id || '').toString().trim();
-    if (gpuId) cmd += `CUDA_VISIBLE_DEVICES=${gpuId} `;
+    cmd += _gpuEnvPrefix(gpuId);
     const _extraEnv = (f.extra_env ?? '').toString().replace(/\s+/g, ' ').trim();
     if (_extraEnv) cmd += _extraEnv + ' ';
     cmd += `${_py3Bin} -m sglang.launch_server --model-path ${modelName} --host 0.0.0.0 --port ${f.port || '30000'}`;
@@ -536,24 +587,39 @@ export function _buildServeCmd(f, modelName, backend) {
     // CPU-only serve (-ngl 0): drop the GPU-only flags, otherwise the command
     // mixes "zero GPU layers" with CUDA unified-memory + flash-attn and fails to
     // start (issue #1291). Only affects the ngl=0 path; GPU serving is unchanged.
+    // The Inference mode pill (GPU/CPU) above gates this — when the user picks
+    // CPU, force ngl=0 here so all downstream flag-suppression fires
+    // consistently regardless of what the (now-hidden) ngl input shows.
+    if (String(f.llama_mode || '').toLowerCase() === 'cpu') {
+      f.ngl = '0';
+    } else if (String(f.llama_mode || '').toLowerCase() === 'gpu' && (!f.ngl || String(f.ngl).trim() === '0')) {
+      f.ngl = '99';
+    }
     const _cpuOnly = String(f.ngl).trim() === '0';
+    // GGML_CUDA_* env vars are no-ops on Vulkan/ROCm/Metal/CPU. Only emit
+    // them when the detected backend is actually CUDA AND the hwfit scan
+    // was run against the currently-targeted host, so a saved preset
+    // from a prior NVIDIA target doesn't pollute a non-NVIDIA launch
+    // with misleading prefixes.
+    const _sb = String(_hwfitCache?.system?.backend || '').toLowerCase();
+    const _hwfitHost = String(_hwfitCache?._scannedHost || '');
+    const _curHost = String(_envState.remoteHost || '');
+    const _isCudaTarget = (_sb === 'cuda') && (_hwfitHost === _curHost);
     const lcPrefix = (() => {
       let p = '';
-      if (f.unified_mem && !_cpuOnly && !_isWindows()) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
-      if (gpuId && !_isWindows()) p += `CUDA_VISIBLE_DEVICES=${gpuId} `;
+      if (f.unified_mem && !_cpuOnly && !_isWindows() && _isCudaTarget) p += `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 `;
+      // No GPU env var in CPU mode — `-ngl 0` already disables offload
+      // so CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES would be misleading
+      // clutter ("why is CUDA pinned for a CPU run?").
+      if (!_isWindows() && !_cpuOnly) p += _gpuEnvPrefix(gpuId);
       return p;
     })();
-    if (f.unified_mem && !_cpuOnly && _isWindows()) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
-    if (gpuId && _isWindows()) cmd += `$env:CUDA_VISIBLE_DEVICES="${gpuId}"; `;
-    if (!_isWindows()) {
-      // Resolve GGUF path once, fail loudly if nothing matched (prevents
-      // `--model ""` which causes confusing downstream errors).
-      cmd += `MODEL_FILE=${ggufPath} && { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } || { echo "ERROR: No GGUF found on this host. Either download the model here, or switch to the server where it's cached."; exit 1; } && `;
-    }
-    const modelArg = _isWindows() ? `"${ggufPath}"` : `"$MODEL_FILE"`;
-    // Prefer the native llama-server binary on Linux — its minja templating
-    // renders modern GGUF chat templates that the Python bindings' Jinja2
-    // rejects (do_tojson ensure_ascii). Fall back to llama_cpp.server.
+    if (f.unified_mem && !_cpuOnly && _isWindows() && _isCudaTarget) cmd += `$env:GGML_CUDA_ENABLE_UNIFIED_MEMORY="1"; `;
+    if (_isWindows() && !_cpuOnly) cmd += _gpuEnvPrefix(gpuId, true);
+    const modelArg = `"${ggufPath}"`;
+    // Prefer native llama-server. The backend bootstrap resolves/builds the
+    // right binary (Vulkan/HIP/CUDA/Metal/CPU), so keep the generated command
+    // as a validator-safe binary + args with no shell chaining.
     // Don't suppress stderr — surface real errors (missing file, lib, OOM).
     // Optional perf/fit flags from a hardware profile (see services/hwfit/
     // profiles.py). n_cpu_moe offloads MoE expert layers to CPU when the model
@@ -575,9 +641,16 @@ export function _buildServeCmd(f, modelName, backend) {
       _lcExtra += ` --n-cpu-moe ${_ncm}`;
       _lcpExtra += ` --n_cpu_moe ${_ncm}`;   // llama-cpp-python uses underscores
     }
+    // Flash-attn default = auto: native llama-server picks whether to
+    // enable based on the build/model; explicit ON (the Flash-attn
+    // toggle in the form) forces it. "auto" is a meaningful arg, not
+    // omission — older builds without flash-attn ignore it cleanly,
+    // newer ones get the speedup without the user having to know.
     if (f.flash_attn && !_cpuOnly) {
       _lcExtra += ' --flash-attn on';
       _lcpExtra += ' --flash_attn true';
+    } else if (!_cpuOnly) {
+      _lcExtra += ' --flash-attn auto';
     }
     if (_kv) {
       _lcExtra += ` --cache-type-k ${_kv} --cache-type-v ${_kv}`;
@@ -613,12 +686,11 @@ export function _buildServeCmd(f, modelName, backend) {
       // llama-cpp-python takes the projector via --clip_model_path.
       _lcpExtra += ` --clip_model_path "${f._mmproj_path}"`;
     }
-    const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
     if (_isWindows()) {
+      const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}${_lcpExtra}`;
       cmd += _lcpServer;
     } else {
       cmd += `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_lcExtra}`;
-      cmd += ` || ${_lcpServer}`;
     }
   } else if (backend === 'ollama') {
     const ollamaPort = f.port || '11434';
@@ -652,7 +724,7 @@ export function _buildServeCmd(f, modelName, backend) {
     }
   } else if (backend === 'diffusers') {
     const gpuStr = f.gpus?.trim();
-    if (gpuStr) cmd += `CUDA_VISIBLE_DEVICES=${gpuStr} `;
+    cmd += _gpuEnvPrefix(gpuStr);
     const diffusersPy = _isWindows() ? 'python' : _py3Bin;
     cmd += `${diffusersPy} scripts/diffusion_server.py --model ${modelName} --port ${f.port || '8100'}`;
     if (f.diff_dtype && f.diff_dtype !== 'bfloat16') cmd += ` --dtype ${f.diff_dtype}`;
@@ -771,6 +843,14 @@ async function _fetchDependencies() {
       if (_depPort) _pkgParams.set('ssh_port', _depPort);
       if (_depVenv) _pkgParams.set('venv', _depVenv);
     }
+    // Pass the detected backend so the server can build a single
+    // OS+backend-aware install command per row (e.g. add nvidia-cuda-toolkit
+    // on a CUDA-Debian box, vulkan-headers on a Vulkan-Arch box, etc.)
+    // instead of dumping every distro's syntax as a hint.
+    const _depBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
+    if (_depBackend && _hwfitCache?._scannedHost === _depHost) {
+      _pkgParams.set('backend', _depBackend);
+    }
     const resp = await fetch('/api/cookbook/packages' + (_pkgParams.toString() ? '?' + _pkgParams.toString() : ''));
     const data = await resp.json();
     const pkgs = data.packages || [];
@@ -832,18 +912,61 @@ async function _fetchDependencies() {
       // For backends with a recipe catalog (vllm / sglang / llama_cpp),
       // append a caret button that toggles a per-row recipe panel below.
       const hasRecipe = RECIPE_BACKENDS.has(pkg.name);
-      const recipeCaret = hasRecipe
-        ? `<button class="cookbook-dep-tag cookbook-dep-recipe-caret" data-dep-recipe-toggle="${esc(pkg.name)}" title="Pick a model to see the exact install commands" aria-expanded="false" style="background:none;border:1px solid var(--border);padding:2px 6px;display:inline-flex;align-items:center;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s"><polyline points="6 9 12 15 18 9"/></svg></button>`
-        : '';
+      // Standalone recipe-caret button removed — the "Pick install
+      // command" action lives inside the Installed ▾ dropdown menu
+      // (see _showDepMenu) so each row only has ONE caret to click.
+      // Kept the variable so downstream concat code stays the same.
+      const recipeCaret = '';
       const recipePanel = hasRecipe ? _recipePanelHtml(pkg.name) : '';
+      // When llama_cpp (or any future engine) reports build_deps_missing
+      // from its system_prereqs probe, surface a one-tap install button
+      // that fires the OS package manager on the target via
+      // /api/cookbook/install-system-deps. Keeps the user inside Cookbook
+      // instead of forcing them out to a shell to apt/pacman/dnf.
+      const _bdm = Array.isArray(pkg.build_deps_missing) ? pkg.build_deps_missing : [];
+      const _buildDepsBtn = _bdm.length
+        ? `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-sysdeps" data-dep-sysdeps="${esc(_bdm.join(','))}" data-dep-target="${isLocal ? 'local' : 'remote'}" title="Install ${esc(_bdm.join(', '))} via the OS package manager on this target (requires passwordless sudo or root).">Install build deps</button>`
+        : '';
+      // Render the target-specific install command as a compact mono box
+      // when the server resolved it (target's /etc/os-release was readable
+      // AND the backend is known). The box doubles as the source of truth
+      // for the "Install build deps" button's failure toast — both surfaces
+      // show the same string for the same target.
+      const _instCmd = (_bdm.length && pkg.install_cmd_for_target) ? String(pkg.install_cmd_for_target) : '';
+      const _instCmdOs = pkg.install_cmd_os ? String(pkg.install_cmd_os) : '';
+      const _instCmdBe = pkg.install_cmd_backend ? String(pkg.install_cmd_backend) : '';
+      const _instLabel = (_instCmdOs && _instCmdBe) ? `${_instCmdOs} + ${_instCmdBe}` : (_instCmdOs || _instCmdBe || 'this target');
+      const _instCmdBox = _instCmd
+        ? `<div class="cookbook-dep-install-cmd" data-dep-cmd="${esc(_instCmd)}" style="margin-top:6px;font-size:10.5px;opacity:0.85;">`
+          + `<div style="opacity:0.65;margin-bottom:2px;">Install on ${esc(_instLabel)}:</div>`
+          + `<div style="display:flex;gap:4px;align-items:stretch;">`
+          + `<code style="flex:1;padding:4px 6px;background:color-mix(in srgb, var(--fg) 6%, transparent);border:1px solid var(--border);border-radius:4px;font-family:var(--mono, ui-monospace, monospace);font-size:10.5px;white-space:pre-wrap;word-break:break-all;">${esc(_instCmd)}</code>`
+          + `<button type="button" class="cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_instCmd)}" title="Copy install command" style="padding:2px 8px;font-size:10px;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;color:var(--fg-muted);">Copy</button>`
+          + `</div></div>`
+        : '';
+      // Partial-state row (replaces the cryptic yellow "Partial ▾" tag).
+      // Renders inline as a yellow banner with two clear actions: one-tap
+      // Install (runs the reinstall in cookbook) or Copy command (paste
+      // into a terminal). Same content surfaces whether the user solves
+      // it from inside Cookbook or from a shell.
+      const _gpuWheelCmd = 'CMAKE_ARGS="-DGGML_CUDA=on" python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124';
+      const _gpuUpgradeBox = (pkg.partial && pkg.partial_action === 'reinstall_llama_cpp_cuda')
+        ? `<div class="cookbook-dep-gpu-upgrade" style="margin-top:6px;font-size:11px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:color-mix(in srgb, var(--yellow, #f1fa8c) 14%, transparent);border:1px solid color-mix(in srgb, var(--yellow, #f1fa8c) 40%, var(--border));padding:6px 8px;border-radius:6px;">`
+          + `<span style="flex:1;min-width:160px;">Installed CPU-only — GPU detected on this target. Upgrade for ~10× faster inference.</span>`
+          + `<button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-install-gpu-wheel" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-gpu-cmd="${esc(_gpuWheelCmd)}" style="font-weight:600;">Install GPU wheel</button>`
+          + `<button type="button" class="cookbook-dep-tag cookbook-dep-cmd-copy" data-dep-cmd-copy="${esc(_gpuWheelCmd)}" title="Copy command to clipboard">Copy command</button>`
+          + `</div>`
+        : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
         + `<div class="cookbook-dep-info">`
         + `<div class="memory-item-title">${_depGlyphHtml(pkg.name)}${esc(pkg.name)}</div>`
         + `<div class="memory-item-meta" style="font-size:10px;opacity:0.5;margin-top:2px;">${esc(pkg.desc)}</div>`
         + note
         + updateNote
+        + _instCmdBox
         + `</div>`
         + _rebuildBtn
+        + _buildDepsBtn
         + `<span class="cookbook-dep-tag cookbook-dep-cat">${esc(pkg.category)}</span>`
         + _statusTag(pkg, isLocal, isSystemDep, winBlocked)
         + recipeCaret
@@ -985,8 +1108,15 @@ async function _fetchDependencies() {
         if (!res.ok || !data.ok) {
           // FastAPI HTTPException returns {detail: …}; the route's own
           // path returns {ok:false, error:…}. Surface whichever we get.
+          // Long duration + an OK button — the default 1.2s toast was
+          // disappearing before the user could read multi-clause errors
+          // like "tmux missing on remote".
           const reason = data.detail || data.error || `HTTP ${res.status}`;
-          uiModule.showToast('Install failed: ' + String(reason).slice(0, 200));
+          uiModule.showToast('Install failed: ' + String(reason).slice(0, 400), {
+            duration: 20000,
+            action: 'OK',
+            onAction: () => {},
+          });
           return;
         }
         // _dep flags this as a pip dependency/driver install (not a servable
@@ -996,17 +1126,158 @@ async function _fetchDependencies() {
         if (statusEl) { statusEl.textContent = upgrade ? 'Updating...' : 'Installing...'; statusEl.disabled = true; }
         uiModule.showToast(`${upgrade ? 'Updating' : 'Installing'} ${pkgName} on ${targetHost}...`);
       } catch (err) {
-        uiModule.showToast('Install failed: ' + err.message);
+        uiModule.showToast('Install failed: ' + err.message, {
+          duration: 20000,
+          action: 'OK',
+          onAction: () => {},
+        });
       }
     }
 
     // Wire install buttons (not-installed packages)
-    list.querySelectorAll('.cookbook-dep-install:not(.cookbook-dep-recipe-run)').forEach(btn => {
+    list.querySelectorAll('.cookbook-dep-install:not(.cookbook-dep-recipe-run):not(.cookbook-dep-install-sysdeps)').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const pipName = btn.dataset.depPip;
         const pkgName = btn.closest('.cookbook-dep-row')?.querySelector('.memory-item-title')?.textContent || pipName;
         await _installDep(pipName, pkgName, btn.dataset.depTarget === 'local', !!btn.dataset.upgrade, btn);
+      });
+    });
+
+    // Wire "Install build deps" buttons — surfaced on rows whose
+    // system_prereqs are missing (e.g. llama_cpp with no cmake on the
+    // target). One-tap call to /api/cookbook/install-system-deps; the
+    // route enforces a per-package allowlist and uses passwordless
+    // sudo only, so it can never silently hang or stretch beyond the
+    // build-toolchain set the catalog declares.
+    // "Partial ▾" upgrade tag: clicking it fires the action-specific
+    // install routine (currently only `reinstall_llama_cpp_cuda` —
+    // forces pip install with the abetlen CUDA wheel index to add GPU
+    // offload). Same install flow used at launch-time auto-fix, but
+    // user-initiated here so they don't have to launch + wait + retry.
+    list.querySelectorAll('.cookbook-dep-partial').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.depPartialAction || '';
+        if (action !== 'reinstall_llama_cpp_cuda') return;
+        const isLocal = btn.dataset.depTarget === 'local';
+        if (!isLocal) {
+          const depsServerSel = document.getElementById('hwfit-deps-server');
+          if (depsServerSel) _applyServerSelection(depsServerSel.value);
+        }
+        const targetLabel = isLocal ? 'this server' : (_envState.remoteHost || 'remote');
+        const cmd = 'CMAKE_ARGS="-DGGML_CUDA=on" python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124';
+        try {
+          const reqBody = {
+            repo_id: 'llama-cpp-python-cuda',
+            cmd,
+            remote_host: _envState.remoteHost || undefined,
+            ssh_port: _getPort(_envState.remoteHost) || undefined,
+            platform: _envState.platform || undefined,
+          };
+          const res = await fetch('/api/model/serve', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqBody),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.ok) {
+            const payload = { repo_id: 'pip llama-cpp-python[CUDA]', _cmd: cmd, remote_host: _envState.remoteHost || '', _dep: true };
+            _addTask(data.session_id, 'pip llama-cpp-python[CUDA]', 'download', payload);
+            uiModule.showToast(`Reinstalling llama-cpp-python with CUDA wheels on ${targetLabel} (~1-3 min)…`, 4000);
+          } else {
+            uiModule.showToast('Upgrade failed: ' + String(data.detail || data.error || `HTTP ${res.status}`).slice(0, 300), {
+              duration: 20000, action: 'OK', onAction: () => {},
+            });
+          }
+        } catch (err) {
+          uiModule.showToast('Upgrade request failed: ' + err.message, { duration: 20000, action: 'OK', onAction: () => {} });
+        }
+      });
+    });
+
+    // Inline command-box "Copy" buttons — one per row that has a
+    // resolved per-target install command. Same string surfaces here
+    // and in the toast/diagnosis so the user always sees one answer.
+    list.querySelectorAll('.cookbook-dep-cmd-copy').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const cmd = btn.dataset.depCmdCopy || '';
+        if (!cmd) return;
+        try { await navigator.clipboard.writeText(cmd); }
+        catch { /* fall through */ }
+        const orig = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { if (btn.isConnected) btn.textContent = orig; }, 1200);
+      });
+    });
+    list.querySelectorAll('.cookbook-dep-install-sysdeps').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const names = (btn.dataset.depSysdeps || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (!names.length) return;
+        const isLocal = btn.dataset.depTarget === 'local';
+        // Pull the per-target install command from the sibling box on
+        // the same row, so failure toasts surface the SAME line the
+        // user already sees inline. No duplicated formatting logic.
+        const _row = btn.closest('.cookbook-dep-row');
+        const _cmdBox = _row?.querySelector('.cookbook-dep-install-cmd');
+        const _resolvedCmd = _cmdBox?.dataset.depCmd || '';
+        // Mirror _installDep: the Dependencies tab has its own server
+        // picker that can override _envState. Apply it before reading
+        // remoteHost, otherwise the install silently runs on the wrong
+        // target (container ends up with the packages, the real remote
+        // host stays broken, success toast misleads the user).
+        if (!isLocal) {
+          const depsServerSel = document.getElementById('hwfit-deps-server');
+          if (depsServerSel) _applyServerSelection(depsServerSel.value);
+        }
+        const targetLabel = isLocal ? 'this server' : (_envState.remoteHost || 'remote');
+        const origText = btn.textContent;
+        btn.textContent = 'Installing…';
+        btn.disabled = true;
+        try {
+          const body = { packages: names };
+          if (!isLocal && _envState.remoteHost) {
+            body.remote_host = _envState.remoteHost;
+            const _p = _getPort(_envState.remoteHost);
+            if (_p) body.ssh_port = _p;
+          }
+          const res = await fetch('/api/cookbook/install-system-deps', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.ok) {
+            uiModule.showToast(`Installed ${names.join(', ')} on ${targetLabel}. Refreshing…`, 4000);
+            // Refresh the deps panel so the row updates (prereqs now present).
+            try { await _fetchDependencies(); } catch {}
+          } else {
+            const reason = data.error || data.detail || `HTTP ${res.status}`;
+            // Append the per-target install command (if we already know it
+            // from the row) so the user can copy-paste it without leaving
+            // the toast. Otherwise just surface the error.
+            const _suffix = _resolvedCmd ? `\n\nRun on ${targetLabel}: ${_resolvedCmd}` : '';
+            uiModule.showToast('Build-deps install failed: ' + String(reason).slice(0, 300) + _suffix, {
+              duration: 25000,
+              action: _resolvedCmd ? 'Copy command' : 'OK',
+              onAction: async () => {
+                if (_resolvedCmd) {
+                  try { await navigator.clipboard.writeText(_resolvedCmd); } catch {}
+                }
+              },
+            });
+            btn.textContent = origText;
+            btn.disabled = false;
+          }
+        } catch (err) {
+          uiModule.showToast('Install request failed: ' + err.message, {
+            duration: 20000, action: 'OK', onAction: () => {},
+          });
+          btn.textContent = origText;
+          btn.disabled = false;
+        }
       });
     });
 
@@ -1577,8 +1848,22 @@ function _wireTabEvents(body) {
   if (dlBtn && dlInput) {
     function _stripHfUrl(input) {
       let repo = input.trim();
+      // Strip a leading `hf download` / `hf-cli download` / `huggingface-cli
+      // download` wrapper so a paste from CLI docs Just Works. Drop the
+      // command prefix; the rest is parsed by the existing strippers.
+      repo = repo.replace(/^(?:huggingface-cli|hf-cli|hf)\s+(?:download|d)\s+/i, '');
+      // Strip the `hf://` (and `huggingface://`) scheme — the HF CLI
+      // accepts it as an alias and users naturally copy it. Same effect
+      // as the bare `org/repo[/file.gguf]` form after the strip.
+      repo = repo.replace(/^(?:hf|huggingface):\/\//i, '');
       // Strip Ollama-style "hf.co/" prefix if present (e.g. hf.co/unsloth/...:tag)
       repo = repo.replace(/^hf\.co\//, '');
+      // Full HF blob/resolve URL → turn into `org/repo/path/to/file` so
+      // the downstream `_splitRepoFile` can pick the file out.
+      // Matches: https://huggingface.co/org/repo/blob/branch/path/to/file.gguf
+      //          https://huggingface.co/org/repo/resolve/branch/path/to/file.gguf
+      const hfBlob = repo.match(/^https?:\/\/huggingface\.co\/([^/]+\/[^/?#]+)\/(?:blob|resolve)\/[^/?#]+\/([^?#]+)/);
+      if (hfBlob) return `${hfBlob[1]}/${hfBlob[2]}`;
       const hfMatch = repo.match(/^https?:\/\/huggingface\.co\/([^/]+\/[^/?#]+(?::[^/?#\s]+)?)/);
       if (hfMatch) repo = hfMatch[1];
       return repo;
@@ -1589,6 +1874,22 @@ function _wireTabEvents(body) {
       const m = raw.match(/^([^\s/:]+\/[^\s/:]+):([^\s/]+)$/);
       if (!m) return { repo: raw, include: null };
       return { repo: m[1], include: `*${m[2]}*` };
+    }
+    // Split `org/repo/path/to/file.gguf` (or `.safetensors`/`.bin`) into
+    // repo + exact file include. Lets the user paste a path straight out
+    // of a HuggingFace "Files and versions" page or a copied filename
+    // without needing to peel the repo/file apart by hand. Returns null
+    // when the input doesn't look like a deep file path.
+    function _splitRepoFile(raw) {
+      // Must have at least 3 slash-separated segments AND end in a
+      // model-file extension to avoid eating Ollama tags or repo-only
+      // inputs like `org/repo`.
+      const parts = raw.split('/');
+      if (parts.length < 3) return null;
+      const fname = parts[parts.length - 1];
+      if (!/\.(gguf|safetensors|bin|pt|pth|onnx|mlx)(\?[^?]*)?$/i.test(fname)) return null;
+      const repo = parts.slice(0, 2).join('/');
+      return { repo, include: fname.replace(/\?.*$/, '') };
     }
     // Ollama-library name. Matches `qwen2.5:14b`, `llama3:latest`, and the
     // (rare) `library/<name>:<tag>` form which we normalize by stripping the
@@ -1605,7 +1906,14 @@ function _wireTabEvents(body) {
       const rawRepo = _stripHfUrl(dlInput.value);
       if (!rawRepo) return;
       const ollamaName = _ollamaName(rawRepo);
-      const { repo, include: autoInclude } = ollamaName ? { repo: ollamaName, include: null } : _splitRepoTag(rawRepo);
+      // Prefer the deep-file split (org/repo/file.gguf → repo + exact
+      // include) over the tag split (org/repo:tag → glob include), and
+      // both over the plain repo case. Ollama names still take priority
+      // since they go through a different backend.
+      const _fileSplit = !ollamaName ? _splitRepoFile(rawRepo) : null;
+      const { repo, include: autoInclude } = ollamaName
+        ? { repo: ollamaName, include: null }
+        : (_fileSplit || _splitRepoTag(rawRepo));
       // HuggingFace repo IDs must be `org/model`. A bare model name would 404
       // at snapshot_download time with a raw traceback, so reject it up front.
       // Ollama names (single-segment with a tag) skip this check — they go

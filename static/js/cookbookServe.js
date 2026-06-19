@@ -10,6 +10,7 @@ import { providerLogo } from './providers.js';
 import { modelColor } from './chatRenderer.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { openCookbookDependencies } from './cookbook-diagnosis.js';
+import { _hwfitCache } from './cookbook-hwfit.js';
 
 // Shared state/functions injected by init()
 let _envState;
@@ -495,6 +496,7 @@ function _rerenderCachedModels() {
         item.classList.remove('doclib-card-expanded');
         item.style.flexDirection = '';
         item.style.alignItems = '';
+        item.style.maxHeight = '';
         list.style.minHeight = '';
         list.style.maxHeight = '';
         return;
@@ -508,6 +510,7 @@ function _rerenderCachedModels() {
         c.classList.remove('doclib-card-expanded');
         c.style.flexDirection = '';
         c.style.alignItems = '';
+        c.style.maxHeight = '';
       });
 
       const shortName = repo.split('/').pop();
@@ -620,13 +623,31 @@ function _rerenderCachedModels() {
       // stays as the source-of-truth so every existing change handler
       // (updateBackendVisibility, runtime readiness, command builder)
       // still fires via dispatchEvent('change') on selection.
-      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:28px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
+      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:28px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;position:relative;top:-3px;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
+      // Inference mode pill (llama.cpp only) — lives directly to the
+      // RIGHT of Backend in Row 1 so the engine and the GPU/CPU choice
+      // are read together. .hwfit-backend-llamacpp visibility class
+      // hides it when the user switches to vLLM/SGLang/Ollama.
+      {
+        // Default CPU — works on every host without GPU/wheel matching
+        // hassle. User picks GPU explicitly if they have the right setup
+        // (avoids "click Launch → silent CPU fallback because the wheel
+        // is CPU-only" surprises that ate hours of debugging).
+        // Layout: CPU on left, GPU on right → mode-right triggers when
+        // GPU is selected so the sliding pill animates rightward.
+        // Default to GPU mode when hwfit detected a GPU backend on the
+        // current target — CPU as a global default sent the user down a
+        // 35GB-model-on-CPU rabbit hole (-ngl 0, no flash-attn, no GPU
+        // offload). Falls back to CPU only when hwfit detected no GPU
+        // (cpu_x86 / generic / unscanned) or the cache is stale.
+        const _hwBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
+        const _hwScanMatch = String(_hwfitCache?._scannedHost || '') === String(_envState.remoteHost || '');
+        const _llamaModeDefault = (_hwScanMatch && ['cuda', 'rocm', 'vulkan', 'metal', 'mps', 'apple'].includes(_hwBackend)) ? 'gpu' : 'cpu';
+        const _llamaMode = sv('llama_mode', _llamaModeDefault);
+        panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Inference','CPU (default) = -ngl 0 (works anywhere). GPU = -ngl 99 (offload all layers; needs CUDA/ROCm/Vulkan-built llama-cpp).')}<div class="mode-toggle${_llamaMode === 'gpu' ? ' mode-right' : ''}" data-llama-mode-toggle style="display:flex;width:100%;height:30px;position:relative;top:2px;"><button type="button" class="mode-toggle-btn${_llamaMode === 'cpu' ? ' active' : ''}" data-llama-mode="cpu" aria-pressed="${_llamaMode === 'cpu'}" style="flex:1;"><span style="position:relative;top:-5px;">CPU</span></button><button type="button" class="mode-toggle-btn${_llamaMode === 'gpu' ? ' active' : ''}" data-llama-mode="gpu" aria-pressed="${_llamaMode === 'gpu'}" style="flex:1;"><span style="position:relative;top:-5px;">GPU</span></button></div><input type="hidden" class="hwfit-sf" data-field="llama_mode" value="${esc(_llamaMode)}" /></label>`;
+      }
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
-      // Dtype lives in Row 1 (next to venv) — it's the first knob people
-      // change when matching the model to the box, so it earns top-row
-      // real estate over Row 2's launch-tuning controls.
-      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
       panelHtml += `<label>${_l('Port','HTTP port for the API server')}<input type="text" class="hwfit-sf" data-field="port" value="${esc(sv('port', defaultPort))}" /></label>`;
       const _activeGpus = (defaultGpus || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -642,7 +663,7 @@ function _rerenderCachedModels() {
       // separates the GPU chiclets from the GPU Mem field that follows
       // (asked-for breathing room; 4px on either side felt cramped on
       // the GPU-Mem boundary).
-      const _gpusLabelHtml = `<label class="hwfit-gpus-label" style="margin:0 8px 0 4px;">${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
+      const _gpusLabelHtml = `<label class="hwfit-gpus-label cookbook-llama-gpu-only" style="margin:0 8px 0 4px;">${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
       // Save / saved-configs split button — sits at the right end of Row 1.
       panelHtml += _slotsHtml;
       panelHtml += `</div>`;
@@ -664,10 +685,12 @@ function _rerenderCachedModels() {
       // (Swap, KV Cache, Attention backend, Env vars, llama.cpp batch/ubatch)
       // moved to the Advanced fold below to keep this row scannable.
       panelHtml += `<div class="hwfit-serve-row hwfit-serve-row-core hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp hwfit-backend-ollama">`;
-      // Order: TP → Context → Max Seqs → GPUs → GPU Mem.
-      // Dtype moved up to Row 1. GPUs moved here next to GPU Mem so the
-      // "which devices + how much of them" decisions sit adjacent. Max
-      // Seqs follows Context per the "request-shape" cluster.
+      // Order: Dtype → TP → Context → Max Seqs → GPUs → GPU Mem.
+      // Dtype moved down from Row 1 to make space for the Inference pill
+      // (llama.cpp GPU/CPU toggle, llamacpp-only). GPUs lives next to
+      // GPU Mem so "which devices + how much" sit adjacent. Max Seqs
+      // follows Context per the "request-shape" cluster.
+      panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
       // ctx resets to the model's max on every panel open (the real ctx slider
       // lives in the Scan/Download toolbar — see cookbook.js .hwfit-ctx-control).
@@ -711,12 +734,6 @@ function _rerenderCachedModels() {
       // container — left an empty trailing column gap on wide modals).
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang" style="grid-column:1 / -1;">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). Example: CUDACXX=$VIRTUAL_ENV/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc — points flashinfer at the venv-bundled nvcc when the system one is too old for your GPU.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(sv('extra_env',''))}" placeholder="CUDACXX=/path/to/nvcc NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
-      // Advanced llama.cpp row (Batch / UBatch — moved out of Core for the
-      // same "rarely touched" reason as the vLLM extras above).
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
-      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Batch','llama.cpp prompt batch size. Leave blank for llama.cpp default.')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
-      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('UBatch','llama.cpp physical micro-batch size. Leave blank for llama.cpp default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
-      panelHtml += `</div>`;
       // Row 2b: Diffusers settings
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
       const deviceMapOpts = ['balanced','auto','sequential'].map(d => `<option value="${d}"${sv('diff_device_map','balanced')===d?' selected':''}>${d}</option>`).join('');
@@ -740,13 +757,19 @@ function _rerenderCachedModels() {
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="trust_remote"${sv('trust_remote',false)?' checked':''} /> Trust Remote Code${_h('Allow model to run custom code from HuggingFace')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="auto_tool"${sv('auto_tool',false)?' checked':''} /> Auto Tool Choice${_h('Enable function/tool calling for agent mode')}</label>`;
-      if (_rp_name) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name}" /> Reasoning Parser <span class="hwfit-parser-tag">${_rp_name}</span></label>`;
+      // Always-render the Reasoning Parser, Expert Parallel, and MoE Env
+      // checkboxes — the model-family detection above is a hint, not a
+      // hard gate. User asked to keep these visible regardless so that
+      // a borderline-undetected MoE/reasoning model can still toggle
+      // them without dropping back to the raw command box.
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name || ''}" /> Reasoning Parser${_rp_name ? ` <span class="hwfit-parser-tag">${_rp_name}</span>` : ''}${_h('Splits <think> tokens into a separate channel. The tag (when shown) is the auto-detected parser; edit the command if you need a different one.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
       // Inline the previously-second vLLM checks row so Expert Parallel /
       // Speculative / MoE Env sit next to Prefix Caching with no gap. All
-      // three are vLLM-only — class-gated so they hide on SGLang.
-      if (_opts2_row3.flags.includes('--enable-expert-parallel')) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel</label>`;
+      // three are vLLM-only — class-gated so they hide on SGLang. Always
+      // render so the user can flip them on for any MoE model.
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel${_h('MoE: shard expert layers across GPUs. Helps for MiniMax M-series, Qwen3 A3B/A10B/A22B MoE, DeepSeek V3+/R1. Ignored / wasteful on dense models.')}</label>`;
       {
         const _specDef = _opts2_row3.spec || { method: 'mtp', tokens: 3 };
         const _specMethod = sv('spec_method', _specDef.method);
@@ -757,27 +780,39 @@ function _rerenderCachedModels() {
           `<option value="${m}"${m === _specMethod ? ' selected' : ''}>${m}</option>`).join('');
         panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" style="width:44px;" /><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
       }
-      if (_opts2_row3.envVars.length) panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
+      // Always-render MoE Env Vars — the env vars dict is empty for
+      // most dense models (toggle is a no-op then), but for MoE families
+      // the user can still flip it on without re-fitting model detection.
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars${_h('Adds MoE-specific env vars to the launch command: VLLM_USE_DEEP_GEMM=0, VLLM_USE_FLASHINFER_MOE_FP16=1, OMP_NUM_THREADS=4. Helpful on MoE models like Qwen3 A3B/A10B, MiniMax, DeepSeek V3+; ignored on dense models.')}</label>`;
       panelHtml += `</div>`;
-      // Row 2c: llama.cpp fit/perf flags (set by Auto profiles, editable by hand)
+      // ── llama.cpp Advanced — grouped by purpose ──
+      // Three clean field rows + one checkbox row, all selects/inputs the
+      // same 28px height (no per-field `top:-Npx` nudges). Groups follow
+      // user mental model: (1) where it runs on GPU, (2) how memory is
+      // shaped, (3) how requests are batched, (4) on/off toggles.
       const _kvOpts = ['', 'q4_0', 'q8_0', 'f16'].map(k => `<option value="${k}"${sv('cache_type','')===k?' selected':''}>${k||'default'}</option>`).join('');
       const llamaFitOpts = ['', 'off', 'on'].map(d => `<option value="${d}"${sv('llama_fit','')===d?' selected':''}>${d||'default'}</option>`).join('');
       const llamaSplitModeOpts = ['', 'layer', 'tensor', 'row', 'none'].map(d => `<option value="${d}"${sv('llama_split_mode','')===d?' selected':''}>${d||'default'}</option>`).join('');
+
+      // Group 1 — GPU placement (GPU-only, hides in CPU mode)
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp cookbook-llama-gpu-only">`;
+      panelHtml += `<label>${_l('Split Mode','llama.cpp GPU placement. layer = default; tensor splits weights and KV across GPUs.')}<select class="hwfit-sf" data-field="llama_split_mode">${llamaSplitModeOpts}</select></label>`;
+      panelHtml += `<label>${_l('Tensor Split','GPU proportions, e.g. 50,50 across two GPUs. Blank = auto.')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label>${_l('Main GPU','--main-gpu index inside the visible GPU set. Useful for split mode none/row.')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `</div>`;
+
+      // Group 2 — Memory tuning (KV cache + MoE-on-CPU + Fit policy)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
-      panelHtml += `<label>${_l('CPU MoE','n-cpu-moe: number of MoE expert layers to run on CPU when the model is bigger than VRAM. 0 = all on GPU. Set automatically by the Auto profiles below.')}<input type="text" class="hwfit-sf" data-field="n_cpu_moe" value="${esc(sv('n_cpu_moe',''))}" placeholder="0" style="width:54px;position:relative;top:-8px;" /></label>`;
-      panelHtml += `<label>${_l('KV Cache','cache-type-k/v: quantize the KV cache. q4_0 = smallest (more context), q8_0 = sharp long-context, f16 = full. Blank = llama.cpp default.')}<select class="hwfit-sf" data-field="cache_type">${_kvOpts}</select></label>`;
-      panelHtml += `<label class="hwfit-sf-cb" style="align-self:end;"><input type="checkbox" class="hwfit-sf" data-field="flash_attn"${sv('flash_attn',false)?' checked':''} /> Flash Attn${_h('--flash-attn on: faster attention + needed for quantized KV cache.')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb" style="align-self:end;"><input type="checkbox" class="hwfit-sf" data-field="vision"${sv('vision',false)?' checked':''} /> Vision${_h('Serve with the vision encoder so the model can read images. Auto-finds an mmproj-*.gguf next to the model (download one into the model folder). Adds ~1 GB VRAM + a small per-image cost.')}</label>`;
+      panelHtml += `<label>${_l('KV Cache','cache-type-k/v: quantize the KV cache. q4_0 = smallest (more context), q8_0 = long-context, f16 = full.')}<select class="hwfit-sf" data-field="cache_type">${_kvOpts}</select></label>`;
+      panelHtml += `<label class="cookbook-llama-gpu-only">${_l('CPU MoE','n-cpu-moe: number of MoE expert layers to run on CPU when the model is bigger than VRAM. 0 = all on GPU.')}<input type="text" class="hwfit-sf" data-field="n_cpu_moe" value="${esc(sv('n_cpu_moe',''))}" placeholder="0" /></label>`;
       panelHtml += `<label>${_l('Fit','llama.cpp --fit. Leave default unless you need explicit off/on behavior for a preset.')}<select class="hwfit-sf" data-field="llama_fit">${llamaFitOpts}</select></label>`;
       panelHtml += `</div>`;
-      // Row 2d: native llama-server placement/runtime controls. These are
-      // explicit overrides for known-good advanced presets; blank keeps
-      // llama.cpp/profile defaults.
+
+      // Group 3 — Request batching (Batch / UBatch / Parallel)
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
-      panelHtml += `<label>${_l('Split Mode','llama.cpp GPU placement. layer is the usual default; tensor splits weights and KV across GPUs.')}<select class="hwfit-sf" data-field="llama_split_mode" style="position:relative;top:-8px;">${llamaSplitModeOpts}</select></label>`;
-      panelHtml += `<label>${_l('Tensor Split','GPU proportions for llama.cpp, e.g. 50,50 across two visible GPUs. Leave blank for auto.')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="50,50" /></label>`;
-      panelHtml += `<label>${_l('Main GPU','llama.cpp --main-gpu index inside the visible GPU set. Mostly useful for split mode none/row.')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
-      panelHtml += `<label>${_l('Parallel','llama.cpp parallel slots. Leave blank for llama.cpp default; 1 matches single-lane presets.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
+      panelHtml += `<label>${_l('Batch','llama.cpp prompt batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
+      panelHtml += `<label>${_l('UBatch','llama.cpp physical micro-batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
+      panelHtml += `<label>${_l('Parallel','llama.cpp parallel slots. Blank = default; 1 matches single-lane presets.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
       panelHtml += `</div>`;
       // Auto-profile chips row removed — visual fit with the rest of the
       // serve panel was off, and the manual ctx/n_cpu_moe/cache controls
@@ -791,12 +826,19 @@ function _rerenderCachedModels() {
       panelHtml += `<span style="opacity:0.7;">GPU memory:</span>`;
       panelHtml += `<span class="hwfit-vram-readout" style="opacity:0.5;">checking…</span>`;
       panelHtml += `</div>`;
-      // Row 3a: Checkboxes (llama.cpp-only)
+      // Group 4 — llama.cpp toggles. Single row of checkboxes, GPU-only
+      // ones (Flash Attn, Unified Memory, Allow CPU overflow) hide
+      // automatically in CPU mode. Order: perf-critical → safety → I/O →
+      // niche. MTP Spec sits last because it owns its own numstep widget
+      // and is the widest item.
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-llamacpp">`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="unified_mem"${sv('unified_mem',false)?' checked':''} /> Unified Memory${_h('For AMD APUs / Strix Halo: exports GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 so llama.cpp can address the full BIOS VRAM carveout instead of the default ~28 GB cap. No-op on discrete GPUs.')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_mmap"${sv('llama_no_mmap',false)?' checked':''} /> No mmap${_h('Adds --no-mmap for native llama-server. Useful for some high-context/local-storage setups, but not a universal default.')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_warmup"${sv('llama_no_warmup',false)?' checked':''} /> Skip warmup${_h('Adds --no-warmup. Can reduce startup memory spikes for tight launches, but llama.cpp defaults to warming up.')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads and a recent llama-server build.')} <span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span></label>`;
+      panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="flash_attn"${sv('flash_attn',false)?' checked':''} /> Flash Attn${_h('--flash-attn on: faster attention + needed for quantized KV cache. Auto by default.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="unified_mem"${sv('unified_mem',false)?' checked':''} /> Unified Memory${_h('For AMD APUs / Strix Halo: exports GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 so llama.cpp can address the full BIOS VRAM carveout instead of the default ~28 GB cap. No-op on discrete GPUs.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="llama_cpu_overflow"${sv('llama_cpu_overflow',false)?' checked':''} /> Allow CPU overflow${_h('OFF (default): cookbook blocks launches that would overflow GPU VRAM. ON: layers/KV cache that do not fit get pushed to CPU (slow).')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="vision"${sv('vision',false)?' checked':''} /> Vision${_h('Serve with the vision encoder so the model can read images. Auto-finds an mmproj-*.gguf next to the model. Adds ~1 GB VRAM.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_mmap"${sv('llama_no_mmap',false)?' checked':''} /> No mmap${_h('Adds --no-mmap. Useful for some high-context/local-storage setups.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_warmup"${sv('llama_no_warmup',false)?' checked':''} /> Skip warmup${_h('Adds --no-warmup. Reduces startup memory spikes; llama.cpp defaults to warming up.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads.')} <span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span></label>`;
       panelHtml += `</div>`;
       // Row 3b: Checkboxes (diffusers)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers">`;
@@ -859,6 +901,21 @@ function _rerenderCachedModels() {
       const panel = item.querySelector('.hwfit-serve-panel');
       // Scroll the serve panel into view within its nearest scrollable ancestor
       requestAnimationFrame(() => panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+      // Firefox-mobile fallback: the CSS that grows the cached-list and
+      // expanded card uses :has(.doclib-card-expanded), which Firefox
+      // mobile doesn't support — so the panel stays collapsed and the
+      // form is unusable. Pin explicit px heights here. On Chromium/
+      // WebKit the !important CSS still wins, so this is a no-op there.
+      // (See project_skills_expand_firefox memory note.)
+      requestAnimationFrame(() => {
+        try {
+          const _itemH = Math.max(item.scrollHeight, item.getBoundingClientRect().height);
+          if (_itemH > 0) item.style.maxHeight = _itemH + 'px';
+          const _listH = Math.max(list.scrollHeight, list.getBoundingClientRect().height);
+          if (_listH > 0) list.style.maxHeight = _listH + 'px';
+          list.style.minHeight = _listH + 'px';
+        } catch {}
+      });
 
       // Build command preview
       function updateCmd() {
@@ -1859,6 +1916,49 @@ function _rerenderCachedModels() {
           updateCmd();
         });
       });
+      // llama.cpp GPU/CPU mode-toggle pill wiring. Clicking GPU or CPU
+      // flips the .active classes + .mode-right marker (so the sliding
+      // pill matches Agent/Chat), updates the hidden data-field input,
+      // and fires a change event so the existing field-change handler
+      // rebuilds the serve cmd (sets -ngl 99 vs -ngl 0).
+      panel.querySelectorAll('[data-llama-mode-toggle]').forEach(group => {
+        group.querySelectorAll('.mode-toggle-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const want = btn.dataset.llamaMode;
+            if (!want) return;
+            group.querySelectorAll('.mode-toggle-btn').forEach(b => {
+              const isActive = b.dataset.llamaMode === want;
+              b.classList.toggle('active', isActive);
+              b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            });
+            group.classList.toggle('mode-right', want === 'gpu');
+            const hidden = group.parentElement.querySelector('[data-field="llama_mode"]');
+            if (hidden) {
+              hidden.value = want;
+              hidden.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            // Hide every GPU-only control (chiclets, Tensor Split,
+            // Split Mode, Main GPU, Flash Attn, Unified Memory, etc.)
+            // in CPU mode — `-ngl 0` ignores them and showing them
+            // implies they matter.
+            panel.classList.toggle('cookbook-llama-cpu-mode', want === 'cpu');
+            panel.querySelectorAll('.cookbook-llama-gpu-only').forEach(el => {
+              el.style.display = (want === 'cpu') ? 'none' : '';
+            });
+          });
+        });
+      });
+      // Apply the CPU-mode visibility on first render too, so a saved
+      // preset that loaded with llama_mode=cpu hides GPU controls
+      // immediately instead of flashing them then disappearing.
+      {
+        const _saved = panel.querySelector('[data-field="llama_mode"]')?.value || 'gpu';
+        if (_saved === 'cpu') {
+          panel.classList.add('cookbook-llama-cpu-mode');
+          panel.querySelectorAll('.cookbook-llama-gpu-only').forEach(el => { el.style.display = 'none'; });
+        }
+      }
       // Themed +/- buttons next to spec_tokens — step the adjacent number input.
       panel.querySelectorAll('.hwfit-numstep-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -2025,6 +2125,140 @@ function _rerenderCachedModels() {
           });
           return;
         }
+        // llama.cpp VRAM-fit preflight. Catches the silent-CPU-fallback
+        // trap: when the model + KV cache exceed the selected GPUs' free
+        // VRAM, llama-cpp-python doesn't error — it pushes layers/KV to
+        // CPU and inference crawls at sub-1 tok/s. Off by default; can
+        // be bypassed per-launch via the dialog's "Allow CPU overflow"
+        // action, OR persistently by ticking the same-named checkbox.
+        if (serveState.backend === 'llamacpp'
+            && String(serveState.llama_mode || 'gpu') !== 'cpu'
+            && !serveState.llama_cpu_overflow) {
+          try {
+            const _ctx = Math.max(1, parseInt(serveState.ctx, 10) || 8192);
+            // Model size on disk — close enough for GPU footprint of a GGUF.
+            const _modelBytes = Number(m?.size_bytes || 0) || Math.round((Number(m?.size_gb || 0)) * 1024 * 1024 * 1024);
+            const _modelGb = _modelBytes / (1024 ** 3);
+            // KV cache heuristic. ~0.7MB / token / 7.5GB-of-model at fp16
+            // KV, scaled linearly by model size. Imperfect but covers
+            // the common 7B–70B range within ~20% — good enough to catch
+            // overflow before it silently happens.
+            const _kvGbPerToken = _modelGb > 0 ? (_modelGb / 7.5) * 0.0007 : 0.0007;
+            const _kvGb = _ctx * _kvGbPerToken;
+            const _needGb = _modelGb + _kvGb;
+            const _selStr = (serveState.gpus || '').trim();
+            const _selIdx = _selStr ? _selStr.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n)) : [0];
+            // Fetch FRESH GPU data per-launch — the hwfit cache may be
+            // stale or for a different host (e.g. user switched server
+            // picker without scanning), which used to silently skip the
+            // preflight and let the launch silently fall to CPU.
+            let _hwGpus = [];
+            try {
+              const _gh = (_envState.remoteHost || '').trim();
+              const _gp = new URLSearchParams();
+              if (_gh) {
+                _gp.set('host', _gh);
+                const _sp = (_serverByVal?.(_envState.remoteServerKey || _gh) || {}).port;
+                if (_sp) _gp.set('ssh_port', _sp);
+              }
+              const _gr = await fetch('/api/cookbook/gpus' + (_gp.toString() ? '?' + _gp : ''), { credentials: 'same-origin' });
+              if (_gr.ok) {
+                const _gd = await _gr.json();
+                _hwGpus = Array.isArray(_gd) ? _gd : (_gd.gpus || []);
+              }
+            } catch {}
+            const _freeFor = (idx) => {
+              const g = _hwGpus[idx];
+              const mb = g?.free_mb;
+              return Number.isFinite(mb) ? mb / 1024 : 0;
+            };
+            const _selFreeGb = _selIdx.reduce((s, i) => s + _freeFor(i), 0);
+            // Skip the gate when we don't have any free-VRAM data (probe
+            // failed) — better to let the launch try than silently refuse
+            // on a missing data point.
+            if (_selFreeGb > 0 && _needGb > _selFreeGb && _modelGb > 0) {
+              // Suggest the smallest set of additional GPUs whose free
+              // VRAM closes the gap. Greedy by largest-free-first.
+              const _candidates = _hwGpus
+                .map((g, i) => ({ i, free: _freeFor(i) }))
+                .filter(x => !_selIdx.includes(x.i) && x.free > 0)
+                .sort((a, b) => b.free - a.free);
+              const _addGpus = [];
+              let _runFree = _selFreeGb;
+              for (const c of _candidates) {
+                _addGpus.push(c.i); _runFree += c.free;
+                if (_runFree >= _needGb) break;
+              }
+              const _canAddGpu = _runFree >= _needGb && _addGpus.length > 0;
+              // Recommend ctx that just-fits on current selection.
+              const _recCtxRaw = Math.floor((_selFreeGb - _modelGb) / _kvGbPerToken);
+              const _recCtx = Math.max(1024, Math.floor(_recCtxRaw / 1024) * 1024);
+              // Custom modal — styledConfirm only takes 2 buttons; this
+              // surface needs up to 4 actions (Reduce / Add GPUs / Allow / Cancel).
+              const _action = await new Promise(resolve => {
+                const ov = document.createElement('div');
+                ov.className = 'modal';
+                ov.style.cssText = 'display:flex;align-items:center;justify-content:center;z-index:10050;position:fixed;inset:0;background:rgba(0,0,0,0.4);';
+                const _btnRow = [];
+                if (_recCtx > 1024 && _recCtx < _ctx) {
+                  _btnRow.push(`<button data-vram-action="reduce" class="confirm-btn confirm-btn-primary" style="width:100%;">Reduce ctx to ${_recCtx.toLocaleString()}</button>`);
+                }
+                if (_canAddGpu) {
+                  _btnRow.push(`<button data-vram-action="add_gpus" class="confirm-btn confirm-btn-primary" style="width:100%;">Add GPU${_addGpus.length > 1 ? 's' : ''} ${_addGpus.join(', ')}</button>`);
+                }
+                _btnRow.push(`<button data-vram-action="allow_cpu" class="confirm-btn confirm-btn-secondary" style="width:100%;">Allow CPU overflow (slow)</button>`);
+                _btnRow.push(`<button data-vram-action="cancel" class="confirm-btn confirm-btn-secondary" style="width:100%;">Cancel</button>`);
+                ov.innerHTML = '<div class="modal-content" style="max-width:480px;">'
+                  + '<div class="modal-header"><h4>Will not fit on selected GPU' + (_selIdx.length > 1 ? 's' : '') + '</h4></div>'
+                  + '<div class="modal-body" style="font-size:12px;line-height:1.5;">'
+                  +   '<p>Model + KV cache would overflow VRAM on the selected GPU' + (_selIdx.length > 1 ? 's' : '') + '. llama-cpp-python will silently spill to CPU → very slow inference.</p>'
+                  +   '<ul style="opacity:0.75;padding-left:18px;">'
+                  +     '<li>Model: ~' + _modelGb.toFixed(1) + ' GB</li>'
+                  +     '<li>KV cache (ctx ' + _ctx.toLocaleString() + '): ~' + _kvGb.toFixed(1) + ' GB</li>'
+                  +     '<li>Total needed: ~' + _needGb.toFixed(1) + ' GB</li>'
+                  +     '<li>Free on GPU ' + _selIdx.join(', ') + ': ~' + _selFreeGb.toFixed(1) + ' GB</li>'
+                  +   '</ul>'
+                  + '</div>'
+                  + '<div class="modal-footer" style="flex-direction:column;gap:6px;align-items:stretch;">' + _btnRow.join('') + '</div>'
+                  + '</div>';
+                document.body.appendChild(ov);
+                ov.addEventListener('click', (e) => {
+                  const b = e.target.closest('[data-vram-action]');
+                  if (b) { ov.remove(); resolve(b.dataset.vramAction); }
+                  else if (e.target === ov) { ov.remove(); resolve('cancel'); }
+                });
+              });
+              if (_action === 'cancel' || !_action) { _restoreLaunchBtn(); return; }
+              if (_action === 'reduce') {
+                const _ctxEl = panel.querySelector('[data-field="ctx"]');
+                if (_ctxEl) {
+                  _ctxEl.value = String(_recCtx);
+                  serveState.ctx = String(_recCtx);
+                  _ctxEl.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              } else if (_action === 'add_gpus') {
+                for (const i of _addGpus) {
+                  const _b = panel.querySelector(`.cookbook-gpu-btn[data-gpu="${i}"]`);
+                  if (_b && !_b.classList.contains('active')) _b.click();
+                }
+                const _gpusEl = panel.querySelector('[data-field="gpus"]');
+                if (_gpusEl) serveState.gpus = _gpusEl.value;
+              } else if (_action === 'allow_cpu') {
+                const _ov = panel.querySelector('[data-field="llama_cpu_overflow"]');
+                if (_ov) {
+                  _ov.checked = true;
+                  _ov.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                serveState.llama_cpu_overflow = true;
+              }
+              // After mutation, rebuild the serve cmd preview so the
+              // launched cmd matches what the user just chose.
+              try { updateCmd(); } catch {}
+            }
+          } catch (_e) {
+            // Preflight is best-effort — never block on its own failure.
+          }
+        }
         // Pre-launch GPU probe — common failure pattern: vLLM/SGLang launched
         // on a host where no GPU is visible (driver missing, $CUDA_VISIBLE_DEVICES
         // unset, container without --gpus). Catch it BEFORE the user spends
@@ -2151,6 +2385,38 @@ function _rerenderCachedModels() {
         if (venvVal) { _envState.env = 'venv'; _envState.envPath = venvVal; }
         else if (_srvEnvPath) { _envState.env = (_srvEnv === 'conda' ? 'conda' : 'venv'); _envState.envPath = _srvEnvPath; }
         if (gpusVal) _envState.gpus = gpusVal;
+        // Preflight: launching a GPU engine (llama.cpp / vLLM / SGLang)
+        // against the local-in-container target on a host whose hwfit
+        // scan reports no GPU backend. That falls through to a CPU build
+        // / CPU inference path and is usually NOT what the user wants —
+        // they typically have a host-side GPU (AMD/Vulkan, NVIDIA on a
+        // different box) that the container can't see. Surface this so
+        // the user can pick the host as a remote target instead, or
+        // confirm they really meant CPU.
+        try {
+          const _isLocalInContainer = !serveHost; // empty serveHost == cookbook container's local
+          const _wantsGpu = ['llamacpp', 'vllm', 'sglang', 'diffusers'].includes(serveState.backend);
+          const _detectedBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
+          const _gpuBackends = ['cuda', 'rocm', 'vulkan', 'metal', 'mps', 'apple'];
+          if (_isLocalInContainer && _wantsGpu && _detectedBackend && !_gpuBackends.includes(_detectedBackend)) {
+            const _proceed = await window.styledConfirm(
+              `The local (in-container) target has no GPU backend detected (hwfit reports: "${_detectedBackend || 'none'}"). ${serveState.backend.toUpperCase()} will run on CPU only and may be unusably slow.\n\nIf this machine has a GPU on the host, add the host as a server in Settings and target that instead. Otherwise launch anyway for CPU inference.`,
+              {
+                title: 'No GPU on local target',
+                confirmText: 'Launch anyway (CPU)',
+                cancelText: 'Cancel',
+                danger: true,
+              },
+            );
+            if (!_proceed) {
+              if (typeof _restoreLaunchBtn === 'function') _restoreLaunchBtn();
+              _envState.env = origEnv;
+              _envState.envPath = origEnvPath;
+              _envState.gpus = origGpus;
+              return;
+            }
+          }
+        } catch { /* preflight is best-effort */ }
         try {
           await _withSpinner(_launchBtn, async () => {
             // Pass the exact form values so the running task can be re-opened
