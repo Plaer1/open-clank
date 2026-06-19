@@ -405,8 +405,11 @@ def _endpoint_refresh_timeout(ep: Any, category: str) -> float:
     except Exception:
         val = 0
     if val > 0:
-        return float(max(1, min(30, val)))
-    return 2.5 if category == "local" else 2.0
+        return float(max(1, min(60, val)))
+    # llama.cpp and other local OpenAI-compatible servers can block briefly
+    # while warming/loading. A 2s local timeout makes working endpoints flicker
+    # offline before /v1/models is ready.
+    return 10.0 if category == "local" else 2.0
 
 
 def _manual_refresh_timeout(ep: Any, category: str, requested: Any = None) -> float:
@@ -473,7 +476,7 @@ def _explicit_model_list_timeout(base_url: str, endpoint_kind: str = "auto", req
     category = _classify_endpoint(base_url, kind)
     if kind in ("api", "proxy") or category == "api":
         return 30.0
-    return 3.0 if _is_ollama_base(base_url) else 2.0
+    return 15.0 if category == "local" else (3.0 if _is_ollama_base(base_url) else 2.0)
 
 
 def _cached_model_ids(ep: Any) -> List[str]:
@@ -856,15 +859,28 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
         pass
 
     try:
+        # OpenAI-compatible servers commonly expose /v1/models but return 404
+        # for the bare /v1 root. Probe models first for those bases to avoid
+        # noisy false-looking 404s in llama.cpp logs.
+        parsed = urlparse(base)
+        prefer_models_first = (parsed.path or "").rstrip("/").endswith("/v1")
+        if prefer_models_first:
+            try:
+                r0 = httpx.get(_safe_build_models_url(base), headers=headers, timeout=timeout, verify=llm_verify())
+                result0 = _result_from_response(r0)
+                if result0["reachable"]:
+                    return result0
+            except Exception as e:
+                last_error = str(e)[:120]
         r = httpx.get(base, headers=headers, timeout=timeout, verify=llm_verify())
         result = _result_from_response(r)
         if result["reachable"]:
             return result
         sc = result.get("status_code") or 0
-        if 400 <= sc < 500 and sc not in (401, 403):
+        if 400 <= sc < 500 and sc not in (401, 403) and not prefer_models_first:
             models_url = _safe_build_models_url(base)
             try:
-                r2 = httpx.get(models_url, headers=headers, timeout=timeout, verify=llm_verify())
+                r2 = httpx.get(models_url, headers=headers,timeout=timeout, verify=llm_verify())
                 result2 = _result_from_response(r2)
                 if result2["reachable"]:
                     return result2
@@ -1567,7 +1583,10 @@ def setup_model_routes(model_discovery):
                 # "everything's already cached" path because this branch only
                 # runs for endpoints with an empty cached_models.
                 if not all_models and not pinned and r.is_enabled:
-                    ping = _ping_endpoint(r.base_url, r.api_key, timeout=3.5)
+                    base_for_ping = _normalize_base(r.base_url)
+                    kind_for_ping = _effective_endpoint_kind(r, base_for_ping)
+                    ping_timeout = 10.0 if _classify_endpoint(base_for_ping, kind_for_ping) == "local" else 3.5
+                    ping = _ping_endpoint(r.base_url, r.api_key, timeout=ping_timeout)
                     if ping.get("reachable"):
                         status = "empty"
                         # Best-effort: if the probe came back reachable, try
@@ -1577,7 +1596,7 @@ def setup_model_routes(model_discovery):
                         # "empty" status, and the existing background refresh
                         # path will eventually fill it in too.
                         try:
-                            probed = _probe_endpoint(r.base_url, r.api_key, timeout=5)
+                            probed = _probe_endpoint(r.base_url, r.api_key, timeout=max(5, int(ping_timeout)))
                             if probed:
                                 r.cached_models = json.dumps(probed)
                                 db.commit()
@@ -1755,7 +1774,7 @@ def setup_model_routes(model_discovery):
         model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=explicit_timeout) if should_probe else []
         ping = {"reachable": False, "error": None}
         if (should_probe or requested_kind in ("api", "proxy")) and not model_ids:
-            ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 2.0))
+            ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 10.0))
         if require_model_list and not model_ids:
             raise HTTPException(400, _model_endpoint_error_message(base_url, ping))
 
@@ -1847,7 +1866,7 @@ def setup_model_routes(model_discovery):
         configured_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
         models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
-        ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 2.0))
+        ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
         return {
             "base_url": base_url,
             "online": bool(models) or bool(ping.get("reachable")),
