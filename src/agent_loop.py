@@ -536,17 +536,44 @@ def _section_text(name: str, default: str) -> str:
     return val if isinstance(val, str) and val.strip() else default
 
 
+def _compact_tool_line(name: str, section: str) -> str:
+    """One-line fenced-tool usage hint for compact/local prompts."""
+    text = (section or "").strip()
+    if not text:
+        return f"- `{name}`"
+    if text.startswith("- "):
+        return text
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    usage = []
+    in_fence = False
+    for ln in lines:
+        if ln.startswith("```"):
+            usage.append(ln)
+            in_fence = not in_fence
+            if len(usage) >= 3:
+                break
+            continue
+        if in_fence and len(usage) < 3:
+            usage.append(ln)
+    if usage:
+        return f"- `{name}` — " + " ".join(usage)
+    return f"- `{name}` — " + lines[0][:160]
+
+
 def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
     """Build the system prompt with only the specified tools included."""
     disabled = disabled_tools or set()
     included = tool_names - disabled
 
     if compact:
-        tool_list = ", ".join(sorted(included)) if included else "none"
+        tool_lines = []
+        for name, _default_section in TOOL_SECTIONS.items():
+            if name in included:
+                tool_lines.append(_compact_tool_line(name, _section_text(name, _default_section)))
         parts = [
-            "You are an AI assistant with tool access.",
-            f"Available tools: {tool_list}.",
-            _API_AGENT_RULES,
+            _AGENT_PREAMBLE,
+            "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
+            _AGENT_RULES,
         ]
         parts.extend(_domain_rules_for_tools(included))
         return "\n\n".join(parts)
@@ -612,11 +639,6 @@ _API_HOSTS = frozenset([
     "api.perplexity.ai", "api.x.ai",
     "ollama.com", "api.venice.ai", "api.kimi.com",
     "api.githubcopilot.com",
-    # Local OpenAI-compatible endpoints (llama.cpp, vLLM, LM Studio, etc.).
-    # Without these, `_is_api_model` falls back to keyword sniffing on the
-    # model name, so well-behaved local servers don't get native tool
-    # schemas and the agent silently degrades to fenced-block parsing.
-    "localhost", "127.0.0.1", "host.docker.internal",
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
@@ -642,6 +664,28 @@ def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
         return False
     path = (parsed.path or "").rstrip("/")
     return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
+
+
+def _is_local_openai_compat_url(endpoint_url: str) -> bool:
+    try:
+        parsed = urlparse(endpoint_url or "")
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").rstrip("/")
+    if not (path == "/v1" or path.startswith("/v1/")):
+        return False
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
+        return True
+    if host.startswith("192.168.") or host.startswith("10."):
+        return True
+    if host.startswith("172."):
+        try:
+            second = int(host.split(".")[1])
+            return 16 <= second <= 31
+        except Exception:
+            return False
+    return False
 
 
 def _endpoint_lookup_keys(endpoint_url: str) -> List[str]:
@@ -2082,6 +2126,7 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
+    _local_openai_compat = _is_local_openai_compat_url(endpoint_url or "")
     if _endpoint_supports is True:
         _is_api_model = True
     elif (
@@ -2089,15 +2134,17 @@ async def stream_agent_loop(
         or _model_no_tools
         or _is_ollama_native
         or _ollama_openai_compat
+        or _local_openai_compat
     ):
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+    _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat or _local_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
-        compact=_is_api_model,
+        compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
         active_email=active_email,
@@ -2185,6 +2232,14 @@ async def stream_agent_loop(
     # Strip internal metadata keys before sending to the LLM API
     messages = [{k: v for k, v in msg.items() if k != "_protected"} for msg in messages]
 
+    agent_prompt_tokens = estimate_tokens(messages)
+    logger.info(
+        "[agent-timing] prep_done model=%s prompt_tokens=%s context_length=%s prep=%s",
+        model,
+        agent_prompt_tokens,
+        context_length,
+        {k: round(v, 3) for k, v in prep_timings.items()},
+    )
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
     full_response = ""
@@ -2329,6 +2384,19 @@ async def stream_agent_loop(
         # complementary cap for the rare stream that trickles bytes forever and
         # so never trips the inactivity timeout. Generous — only catches runaway.
         _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
+        _round_start = time.time()
+        _round_first_event_logged = False
+        _round_first_token_logged = False
+        logger.info(
+            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
+            round_num,
+            model,
+            endpoint_url,
+            estimate_tokens(messages),
+            len(_tool_names_sent),
+            bool(all_tool_schemas),
+            agent_stream_timeout,
+        )
         async for chunk in stream_llm_with_fallback(
             _candidates,
             messages,
@@ -2339,11 +2407,30 @@ async def stream_agent_loop(
             timeout=agent_stream_timeout,
             session_id=session_id,
         ):
+            if not _round_first_event_logged:
+                _round_first_event_logged = True
+                logger.info(
+                    "[agent-timing] first_event round=%s elapsed=%.3fs kind=%s",
+                    round_num,
+                    time.time() - _round_start,
+                    "error" if chunk.startswith("event: error") else "data",
+                )
             if time.time() > _round_deadline:
-                logger.warning(f"[agent] round {round_num} stream exceeded wall-clock deadline; cutting off")
+                logger.warning(
+                    "[agent-timing] round_deadline round=%s elapsed=%.3fs deadline_s=%s",
+                    round_num,
+                    time.time() - _round_start,
+                    max(agent_stream_timeout * 4, 1200),
+                )
                 break
             # Forward error events from stream_llm to the frontend
             if chunk.startswith("event: error"):
+                logger.warning(
+                    "[agent-timing] stream_error round=%s elapsed=%.3fs chunk=%r",
+                    round_num,
+                    time.time() - _round_start,
+                    chunk[:500],
+                )
                 yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -2423,6 +2510,15 @@ async def stream_agent_loop(
                         if not first_token_received:
                             time_to_first_token = time.time() - total_start
                             first_token_received = True
+                        if not _round_first_token_logged:
+                            _round_first_token_logged = True
+                            logger.info(
+                                "[agent-timing] first_visible_token round=%s elapsed=%.3fs total_elapsed=%.3fs thinking=%s",
+                                round_num,
+                                time.time() - _round_start,
+                                time.time() - total_start,
+                                bool(data.get("thinking")),
+                            )
                         # Keep reasoning deltas in a separate accumulator so
                         # we can echo them back via `reasoning_content` on the
                         # next request (DeepSeek requires this; harmless for
@@ -2492,6 +2588,15 @@ async def stream_agent_loop(
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
 
+        logger.info(
+            "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
+            round_num,
+            time.time() - _round_start,
+            len(round_response),
+            len(native_tool_calls),
+            _round_first_event_logged,
+            _round_first_token_logged,
+        )
         tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num, is_api_model=_is_api_model)
 
         # Force-answer round: we told the model to STOP calling tools and
