@@ -189,8 +189,27 @@ def setup_cookbook_routes() -> APIRouter:
                 "SGLang is not installed or not in PATH on this server.",
                 [{"label": "install SGLang in Cookbook Dependencies", "op": "dependency", "package": "sglang[all]"}],
             ),
+            # System build deps come BEFORE the generic llama.cpp catch-all
+            # so cmake / build-essential / git missing → a specific OS-package
+            # remediation instead of "install llama-cpp-python[server]" (which
+            # itself fails to compile when cmake is absent).
             (
-                r"llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'|git: command not found|cmake: command not found",
+                r"cmake: command not found|cmake.*not found.*[Cc]ould not",
+                "cmake is required to build llama.cpp from source but isn't installed on this server.",
+                [{"label": "install build deps for llama.cpp (apt: cmake build-essential git / pacman: cmake base-devel git / dnf: cmake gcc-c++ make git / brew: cmake git)", "op": "dependency", "package": "llama-cpp-python[server]"}],
+            ),
+            (
+                r"^(make|g\+\+|gcc): command not found|Could not find C\+\+ compiler",
+                "A C/C++ compiler (build-essential) is required to build llama.cpp from source.",
+                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
+            ),
+            (
+                r"^git: command not found",
+                "git is required to clone the llama.cpp source tree.",
+                [{"label": "install build deps for llama.cpp on this server", "op": "dependency", "package": "llama-cpp-python[server]"}],
+            ),
+            (
+                r"llama-server.*command not found|llama\.cpp.*not found|No module named.*llama_cpp|No module named 'starlette_context'",
                 "llama.cpp / llama-cpp-python dependencies are missing.",
                 [{"label": "install llama.cpp dependencies or llama-cpp-python[server]", "op": "dependency", "package": "llama-cpp-python[server]"}],
             ),
@@ -1243,8 +1262,16 @@ def setup_cookbook_routes() -> APIRouter:
             req.cmd = _pip_install_no_cache(req.cmd)
             # Accept common aliases and enforce server extras for llama-cpp so
             # `python -m llama_cpp.server` has all runtime dependencies.
-            req.cmd = re.sub(r"(?<![A-Za-z0-9_.-])llama_cpp(?![A-Za-z0-9_.-])", "llama-cpp-python[server]", req.cmd)
-            req.cmd = re.sub(r"(?<![A-Za-z0-9_.-])llama-cpp-python(?!\[)", "llama-cpp-python[server]", req.cmd)
+            # CRITICAL: the lookbehind / lookahead must also exclude `/` so
+            # the regex DOESN'T mangle a URL path like
+            #   https://abetlen.github.io/llama-cpp-python/whl/cu124
+            # The previous regex turned that URL into
+            #   https://abetlen.github.io/llama-cpp-python[server]/whl/cu124
+            # which pip then couldn't resolve → silent fallback to source
+            # build of the .tar.gz → CPU-only binary (because CMAKE_ARGS
+            # isn't set), defeating the entire purpose of the CUDA index.
+            req.cmd = re.sub(r"(?<![A-Za-z0-9_.\-/])llama_cpp(?![A-Za-z0-9_.\-/])", "llama-cpp-python[server]", req.cmd)
+            req.cmd = re.sub(r"(?<![A-Za-z0-9_.\-/])llama-cpp-python(?![\[/])", "llama-cpp-python[server]", req.cmd)
             if "llama-cpp-python" in req.cmd and "--extra-index-url" not in req.cmd:
                 req.cmd += " --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
             # PEP-508-style package spec — letters, digits, `.-_` for the
@@ -1425,6 +1452,69 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
                 runner_lines.append('  else')
                 _append_llama_cpp_linux_accel_build_lines(runner_lines)
+                runner_lines.append('  fi')
+                # Source the env file the prebuilt-download path writes so
+                # LD_LIBRARY_PATH includes the directory holding libllama.so
+                # and friends. No-op when prebuilt wasn't used.
+                runner_lines.append('  [ -r ~/.config/odysseus-llama-cpp-env ] && . ~/.config/odysseus-llama-cpp-env')
+                # Auto-upgrade pip llama-cpp-python to the CUDA-enabled
+                # wheel when (a) NVIDIA hardware is present and (b) the
+                # currently-installed wheel is CPU-only. Without this the
+                # user gets the Python server happily running at 3 tok/s
+                # because pip's default index ships CPU-only wheels.
+                # Forward-compat: cu124 wheels work on driver/runtime
+                # 12.4+ including the cu13.x line.
+                runner_lines.append('  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q "GPU " && python3 -c "import llama_cpp" 2>/dev/null; then')
+                runner_lines.append('    if ! python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then')
+                runner_lines.append('      echo "[odysseus] NVIDIA detected but installed llama-cpp-python is CPU-only — reinstalling with CUDA wheel index for GPU offload..."')
+                runner_lines.append('      python3 -m pip install --user --break-system-packages --force-reinstall --no-cache-dir "llama-cpp-python[server]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 2>&1 | tail -8 || echo "[odysseus] WARNING: CUDA wheel reinstall failed — Python server will stay CPU-only (slow). Manual fix: pip install --user --force-reinstall \'llama-cpp-python[server]\' --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124"')
+                runner_lines.append('      if python3 -c "import llama_cpp; import sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 1)" 2>/dev/null; then')
+                runner_lines.append('        echo "[odysseus] llama-cpp-python now supports GPU offload."')
+                runner_lines.append('      fi')
+                runner_lines.append('    fi')
+                runner_lines.append('  fi')
+                # SHORT-CIRCUIT before the build/pip fallback: if the
+                # native binary is missing but llama_cpp Python is already
+                # installed, drop a wrapper at ~/bin/llama-server that
+                # translates llama-server CLI args to llama_cpp.server's
+                # underscore-style flags. The user's serve command stays
+                # `llama-server ...` and "just works" — no build, no cmake,
+                # no second install. This is the path that unblocks every
+                # remote where pip-installed llama-cpp-python is already
+                # working but Cookbook used to insist on a native binary.
+                runner_lines.append('  if ! command -v llama-server >/dev/null 2>&1 && python3 -c "import llama_cpp" 2>/dev/null; then')
+                runner_lines.append('    mkdir -p ~/bin')
+                runner_lines.append('    cat > ~/bin/llama-server <<\'_ODY_LLAMA_SHIM_EOF\'')
+                runner_lines.append('#!/usr/bin/env bash')
+                runner_lines.append('# Auto-generated by Odysseus Cookbook: a `llama-server` lookalike')
+                runner_lines.append('# that translates the native CLI to `python -m llama_cpp.server`.')
+                runner_lines.append('# Lets cookbook-generated launch commands run unchanged on hosts')
+                runner_lines.append('# where only the pip llama-cpp-python package is installed.')
+                runner_lines.append('ARGS=()')
+                runner_lines.append('while [ $# -gt 0 ]; do')
+                runner_lines.append('  case "$1" in')
+                runner_lines.append('    -ngl|--gpu-layers|--n-gpu-layers) ARGS+=(--n_gpu_layers "$2"); shift 2 ;;')
+                runner_lines.append('    -c|--ctx-size) ARGS+=(--n_ctx "$2"); shift 2 ;;')
+                runner_lines.append('    -b|--batch-size) ARGS+=(--n_batch "$2"); shift 2 ;;')
+                runner_lines.append('    -ub|--ubatch-size) shift 2 ;;  # llama-cpp-python has no separate ubatch')
+                runner_lines.append('    --flash-attn) ARGS+=(--flash_attn true); shift 2 ;;')
+                runner_lines.append('    --cache-type-k) ARGS+=(--type_k "$2"); shift 2 ;;')
+                runner_lines.append('    --cache-type-v) ARGS+=(--type_v "$2"); shift 2 ;;')
+                runner_lines.append('    --n-cpu-moe) ARGS+=(--n_cpu_moe "$2"); shift 2 ;;')
+                runner_lines.append('    --mmproj) ARGS+=(--clip_model_path "$2"); shift 2 ;;')
+                runner_lines.append('    --image-max-tokens) shift 2 ;;  # native-only')
+                runner_lines.append('    --no-mmap) ARGS+=(--no_mmap true); shift ;;')
+                runner_lines.append('    --no-warmup) shift ;;  # native-only')
+                runner_lines.append('    --chat-template) ARGS+=(--chat_format "$2"); shift 2 ;;')
+                runner_lines.append('    --fit|--split-mode|--tensor-split|--main-gpu|--parallel) shift 2 ;;  # native-only')
+                runner_lines.append('    --mlock) ARGS+=(--use_mlock true); shift ;;')
+                runner_lines.append('    *) ARGS+=("$1"); shift ;;')
+                runner_lines.append('  esac')
+                runner_lines.append('done')
+                runner_lines.append('exec python3 -m llama_cpp.server "${ARGS[@]}"')
+                runner_lines.append('_ODY_LLAMA_SHIM_EOF')
+                runner_lines.append('    chmod +x ~/bin/llama-server')
+                runner_lines.append('    echo "[odysseus] Created llama-server shim → python -m llama_cpp.server (no native binary needed)"')
                 runner_lines.append('  fi')
                 runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
                 runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
@@ -1834,6 +1924,25 @@ def setup_cookbook_routes() -> APIRouter:
         out, err = await _run_gpu_shell("ls -1 /sys/class/drm 2>/dev/null", host, ssh_port, timeout=4)
         if err is not None or not out:
             return []
+        # Pick the runtime label up-front so each GPU dict gets the
+        # right `backend`. AMD silicon can be driven by ROCm/HIP (native)
+        # OR Vulkan (mesa RADV). Reporting "rocm" on a host where no
+        # ROCm toolchain is installed misleads the frontend env-var
+        # prefix logic — it would emit `HIP_VISIBLE_DEVICES=` for a
+        # Vulkan-only stack, which is a silent no-op at best.
+        rt_out, _ = await _run_gpu_shell(
+            'command -v rocminfo >/dev/null 2>&1 && echo rocm '
+            '|| (command -v hipconfig >/dev/null 2>&1 && echo rocm) '
+            '|| (command -v vulkaninfo >/dev/null 2>&1 && echo vulkan) '
+            '|| echo unknown',
+            host, ssh_port, timeout=4,
+        )
+        _amd_runtime = (rt_out or "").strip().splitlines()[-1:][0].strip() if rt_out else "rocm"
+        if _amd_runtime not in ("rocm", "vulkan"):
+            # Default to rocm so existing ROCm-installed hosts keep
+            # working; "unknown" only happens when neither toolchain is
+            # detected (e.g. minimal sysfs read on a fresh box).
+            _amd_runtime = "rocm"
         gpus = []
         for entry in out.split():
             if not entry.startswith("card") or "-" in entry:
@@ -1877,7 +1986,7 @@ def setup_cookbook_routes() -> APIRouter:
                 "free_mb": free_mb, "total_mb": total_mb, "used_mb": used_mb,
                 "gtt_used_mb": gtt_used_mb,
                 "util_pct": 0, "busy": bool(total_mb and (free_mb / total_mb) < 0.85),
-                "processes": [], "backend": "rocm", "source": "amd-sysfs",
+                "processes": [], "backend": _amd_runtime, "source": "amd-sysfs",
                 "unified_memory": unified,
             })
         if gpus:
@@ -2018,10 +2127,15 @@ def setup_cookbook_routes() -> APIRouter:
 
         amd_gpus = await _probe_amd_sysfs(host, ssh_port)
         if amd_gpus:
+            # The per-GPU dict already carries the runtime label picked by
+            # _probe_amd_sysfs (rocm vs vulkan); mirror that into the
+            # wrapper so the frontend can read `data.backend` directly
+            # without scanning the list.
+            _amd_wrap_backend = str(amd_gpus[0].get("backend") or "rocm")
             return {
                 "ok": True,
                 "gpus": amd_gpus,
-                "backend": "rocm",
+                "backend": _amd_wrap_backend,
                 "source": "amd-sysfs",
                 "fallback_from": "nvidia-smi",
                 "nvidia_error": nvidia_error,
