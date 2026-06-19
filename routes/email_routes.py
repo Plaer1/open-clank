@@ -360,6 +360,21 @@ def _apply_odysseus_headers(msg, kind: str | None = None, ref_id: str | None = N
         msg["X-Odysseus-Ref"] = re.sub(r"[^A-Za-z0-9_.:-]", "-", ref_id)[:128]
 
 
+def _normalize_addr_field(field: str) -> str:
+    """Strip the malformed-but-common trailing/leading commas and stray
+    whitespace from a To/Cc/Bcc string before it lands in the MIME header
+    or the SMTP envelope. Users often paste a single address with a
+    trailing comma (e.g. `felix@pewdiepie.com,`) and most MTAs reject the
+    resulting `To: felix@pewdiepie.com,` line as a syntax error. Collapse
+    any run of separator junk between addresses too."""
+    if not field:
+        return field
+    # Split on commas, drop empty tokens, rejoin with a single ', '.
+    parts = [p.strip() for p in field.split(",")]
+    parts = [p for p in parts if p]
+    return ", ".join(parts)
+
+
 def _envelope_recipients(*fields: str) -> list:
     """Extract bare SMTP envelope addresses from one or more To/Cc/Bcc header
     strings. A naive `field.split(",")` corrupts display names that contain a
@@ -2021,6 +2036,9 @@ def setup_email_routes():
             outer = MIMEMultipart("alternative")
             body_container = outer
 
+        to = _normalize_addr_field(to or "")
+        cc = _normalize_addr_field(cc or "")
+        bcc = _normalize_addr_field(bcc or "")
         outer["From"] = cfg["from_address"]
         outer["To"] = to
         if cc:
@@ -2297,6 +2315,9 @@ def setup_email_routes():
             outer = MIMEMultipart("alternative")
             body_container = outer
 
+        req.to = _normalize_addr_field(req.to or "")
+        req.cc = _normalize_addr_field(req.cc or "")
+        req.bcc = _normalize_addr_field(req.bcc or "")
         outer["From"] = cfg["from_address"]
         outer["To"] = req.to
         if req.cc:
