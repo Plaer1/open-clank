@@ -2936,6 +2936,20 @@ function _createCard(em) {
     titleRow.appendChild(att);
   }
 
+  const tags = Array.isArray(em.tags) ? em.tags : [];
+  if (tags.length || em.is_spam_verdict) {
+    const tagWrap = document.createElement('span');
+    tagWrap.className = 'email-tags email-card-tags';
+    tagWrap.innerHTML = tags.map(t => {
+      const tag = String(t || '').trim().toLowerCase().replace(/_/g, '-');
+      return tag ? `<span class="email-tag email-tag-${_esc(tag)}">${_esc(tag)}</span>` : '';
+    }).join('');
+    if (em.is_spam_verdict) {
+      tagWrap.insertAdjacentHTML('beforeend', '<span class="email-tag email-tag-spam">spam</span>');
+    }
+    titleRow.appendChild(tagWrap);
+  }
+
   // Done check + unread dot stay next to the subject on the left.
   const isSentFolder = /sent/i.test(state._libFolder);
   if (!isSentFolder) {
