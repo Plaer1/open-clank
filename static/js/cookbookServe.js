@@ -499,11 +499,26 @@ function _selectedServeTarget(panel) {
     host,
     serverKey: server ? (_serverKey?.(server) || '') : (select?.value || ''),
     serverName: server?.name || '',
-    port: host ? (_getPort(host) || server?.port || '') : '',
+    env: server?.env || '',
+    port: host ? (server?.port || _getPort(host) || '') : '',
     venv,
     platform: server?.platform || _envState.platform || '',
     label,
   };
+}
+
+function _remoteWindowsDiffusersUnsupported(target) {
+  return !!(target?.host && target?.platform === 'windows');
+}
+
+function _backendChoicesForTarget(target) {
+  if (target?.platform === 'windows') {
+    if (_remoteWindowsDiffusersUnsupported(target)) return [['llamacpp','llama.cpp']];
+    return [['llamacpp','llama.cpp'],['diffusers','Diffusers']];
+  }
+  return _isMetal()
+    ? [['llamacpp','llama.cpp'],['ollama','Ollama']]
+    : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
 }
 
 async function _fetchServeRuntimePackage(panel, backend) {
@@ -948,13 +963,14 @@ function _rerenderCachedModels() {
       const _isMiniMaxM2 = _isMiniMaxM2Model({ ...m, repo_id: repo });
       const _isMiniMaxMSeries = _isMiniMaxM3 || _isMiniMaxM2;
       const svm = (k, def) => (_modelSs && _hasOwn(_modelSs, k)) ? _modelSs[k] : def;
+      const _serveTarget = _selectedServeTarget();
+      const _backendChoices = _backendChoicesForTarget(_serveTarget);
+      const _allowedBackends = new Set(_backendChoices.map(([v]) => v));
       const detectedBackend = _detectBackend(m).backend;
-      const _allowedBackends = new Set(_isWindows()
-        ? ['llamacpp', 'diffusers']
-        : (_isMetal() ? ['llamacpp', 'ollama'] : ['vllm', 'sglang', 'llamacpp', 'ollama', 'diffusers']));
-      const defaultBackend = (_repoForcedBackend && ss.backend && _allowedBackends.has(ss.backend))
+      let defaultBackend = (_repoForcedBackend && ss.backend && _allowedBackends.has(ss.backend))
         ? ss.backend
         : detectedBackend;
+      if (!_allowedBackends.has(defaultBackend)) defaultBackend = _backendChoices[0]?.[0] || detectedBackend;
       const savedMatchesBackend = _repoForcedBackend || (ss.backend || 'vllm') === detectedBackend;
       const sv = (k, def) => (ss[k] !== undefined && savedMatchesBackend) ? ss[k] : def;
       const defaultTp = defaultBackend === 'llamacpp' ? '1' : sv('tp', _isMiniMaxMSeries ? '8' : '1');
@@ -1027,12 +1043,6 @@ function _rerenderCachedModels() {
       panelHtml += `<div class="hwfit-serve-preset-row">${_slotsHtml}</div>`;
       // Row 1: Engine + Server + Env
       panelHtml += `<div class="hwfit-serve-row">`;
-      const _backendChoices = _isWindows()
-        ? [['llamacpp','llama.cpp'],['diffusers','Diffusers']]
-        : _isMetal()
-        // Diffusers (diffusion_server.py) is CUDA-only — omit it on Metal.
-        ? [['llamacpp','llama.cpp'],['ollama','Ollama']]
-        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
       // Custom Backend picker — native <select> can't host SVG inside
       // options, so we render a button + menu that show the backend logo
@@ -2770,30 +2780,12 @@ function _rerenderCachedModels() {
           else serveState[el.dataset.field] = el.value;
         });
         serveState.backend = serveState.backend || (_detectBackend(m).backend) || 'vllm';
-        // Resolve the target host from the visible Server dropdown before any
-        // preflight checks. _envState.remoteHost can lag behind the panel's
-        // selected server, which made cross-server serves look like port
-        // collisions.
-        const _selectedServeTarget = (() => {
-          const target = { host: _envState.remoteHost || '', serverKey: '', serverName: '', env: '', envPath: '' };
-          const ssEl = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
-          if (!ssEl || ssEl.value == null) return target;
-          if (ssEl.value === 'local') {
-            target.host = '';
-            target.serverKey = 'local';
-            target.serverName = 'Local';
-            return target;
-          }
-          const srv = _serverByVal?.(ssEl.value) || _envState.servers[parseInt(ssEl.value)];
-          if (srv) {
-            target.host = srv.host || '';
-            target.serverKey = _serverKey?.(srv) || ssEl.value || '';
-            target.serverName = srv.name || srv.host || '';
-            target.env = srv.env || '';
-            target.envPath = srv.envPath || '';
-          }
-          return target;
-        })();
+        const launchTarget = _selectedServeTarget(panel);
+        if (serveState.backend === 'diffusers' && _remoteWindowsDiffusersUnsupported(launchTarget)) {
+          _restoreLaunchBtn();
+          uiModule.showToast('Diffusers serving is not supported on remote Windows servers yet. Use local Windows or a Linux server.', 9000);
+          return;
+        }
 
         // Pre-launch: check our own task list for a serve already running
         // on this host. Offer to stop+launch as the default action — the
@@ -2802,8 +2794,8 @@ function _rerenderCachedModels() {
         // common case instantly without waiting for a network round-trip.
         try {
           const _runningMod = await import('./cookbookRunning.js');
-          const _hostStr = _selectedServeTarget.host || '';
-          const _serverKeyStr = _selectedServeTarget.serverKey || (_hostStr || 'local');
+          const _hostStr = launchTarget.host || '';
+          const _serverKeyStr = launchTarget.serverKey || (_hostStr || 'local');
           const _active = (_runningMod._loadTasks ? _runningMod._loadTasks() : []).filter(t =>
             t && t.type === 'serve'
             && ((t.remoteHost || '') === _hostStr || (t.remoteServerKey || '') === _serverKeyStr)
@@ -2991,12 +2983,11 @@ function _rerenderCachedModels() {
           || (serveState.backend === 'diffusers');
         if (_needsGpu) {
           try {
-            const _probeHost = (_selectedServeTarget.host || '').trim();
+            const _probeHost = (launchTarget.host || '').trim();
             const _probeParams = new URLSearchParams();
             if (_probeHost) {
               _probeParams.set('host', _probeHost);
-              const _sp = (_serverByVal?.(_selectedServeTarget.serverKey || _probeHost) || {}).port;
-              if (_sp) _probeParams.set('ssh_port', _sp);
+              if (launchTarget.port) _probeParams.set('ssh_port', launchTarget.port);
             }
             const _probeRes = await fetch('/api/cookbook/gpus' + (_probeParams.toString() ? '?' + _probeParams : ''), { credentials: 'same-origin' });
             const _probeData = await _probeRes.json();
@@ -3029,10 +3020,10 @@ function _rerenderCachedModels() {
             || launchCmd.match(/OLLAMA_HOST=[^:\s]+:(\d{2,5})\b/);
           const _port = _portMatch ? _portMatch[1] : '';
           if (_port) {
-            const _portHost = (_selectedServeTarget.host || '').trim();
+            const _portHost = (launchTarget.host || '').trim();
             const _checkInner = `ss -tlnp 2>/dev/null | awk '$4 ~ /:${_port}$/ {print; exit}' || netstat -tlnp 2>/dev/null | awk '$4 ~ /:${_port}$/ {print; exit}'`;
             const _cmd = _portHost
-              ? `ss h ${_portHost} <<<"" 2>/dev/null; ssh -o ConnectTimeout=4 -o StrictHostKeyChecking=no ${_portHost} ${JSON.stringify(_checkInner)}`
+              ? `ssh -o ConnectTimeout=4 -o StrictHostKeyChecking=no ${_sshPrefix(launchTarget.port)}${_portHost} ${JSON.stringify(_checkInner)}`
               : _checkInner;
             const _res = await fetch('/api/shell/exec', {
               method: 'POST', credentials: 'same-origin',
@@ -3086,11 +3077,14 @@ function _rerenderCachedModels() {
         const venvVal = panel.querySelector('[data-field="venv"]')?.value?.trim();
         const gpusVal = panel.querySelector('[data-field="gpus"]')?.value?.trim();
         const origGpus = _envState.gpus;
-        const serveHost = _selectedServeTarget.host || '';
-        const serveServerKey = _selectedServeTarget.serverKey || '';
-        const serveServerName = _selectedServeTarget.serverName || '';
-        const _srvEnv = _selectedServeTarget.env || '';
-        const _srvEnvPath = _selectedServeTarget.envPath || '';
+        // Resolve the target host from the visible Server dropdown — the reliable
+        // source. Relying on _envState.remoteHost silently sent serves to Local
+        // when that value was stale/empty. Pass it explicitly to the launcher.
+        const serveHost = launchTarget.host || '';
+        const serveServerKey = launchTarget.serverKey || '';
+        const serveServerName = launchTarget.serverName || '';
+        const _srvEnv = launchTarget.env || '';
+        const _srvEnvPath = launchTarget.venv || '';
         // The venv field wins; otherwise fall back to the env configured for the
         // selected server in Settings, so the activation isn't silently dropped
         // when the field is left blank (the per-server venv wasn't being applied).

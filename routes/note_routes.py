@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from core.database import SessionLocal, Note
-from src.auth_helpers import get_current_user
+from core.middleware import INTERNAL_TOOL_USER
+from src.auth_helpers import require_user
 from src.constants import DATA_DIR
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -570,10 +571,19 @@ def setup_note_routes(task_scheduler=None):
     router = APIRouter(prefix="/api/notes", tags=["notes"])
 
     def _owner(request: Request) -> Optional[str]:
-        return get_current_user(request)
+        # require_user, not bare get_current_user: a request that reaches
+        # these owner-scoped routes with NO identity (auth-middleware
+        # regression, SSRF from a sibling service) must fail closed (401)
+        # when auth is configured — not be treated as the single-user mode
+        # and handed blanket access to every account's notes. The documented
+        # anonymous modes (AUTH_ENABLED=false, LOCALHOST_BYPASS on loopback,
+        # unconfigured first-run) still resolve to None, the single-user
+        # path. fire_reminder below already gated this way; the CRUD routes
+        # did not.
+        return require_user(request) or None
 
     def _is_admin_or_single_user(request: Request, user: str | None) -> bool:
-        if user == "internal-tool":
+        if user == INTERNAL_TOOL_USER:
             return True
         if not user:
             # require_user() already admitted this request, which only happens
@@ -805,8 +815,7 @@ def setup_note_routes(task_scheduler=None):
         Returns {synthesis, email_sent}.
         """
         # Gate against anonymous callers — LLM synthesis can burn tokens.
-        from src.auth_helpers import require_user as _ru
-        user = _ru(request)
+        user = require_user(request)
         body = await request.json()
         note_id = str(body.get("note_id") or "").strip()
         if not note_id:

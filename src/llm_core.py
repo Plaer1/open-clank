@@ -87,7 +87,7 @@ _host_health_lock = threading.Lock()
 _model_activity: Dict[str, float] = {}
 
 _HARMONY_MARKER_RE = re.compile(
-    r"<\|channel\|>(analysis|final)"
+    r"<\|channel\|>(analysis|commentary|final)"
     r"|<\|start\|>(?:assistant|system|user|tool)?"
     r"|<\|message\|>"
     r"|<\|end\|>"
@@ -96,6 +96,7 @@ _HARMONY_MARKER_RE = re.compile(
 )
 _HARMONY_MARKERS = (
     "<|channel|>analysis",
+    "<|channel|>commentary",
     "<|channel|>final",
     "<|start|>assistant",
     "<|start|>system",
@@ -145,7 +146,10 @@ class _HarmonyStreamRouter:
             out.append((text, False))
             return
         if self._in_message:
-            out.append((text, self._channel == "analysis"))
+            # analysis + commentary (tool-call preambles / function-arg bodies)
+            # are internal, not user-facing — route them to thinking so they
+            # don't leak into the visible answer; only `final` is visible.
+            out.append((text, self._channel in ("analysis", "commentary")))
 
     def _handle_marker(self, match: re.Match[str]) -> None:
         marker = match.group(0)
@@ -283,7 +287,8 @@ def _is_ollama_native_url(url: str) -> bool:
     """Return True for native Ollama API URLs, including Ollama Cloud."""
     try:
         parsed = urlparse(url or "")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to parse URL for Ollama detection", exc_info=e)
         return False
     host = parsed.hostname or ""
     path = (parsed.path or "").rstrip("/")
@@ -1345,8 +1350,8 @@ def list_model_ids(
                 r = httpx.get(root + "/api/tags", timeout=timeout)
                 r.raise_for_status()
                 return [m.get("name") or m.get("model") for m in (r.json().get("models") or []) if m.get("name") or m.get("model")]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to fetch model list from configured endpoint", exc_info=e)
         return []
 
 def normalize_model_id(
