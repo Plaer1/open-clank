@@ -273,6 +273,78 @@ def setup_cookbook_routes() -> APIRouter:
     def _load_stored_hf_token() -> str:
         return load_stored_hf_token(state_path=_cookbook_state_path)
 
+    def _normalize_minimax_m3_vllm_cmd(cmd: str) -> str:
+        """Patch MiniMax M3 vLLM launches into the known-good local form.
+
+        The browser form can be stale or omit advanced-only fields. MiniMax M3
+        is sensitive to several flags: using the HF repo id with block-size 128
+        fails KV-cache setup, and FlashInfer sampler JIT fails on this host's
+        system nvcc. Normalize server-side before writing the tmux runner.
+        """
+        if not cmd or "vllm serve" not in cmd or not re.search(r"minimax.*m3", cmd, re.I):
+            return cmd
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            return cmd
+        if "serve" not in parts:
+            return cmd
+
+        env_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+        env_parts = [p for p in parts if env_re.match(p)]
+        body = [p for p in parts if not env_re.match(p)]
+        try:
+            serve_i = body.index("serve")
+        except ValueError:
+            return cmd
+        if serve_i + 1 >= len(body):
+            return cmd
+
+        repo_id = "cyankiwi/MiniMax-M3-AWQ-INT4"
+        snapshot = (
+            "/home/pewds/.cache/huggingface/hub/"
+            "models--cyankiwi--MiniMax-M3-AWQ-INT4/"
+            "snapshots/4082acbbec1236d21828d55b6bb0fe02ade4ab5b"
+        )
+        if body[serve_i + 1] == repo_id:
+            body[serve_i + 1] = snapshot
+
+        def add_env(key: str, value: str) -> None:
+            if not any(p.startswith(f"{key}=") for p in env_parts):
+                env_parts.append(f"{key}={value}")
+
+        def has_flag(flag: str) -> bool:
+            return any(p == flag or p.startswith(flag + "=") for p in body)
+
+        def set_flag(flag: str, value: str) -> None:
+            for i, part in enumerate(body):
+                if part == flag:
+                    if i + 1 < len(body):
+                        body[i + 1] = value
+                    else:
+                        body.append(value)
+                    return
+                if part.startswith(flag + "="):
+                    body[i] = f"{flag}={value}"
+                    return
+            body.extend([flag, value])
+
+        def add_bool(flag: str) -> None:
+            if not has_flag(flag):
+                body.append(flag)
+
+        add_env("VLLM_TARGET_DEVICE", "cuda")
+        add_env("VLLM_USE_FLASHINFER_SAMPLER", "0")
+        set_flag("--served-model-name", repo_id)
+        set_flag("--tool-call-parser", "minimax_m3")
+        set_flag("--reasoning-parser", "minimax_m3")
+        set_flag("--attention-backend", "TRITON_ATTN")
+        set_flag("--block-size", "128")
+        add_bool("--language-model-only")
+        add_bool("--disable-custom-all-reduce")
+        add_bool("--enable-expert-parallel")
+        return shlex.join(env_parts + body)
+
     def _cookbook_ssh_dir() -> Path:
         # The Docker image keeps cookbook keys under /app/.ssh; that path only
         # exists inside the container. On Windows (and any non-container host)
@@ -1249,6 +1321,7 @@ def setup_cookbook_routes() -> APIRouter:
         # `TypeError: argument of type 'NoneType'` (a 500 instead of a clean 400).
         req.cmd = _validate_serve_cmd(req.cmd) or ""
         req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or ""
+        req.cmd = _normalize_minimax_m3_vllm_cmd(req.cmd)
         req.cmd = _venv_safe_local_pip_install_cmd(
             req.cmd,
             local=not bool(req.remote_host),
@@ -1579,6 +1652,96 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('  echo "ERROR: vLLM is not installed."')
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
+                runner_lines.append('  ODYSSEUS_VLLM_HELP_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('try:')
+                runner_lines.append('    serve_i = parts.index("serve")')
+                runner_lines.append('except ValueError:')
+                runner_lines.append('    print("vllm serve --help")')
+                runner_lines.append('else:')
+                runner_lines.append('    print(shlex.join(parts[:serve_i + 1] + ["--help"]))')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('  ODYSSEUS_VLLM_SUPPORTS_SWAP=0')
+                runner_lines.append('  if eval "$ODYSSEUS_VLLM_HELP_CMD" 2>&1 | grep -q -- "--swap-space"; then ODYSSEUS_VLLM_SUPPORTS_SWAP=1; fi')
+                runner_lines.append('fi')
+                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" = "1" ] && ! printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
+                runner_lines.append('  echo "[odysseus] Setting vLLM --swap-space 0 so the runtime does not reserve CPU swap per GPU."')
+                runner_lines.append('  ODYSSEUS_SERVE_CMD="${ODYSSEUS_SERVE_CMD} --swap-space 0"')
+                runner_lines.append('fi')
+                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ] && [ "${ODYSSEUS_VLLM_SUPPORTS_SWAP:-0}" != "1" ]; then')
+                runner_lines.append('  if printf "%s" "$ODYSSEUS_SERVE_CMD" | grep -q -- "--swap-space"; then')
+                runner_lines.append('    echo "[odysseus] vLLM serve does not expose --swap-space; removing the flag and patching the runtime default to 0."')
+                runner_lines.append('    ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('out = []')
+                runner_lines.append('skip = False')
+                runner_lines.append('for part in parts:')
+                runner_lines.append('    if skip:')
+                runner_lines.append('        skip = False')
+                runner_lines.append('        continue')
+                runner_lines.append('    if part == "--swap-space":')
+                runner_lines.append('        skip = True')
+                runner_lines.append('        continue')
+                runner_lines.append('    if part.startswith("--swap-space="):')
+                runner_lines.append('        continue')
+                runner_lines.append('    out.append(part)')
+                runner_lines.append('print(shlex.join(out))')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_SERVE_CMD="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('patch = r"""import inspect, sys')
+                runner_lines.append('from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs')
+                runner_lines.append('def _odysseus_swap0(cls):')
+                runner_lines.append('    params = list(inspect.signature(cls).parameters)')
+                runner_lines.append('    if "swap_space" not in params:')
+                runner_lines.append('        return')
+                runner_lines.append('    idx = params.index("swap_space")')
+                runner_lines.append('    defaults = list(cls.__init__.__defaults__ or ())')
+                runner_lines.append('    if idx < len(defaults):')
+                runner_lines.append('        defaults[idx] = 0')
+                runner_lines.append('        cls.__init__.__defaults__ = tuple(defaults)')
+                runner_lines.append('    fields = getattr(cls, "__dataclass_fields__", {})')
+                runner_lines.append('    if "swap_space" in fields:')
+                runner_lines.append('        fields["swap_space"].default = 0')
+                runner_lines.append('_odysseus_swap0(EngineArgs)')
+                runner_lines.append('_odysseus_swap0(AsyncEngineArgs)')
+                runner_lines.append('try:')
+                runner_lines.append('    from vllm.config import CacheConfig')
+                runner_lines.append('    CacheConfig.swap_space = 0')
+                runner_lines.append('except Exception:')
+                runner_lines.append('    pass')
+                runner_lines.append('_orig_create_engine_config = EngineArgs.create_engine_config')
+                runner_lines.append('def _odysseus_create_engine_config(self, *args, **kwargs):')
+                runner_lines.append('    self.swap_space = 0')
+                runner_lines.append('    return _orig_create_engine_config(self, *args, **kwargs)')
+                runner_lines.append('EngineArgs.create_engine_config = _odysseus_create_engine_config')
+                runner_lines.append('AsyncEngineArgs.create_engine_config = _odysseus_create_engine_config')
+                runner_lines.append('from vllm.entrypoints.cli.main import main')
+                runner_lines.append('sys.exit(main())"""')
+                runner_lines.append('try:')
+                runner_lines.append('    serve_i = parts.index("serve")')
+                runner_lines.append('except ValueError:')
+                runner_lines.append('    print(shlex.join(parts))')
+                runner_lines.append('else:')
+                runner_lines.append('    exe_i = serve_i - 1')
+                runner_lines.append('    exe = parts[exe_i] if exe_i >= 0 else "vllm"')
+                runner_lines.append('    py = "python3"')
+                runner_lines.append('    if exe.endswith("/bin/vllm"):')
+                runner_lines.append('        py = exe[:-len("/bin/vllm")] + "/bin/python"')
+                runner_lines.append('    parts[exe_i:serve_i] = [py, "-c", patch]')
+                runner_lines.append('    print(shlex.join(parts))')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('  echo "[odysseus] Patched vLLM internal swap_space default to 0 for this runtime."')
+                runner_lines.append('fi')
             elif "sglang.launch_server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
                 runner_lines.append('if ! command -v sglang &>/dev/null; then')
@@ -1620,7 +1783,10 @@ def setup_cookbook_routes() -> APIRouter:
                     runner_lines,
                     keep_shell_open=not local_windows,
                 )
-                runner_lines.append(req.cmd)
+                if "vllm serve" in req.cmd:
+                    runner_lines.append('eval "$ODYSSEUS_SERVE_CMD"')
+                else:
+                    runner_lines.append(req.cmd)
                 if local_windows:
                     # Detached background process — no interactive shell to keep open.
                     # Print the exit marker the status poller looks for, then stop.
@@ -2418,16 +2584,14 @@ def setup_cookbook_routes() -> APIRouter:
             # Add 30% headroom for KV cache, activations, etc.
             needed_vram = (est_vram * 1.3) if est_vram else None
 
-            if vram_gb > 0 and needed_vram is not None and needed_vram > vram_gb:
-                continue
-            # Unknown-size models (e.g. MiniMax-M2.7, DeepSeek-V4-Flash) have no
-            # "NB" in the repo id, so the regex above can't extract their
-            # param count. Previously we dropped them entirely, which made
-            # brand-new flagship releases silently vanish from this list even
-            # on rigs with hundreds of GB of VRAM. Adapters/LoRAs are already
-            # filtered by _is_excluded(), so what falls through here is
-            # overwhelmingly full models — keep them, just without a size
-            # badge (the frontend handles needed_vram_gb=null gracefully).
+            if vram_gb > 0:
+                if needed_vram is None:
+                    # The "trending models that fit" list must be conservative:
+                    # if we cannot estimate size from the repo id/tags, do not
+                    # present it as runnable on this hardware.
+                    continue
+                if needed_vram > vram_gb:
+                    continue
 
             out.append({
                 "repo_id": repo_id,
@@ -2623,6 +2787,32 @@ def setup_cookbook_routes() -> APIRouter:
                 atomic_write_json(_cookbook_state_path, state)
             except Exception as e:
                 logger.warning(f"orphan sweep: state write failed: {e}")
+
+    @router.get("/api/cookbook/hf-gguf-files")
+    async def hf_gguf_files(repo_id: str, owner: str = Depends(require_user)):
+        """List GGUF files in a HuggingFace repo for the direct-download picker."""
+        import httpx
+
+        repo_id = _validate_repo_id(repo_id)
+        url = f"https://huggingface.co/api/models/{repo_id}"
+        try:
+            headers = {}
+            token = _load_stored_hf_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    return {"ok": False, "files": [], "error": f"HF API HTTP {resp.status_code}"}
+                data = resp.json()
+        except Exception as e:
+            return {"ok": False, "files": [], "error": str(e)}
+        files = [
+            str(s.get("rfilename") or "")
+            for s in data.get("siblings", [])
+            if str(s.get("rfilename") or "").lower().endswith(".gguf")
+        ]
+        return {"ok": True, "repo_id": repo_id, "files": files}
 
     # In-memory cache for the Ollama library scrape. ollama.com is a public
     # site, but it doesn't expose a stable JSON listing — we fetch the HTML

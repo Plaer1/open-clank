@@ -112,6 +112,7 @@ function _initModelPickerDropdown() {
   const search = document.getElementById('model-picker-search');
   const listEl = document.getElementById('model-picker-list');
   const searchRow = menu ? menu.querySelector('.model-picker-search-row') : null;
+  const refreshBtn = document.getElementById('model-picker-refresh-btn');
   if (!wrap || !btn || !menu || !search || !listEl) return;
 
   function _close() {
@@ -608,6 +609,26 @@ function _initModelPickerDropdown() {
 
   search.addEventListener('input', () => _populate(search.value));
   search.addEventListener('click', (e) => e.stopPropagation());
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      refreshBtn.disabled = true;
+      refreshBtn.classList.add('spinning');
+      try {
+        if (window.modelsModule && window.modelsModule.refreshModels) {
+          await window.modelsModule.refreshModels(true);
+        }
+        await _refreshLocalProbe();
+        if (!menu.classList.contains('hidden')) _populate(search.value || '');
+        updateModelPicker();
+      } catch (_) {
+        uiModule.showToast('Model refresh failed');
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.classList.remove('spinning');
+      }
+    });
+  }
   search.addEventListener('keydown', (e) => {
     _handlePickerKeydown(e, listEl, '.model-switch-item', _close);
   });

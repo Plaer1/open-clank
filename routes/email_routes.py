@@ -44,7 +44,7 @@ from routes.email_helpers import (
     _send_smtp_message, _smtp_security_mode,
     _IMAP_TIMEOUT_SECONDS, _open_imap_connection,
     _imap_connect, _imap, _decode_header, _detect_sent_folder, _detect_drafts_folder,
-    _extract_attachment_text, _list_attachments_from_msg,
+    _extract_attachment_text, _list_attachments_from_msg, _has_visible_attachments, _is_likely_signature_image_attachment,
     _extract_attachment_to_disk, _extract_html, _extract_text,
     _fetch_sender_thread_context, _pre_retrieve_context,
     _EMAIL_REPLY_SYS_PROMPT_BASE, _POOL_HOOKS,
@@ -58,6 +58,7 @@ from routes.email_pollers import _start_poller
 logger = logging.getLogger(__name__)
 
 ODYSSEUS_MAIL_ORIGIN = "odysseus-ui"
+EMAIL_READ_ATTACHMENT_VERSION = 2
 
 
 def _email_tag_owner_aliases(account_id: str | None, owner: str = "") -> list[str]:
@@ -242,6 +243,21 @@ def _imap_uid_search(conn, criteria: str):
 
 def _imap_uid_fetch(conn, uid_set: str | bytes, query: str):
     return conn.uid("FETCH", _uid_bytes(uid_set), query)
+
+
+def _imap_search_quote(value: str) -> str:
+    return '"' + str(value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _message_id_chain(*values: str) -> list[str]:
+    seen = set()
+    out = []
+    for value in values:
+        for mid in re.findall(r"<[^>]+>", value or ""):
+            if mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+    return out
 
 
 def _uid_from_fetch_meta(meta_b: bytes) -> str:
@@ -1003,6 +1019,65 @@ def setup_email_routes():
                 except Exception:
                     pass
 
+    def _related_thread_attachments_sync(
+        folder: str,
+        account_id: str | None,
+        owner: str,
+        current_uid: str,
+        current_message_id: str,
+        in_reply_to: str,
+        references: str,
+        limit: int = 12,
+    ) -> list[dict]:
+        """Return visible attachments from referenced messages in this folder."""
+        wanted_ids = _message_id_chain(references, in_reply_to)
+        current_mid = (current_message_id or "").strip()
+        wanted_ids = [mid for mid in wanted_ids if mid and mid != current_mid]
+        if not wanted_ids:
+            return []
+
+        related: list[dict] = []
+        try:
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder), readonly=True)
+                # Search newest referenced messages first; cap work so opening
+                # a long thread stays bounded.
+                for mid in reversed(wanted_ids[-10:]):
+                    if len(related) >= limit:
+                        break
+                    status, data = _imap_uid_search(conn, f'(HEADER Message-ID {_imap_search_quote(mid)})')
+                    if status != "OK" or not data or not data[0]:
+                        continue
+                    for uid_b in reversed(data[0].split()[-3:]):
+                        source_uid = uid_b.decode(errors="ignore")
+                        if not source_uid or source_uid == str(current_uid):
+                            continue
+                        st2, msg_data = _imap_uid_fetch(conn, source_uid, "(BODY.PEEK[])")
+                        if st2 != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+                            continue
+                        msg = email_mod.message_from_bytes(msg_data[0][1])
+                        source_from = _decode_header(msg.get("From", ""))
+                        source_subject = _decode_header(msg.get("Subject", ""))
+                        source_date = msg.get("Date", "")
+                        for att in _list_attachments_from_msg(msg):
+                            if _is_likely_signature_image_attachment(att):
+                                continue
+                            enriched = dict(att)
+                            enriched.update({
+                                "source_uid": source_uid,
+                                "source_folder": folder,
+                                "source_message_id": (msg.get("Message-ID") or "").strip(),
+                                "source_from": source_from,
+                                "source_subject": source_subject,
+                                "source_date": source_date,
+                            })
+                            related.append(enriched)
+                            if len(related) >= limit:
+                                break
+        except Exception as e:
+            logger.debug(f"related thread attachment lookup failed uid={current_uid}: {e}")
+        return related
+
     @router.get("/list")
     async def list_emails(
         folder: str = Query("INBOX"),
@@ -1273,6 +1348,17 @@ def setup_email_routes():
             sender_name, sender_addr = email.utils.parseaddr(sender)
             parsed_date = email.utils.parsedate_to_datetime(date_str) if date_str else None
             attachments = _list_attachments_from_msg(msg)
+            related_attachments = []
+            if not _has_visible_attachments(msg):
+                related_attachments = _related_thread_attachments_sync(
+                    folder,
+                    account_id,
+                    owner,
+                    uid,
+                    message_id,
+                    in_reply_to,
+                    references,
+                )
 
             if mark_seen:
                 # Set \Seen in a separate readwrite session so concurrent reads
@@ -1381,6 +1467,8 @@ def setup_email_routes():
                 "body": body,
                 "body_html": body_html,
                 "attachments": attachments,
+                "related_attachments": related_attachments,
+                "attachment_version": EMAIL_READ_ATTACHMENT_VERSION,
                 "cached_summary": cached_summary,
                 "cached_ai_reply": cached_ai_reply,
                 "boundaries": cached_boundaries,
@@ -1411,6 +1499,12 @@ def setup_email_routes():
         """Read email body. Cached for 30m, sync IMAP work runs in a thread."""
         ck = _read_cache_key(account_id, folder, uid, owner=owner)
         cached = _read_cache_get(ck)
+        if cached is not None:
+            # Older cached read responses lack the thread-attachment fallback.
+            # Fetch once so replies that reference prior attachments can show
+            # those files without waiting for cache expiry.
+            if cached.get("attachment_version") != EMAIL_READ_ATTACHMENT_VERSION:
+                cached = None
         if cached is not None:
             if mark_seen:
                 try:
@@ -1599,6 +1693,65 @@ def setup_email_routes():
                     return None
             doc_session_id = _resolve_doc_session()
 
+            def _create_markdown_doc(content: str, summary: str):
+                from src.database import SessionLocal as _SL, Document as _Doc, DocumentVersion as _DV
+                doc_id = str(uuid.uuid4())
+                ver_id = str(uuid.uuid4())
+                _db = _SL()
+                try:
+                    _db.query(_Doc).filter(_Doc.is_active == True).update({"is_active": False})
+                    _db.add(_Doc(
+                        id=doc_id, session_id=doc_session_id, title=title,
+                        language="markdown", current_content=content,
+                        version_count=1, is_active=True,
+                    ))
+                    _db.add(_DV(
+                        id=ver_id, document_id=doc_id, version_number=1,
+                        content=content, summary=summary, source="upload",
+                    ))
+                    _db.commit()
+                finally:
+                    _db.close()
+                _tag_doc_with_source(doc_id)
+                return doc_id
+
+            def _attached_email_markdown(path):
+                raw_bytes = path.read_bytes()
+                if not raw_bytes:
+                    return f"# Attached email: {base}\n\n_(empty email attachment)_"
+                try:
+                    attached_msg = email_mod.message_from_bytes(raw_bytes)
+                except Exception as e:
+                    return f"# Attached email: {base}\n\nCould not parse this email attachment: {e}"
+
+                attached_subject = _decode_header(attached_msg.get("Subject", "")) or base
+                attached_from = _decode_header(attached_msg.get("From", ""))
+                attached_to = _decode_header(attached_msg.get("To", ""))
+                attached_cc = _decode_header(attached_msg.get("Cc", ""))
+                attached_date = attached_msg.get("Date", "")
+                attached_body = _extract_text(attached_msg).strip()
+                attached_atts = _list_attachments_from_msg(attached_msg)
+
+                lines = [f"# Attached email: {attached_subject}", ""]
+                if attached_from:
+                    lines.append(f"**From:** {attached_from}")
+                if attached_to:
+                    lines.append(f"**To:** {attached_to}")
+                if attached_cc:
+                    lines.append(f"**Cc:** {attached_cc}")
+                if attached_date:
+                    lines.append(f"**Date:** {attached_date}")
+                lines.extend(["", "## Body", "", attached_body or "_(no readable body)_"])
+                if attached_atts:
+                    lines.extend(["", "## Attachments", ""])
+                    for att in attached_atts:
+                        size = int(att.get("size") or 0)
+                        size_label = f"{size} B" if size < 1024 else f"{round(size / 1024)} KB"
+                        name = att.get("filename") or f"attachment_{att.get('index', '')}"
+                        ctype = att.get("content_type") or "application/octet-stream"
+                        lines.append(f"- {name} ({ctype}, {size_label})")
+                return "\n".join(lines).strip()
+
             # ── PDF path (existing) ────────────────────────────────────
             if ext == ".pdf":
                 import shutil as _shutil
@@ -1645,6 +1798,15 @@ def setup_email_routes():
                 _tag_doc_with_source(doc_id)
                 return {"doc_id": doc_id, "filename": filepath.name}
 
+            # ── Attached email (.eml / message/rfc822) ────────────────
+            if ext == ".eml":
+                try:
+                    content = _attached_email_markdown(filepath)
+                except Exception as e:
+                    return {"error": f"Failed to read email attachment: {e}", "filename": base}
+                doc_id = _create_markdown_doc(content, "Imported attached email")
+                return {"doc_id": doc_id, "filename": filepath.name}
+
             # ── DOCX path: extract text → markdown document ───────────
             if ext == ".docx":
                 try:
@@ -1682,25 +1844,7 @@ def setup_email_routes():
                     lines.append("")
                 content = "\n".join(lines).strip() or f"_(empty {base})_"
 
-                from src.database import SessionLocal as _SL, Document as _Doc, DocumentVersion as _DV
-                doc_id = str(uuid.uuid4())
-                ver_id = str(uuid.uuid4())
-                _db = _SL()
-                try:
-                    _db.query(_Doc).filter(_Doc.is_active == True).update({"is_active": False})
-                    _db.add(_Doc(
-                        id=doc_id, session_id=doc_session_id, title=title,
-                        language="markdown", current_content=content,
-                        version_count=1, is_active=True,
-                    ))
-                    _db.add(_DV(
-                        id=ver_id, document_id=doc_id, version_number=1,
-                        content=content, summary="Imported from DOCX", source="upload",
-                    ))
-                    _db.commit()
-                finally:
-                    _db.close()
-                _tag_doc_with_source(doc_id)
+                doc_id = _create_markdown_doc(content, "Imported from DOCX")
                 return {"doc_id": doc_id, "filename": filepath.name}
 
             # ── Plain text / markdown ────────────────────────────────
@@ -1709,25 +1853,7 @@ def setup_email_routes():
                     content = filepath.read_text(encoding="utf-8", errors="replace")
                 except Exception as e:
                     return {"error": f"Failed to read text file: {e}", "filename": base}
-                from src.database import SessionLocal as _SL, Document as _Doc, DocumentVersion as _DV
-                doc_id = str(uuid.uuid4())
-                ver_id = str(uuid.uuid4())
-                _db = _SL()
-                try:
-                    _db.query(_Doc).filter(_Doc.is_active == True).update({"is_active": False})
-                    _db.add(_Doc(
-                        id=doc_id, session_id=doc_session_id, title=title,
-                        language="markdown", current_content=content,
-                        version_count=1, is_active=True,
-                    ))
-                    _db.add(_DV(
-                        id=ver_id, document_id=doc_id, version_number=1,
-                        content=content, summary="Imported from email attachment", source="upload",
-                    ))
-                    _db.commit()
-                finally:
-                    _db.close()
-                _tag_doc_with_source(doc_id)
+                doc_id = _create_markdown_doc(content, "Imported from email attachment")
                 return {"doc_id": doc_id, "filename": filepath.name}
 
             return {"error": f"Unsupported attachment type: {ext}", "filename": base}

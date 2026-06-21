@@ -1164,6 +1164,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
 
       function _replyAfterClosedThinking(text) {
+        text = markdownModule.normalizeThinkingMarkup(text || '');
         const closeRe = /<\/(?:think(?:ing)?|thought)>|<channel\|>/gi;
         let match = null;
         let last = null;
@@ -1174,7 +1175,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Direct render helper for streaming text
       _renderStream = () => {
-        let dt = stripToolBlocks(roundText);
+        let dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
         const bodyEl = roundHolder.querySelector('.body');
         const contentEl = _ensureStreamLayout(bodyEl);
 
@@ -1466,12 +1467,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // 1. Normal: <think>...no closing tag yet
                 // 2. Malformed: <think></think>\n...text but no second </think> yet
                 // 3. Qwen3.5: "Thinking Process:" without <think> tags
-                let hasUnclosedThink = markdownModule.hasUnclosedThinkTag(roundText);
+                const normalizedRoundText = markdownModule.normalizeThinkingMarkup(roundText);
+                let hasUnclosedThink = markdownModule.hasUnclosedThinkTag(normalizedRoundText);
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
                 const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-                if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(roundText)) {
-                  const _trimmedRT = roundText.trimStart();
+                if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
+                  const _trimmedRT = normalizedRoundText.trimStart();
                   const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
                   if (_isReasoning) {
                     // Check if we can see a reply boundary yet (newline then reply pattern)
@@ -1496,9 +1498,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     }
                   }
                 }
-                if (!hasUnclosedThink && /^<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*<\/(?:think(?:ing)?|thought)>/i.test(roundText)) {
+                if (!hasUnclosedThink && /^<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*<\/(?:think(?:ing)?|thought)>/i.test(normalizedRoundText)) {
                   // Empty <think></think> — the model likely put thinking outside the tags
-                  const afterEmpty = roundText.replace(/^<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*<\/(?:think(?:ing)?|thought)>/i, '').trim();
+                  const afterEmpty = normalizedRoundText.replace(/^<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*<\/(?:think(?:ing)?|thought)>/i, '').trim();
                   const closeTags = (afterEmpty.match(/<\/(?:think(?:ing)?|thought)>/gi) || []).length;
                   if (closeTags === 0 && afterEmpty.length > 0) {
                     hasUnclosedThink = true; // still waiting for real closing tag
@@ -1508,10 +1510,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Only applies when there's a second </think> later (model leaked thinking outside tags)
                 // Do NOT trigger if the text after </think> contains tool calls (that's real content)
                 if (!hasUnclosedThink && isThinking) {
-                  const _thinkMatch = roundText.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i);
+                  const _thinkMatch = normalizedRoundText.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i);
                   const _thinkLen = _thinkMatch ? _thinkMatch[1].trim().length : 0;
                   if (_thinkLen < 20) {
-                    const _afterClose = roundText.replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i, '').trim();
+                    const _afterClose = normalizedRoundText.replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i, '').trim();
                     // Only keep waiting if there's trailing text that looks like thinking (not tool calls)
                     const _hasToolCall = /```(?:bash|python|web_search|read_file|write_file|create_document|edit_document|manage_|generate_image)/i.test(_afterClose);
                     const _hasOrphanClose = /<\/(?:think(?:ing)?|thought)>/i.test(_afterClose);
@@ -1572,7 +1574,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
                     // Extract raw thinking text (strip known thinking wrappers and prefixes)
-                    var thinkText = roundText
+                    var thinkText = markdownModule.normalizeThinkingMarkup(roundText)
                       .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
                       .replace(/<\|channel>thought\s*\n?/gi, '')
                       .replace(/<\|channel>response\s*\n?/gi, '')
@@ -2045,7 +2047,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!roundFinalized) {
                   roundFinalized = true;
                   if (spinner && spinner.element) spinner.destroy();
-                  const dt = stripToolBlocks(roundText);
+                  const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
                   if (dt.trim()) {
                     var _body3 = roundHolder.querySelector('.body');
                     var _contentEl3 = _ensureStreamLayout(_body3);
@@ -3405,7 +3407,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     };
 
     const renderDelta = () => {
-      const dt = stripToolBlocks(roundText);
+      const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
       contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt));
       uiModule.scrollHistory();
     };

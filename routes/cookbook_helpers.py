@@ -964,18 +964,31 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('  fi  # end _odysseus_have_prebuilt guard')
 
 
-def _llama_cpp_rebuild_cmd() -> str:
+def _llama_cpp_rebuild_cmd(update_source: bool = False) -> str:
     """Shell command that clears the Cookbook-managed llama.cpp build.
 
     Removes the cached ``llama-server`` symlink and the ``~/llama.cpp/build*``
     directory so the next llama.cpp serve recompiles from source, picking up a
     CUDA or HIP toolchain if one is now available. The serve bootstrap only
     builds when ``llama-server`` is missing from PATH, so without this an
-    existing CPU-only build is reused forever. It deliberately installs and
-    downloads nothing; the rebuild itself happens on the next serve.
+    existing CPU-only build is reused forever. When ``update_source`` is true,
+    the command also fast-forwards the Cookbook-managed ``~/llama.cpp`` checkout
+    if it exists. The rebuild itself happens on the next serve.
     """
+    update_cmd = ''
+    if update_source:
+        update_cmd = (
+            'if [ -d "$HOME/llama.cpp/.git" ]; then '
+            'git -C "$HOME/llama.cpp" pull --ff-only --depth 1 || '
+            'echo "[odysseus] WARNING: llama.cpp source update failed; clearing cached build anyway."; '
+            'elif command -v git >/dev/null 2>&1; then '
+            'git clone --depth 1 https://github.com/ggml-org/llama.cpp "$HOME/llama.cpp" || '
+            'echo "[odysseus] WARNING: llama.cpp clone failed; clearing cached build anyway."; '
+            'fi && '
+        )
     return (
         'mkdir -p "$HOME/bin" && '
+        f'{update_cmd}'
         'rm -f "$HOME/bin/llama-server" && '
         'rm -rf "$HOME/llama.cpp/build" "$HOME/llama.cpp/build-vulkan" && '
         'echo "[odysseus] Cleared the cached llama.cpp build. '

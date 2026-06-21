@@ -1064,9 +1064,11 @@ def setup_model_routes(model_discovery):
         except Exception:
             return 0.0
 
-    def _failure_delay(fails: int) -> float:
+    def _failure_delay(fails: int, *, empty_local: bool = False) -> float:
         if fails <= 0:
             return 0.0
+        if empty_local:
+            return min(5.0 * (2 ** max(0, fails - 1)), 30.0)
         return min(_REFRESH_FAILURE_BASE * (2 ** max(0, fails - 1)), _REFRESH_FAILURE_MAX)
 
     def _should_refresh_endpoint(ep: Any, now: float, force: bool = False) -> tuple[bool, Dict[str, Any]]:
@@ -1097,7 +1099,12 @@ def setup_model_routes(model_discovery):
         fails = int(state.get("fail_count") or 0)
         if fails and not force:
             last_failure = float(state.get("last_failure") or 0.0)
-            if now - last_failure < _failure_delay(fails):
+            empty_local = (
+                not cached
+                and category == "local"
+                and str(getattr(ep, "id", "") or "").startswith("local-")
+            )
+            if now - last_failure < _failure_delay(fails, empty_local=empty_local):
                 return False, info
         if cached and not force:
             interval = _endpoint_refresh_interval(ep, category)

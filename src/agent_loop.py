@@ -751,6 +751,17 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
 
 
 _LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
+_CASUAL_OPENING_RE = re.compile(
+    r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
+    r"lol|lmao|haha+|hehe+|thanks?|thank you|ty|idk|dunno|meh|bruh|bro)\b(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+_CASUAL_BLOCKLIST_RE = re.compile(
+    r"\b(?:cookbook|serve|serving|launch|start|vllm|sglang|llama\.?cpp|ollama|"
+    r"download|model|email|document|doc|note|calendar|task|search|web|research|"
+    r"file|folder|repo|git|settings?|endpoint|api|token|mcp)\b",
+    re.IGNORECASE,
+)
 _EXPLICIT_CONTINUATION_RE = re.compile(
     r"^\s*(?:"
     r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|"
@@ -760,11 +771,53 @@ _EXPLICIT_CONTINUATION_RE = re.compile(
     r")\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
+_RETRY_CONTINUATION_RE = re.compile(
+    r"\b(?:try again|retry|again|rerun|re-run|run it again|launch it again|"
+    r"start it again|failed|fails?|died|crashed|broke|insta|instantly)\b",
+    re.IGNORECASE,
+)
+_COOKBOOK_CONTEXT_RE = re.compile(
+    r"\b(?:cookbook|serve|serving|served|launch|start|preset|vllm|sglang|"
+    r"llama\.?cpp|ollama|download|cached models?|model servers?|running models?|"
+    r"gpu box|ajax|qwen|gemma|llama|mistral|minimax)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_explicit_continuation(text: str) -> bool:
     """Only these terse replies may inherit older user turns for tool retrieval."""
     return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
+
+
+def _is_casual_low_signal(text: str) -> bool:
+    """True for short greetings/slang that should not inherit stale context."""
+    s = str(text or "").strip()
+    m = _CASUAL_OPENING_RE.match(s)
+    if not m:
+        return False
+    tail = m.group("tail") or ""
+    if _CASUAL_BLOCKLIST_RE.search(tail):
+        return False
+    # Allow a short vocative/address after the opener without hardcoding the
+    # address term itself: "hey man", "yo dude", "sup <name>". Longer tails are
+    # more likely to be an actual request and should get normal context/tooling.
+    tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
+    return len(tail_words) <= 2
+
+
+def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
+    """Treat "try again / it failed" as a continuation only for active tool work.
+
+    These follow-ups are common after Cookbook launches: the latest user turn
+    says only "try again it failed", while the actionable model/host/command
+    details live one or two turns back. Keep this intentionally narrow so
+    ordinary chat does not inherit stale Cookbook context.
+    """
+    latest = str(text or "").strip()
+    if not latest or not _RETRY_CONTINUATION_RE.search(latest):
+        return False
+    recent = _recent_context_for_retrieval(messages, max_user=5, max_chars=1200)
+    return bool(_COOKBOOK_CONTEXT_RE.search(recent))
 
 
 def _assistant_requested_followup(messages: List[Dict]) -> bool:
@@ -808,11 +861,12 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     which domain rule packs get appended to the system prompt.
     """
     text = str(last_user or "").strip()
-    continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages)
+    retry_continuation = _is_contextual_retry_continuation(messages, text)
+    continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages) or retry_continuation
     retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
 
-    if not text or bool(_LOW_SIGNAL_RE.match(text)):
+    if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
         return {
             "low_signal": True,
             "continuation": False,
@@ -907,6 +961,7 @@ def _build_system_prompt(
     compact: bool = False,
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
+    suppress_skills: bool = False,
     active_email: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
@@ -924,7 +979,7 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context)
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -934,6 +989,7 @@ def _build_system_prompt(
             disabled_tools, mcp_mgr, needs_admin, relevant_tools,
             mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
             suppress_local_context=suppress_local_context,
+            suppress_skills=suppress_skills,
         )
     else:
         agent_prompt, _skill_index_block = _build_base_prompt(
@@ -945,6 +1001,7 @@ def _build_system_prompt(
             compact=compact,
             owner=owner,
             suppress_local_context=suppress_local_context,
+            suppress_skills=suppress_skills,
         )
         if not active_document:
             _cached_base_prompt = agent_prompt
@@ -1228,7 +1285,7 @@ def _build_system_prompt(
     # few. If the teacher wrote a procedure for "open my X chat" last
     # time the student failed, this is where the student finds it
     # before deciding which tool to call.
-    if not suppress_local_context:
+    if not suppress_local_context and not suppress_skills:
         try:
             last_user = _extract_last_user_message(messages)
             # Respect the user's skills-enabled toggle (mirrors memory_enabled).
@@ -1395,6 +1452,7 @@ def _build_base_prompt(
     compact: bool = False,
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
+    suppress_skills: bool = False,
 ):
     """Build the agent prompt with only relevant tools included.
 
@@ -1447,7 +1505,7 @@ def _build_base_prompt(
     # The caller wraps it in untrusted_context_message and ships it as a
     # user-role message — same treatment as the matched-skills block.
     skill_index_block = ""
-    if not suppress_local_context:
+    if not suppress_local_context and not suppress_skills:
         try:
             from services.memory.skills import SkillsManager
             from src.constants import DATA_DIR
@@ -1866,6 +1924,7 @@ async def stream_agent_loop(
     approved_plan: Optional[str] = None,
     tool_policy: Optional[ToolPolicy] = None,
     workspace: Optional[str] = None,
+    forced_tools: Optional[Set[str]] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -1905,6 +1964,18 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
     _intent = _classify_agent_request(messages, _last_user)
+    _low_signal_turn = bool(_intent.get("low_signal"))
+    _casual_low_signal_turn = _is_casual_low_signal(_last_user)
+    _direct_low_signal = (
+        _low_signal_turn
+        and not bool(_intent.get("continuation"))
+        and not plan_mode
+        and not approved_plan
+        and (_casual_low_signal_turn or active_document is None)
+        and (_casual_low_signal_turn or not active_email)
+        and (_casual_low_signal_turn or not workspace)
+        and not forced_tools
+    )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
     _retrieval_query = str(_intent.get("retrieval_query") or _last_user)
@@ -1912,11 +1983,86 @@ async def stream_agent_loop(
         "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s retrieval_query=%r",
         _last_user[:120],
         bool(_intent.get("continuation")),
-        bool(_intent.get("low_signal")),
+        _low_signal_turn,
         sorted(_intent.get("domains") or []),
         _retrieval_query[:200],
     )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
+    if _direct_low_signal:
+        logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
+        direct_messages = [{"role": "user", "content": _last_user}]
+        direct_response = ""
+        direct_start = time.time()
+        direct_actual_model = model
+        real_input_tokens = 0
+        real_output_tokens = 0
+        try:
+            async for chunk in stream_llm_with_fallback(
+                [(endpoint_url, model, headers)] + list(fallbacks or []),
+                direct_messages,
+                temperature=temperature,
+                max_tokens=min(max_tokens or 128, 128),
+                prompt_type=None,
+                tools=None,
+                timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+                session_id=session_id,
+            ):
+                if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                    try:
+                        data = json.loads(chunk[6:])
+                    except json.JSONDecodeError:
+                        yield chunk
+                        continue
+                    if data.get("type") == "usage":
+                        usage = data.get("data", {}) or {}
+                        direct_actual_model = usage.get("model") or direct_actual_model
+                        real_input_tokens += usage.get("input_tokens", 0) or 0
+                        real_output_tokens += usage.get("output_tokens", 0) or 0
+                        continue
+                    if data.get("type") == "model_actual":
+                        direct_actual_model = data.get("model") or direct_actual_model
+                        data["requested_model"] = model
+                        yield f"data: {json.dumps(data)}\n\n"
+                        continue
+                    if data.get("type") == "fallback":
+                        direct_actual_model = data.get("answered_by") or direct_actual_model
+                        yield chunk
+                        continue
+                    if "delta" in data:
+                        if not data.get("thinking"):
+                            direct_response += data.get("delta", "")
+                        yield chunk
+                        continue
+                    yield chunk
+                elif chunk.startswith("event: "):
+                    yield chunk
+        except Exception as _direct_err:
+            logger.warning("[agent] direct low-signal path failed: %s", _direct_err)
+            fallback = "Hey."
+            direct_response += fallback
+            yield f"data: {json.dumps({'delta': fallback})}\n\n"
+
+        if not direct_response.strip():
+            fallback = "Hey."
+            direct_response = fallback
+            yield f"data: {json.dumps({'delta': fallback})}\n\n"
+
+        duration = time.time() - direct_start
+        metrics = {
+            "model": direct_actual_model,
+            "requested_model": model,
+            "input_tokens": real_input_tokens or estimate_tokens(direct_messages),
+            "output_tokens": real_output_tokens or max(len(direct_response) // 4, 1),
+            "total_time": round(duration, 2),
+            "response_time": round(duration, 2),
+            "agent_rounds": 0,
+            "tool_calls": 0,
+            "direct_low_signal": True,
+        }
+        yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     if plan_mode and mcp_mgr:
         # Allow read-only MCP tools to investigate, block write/unknown ones:
         # hide them from the schemas AND reject them at runtime by qualified name.
@@ -1932,7 +2078,7 @@ async def stream_agent_loop(
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
-    if not guide_only and not _relevant_tools and bool(_intent.get("low_signal")):
+    if not guide_only and not _relevant_tools and _low_signal_turn:
         from src.tool_index import ALWAYS_AVAILABLE
         if workspace:
             # An active workspace IS the file-work signal: a vague "look at the
@@ -2023,6 +2169,15 @@ async def stream_agent_loop(
     if _relevant_tools is not None and active_document is not None:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
 
+    # Per-request UI toggles are stronger than retrieval. If the user turns on
+    # Search, the model must see the search tools even when the latest text is a
+    # typo or otherwise low-signal for tool RAG.
+    if not guide_only and forced_tools:
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.update(t for t in forced_tools if t not in disabled_tools)
+
     # The skill index injected by _build_system_prompt tells the model to
     # call `manage_skills action=view`, and Jaccard-matched skills are pasted
     # into the prompt as procedures to follow — but neither path goes through
@@ -2030,7 +2185,7 @@ async def stream_agent_loop(
     # (grep, read_file, ...) that aren't in its schema list. Keep the schemas
     # in lockstep: manage_skills is callable whenever any skill is indexed,
     # and a matched skill's declared requires_toolsets ride along with it.
-    if not guide_only and _relevant_tools is not None:
+    if not guide_only and _relevant_tools is not None and not _low_signal_turn:
         try:
             from services.memory.skills import SkillsManager
             from src.constants import DATA_DIR
@@ -2147,6 +2302,7 @@ async def stream_agent_loop(
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
+        suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
     if plan_mode and not guide_only:
@@ -2753,6 +2909,15 @@ async def stream_agent_loop(
                 _intent_nudge_count += 1
                 _matched_phrase = _intent_match.group(0).strip()
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
+                _lower_phrase = _matched_phrase.lower()
+                _cookbook_log_hint = ""
+                if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
+                    _cookbook_log_hint = (
+                        " If this is about a Cookbook/model serve, the concrete calls are: "
+                        "`list_served_models` first, then `tail_serve_output` with the "
+                        "session_id from the serve/list result. Never answer with "
+                        "\"check logs\" when those tools are available."
+                    )
                 messages.append({
                     "role": "system",
                     "content": (
@@ -2761,6 +2926,7 @@ async def stream_agent_loop(
                         "see you announced the action but didn't run it, which "
                         "is the most frustrating thing you can do. "
                         "DO IT NOW: emit the actual function call this turn. "
+                        f"{_cookbook_log_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
                     ),

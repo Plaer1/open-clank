@@ -330,6 +330,9 @@ def add_user_install_bins_to_path():
         candidates.append(os.path.join(site.USER_BASE, 'bin'))
     except Exception:
         pass
+    candidates.append(os.path.expanduser('~/bin'))
+    candidates.append(os.path.expanduser('~/llama.cpp/build/bin'))
+    candidates.append(os.path.expanduser('~/llama.cpp/build-vulkan/bin'))
     candidates.append(os.path.expanduser('~/.local/bin'))
     parts = os.environ.get('PATH', '').split(os.pathsep) if os.environ.get('PATH') else []
     changed = False
@@ -1188,6 +1191,7 @@ def setup_shell_routes() -> APIRouter:
         # venv over SSH so a remote `pip install` actually reflects here.
         remote_status: dict = {}
         remote_details: dict = {}
+        remote_probe_error = ""
         remote_names = [
             p["name"]
             for p in packages
@@ -1226,8 +1230,34 @@ def setup_shell_routes() -> APIRouter:
                         break
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            except Exception:
+            except Exception as e:
                 remote_status = {}
+                remote_probe_error = f"SSH package probe failed: {str(e)[:160]}"
+            if "llama_cpp" in remote_names:
+                try:
+                    inner = (
+                        'export PATH="$HOME/.local/bin:$HOME/bin:'
+                        '$HOME/llama.cpp/build/bin:$HOME/llama.cpp/build-vulkan/bin:$PATH"; '
+                        "command -v llama-server 2>/dev/null || true"
+                    )
+                    argv = _ssh_base_argv(host, ssh_port) + [inner]
+                    proc = await asyncio.create_subprocess_exec(
+                        *argv,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, _err = await asyncio.wait_for(proc.communicate(), timeout=8)
+                    llama_server_path = out.decode("utf-8", errors="replace").strip().splitlines()
+                    llama_server_path = llama_server_path[-1].strip() if llama_server_path else ""
+                    if llama_server_path:
+                        remote_status["llama_cpp"] = True
+                        probe = remote_details.setdefault("llama_cpp", {})
+                        if isinstance(probe, dict):
+                            probe.setdefault("binaries", {})["llama-server"] = llama_server_path
+                except Exception as e:
+                    if not remote_probe_error:
+                        remote_probe_error = f"SSH llama-server probe failed: {str(e)[:160]}"
+                    pass
         # Union of system_names + every package's system_prereqs. Probing
         # the prereqs alongside the main system deps in a single SSH call
         # avoids a second round-trip per Cookbook → Dependencies refresh.
@@ -1272,7 +1302,9 @@ def setup_shell_routes() -> APIRouter:
                 target_os_id = _os_id_from_release("\n".join(_osrel_lines))
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            except Exception:
+            except Exception as e:
+                if not remote_probe_error:
+                    remote_probe_error = f"SSH system probe failed: {str(e)[:160]}"
                 pass
         elif not host:
             # Local target — probe in-process so the inline install command
@@ -1290,7 +1322,12 @@ def setup_shell_routes() -> APIRouter:
             on_remote = bool(host and pkg.get("target") == "remote")
             probe = None
             if on_remote:
-                pkg["installed"] = bool(remote_status.get(pkg["name"], False))
+                if remote_probe_error and pkg["name"] not in remote_status:
+                    pkg["installed"] = None
+                    pkg["probe_error"] = remote_probe_error
+                    pkg["status_note"] = remote_probe_error
+                else:
+                    pkg["installed"] = bool(remote_status.get(pkg["name"], False))
                 probe = remote_details.get(pkg["name"])
                 if isinstance(probe, dict):
                     pkg["details"] = probe
@@ -1353,9 +1390,19 @@ def setup_shell_routes() -> APIRouter:
             # reads "ready" green while inference runs at 3 tok/s on GPU
             # silicon — actively misleading.
             if pkg["name"] == "llama_cpp" and pkg.get("installed"):
+                _native_llama_server = bool(
+                    isinstance(probe, dict)
+                    and isinstance(probe.get("binaries"), dict)
+                    and probe["binaries"].get("llama-server")
+                )
                 _gpu_capable = False
                 _has_nvidia_target = False
-                if on_remote and host:
+                if _native_llama_server:
+                    # Native llama-server is the launcher path Cookbook now
+                    # prefers. Do not mark this as a CPU-only Python wheel just
+                    # because llama-cpp-python is absent from the selected venv.
+                    _gpu_capable = True
+                elif on_remote and host:
                     try:
                         # Activate the configured venv FIRST so the probe
                         # runs against the same python the launch script
@@ -1609,7 +1656,8 @@ def setup_shell_routes() -> APIRouter:
             return {"ok": False, "error": f"Unsupported engine: {engine}"}
         host = str(body.get("remote_host") or "").strip()
         ssh_port = body.get("ssh_port")
-        cmd = _llama_cpp_rebuild_cmd()
+        update_source = bool(body.get("update_source"))
+        cmd = _llama_cpp_rebuild_cmd(update_source=update_source)
         try:
             argv = (
                 (_ssh_base_argv(host, ssh_port) + [cmd])

@@ -16,6 +16,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "static/js/cookbook.js"
 SERVE_SRC = Path(__file__).resolve().parent.parent / "static/js/cookbookServe.js"
+ROUTES_SRC = Path(__file__).resolve().parent.parent / "routes/cookbook_routes.py"
 
 
 def test_cpu_only_drops_gpu_only_flags():
@@ -51,3 +52,32 @@ def test_windows_diffusers_uses_python_not_python3():
     assert "const diffusersPy = _isWindows() ? 'python' : _py3Bin;" in text
     assert "cmd += `${diffusersPy} scripts/diffusion_server.py" in text
     assert "cmd += `python3 scripts/diffusion_server.py" not in text
+
+
+def test_vllm_blank_swap_omits_swap_space_flag():
+    text = SRC.read_text(encoding="utf-8")
+
+    assert "const _swapRaw = (f.swap ?? '').toString().trim().toLowerCase();" in text
+    assert "['0', 'off', 'none', 'false'].includes(_swapRaw)" in text
+    assert "if (_swapRaw && !['0', 'off', 'none', 'false'].includes(_swapRaw)) cmd += ` --swap-space ${_swapRaw}`;" in text
+
+
+def test_serve_preflight_uses_selected_server_not_stale_env_host():
+    text = SERVE_SRC.read_text(encoding="utf-8")
+
+    assert "const _selectedServeTarget = (() => {" in text
+    assert "const _hostStr = _selectedServeTarget.host || '';" in text
+    assert "(t.remoteHost || '') === _hostStr" in text
+    assert "const _probeHost = (_selectedServeTarget.host || '').trim();" in text
+    assert "const _portHost = (_selectedServeTarget.host || '').trim();" in text
+
+
+def test_vllm_route_strips_swap_space_when_runtime_rejects_it():
+    text = ROUTES_SRC.read_text(encoding="utf-8")
+
+    assert "Removing --swap-space 0; off is represented by omitting the vLLM flag." in text
+    assert "vLLM serve does not support --swap-space; removing it" in text
+    assert "ODYSSEUS_VLLM_HELP_CMD" in text
+    assert "print(shlex.join(parts[:serve_i + 1] + [\"--help\"]))" in text
+    assert "eval \"$ODYSSEUS_VLLM_HELP_CMD\" 2>&1 | grep -q -- \"--swap-space\"" in text
+    assert "eval \"$ODYSSEUS_SERVE_CMD\"" in text

@@ -2130,6 +2130,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                             yield _stream_delta_event(reasoning, thinking=True)
                                         content = delta.get("content") or ""
                                         if content:
+                                            content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
+                                            content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
                                             stripped = content.lstrip()
                                             # gpt-oss harmony format (<|channel|>analysis/final): route via the harmony
                                             # stream router. Sticky once the first marker appears — distinct from the
