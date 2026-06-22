@@ -619,7 +619,7 @@ async function _startQueuedDownload(task) {
       if (t.sessionId === data.session_id) return false;
       return !(key && t.type === 'download' && t.status === 'queued' && _downloadDedupeKey(t) === key);
     });
-    if (!found) tasks.push(_stripTaskSecrets(launchedTask));
+    if (!found) tasks.push(_redactTaskForStorage(launchedTask));
     _saveTasks(tasks);
     _renderRunningTab();
     _startBackgroundMonitor();
@@ -760,12 +760,22 @@ function _isTombstoned(id) {
   return ts != null && (Date.now() - ts) <= _TOMBSTONE_TTL_MS;
 }
 
-function _stripTaskSecrets(task) {
+function _redactStoredText(value) {
+  return String(value || '')
+    .replace(/hf_[A-Za-z0-9]{20,}/g, '[redacted-token]')
+    .replace(/((?:api[_-]?key|token|authorization|password|passwd|secret)\s*[=:]\s*)(["']?)[^\s"']+/gi, '$1$2[redacted]');
+}
+
+function _redactTaskForStorage(task) {
   if (!task || typeof task !== 'object') return task;
   const safe = { ...task };
+  if (typeof safe.output === 'string') safe.output = _redactStoredText(safe.output);
   if (safe.payload && typeof safe.payload === 'object') {
     safe.payload = { ...safe.payload };
     delete safe.payload.hf_token;
+    delete safe.payload.hfToken;
+    if (typeof safe.payload._cmd === 'string') safe.payload._cmd = _redactStoredText(safe.payload._cmd);
+    if (typeof safe.payload.cmd === 'string') safe.payload.cmd = _redactStoredText(safe.payload.cmd);
   }
   return safe;
 }
@@ -774,15 +784,14 @@ function _stripStateSecrets(state) {
   const safe = { ...state };
   if (safe.env && typeof safe.env === 'object') {
     const { hfToken, ...env } = safe.env;
-    if (hfToken) env.hfToken = hfToken;
     safe.env = env;
   }
-  if (Array.isArray(safe.tasks)) safe.tasks = safe.tasks.map(_stripTaskSecrets);
+  if (Array.isArray(safe.tasks)) safe.tasks = safe.tasks.map(_redactTaskForStorage);
   return safe;
 }
 
 export function _saveTasks(tasks) {
-  localStorage.setItem(TASKS_KEY, JSON.stringify((tasks || []).map(_stripTaskSecrets)));
+  localStorage.setItem(TASKS_KEY, JSON.stringify((tasks || []).map(_redactTaskForStorage)));
   _syncToServer();
 }
 
@@ -807,7 +816,7 @@ export function _addTask(sessionId, name, type, payload) {
       return !(key && t.type === 'download' && t.status === 'queued' && _downloadDedupeKey(t) === key);
     });
   }
-  const task = _stripTaskSecrets({ id: sessionId, sessionId, name, type, status: 'running', output: '', ts: Date.now(), payload: payload || null, remoteHost, remoteServerKey, remoteServerName, sshPort, platform });
+  const task = _redactTaskForStorage({ id: sessionId, sessionId, name, type, status: 'running', output: '', ts: Date.now(), payload: payload || null, remoteHost, remoteServerKey, remoteServerName, sshPort, platform });
   tasks.push(task);
   _saveTasks(tasks);
   // New action → collapse all other cards, leave only this one open.
@@ -1102,14 +1111,24 @@ function _presetEnvFields(task) {
   };
 }
 
+function _redactPresetForStorage(preset) {
+  if (!preset || typeof preset !== 'object') return preset;
+  const safe = { ...preset };
+  if (typeof safe.cmd === 'string') safe.cmd = _redactStoredText(safe.cmd);
+  if (typeof safe.command === 'string') safe.command = _redactStoredText(safe.command);
+  delete safe.hf_token;
+  delete safe.hfToken;
+  return safe;
+}
+
 function _saveTaskAsPreset(task, label) {
   const host = task.remoteHost || 'localhost';
   const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
   const port = portMatch ? portMatch[1] : '8000';
   const presets = _loadPresets();
   if (presets.some(p => p.cmd === task.payload._cmd)) return false;
-  presets.push({ name: task.name, model: task.payload.repo_id, backend: 'vllm', host, port, cmd: task.payload._cmd, remoteHost: task.remoteHost || '', label: label || task.name, ..._presetEnvFields(task) });
-  _savePresets(presets);
+  presets.push(_redactPresetForStorage({ name: task.name, model: task.payload.repo_id, backend: 'vllm', host, port, cmd: task.payload._cmd, remoteHost: task.remoteHost || '', label: label || task.name, ..._presetEnvFields(task) }));
+  _savePresets(presets.map(_redactPresetForStorage));
   return true;
 }
 
@@ -1152,7 +1171,7 @@ function _autoSaveWorkingConfig(task) {
   const existing = presets.find(p => p.cmd === cmd);
   if (existing) {
     task._autoSaved = true;
-    if (!existing.confirmedWorking) { existing.confirmedWorking = true; _savePresets(presets); }
+    if (!existing.confirmedWorking) { existing.confirmedWorking = true; _savePresets(presets.map(_redactPresetForStorage)); }
     return;   // already saved → just confirm it, no duplicate, no toast
   }
   // Respect the per-model cap the manual save flow uses (max 5).
@@ -1160,13 +1179,13 @@ function _autoSaveWorkingConfig(task) {
   const host = task.remoteHost || 'localhost';
   const portMatch = cmd.match(/--port[=\s]+(\d+)/);
   const port = portMatch ? portMatch[1] : '8000';
-  presets.push({
+  presets.push(_redactPresetForStorage({
     name: task.name, model, backend: 'vllm', host, port,
     cmd, remoteHost: task.remoteHost || '',
     label: _autoConfigLabel(task), confirmedWorking: true, autoSaved: true,
     ..._presetEnvFields(task),
-  });
-  _savePresets(presets);
+  }));
+  _savePresets(presets.map(_redactPresetForStorage));
   task._autoSaved = true;
   uiModule.showToast('Saved working config');
 }
@@ -1252,7 +1271,7 @@ export async function _syncFromServer() {
         merged.push(t);
       }
     }
-    localStorage.setItem(TASKS_KEY, JSON.stringify(merged.map(_stripTaskSecrets)));
+    localStorage.setItem(TASKS_KEY, JSON.stringify(merged.map(_redactTaskForStorage)));
 
     if (state.env) {
       // The active server selection (remoteHost + its env/path/platform) is a
@@ -3711,7 +3730,7 @@ async function _pollBackgroundStatus() {
             }
           }
           if (added > 0) {
-            localStorage.setItem(TASKS_KEY, JSON.stringify(merged.map(_stripTaskSecrets)));
+            localStorage.setItem(TASKS_KEY, JSON.stringify(merged.map(_redactTaskForStorage)));
             _renderRunningTab();
           }
         }

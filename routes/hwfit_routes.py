@@ -332,8 +332,23 @@ def setup_hwfit_routes():
             # "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct".
             s = (s or "").lower().strip()
             s = s.split("/")[-1]                     # drop org prefix
-            s = re.sub(r"[-_.]?gguf$", "", s)        # drop trailing gguf marker
-            s = re.sub(r"[-_.](q\d[^/]*|iq\d[^/]*|fp8|bf16|f16|awq[^/]*|gptq[^/]*)$", "", s)
+            for suffix in ("-gguf", "_gguf", ".gguf", "gguf"):
+                if s.endswith(suffix):
+                    s = s[: -len(suffix)]
+                    break
+            cut_at = None
+            for idx, ch in enumerate(s):
+                if ch not in "-_." or idx + 1 >= len(s):
+                    continue
+                suffix = s[idx + 1:]
+                if (
+                    suffix in {"fp8", "bf16", "f16"}
+                    or suffix.startswith(("awq", "gptq", "iq"))
+                    or (suffix.startswith("q") and len(suffix) > 1 and suffix[1].isdigit())
+                ):
+                    cut_at = idx
+            if cut_at is not None:
+                s = s[:cut_at]
             return s
 
         m = catalog.get(model)

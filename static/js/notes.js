@@ -1825,13 +1825,13 @@ function _renderNotes() {
         const agentTitle = agentStatus === 'stream_complete'
           ? 'Agent stream finished for this todo'
           : (agentStatus === 'running' ? 'Agent is working on this todo' : 'Solve this todo with the agent');
-        const agentSessionAttr = item.agent_session_id ? ` data-session-id="${_esc(item.agent_session_id)}"` : '';
+        const agentSessionAttr = item.agent_session_id ? ` data-session-id="${_attrEsc(item.agent_session_id)}"` : '';
         const agentMenuTitle = item.agent_session_title || `Agent: ${(item.text || '').slice(0, 40)}`;
         const indent = Math.min(item.indent || 0, 3);
         contentHtml += `<div class="note-checkbox${doneClass}" data-note-id="${note.id}" data-idx="${i}" style="padding-left:${indent * 16}px">
           <span class="note-check-dot" title="Mark done"></span>
           <span class="note-check-text">${_linkify(item.text)}</span>
-          <button class="note-checkbox-agent${agentDoneClass}" data-note-id="${note.id}" data-idx="${i}"${agentSessionAttr} data-agent-title="${_attrEsc(agentMenuTitle)}" title="${agentTitle}">
+          <button class="note-checkbox-agent${agentDoneClass}" data-note-id="${_attrEsc(note.id)}" data-idx="${i}"${agentSessionAttr} data-agent-title="${_attrEsc(agentMenuTitle)}" title="${_attrEsc(agentTitle)}">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
           </button>
           <button class="note-checkbox-rm" data-note-id="${note.id}" data-idx="${i}" title="Delete item">

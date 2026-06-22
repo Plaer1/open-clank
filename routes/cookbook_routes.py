@@ -281,7 +281,8 @@ def setup_cookbook_routes() -> APIRouter:
         fails KV-cache setup, and FlashInfer sampler JIT fails on this host's
         system nvcc. Normalize server-side before writing the tmux runner.
         """
-        if not cmd or "vllm serve" not in cmd or not re.search(r"minimax.*m3", cmd, re.I):
+        cmd_lower = (cmd or "").lower()
+        if not cmd or "vllm serve" not in cmd_lower or "minimax" not in cmd_lower or "m3" not in cmd_lower:
             return cmd
         try:
             parts = shlex.split(cmd)
@@ -2823,8 +2824,9 @@ def setup_cookbook_routes() -> APIRouter:
                 if resp.status_code != 200:
                     return {"ok": False, "files": [], "error": f"HF API HTTP {resp.status_code}"}
                 data = resp.json()
-        except Exception as e:
-            return {"ok": False, "files": [], "error": str(e)}
+        except Exception:
+            logger.exception("HF GGUF file scan failed for %s", repo)
+            return {"ok": False, "files": [], "error": "HF API request failed"}
         files = [
             str(s.get("rfilename") or "")
             for s in data.get("siblings", [])

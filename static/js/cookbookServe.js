@@ -61,6 +61,28 @@ function _saveServeFavorites(favorites) {
   } catch {}
 }
 
+function _redactStoredCommand(value) {
+  return String(value || '')
+    .replace(/hf_[A-Za-z0-9]{20,}/g, '[redacted-token]')
+    .replace(/((?:api[_-]?key|token|authorization|password|passwd|secret)\s*[=:]\s*)(["']?)[^\s"']+/gi, '$1$2[redacted]');
+}
+
+function _redactServeStateForStorage(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(_redactServeStateForStorage);
+  const safe = { ...value };
+  for (const key of Object.keys(safe)) {
+    if (/token|password|passwd|secret|api[_-]?key/i.test(key)) {
+      delete safe[key];
+    } else if (typeof safe[key] === 'string' && /cmd|command|args|env/i.test(key)) {
+      safe[key] = _redactStoredCommand(safe[key]);
+    } else if (safe[key] && typeof safe[key] === 'object') {
+      safe[key] = _redactServeStateForStorage(safe[key]);
+    }
+  }
+  return safe;
+}
+
 function _isServeFavorite(repo) {
   return _loadServeFavorites().has(String(repo || ''));
 }
@@ -2118,7 +2140,7 @@ function _rerenderCachedModels() {
           if (el.type === 'checkbox') fields[el.dataset.field] = el.checked;
           else fields[el.dataset.field] = el.value;
         });
-        presets.push({ name: shortName, model: repo, cmd, remoteHost: host, port: fields.port || '8000', label, fields });
+        presets.push(_redactServeStateForStorage({ name: shortName, model: repo, cmd, remoteHost: host, port: fields.port || '8000', label, fields }));
         _savePresets(presets);
         uiModule.showToast(`Saved "${label}"`);
         _updateSavedToggleLabel();
@@ -2209,7 +2231,7 @@ function _rerenderCachedModels() {
             const target = _presetsForModel(cur, repo)[slotIdx];
             if (target) {
               target.favorite = !target.favorite;
-              _savePresets(cur);
+              _savePresets(cur.map(_redactServeStateForStorage));
               uiModule.showToast(target.favorite ? 'Favorited — pinned to top' : 'Unfavorited');
               _showSavedConfigMenu(anchor);
             }
@@ -2223,7 +2245,7 @@ function _rerenderCachedModels() {
             if (toRemove) {
               const gi = cur.indexOf(toRemove);
               if (gi >= 0) cur.splice(gi, 1);
-              _savePresets(cur);
+              _savePresets(cur.map(_redactServeStateForStorage));
             }
             uiModule.showToast(`Deleted "${label}"`);
             _updateSavedToggleLabel();
@@ -3205,7 +3227,7 @@ function _rerenderCachedModels() {
           const _saved = { ...serveState, _forceBackend: true };
           delete _saved._replaceTaskId;
           byRepo[repo] = _saved;
-          localStorage.setItem(SERVE_STATE_KEY, JSON.stringify({ _byRepo: byRepo, _lastUsed: _saved }));
+          localStorage.setItem(SERVE_STATE_KEY, JSON.stringify(_redactServeStateForStorage({ _byRepo: byRepo, _lastUsed: _saved })));
         } catch {}
         const origEnv = _envState.env;
         const origEnvPath = _envState.envPath;
@@ -3352,6 +3374,7 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
   const host = _resolveCacheHost();
   let cmd;
   if (_isWindows()) {
+    const _psSingleQuote = (value) => `'${String(value || '').replace(/'/g, "''")}'`;
     const winTarget = target.startsWith('~')
       ? target.replace(/^~/, '$env:USERPROFILE').replace(/\//g, '\\')
       : target.replace(/\//g, '\\');
@@ -3361,9 +3384,9 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
         .filter(Boolean)
         .map(rel => `${winTarget}\\${rel.replace(/\//g, '\\')}`);
       if (!targets.length) return;
-      cmd = targets.map(p => `Remove-Item -Force "${p.replace(/"/g, '\\"')}" -ErrorAction SilentlyContinue`).join('; ');
+      cmd = targets.map(p => `Remove-Item -Force ${_psSingleQuote(p)} -ErrorAction SilentlyContinue`).join('; ');
     } else {
-      cmd = `Remove-Item -Recurse -Force "${winTarget}" -ErrorAction SilentlyContinue`;
+      cmd = `Remove-Item -Recurse -Force ${_psSingleQuote(winTarget)} -ErrorAction SilentlyContinue`;
     }
     if (host) {
       const pf = _sshPrefix(_getPort(host));
@@ -3490,7 +3513,7 @@ export async function openServePanelForRepo(repo, fields) {
       // overridable defaults.
       const _seeded = { ...fields, _forceBackend: true };
       byRepo[repo] = _seeded;
-      localStorage.setItem(SERVE_STATE_KEY, JSON.stringify({ _byRepo: byRepo, _lastUsed: _seeded }));
+      localStorage.setItem(SERVE_STATE_KEY, JSON.stringify(_redactServeStateForStorage({ _byRepo: byRepo, _lastUsed: _seeded })));
     } catch {}
   }
   // Switch to the Serve tab (its click handler triggers _fetchCachedModels).

@@ -582,6 +582,18 @@ def _safe_build_headers(api_key: Optional[str], base_url: str) -> dict:
         return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
+def _redact_url_for_log(url: str) -> str:
+    """Return a URL safe for logs by removing userinfo and query/fragment."""
+    try:
+        parsed = urlparse(url or "")
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
+    except Exception:
+        return "<endpoint>"
+
+
 def _is_discovery_only_provider(provider: str) -> bool:
     return provider == "chatgpt-subscription"
 
@@ -789,13 +801,13 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             return [m for m in models if _is_chat_model(m)]
     except httpx.HTTPStatusError as e:
         if e.response is not None and _is_loading_model_response(e.response):
-            logger.info(f"Endpoint still loading model at {url}")
+            logger.info("Endpoint still loading model at %s", _redact_url_for_log(url))
             return []
         if api_key:
             status = e.response.status_code if e.response is not None else "unknown"
-            logger.warning(f"Failed to probe {url} with API key: HTTP {status}")
+            logger.warning("Failed to probe %s with API key: HTTP %s", _redact_url_for_log(url), status)
             return []
-        logger.warning(f"Failed to probe {url}: {e}")
+        logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
     except Exception as e:
         if api_key:
             logger.warning(f"Failed to probe {url} with API key: {e}")

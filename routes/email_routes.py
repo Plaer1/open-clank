@@ -1645,6 +1645,13 @@ def setup_email_routes():
                 return {"error": f"Attachment index {index} not found"}
 
             from pathlib import Path as _Path
+            target_root = _Path(target_dir).resolve()
+            filepath = _Path(filepath).resolve()
+            try:
+                filepath.relative_to(target_root)
+            except ValueError:
+                logger.warning("Rejected attachment path outside extraction dir: %s", filepath)
+                return {"error": "Invalid attachment path"}
             base = _Path(filepath).name
             if base.startswith("."):
                 return {"error": "Invalid filename", "filename": base}
@@ -1727,8 +1734,9 @@ def setup_email_routes():
                     return f"# Attached email: {base}\n\n_(empty email attachment)_"
                 try:
                     attached_msg = email_mod.message_from_bytes(raw_bytes)
-                except Exception as e:
-                    return f"# Attached email: {base}\n\nCould not parse this email attachment: {e}"
+                except Exception:
+                    logger.exception("Failed to parse attached email %s", base)
+                    return f"# Attached email: {base}\n\nCould not parse this email attachment."
 
                 attached_subject = _decode_header(attached_msg.get("Subject", "")) or base
                 attached_from = _decode_header(attached_msg.get("From", ""))
@@ -1809,7 +1817,8 @@ def setup_email_routes():
                 try:
                     content = _attached_email_markdown(filepath)
                 except Exception as e:
-                    return {"error": f"Failed to read email attachment: {e}", "filename": base}
+                    logger.exception("Failed to read email attachment %s", base)
+                    return {"error": "Failed to read email attachment", "filename": base}
                 doc_id = _create_markdown_doc(content, "Imported attached email")
                 return {"doc_id": doc_id, "filename": filepath.name}
 
