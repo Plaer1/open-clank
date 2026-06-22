@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, urlunparse
 
+from core.log_safety import redact_url
 from fastapi import APIRouter, Query, Depends, Response, HTTPException
 from typing import List, Dict, Optional
 
@@ -702,7 +703,7 @@ def _delete_contact(uid: str) -> bool:
                 logger.warning(
                     f"CardDAV DELETE reported success for {uid} "
                     f"but UID still present after re-fetch — "
-                    f"resource URL may differ from {url}"
+                    f"resource URL may differ from {redact_url(url)}"
                 )
                 return False
             if r.status_code == 404:
