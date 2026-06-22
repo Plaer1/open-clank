@@ -1120,6 +1120,7 @@ export function openPanel() {
   }
   _open = true;
   _editingId = null;
+  _searchQuery = '';
   _clearViewedReminderGlows();
   _firedDotDismissedAt = Date.now();
   try { localStorage.setItem(REMINDER_DISMISSED_AT_KEY, String(_firedDotDismissedAt)); } catch {}

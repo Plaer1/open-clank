@@ -896,25 +896,12 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
         pass
 
     try:
-        # OpenAI-compatible servers commonly expose /v1/models but return 404
-        # for the bare /v1 root. Probe models first for those bases to avoid
-        # noisy false-looking 404s in llama.cpp logs.
-        parsed = urlparse(base)
-        prefer_models_first = (parsed.path or "").rstrip("/").endswith("/v1")
-        if prefer_models_first:
-            try:
-                r0 = httpx.get(_safe_build_models_url(base), headers=headers, timeout=timeout, verify=llm_verify())
-                result0 = _result_from_response(r0)
-                if result0["reachable"]:
-                    return result0
-            except Exception as e:
-                last_error = str(e)[:120]
         r = httpx.get(base, headers=headers, timeout=timeout, verify=llm_verify())
         result = _result_from_response(r)
         if result["reachable"]:
             return result
         sc = result.get("status_code") or 0
-        if 400 <= sc < 500 and sc not in (401, 403) and not prefer_models_first:
+        if 400 <= sc < 500 and sc not in (401, 403):
             models_url = _safe_build_models_url(base)
             try:
                 r2 = httpx.get(models_url, headers=headers,timeout=timeout, verify=llm_verify())

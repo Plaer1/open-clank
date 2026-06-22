@@ -2000,6 +2000,7 @@ async def stream_agent_loop(
         and not bool(_intent.get("continuation"))
         and not plan_mode
         and not approved_plan
+        and not guide_only
         and (_casual_low_signal_turn or active_document is None)
         and (_casual_low_signal_turn or not active_email)
         and (_casual_low_signal_turn or not workspace)
@@ -2103,7 +2104,7 @@ async def stream_agent_loop(
 
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
-    _relevant_tools = set() if guide_only else relevant_tools
+    _relevant_tools = relevant_tools
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -2279,7 +2280,7 @@ async def stream_agent_loop(
     _model_supports_tools = any(kw in _model_lc for kw in (
         "gpt-4", "gpt-5", "gpt-o", "claude", "gemini", "gemma",
         "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
-        "llama-3.3", "llama-4",
+        "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
         # Local-served models that follow OpenAI-style function calling
         # via vLLM's `--enable-auto-tool-choice`. Belt-and-suspenders
         # with the per-endpoint flag above.
@@ -2310,7 +2311,6 @@ async def stream_agent_loop(
     # the fenced-block path is used instead of native function calling.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
-    _local_openai_compat = _is_local_openai_compat_url(endpoint_url or "")
     if _endpoint_supports is True:
         _is_api_model = True
     elif (
@@ -2318,12 +2318,11 @@ async def stream_agent_loop(
         or _model_no_tools
         or _is_ollama_native
         or _ollama_openai_compat
-        or _local_openai_compat
     ):
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
-    _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat or _local_openai_compat
+    _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
@@ -2782,7 +2781,12 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
-        tool_blocks, used_native = _resolve_tool_blocks(round_response, native_tool_calls, round_num, is_api_model=_is_api_model)
+        tool_blocks, used_native = _resolve_tool_blocks(
+            round_response,
+            native_tool_calls,
+            round_num,
+            is_api_model=(_is_api_model and not guide_only),
+        )
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
@@ -2866,7 +2870,7 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native)).strip()
+        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
         round_texts.append(cleaned_round)
 
         if not tool_blocks:
