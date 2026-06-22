@@ -1645,13 +1645,12 @@ def setup_email_routes():
                 return {"error": f"Attachment index {index} not found"}
 
             from pathlib import Path as _Path
-            target_root = _Path(target_dir).resolve()
-            filepath = _Path(filepath).resolve()
-            try:
-                filepath.relative_to(target_root)
-            except ValueError:
+            target_root = os.path.abspath(str(target_dir))
+            filepath_str = os.path.abspath(str(filepath))
+            if os.path.commonpath([target_root, filepath_str]) != target_root:
                 logger.warning("Rejected attachment path outside extraction dir: %s", filepath)
                 return {"error": "Invalid attachment path"}
+            filepath = _Path(filepath_str)
             base = _Path(filepath).name
             if base.startswith("."):
                 return {"error": "Invalid filename", "filename": base}
@@ -1728,8 +1727,7 @@ def setup_email_routes():
                 _tag_doc_with_source(doc_id)
                 return doc_id
 
-            def _attached_email_markdown(path):
-                raw_bytes = path.read_bytes()
+            def _attached_email_markdown(raw_bytes: bytes):
                 if not raw_bytes:
                     return f"# Attached email: {base}\n\n_(empty email attachment)_"
                 try:
@@ -1814,9 +1812,32 @@ def setup_email_routes():
 
             # ── Attached email (.eml / message/rfc822) ────────────────
             if ext == ".eml":
+                def _attachment_bytes_from_msg():
+                    if not msg.is_multipart():
+                        return b""
+                    idx = 0
+                    for part in msg.walk():
+                        cd = str(part.get("Content-Disposition", ""))
+                        ct = part.get_content_type()
+                        is_attached_email = ct == "message/rfc822" and ("attachment" in cd.lower() or part.get_filename())
+                        if part.is_multipart() and not is_attached_email:
+                            continue
+                        if ct in ("text/plain", "text/html") and "attachment" not in cd:
+                            continue
+                        if idx == index:
+                            payload = part.get_payload(decode=True)
+                            if payload is None and ct == "message/rfc822":
+                                try:
+                                    payload = part.as_bytes()
+                                except Exception:
+                                    payload = b""
+                            return payload or b""
+                        idx += 1
+                    return b""
+
                 try:
-                    content = _attached_email_markdown(filepath)
-                except Exception as e:
+                    content = _attached_email_markdown(_attachment_bytes_from_msg())
+                except Exception:
                     logger.exception("Failed to read email attachment %s", base)
                     return {"error": "Failed to read email attachment", "filename": base}
                 doc_id = _create_markdown_doc(content, "Imported attached email")

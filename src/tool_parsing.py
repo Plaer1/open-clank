@@ -545,6 +545,28 @@ def _strip_stepfun_tool_markup(text: str) -> str:
     return cleaned.replace(_STEPFUN_CALLS_BEGIN, "").replace(_STEPFUN_CALLS_END, "")
 
 
+def _strip_bare_invoke_markup(text: str) -> str:
+    """Remove bare <invoke ...>...</invoke> blocks without regex backtracking."""
+    out = []
+    pos = 0
+    while True:
+        start = text.lower().find("<invoke", pos)
+        if start < 0:
+            out.append(text[pos:])
+            break
+        tag_end = text.find(">", start)
+        if tag_end < 0:
+            out.append(text[pos:])
+            break
+        close = text.lower().find("</invoke>", tag_end + 1)
+        if close < 0:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:start])
+        pos = close + len("</invoke>")
+    return "".join(out)
+
+
 def _parse_stepfun_tool_call(tool_name: str, body: str) -> Optional[ToolBlock]:
     """Parse StepFun native tool-call tokens into an Odysseus ToolBlock."""
     tool_name = tool_name.lower().replace("-", "_").replace(".", "_")
@@ -780,6 +802,6 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
             _, (start, end) = raw_web_json
             cleaned = cleaned[:start] + cleaned[end:]
     # Strip bare <invoke> blocks not wrapped in <tool_call>
-    cleaned = _XML_INVOKE_RE.sub('', cleaned)
+    cleaned = _strip_bare_invoke_markup(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
