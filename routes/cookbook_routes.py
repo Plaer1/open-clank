@@ -2446,6 +2446,17 @@ def setup_cookbook_routes() -> APIRouter:
 
             disk_tasks = on_disk.get("tasks") or [] if isinstance(on_disk, dict) else []
             incoming_tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+            incoming_removed = data.get("removedTasks") if isinstance(data.get("removedTasks"), dict) else {}
+            disk_removed = on_disk.get("removedTasks") if isinstance(on_disk, dict) and isinstance(on_disk.get("removedTasks"), dict) else {}
+            removed_tasks = {**disk_removed, **incoming_removed}
+            data["removedTasks"] = removed_tasks
+            removed_ids = set(removed_tasks.keys())
+            if removed_ids:
+                incoming_tasks = [
+                    t for t in incoming_tasks
+                    if not (isinstance(t, dict) and t.get("sessionId") in removed_ids)
+                ]
+                data["tasks"] = incoming_tasks
             # Anti-poisoning guard: a stale browser tab can keep POSTing a
             # download task as status='done' from before the strict-finish
             # fix landed, undoing any server-side correction. For each
@@ -2483,6 +2494,8 @@ def setup_cookbook_routes() -> APIRouter:
                 sid = t.get("sessionId")
                 if not sid or sid in incoming_ids:
                     continue  # client's version wins
+                if sid in removed_ids:
+                    continue  # intentional cross-device clear/remove
                 ts = t.get("ts") or 0
                 if isinstance(ts, (int, float)) and (now_ms - ts) <= RACE_WINDOW_MS:
                     preserved.append(t)

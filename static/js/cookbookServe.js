@@ -477,7 +477,9 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
 }
 
 function _selectedServeTarget(panel) {
-  const select = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
+  const select = panel?.querySelector?.('#hwfit-server-select')
+    || document.getElementById('hwfit-server-select')
+    || document.getElementById('hwfit-dl-server');
   const servers = Array.isArray(_envState.servers) ? _envState.servers : [];
   let host = _envState.remoteHost || '';
   let server = host ? (_serverByVal?.(_envState.remoteServerKey || host) || servers.find(s => s.host === host)) : null;
@@ -643,6 +645,122 @@ function _ggufFileLabel(file) {
   return `${quant}${base}${size || split ? ` (${[size, split.replace(/^, /, '')].filter(Boolean).join(', ')})` : ''}${role}`;
 }
 
+function _ggufTaskDisplayPart(model, relPath) {
+  const rel = String(relPath || '');
+  if (!rel) return '';
+  const file = _ggufFilesForModel(model).find(f => f.rel_path === rel);
+  if (file?.quant) return String(file.quant).toUpperCase().replace(/^UD-/, '');
+  const parts = rel.split('/').filter(Boolean);
+  const base = parts[parts.length - 1] || '';
+  const parent = parts.length > 1 ? parts[parts.length - 2] : '';
+  const text = `${parent} ${base}`;
+  const quant = text.match(/\b(?:UD-)?(?:IQ[1-8]_[A-Z0-9]+|Q[2-8]_K_[MLS]|Q[2-8]_[0-9A-Z]+|Q[2-8])\b/i);
+  if (quant) return quant[0].toUpperCase().replace(/^UD-/, '');
+  return base.replace(/\.gguf$/i, '').replace(/-\d{5}-of-\d{5}$/i, '');
+}
+
+function _serveTaskDisplayName(shortName, model, fields) {
+  const name = String(shortName || '').trim();
+  const backend = String(fields?.backend || '').toLowerCase();
+  if (backend !== 'llamacpp' && backend !== 'ollama') return name;
+  const part = _ggufTaskDisplayPart(model, fields?.gguf_file);
+  return part && !name.includes(` · ${part}`) ? `${name} · ${part}` : name;
+}
+
+function _safeGgufRelPath(relPath) {
+  const rel = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel || rel.startsWith('../') || rel.includes('/../') || rel === '..') return '';
+  if (rel.includes('\0')) return '';
+  return rel;
+}
+
+function _ggufDeleteChoice(repo, files) {
+  return new Promise(resolve => {
+    let overlay = document.getElementById('cookbook-gguf-delete-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'cookbook-gguf-delete-overlay';
+      overlay.className = 'modal hidden';
+      overlay.innerHTML =
+        '<div class="modal-content styled-confirm-box cookbook-gguf-delete-box" role="dialog" aria-modal="true" aria-labelledby="cookbook-gguf-delete-title">' +
+          '<div class="modal-header"><h4 id="cookbook-gguf-delete-title">Delete GGUF files</h4></div>' +
+          '<div class="modal-body">' +
+            '<p id="cookbook-gguf-delete-msg"></p>' +
+            '<div id="cookbook-gguf-delete-list" class="cookbook-gguf-delete-list"></div>' +
+          '</div>' +
+          '<div class="modal-footer cookbook-gguf-delete-actions">' +
+            '<button type="button" id="cookbook-gguf-delete-cancel" class="confirm-btn confirm-btn-secondary">Cancel</button>' +
+            '<button type="button" id="cookbook-gguf-delete-repo" class="confirm-btn confirm-btn-secondary">Whole repo</button>' +
+            '<button type="button" id="cookbook-gguf-delete-selected" class="confirm-btn confirm-btn-danger">Delete selected</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+    }
+
+    const safeFiles = files
+      .map(f => ({ ...f, rel_path: _safeGgufRelPath(f.rel_path) }))
+      .filter(f => f.rel_path);
+    const msg = overlay.querySelector('#cookbook-gguf-delete-msg');
+    const list = overlay.querySelector('#cookbook-gguf-delete-list');
+    const cancelBtn = overlay.querySelector('#cookbook-gguf-delete-cancel');
+    const repoBtn = overlay.querySelector('#cookbook-gguf-delete-repo');
+    const selectedBtn = overlay.querySelector('#cookbook-gguf-delete-selected');
+    const prevFocus = document.activeElement;
+
+    msg.textContent = `${repo} has multiple GGUF files. Pick what to delete.`;
+    list.innerHTML = safeFiles.map((file, idx) => {
+      const label = esc ? esc(_ggufFileLabel(file)) : _ggufFileLabel(file);
+      const rel = esc ? esc(file.rel_path) : file.rel_path;
+      return `<label class="cookbook-gguf-delete-row">
+        <input class="cookbook-gguf-delete-cb" type="checkbox" value="${idx}">
+        <span class="cookbook-gguf-delete-main">${label}</span>
+        <span class="cookbook-gguf-delete-path">${rel}</span>
+      </label>`;
+    }).join('');
+
+    function cleanup(result) {
+      overlay.classList.add('hidden');
+      overlay.style.display = 'none';
+      cancelBtn.removeEventListener('click', onCancel);
+      repoBtn.removeEventListener('click', onRepo);
+      selectedBtn.removeEventListener('click', onSelected);
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey);
+      try { prevFocus && prevFocus.focus && prevFocus.focus(); } catch {}
+      resolve(result);
+    }
+    function onCancel() { cleanup(null); }
+    function onRepo() { cleanup({ mode: 'repo' }); }
+    function onSelected() {
+      const selected = [...list.querySelectorAll('input[type="checkbox"]:checked')]
+        .map(input => safeFiles[Number(input.value)])
+        .filter(Boolean);
+      if (!selected.length) {
+        uiModule.showToast?.('Select at least one GGUF file.');
+        return;
+      }
+      cleanup({ mode: 'files', files: selected });
+    }
+    function onBackdrop(e) { if (e.target === overlay) cleanup(null); }
+    function onKey(e) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        cleanup(null);
+      }
+    }
+
+    cancelBtn.addEventListener('click', onCancel);
+    repoBtn.addEventListener('click', onRepo);
+    selectedBtn.addEventListener('click', onSelected);
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey);
+    overlay.classList.remove('hidden');
+    overlay.style.display = '';
+    selectedBtn.focus();
+  });
+}
+
 function _shellPathExpr(path) {
   const s = String(path || '');
   if (s === '~') return '${HOME}';
@@ -729,7 +847,7 @@ function _rerenderCachedModels() {
       ? ` <span class="cookbook-serve-downloading-pill${_isDlActive ? '' : ' is-stalled'}" title="${_isDlActive ? 'Download in progress' : 'Download stalled — retry to resume'}">${_isDlActive ? 'downloading' : 'stalled'}</span>`
       : '';
     const _favoritePill = _isFavorite ? ' <span class="memory-cat-badge memory-cat-pinned cookbook-serve-fav-badge">pinned</span>' : '';
-    html += `<div class="memory-item-title"${_mc ? ` style="color:${_mc}"` : ''}>${modelLogo(m.repo_id)}${esc(shortName)}${_favoritePill}${hfLink ? ` <a href="${esc(hfLink)}" target="_blank" rel="noopener" class="cookbook-hf-link">HF ↗</a>` : ''}${_runningPill}${_downloadingPill}</div>`;
+    html += `<div class="memory-item-title cookbook-serve-title"${_mc ? ` style="color:${_mc}"` : ''}><span class="cookbook-serve-title-name">${modelLogo(m.repo_id)}${esc(shortName)}</span>${_favoritePill}${hfLink ? ` <a href="${esc(hfLink)}" target="_blank" rel="noopener" class="cookbook-hf-link">HF ↗</a>` : ''}${_runningPill}${_downloadingPill}</div>`;
     html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.4;margin-top:2px;">${metaParts.join(' \u00b7 ')}</div>`;
     html += `</div>`;
     const _bk = _detectBackend(m).backend;
@@ -962,6 +1080,11 @@ function _rerenderCachedModels() {
       const _isMiniMaxM3 = _isMiniMaxM3Model({ ...m, repo_id: repo });
       const _isMiniMaxM2 = _isMiniMaxM2Model({ ...m, repo_id: repo });
       const _isMiniMaxMSeries = _isMiniMaxM3 || _isMiniMaxM2;
+      const _toolParserDefault = _detectToolParser(repo);
+      const _isStepFunStep = _toolParserDefault === 'step3p5';
+      const _nativeToolDefault = _isMiniMaxMSeries || _isStepFunStep;
+      const _reasoningDefault = _isMiniMaxMSeries || _isStepFunStep;
+      const _expertParallelDefault = _isMiniMaxMSeries || _isStepFunStep;
       const svm = (k, def) => (_modelSs && _hasOwn(_modelSs, k)) ? _modelSs[k] : def;
       const _serveTarget = _selectedServeTarget();
       const _backendChoices = _backendChoicesForTarget(_serveTarget);
@@ -993,8 +1116,15 @@ function _rerenderCachedModels() {
       const _l = (name, tip) => `<span>${name}<span class="hwfit-hint" title="${tip}">?</span></span>`;
       const _ggufChoices = _runnableGgufFiles(m);
       const _savedGguf = String(sv('gguf_file', '') || '');
+      const _preferredGgufInclude = String(sv('_preferredGgufInclude', '') || '').replace(/\*/g, '').toLowerCase();
+      const _preferredGguf = _preferredGgufInclude
+        ? (_ggufChoices.find(f => String(f.rel_path || '').toLowerCase().includes(_preferredGgufInclude))
+          || _ggufChoices.find(f => String(f.name || '').toLowerCase().includes(_preferredGgufInclude)))
+        : null;
       const _defaultGguf = _ggufChoices.some(f => f.rel_path === _savedGguf)
         ? _savedGguf
+        : (_preferredGguf?.rel_path || '')
+          ? _preferredGguf.rel_path
         : (_ggufChoices[0]?.rel_path || '');
       const _ggufOptions = _ggufChoices.map(f =>
         `<option value="${esc(f.rel_path)}"${f.rel_path === _defaultGguf ? ' selected' : ''}>${esc(_ggufFileLabel(f))}</option>`
@@ -1026,6 +1156,10 @@ function _rerenderCachedModels() {
         + `</div>`;
 
       let panelHtml = `<div class="hwfit-serve-panel">`;
+      const _replaceTaskId = String(sv('_replaceTaskId', '') || '');
+      if (_replaceTaskId) {
+        panelHtml += `<input type="hidden" class="hwfit-sf" data-field="_replaceTaskId" value="${esc(_replaceTaskId)}" />`;
+      }
       // Runtime-readiness note pinned at the top of the serve area so the
       // user sees "vLLM ready on …" before scrolling into the configure
       // form. Hidden until the readiness probe returns. The × button
@@ -1202,20 +1336,20 @@ function _rerenderCachedModels() {
       const _rp_name = _rp_flag ? _rp_flag.split(' ')[1] : '';
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="trust_remote"${sv('trust_remote',_isMiniMaxMSeries)?' checked':''} /> Trust Remote Code${_h('Allow model to run custom code from HuggingFace')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="auto_tool"${sv('auto_tool',_isMiniMaxMSeries)?' checked':''} /> Auto Tool Choice${_h('Enable function/tool calling for agent mode')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="auto_tool"${sv('auto_tool',_nativeToolDefault)?' checked':''} /> Auto Tool Choice${_h('Enable function/tool calling for agent mode')}</label>`;
       // Always-render the Reasoning Parser, Expert Parallel, and MoE Env
       // checkboxes — the model-family detection above is a hint, not a
       // hard gate. User asked to keep these visible regardless so that
       // a borderline-undetected MoE/reasoning model can still toggle
       // them without dropping back to the raw command box.
-      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name || ''}"${sv('reasoning_parser',_isMiniMaxMSeries)?' checked':''} /> Reasoning Parser${_rp_name ? ` <span class="hwfit-parser-tag">${_rp_name}</span>` : ''}${_h('Splits <think> tokens into a separate channel. The tag (when shown) is the auto-detected parser; edit the command if you need a different one.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name || ''}"${sv('reasoning_parser',_reasoningDefault)?' checked':''} /> Reasoning Parser${_rp_name ? ` <span class="hwfit-parser-tag">${_rp_name}</span>` : ''}${_h('Splits <think> tokens into a separate channel. The tag (when shown) is the auto-detected parser; edit the command if you need a different one.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
       // Inline the previously-second vLLM checks row so Expert Parallel /
       // Speculative / MoE Env sit next to Prefix Caching with no gap. All
       // three are vLLM-only — class-gated so they hide on SGLang. Always
       // render so the user can flip them on for any MoE model.
-      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel"${sv('expert_parallel',_isMiniMaxMSeries)?' checked':''} /> Expert Parallel${_h('MoE: shard expert layers across GPUs. Helps for MiniMax M-series, Qwen3 A3B/A10B/A22B MoE, DeepSeek V3+/R1. Ignored / wasteful on dense models.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel"${sv('expert_parallel',_expertParallelDefault)?' checked':''} /> Expert Parallel${_h('MoE: shard expert layers across GPUs. Helps for MiniMax M-series, StepFun Step-3, Qwen3 A3B/A10B/A22B MoE, DeepSeek V3+/R1. Ignored / wasteful on dense models.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="language_model_only"${sv('language_model_only',_isMiniMaxM3)?' checked':''} /> Language Model Only${_h('vLLM --language-model-only. Needed by MiniMax M3 text serving when the repo also contains VL components.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="disable_custom_all_reduce"${sv('disable_custom_all_reduce',_isMiniMaxM3)?' checked':''} /> Disable Custom All Reduce${_h('vLLM --disable-custom-all-reduce. Useful for some 8-GPU/nightly configurations.')}</label>`;
       {
@@ -2870,11 +3004,11 @@ function _rerenderCachedModels() {
             // preflight and let the launch silently fall to CPU.
             let _hwGpus = [];
             try {
-              const _gh = (_selectedServeTarget.host || '').trim();
+              const _gh = (launchTarget.host || '').trim();
               const _gp = new URLSearchParams();
               if (_gh) {
                 _gp.set('host', _gh);
-                const _sp = (_serverByVal?.(_selectedServeTarget.serverKey || _gh) || {}).port;
+                const _sp = (_serverByVal?.(launchTarget.serverKey || _gh) || {}).port;
                 if (_sp) _gp.set('ssh_port', _sp);
               }
               const _gr = await fetch('/api/cookbook/gpus' + (_gp.toString() ? '?' + _gp : ''), { credentials: 'same-origin' });
@@ -3069,6 +3203,7 @@ function _rerenderCachedModels() {
           try { cur = JSON.parse(localStorage.getItem(SERVE_STATE_KEY)) || {}; } catch {}
           const byRepo = (cur && cur._byRepo && typeof cur._byRepo === 'object') ? cur._byRepo : {};
           const _saved = { ...serveState, _forceBackend: true };
+          delete _saved._replaceTaskId;
           byRepo[repo] = _saved;
           localStorage.setItem(SERVE_STATE_KEY, JSON.stringify({ _byRepo: byRepo, _lastUsed: _saved }));
         } catch {}
@@ -3127,7 +3262,8 @@ function _rerenderCachedModels() {
           await _withSpinner(_launchBtn, async () => {
             // Pass the exact form values so the running task can be re-opened
             // in the Serve panel pre-filled with these settings (Edit button).
-            await _launchServeTask(shortName, repo, launchCmd, serveState, serveHost, { serverKey: serveServerKey, serverName: serveServerName });
+            const taskDisplayName = _serveTaskDisplayName(shortName, m, serveState);
+            await _launchServeTask(taskDisplayName, repo, launchCmd, serveState, serveHost, { serverKey: serveServerKey, serverName: serveServerName });
           });
         } finally {
           _envState.env = origEnv;
@@ -3188,7 +3324,6 @@ function _resolveCacheHost() {
 }
 
 async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null) {
-  if (!skipConfirm && !(await uiModule.styledConfirm(`Delete ${repo} from cache?`, { confirmText: 'Delete', danger: true }))) return;
   const m = model || _cachedAllModels.find(x => x.repo_id === repo);
   // Delete the EXACT on-disk path the scan reported. Models in a custom
   // model dir live at <path>/<repo>; HF-cache models at
@@ -3204,13 +3339,32 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
   } else {
     target = `~/.cache/huggingface/hub/models--${repo.replace(/\//g, '--')}`;
   }
+  let deleteChoice = { mode: 'repo' };
+  const ggufFiles = _ggufFilesForModel(m);
+  if (!skipConfirm) {
+    if (ggufFiles.length > 1) {
+      deleteChoice = await _ggufDeleteChoice(repo, ggufFiles);
+      if (!deleteChoice) return;
+    } else if (!(await uiModule.styledConfirm(`Delete ${repo} from cache?`, { confirmText: 'Delete', danger: true }))) {
+      return;
+    }
+  }
   const host = _resolveCacheHost();
   let cmd;
   if (_isWindows()) {
     const winTarget = target.startsWith('~')
       ? target.replace(/^~/, '$env:USERPROFILE').replace(/\//g, '\\')
       : target.replace(/\//g, '\\');
-    cmd = `Remove-Item -Recurse -Force "${winTarget}" -ErrorAction SilentlyContinue`;
+    if (deleteChoice.mode === 'files') {
+      const targets = deleteChoice.files
+        .map(f => _safeGgufRelPath(f.rel_path))
+        .filter(Boolean)
+        .map(rel => `${winTarget}\\${rel.replace(/\//g, '\\')}`);
+      if (!targets.length) return;
+      cmd = targets.map(p => `Remove-Item -Force "${p.replace(/"/g, '\\"')}" -ErrorAction SilentlyContinue`).join('; ');
+    } else {
+      cmd = `Remove-Item -Recurse -Force "${winTarget}" -ErrorAction SilentlyContinue`;
+    }
     if (host) {
       const pf = _sshPrefix(_getPort(host));
       cmd = `ssh ${pf}${host} "powershell -Command \\"${cmd}\\""`;
@@ -3219,7 +3373,16 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
     // $HOME expands inside double quotes; ~ would not, so normalize the
     // fallback. Quoting also handles spaces in custom model-dir paths.
     const unixTarget = target.startsWith('~') ? target.replace(/^~/, '$HOME') : target;
-    cmd = `rm -rf "${unixTarget}"`;
+    if (deleteChoice.mode === 'files') {
+      const targets = deleteChoice.files
+        .map(f => _safeGgufRelPath(f.rel_path))
+        .filter(Boolean)
+        .map(rel => `${target.replace(/\/+$/, '')}/${rel}`);
+      if (!targets.length) return;
+      cmd = `rm -f ${targets.map(p => _shellPathExpr(p)).join(' ')} && find ${_shellPathExpr(target)} -type d -empty -delete`;
+    } else {
+      cmd = `rm -rf "${unixTarget}"`;
+    }
     if (host) cmd = _sshCmd(host, cmd, _getPort(host));
   }
   // Deleting a large model (tens/hundreds of GB) can take a while, especially
@@ -3244,7 +3407,13 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
       body: JSON.stringify({ command: cmd }),
     });
     if (!res.ok) { uiModule.showError(`Delete failed (${res.status})`); return; }
-    if (itemEl) {
+    if (deleteChoice.mode === 'files') {
+      if (m && Array.isArray(m.gguf_files)) {
+        const removed = new Set(deleteChoice.files.map(f => _safeGgufRelPath(f.rel_path)));
+        m.gguf_files = m.gguf_files.filter(f => !removed.has(_safeGgufRelPath(f.rel_path)));
+      }
+      await _fetchCachedModels(false);
+    } else if (itemEl) {
       itemEl.querySelector('.cookbook-delete-overlay')?.remove();
       itemEl.style.transition = 'opacity 0.24s ease, transform 0.24s ease, max-height 0.28s ease, padding 0.28s ease, margin 0.28s ease';
       itemEl.style.maxHeight = `${Math.max(itemEl.getBoundingClientRect().height, itemEl.scrollHeight)}px`;
@@ -3258,9 +3427,9 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
       requestAnimationFrame(() => { itemEl.style.maxHeight = '0'; });
       await new Promise(resolve => setTimeout(resolve, 300));
       if (itemEl.parentElement) itemEl.remove();
+      // Drop from the in-memory list so a re-render/filter doesn't resurrect it.
+      _cachedAllModels = _cachedAllModels.filter(x => x.repo_id !== repo);
     }
-    // Drop from the in-memory list so a re-render/filter doesn't resurrect it.
-    _cachedAllModels = _cachedAllModels.filter(x => x.repo_id !== repo);
   } catch (e) {
     uiModule.showError('Delete failed: ' + (e && e.message ? e.message : e));
   } finally {

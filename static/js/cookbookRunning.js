@@ -38,6 +38,47 @@ function _taskBadge(task) {
   return { text: _statusLabel(task.status, task.type), cls: 'cookbook-task-' + task.status };
 }
 
+function _ggufDisplayPartFromPath(path) {
+  const parts = String(path || '').split('/').filter(Boolean);
+  const file = parts[parts.length - 1] || '';
+  const dir = parts.length > 1 ? parts[parts.length - 2] : '';
+  const text = `${dir} ${file}`;
+  const quant = text.match(/\b(?:UD-)?(?:IQ[1-8]_[A-Z0-9]+|Q[2-8]_K_[MLS]|Q[2-8]_[0-9A-Z]+|Q[2-8])\b/i);
+  if (quant) return quant[0].toUpperCase().replace(/^UD-/, '');
+  return file.replace(/\.gguf$/i, '').replace(/-\d{5}-of-\d{5}$/i, '');
+}
+
+function _downloadDisplayName(name, task) {
+  const include = task?.payload?.include || '';
+  if (!include || String(name || '').includes(' · ')) return name;
+  const part = _ggufDisplayPartFromPath(include.replace(/\*/g, ''));
+  return part ? `${name} · ${part}` : name;
+}
+
+function _taskDisplayName(task) {
+  const name = String(task?.name || '').trim();
+  if (task?.type === 'download') return _downloadDisplayName(name, task);
+  if (task?.type !== 'serve') return name;
+  const gguf = task?.payload?._fields?.gguf_file || task?.payload?.gguf_file || '';
+  if (!gguf || name.includes(' · ')) return name;
+  const part = _ggufDisplayPartFromPath(gguf);
+  return part ? `${name} · ${part}` : name;
+}
+
+function _canLaunchDownloadedTask(task) {
+  return task?.type === 'download' && ['done', 'completed'].includes(task.status || '') && !!(task.payload?.repo_id || task.name);
+}
+
+function _downloadServeFields(task) {
+  const include = String(task?.payload?.include || '').trim();
+  if (!include) return null;
+  return {
+    backend: 'llamacpp',
+    _forceBackend: true,
+    _preferredGgufInclude: include,
+  };
+}
+
 // A download task whose tmux output still shows an active per-shard line
 // (e.g. "model-00012-of-00082.safetensors: 56%|") is NOT actually finished —
 // the cookbook just lost track. The clear pill becomes a "reconnect" affordance
@@ -281,6 +322,40 @@ let _detectBackend;
 let _detectToolParser;
 let _detectModelOptimizations;
 let _buildServeCmd;
+
+function _taskServerSelection(task) {
+  const host = task?.remoteHost || task?.payload?.remote_host || '';
+  const savedKey = task?.remoteServerKey || task?.payload?.remote_server_key || '';
+  const server = (savedKey ? _serverByVal(savedKey) : null)
+    || (host ? _serverByVal(host) : null)
+    || (host ? _envState.servers.find(s => s.host === host) : null)
+    || null;
+  const key = server ? (_serverKey ? _serverKey(server) : savedKey) : (savedKey || (host || 'local'));
+  return { host, server, key };
+}
+
+function _selectTaskServer(task) {
+  const { host, server, key } = _taskServerSelection(task);
+  _envState.remoteHost = host;
+  _envState.remoteServerKey = key === 'local' ? '' : key;
+  if (server) {
+    _envState.env = server.env || 'none';
+    _envState.envPath = server.envPath || '';
+    _envState.platform = server.platform || '';
+  } else if (!host) {
+    _envState.env = 'none';
+    _envState.envPath = '';
+    _envState.platform = '';
+  }
+  document.querySelectorAll('#hwfit-server-select, #hwfit-dl-server, #hwfit-cache-server, #hwfit-deps-server').forEach(sel => {
+    if (!sel || sel.tagName !== 'SELECT') return;
+    const wanted = key || (host || 'local');
+    if ([...sel.options].some(o => o.value === wanted)) sel.value = wanted;
+    else if (host && [...sel.options].some(o => o.value === host)) sel.value = host;
+    else sel.value = host ? wanted : 'local';
+  });
+  return { host, server, key };
+}
 
 // When a new action is started (download / dependency / serve), this holds the
 // new task's id so the next render collapses every other card and leaves only
@@ -654,8 +729,23 @@ function _loadPrunedTasks() {
 const _REMOVED_KEY = 'cookbook-removed-tasks';
 const _TOMBSTONE_TTL_MS = 24 * 3600 * 1000;
 function _loadTombstones() {
-  try { return JSON.parse(localStorage.getItem(_REMOVED_KEY)) || {}; }
+  try {
+    const tomb = JSON.parse(localStorage.getItem(_REMOVED_KEY)) || {};
+    const now = Date.now();
+    let changed = false;
+    for (const k in tomb) {
+      if (now - tomb[k] > _TOMBSTONE_TTL_MS) {
+        delete tomb[k];
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(_REMOVED_KEY, JSON.stringify(tomb));
+    return tomb;
+  }
   catch { return {}; }
+}
+function _saveTombstones(tomb) {
+  localStorage.setItem(_REMOVED_KEY, JSON.stringify(tomb || {}));
 }
 function _tombstoneTask(id) {
   if (!id) return;
@@ -663,7 +753,7 @@ function _tombstoneTask(id) {
   const now = Date.now();
   tomb[id] = now;
   for (const k in tomb) { if (now - tomb[k] > _TOMBSTONE_TTL_MS) delete tomb[k]; }
-  localStorage.setItem(_REMOVED_KEY, JSON.stringify(tomb));
+  _saveTombstones(tomb);
 }
 function _isTombstoned(id) {
   const ts = _loadTombstones()[id];
@@ -1098,6 +1188,7 @@ function _syncToServer() {
       if (!_envState || !Array.isArray(_envState.servers) || _envState.servers.length === 0) return;
       const state = {
         tasks: _loadTasks(),
+        removedTasks: _loadTombstones(),
         presets: _loadPresets(),
         env: _envState,
         serveState: null,
@@ -1146,9 +1237,16 @@ export async function _syncFromServer() {
 
     const localTasks = _loadTasks();
     const serverTasks = state.tasks || [];
+    const serverTombstones = (state.removedTasks && typeof state.removedTasks === 'object') ? state.removedTasks : {};
+    const localTombstones = _loadTombstones();
+    const mergedTombstones = { ...serverTombstones, ...localTombstones };
+    for (const [id, ts] of Object.entries(serverTombstones)) {
+      if (localTombstones[id] == null || Number(ts) > Number(localTombstones[id])) mergedTombstones[id] = ts;
+    }
+    _saveTombstones(mergedTombstones);
 
     const localIds = new Set(localTasks.map(t => t.sessionId));
-    const merged = [...localTasks];
+    const merged = localTasks.filter(t => !_isTombstoned(t.sessionId));
     for (const t of serverTasks) {
       if (!localIds.has(t.sessionId) && !_isTombstoned(t.sessionId)) {
         merged.push(t);
@@ -1165,6 +1263,18 @@ export async function _syncFromServer() {
       const { remoteHost: _rh, env: _e, envPath: _ep, platform: _pf, ...settings } = state.env;
       delete settings.hfToken;
       Object.assign(_envState, settings);
+      const selected = (_envState.remoteServerKey && _serverByVal?.(_envState.remoteServerKey))
+        || (_envState.remoteHost ? (_envState.servers || []).find(s => s.host === _envState.remoteHost) : null);
+      if (selected) {
+        _envState.env = selected.env || 'none';
+        _envState.envPath = selected.envPath || '';
+        _envState.platform = selected.platform || '';
+      } else if (!_envState.remoteHost) {
+        const local = (_envState.servers || []).find(s => !s.host || s.host === 'local');
+        _envState.env = local?.env || 'none';
+        _envState.envPath = local?.envPath || '';
+        _envState.platform = local?.platform || '';
+      }
       const { hfToken, ...safeState } = _envState;
       localStorage.setItem('cookbook-last-state', JSON.stringify(safeState));
     }
@@ -1174,6 +1284,7 @@ export async function _syncFromServer() {
     if (state.serveState) {
       localStorage.setItem(SERVE_STATE_KEY, JSON.stringify(state.serveState));
     }
+    document.dispatchEvent(new CustomEvent('cookbook:state-synced', { detail: state }));
     return true;
   } catch { return false; }
 }
@@ -1332,17 +1443,11 @@ async function _openServeEditForTask(task, cmdOverride, fieldOverrides = null) {
   if (fieldOverrides && typeof fieldOverrides === 'object') {
     fields = { ...(fields || {}), ...fieldOverrides };
   }
-  // Switch the active server to the one this serve ran on (mirrors _openEdit).
-  const _tHost = task.remoteHost || '';
-  _envState.remoteHost = _tHost;
-  const _tSrv = _serverByVal(_envState.remoteServerKey || _tHost)
-    || _envState.servers.find(s => s.host === _tHost);
-  if (_tSrv) { _envState.env = _tSrv.env || 'none'; _envState.envPath = _tSrv.envPath || ''; _envState.platform = _tSrv.platform || ''; }
-  else if (!_tHost) { _envState.env = 'none'; _envState.envPath = ''; _envState.platform = ''; }
-  document.querySelectorAll('#hwfit-server-select, #hwfit-dl-server, #hwfit-cache-server, #hwfit-deps-server').forEach(sel => {
-    if (!sel || sel.tagName !== 'SELECT') return;
-    sel.value = _tHost || 'local';
-  });
+  fields = { ...(fields || {}), _replaceTaskId: task.sessionId };
+  // Switch the active server to the exact profile this serve ran on. The
+  // dropdown stores stable srv: keys, not raw host strings, so preserving only
+  // task.remoteHost can relaunch against the local container by accident.
+  _selectTaskServer(task);
   try {
     const { openServePanelForRepo } = await import('./cookbookServe.js');
     await openServePanelForRepo(repo, fields);
@@ -1553,6 +1658,20 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   const _serverMetaKey = _targetKey || (_hsrv && _serverKey ? _serverKey(_hsrv) : '') || (_host || 'local');
   const _serverMetaName = targetMeta?.serverName || _hsrv.name || (_host ? _host : 'Local');
   const _hplatform = _host ? (_hsrv.platform || '') : (_envState.platform || '');
+  const _replaceTaskId = fields?._replaceTaskId || '';
+  if (_replaceTaskId) {
+    try {
+      const _old = _loadTasks().find(t => t.sessionId === _replaceTaskId);
+      if (_old && _old.type === 'serve') {
+        await fetch('/api/shell/exec', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: _tmuxGracefulKill(_old) }),
+        });
+        _removeTask(_old.sessionId);
+      }
+    } catch {}
+  }
 
   // Replace any serve already targeting this same host:port — you can't run two
   // servers on one port, so re-serving (or retrying) should stop & remove the
@@ -1750,7 +1869,7 @@ export function _renderRunningTab() {
       '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">' +
       '<h2 style="margin:0;padding:0;line-height:1;">Active <span id="running-count" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal">' + activeCount + '</span></h2>' +
       '</div>' +
-      '<p class="memory-desc doclib-desc" style="margin-top:6px;">Active downloads and serving processes.</p>' +
+      '<p class="memory-desc doclib-desc" style="margin-top:6px;">Active downloads, installs and model launches.</p>' +
       '</div>';
     const firstGroup = body.querySelector('.cookbook-group');
     if (firstGroup) body.insertBefore(group, firstGroup);
@@ -1863,6 +1982,7 @@ export function _renderRunningTab() {
         return;
       }
       if (!await window.styledConfirm(`Clear ${toRemove.length} finished task${toRemove.length === 1 ? '' : 's'} on ${_serverName(host)}?`, { confirmText: 'Clear' })) return;
+      toRemove.forEach(t => _tombstoneTask(t.sessionId));
       const remaining = allTasks.filter(t => _taskServerKey(t) !== host || !_canClearTask(t));
       _saveTasks(remaining);
       // Fade/slide each finished card out (same exit as the per-card clear)
@@ -2000,11 +2120,12 @@ export function _renderRunningTab() {
 
     const _bdg = _taskBadge(task);
     const _bdgTitle = (task._unreachable && task.status === 'running') ? ' title="Server not responding — it may have crashed"' : '';
+    const displayName = _taskDisplayName(task);
     el.innerHTML = `
       <div class="cookbook-task-header">
         <span class="cookbook-task-type${(task.status === 'done' && task.type === 'download') ? ' cookbook-task-type-done' : ''}" data-type="${esc(task.type)}">${esc((task.status === 'done' && task.type === 'download') ? 'finished' : task.type)}</span>
-        <span class="cookbook-task-name">${modelLogo(task.name)}${esc(task.name)}</span>
-        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span><span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}"><svg class="cookbook-task-check-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><svg class="cookbook-task-clear-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
+        <span class="cookbook-task-name">${modelLogo(task.name)}${esc(displayName)}</span>
+        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? '<button type="button" class="cookbook-task-serve-btn" title="Open in Launch"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Launch</span></button>' : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}"><svg class="cookbook-task-check-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><svg class="cookbook-task-clear-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
         <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"/></svg><span>start now</span></button>
         <span class="cookbook-task-status ${_bdg.cls}"${_bdgTitle}>${esc(_bdg.text)}</span>
         <button class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
@@ -2076,19 +2197,11 @@ export function _renderRunningTab() {
           e.stopPropagation();
           const repo = task.payload?.repo_id || task.name;
           if (!repo) { uiModule.showToast('No model info on this task'); return; }
-          // Point the active server at the one it downloaded to.
-          const _tHost = task.remoteHost || '';
-          _envState.remoteHost = _tHost;
-          const _tSrv = _serverByVal(_envState.remoteServerKey || _tHost)
-            || _envState.servers.find(s => s.host === _tHost);
-          if (_tSrv) { _envState.env = _tSrv.env || 'none'; _envState.envPath = _tSrv.envPath || ''; _envState.platform = _tSrv.platform || ''; }
-          else if (!_tHost) { _envState.env = 'none'; _envState.envPath = ''; _envState.platform = ''; }
-          document.querySelectorAll('#hwfit-server-select, #hwfit-dl-server, #hwfit-cache-server, #hwfit-deps-server').forEach(sel => {
-            if (sel && sel.tagName === 'SELECT') sel.value = _tHost || 'local';
-          });
+          // Point the active server at the exact profile it downloaded to.
+          _selectTaskServer(task);
           try {
             const { openServePanelForRepo } = await import('./cookbookServe.js');
-            await openServePanelForRepo(repo);
+            await openServePanelForRepo(repo, _downloadServeFields(task));
             // Serving it supersedes the finished download — clear the card from
             // the Running tab (smooth exit) now that we've jumped to Serve.
             _animateOutThenRemove(el, task.sessionId);
@@ -3558,7 +3671,9 @@ async function _probeEndpointUntilOnline(epId, host, port) {
     try {
       // Hit the probe endpoint — it re-probes server-side and updates
       // cached_models. We consume (and discard) the SSE stream.
-      await fetch(`/api/model-endpoints/${epId}/probe`, { credentials: 'same-origin' }).then(r => r.text()).catch(() => {});
+      const probeRes = await fetch(`/api/model-endpoints/${epId}/probe`, { credentials: 'same-origin' }).catch(() => null);
+      if (probeRes && probeRes.status === 404) return;
+      if (probeRes) await probeRes.text().catch(() => {});
       const eps = await fetch('/api/model-endpoints', { credentials: 'same-origin' }).then(r => r.json()).catch(() => []);
       const ep = (eps || []).find(e => e.id === epId);
       if (ep && (ep.models || []).length) {

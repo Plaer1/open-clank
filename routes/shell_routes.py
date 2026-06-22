@@ -1108,7 +1108,7 @@ def setup_shell_routes() -> APIRouter:
             {
                 "name": "llama_cpp",
                 "pip": "llama-cpp-python[server]",
-                "desc": "Serve GGUF models via llama.cpp",
+                "desc": "Great for single-GPU or CPU inference with GGUF models",
                 "category": "LLM",
                 "target": "remote",
                 # Build-toolchain prereqs. Cookbook's launch bootstrap
@@ -1129,7 +1129,7 @@ def setup_shell_routes() -> APIRouter:
             {
                 "name": "vllm",
                 "pip": "vllm",
-                "desc": "High-throughput LLM serving engine",
+                "desc": "Great for high-throughput multi-GPU inference",
                 "category": "LLM",
                 "target": "remote",
             },

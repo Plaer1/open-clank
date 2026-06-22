@@ -230,14 +230,30 @@ export function _isMetal() {
 }
 
 /** Detect model-specific vLLM optimizations */
+function _isStepFunStepModel(modelName) {
+  const n = (modelName || '').toLowerCase();
+  return n.includes('stepfun')
+    || n.includes('step-3')
+    || n.includes('step3')
+    || n.includes('step_3');
+}
+
 function _detectModelOptimizations(modelName) {
   const n = (modelName || '').toLowerCase();
   const opts = { envVars: [], flags: [], tips: [] };
 
+  // StepFun Step-3.x MoE models. Their tokenizer defines the Step tool-call
+  // and thinking tags; vLLM/SGLang need the step3p5 parser instead of generic
+  // Hermes/XML guesses, and the MoE backend should default to expert parallel.
+  if (_isStepFunStepModel(modelName)) {
+    opts.flags.push('--enable-expert-parallel');
+    opts.tips.push('StepFun Step-3 MoE: expert parallel');
+    opts.tips.push('StepFun parser: step3p5 for native tool calls and reasoning tags');
+  }
   // Qwen3.5 MoE models — MoE-specific env vars + expert-parallel.
   // The --reasoning-parser flag is added uniformly below via
   // _detectReasoningParser, no longer hardcoded here.
-  if (n.includes('qwen3.5') || n.includes('qwen3-') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
+  else if (n.includes('qwen3.5') || n.includes('qwen3-') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
     opts.envVars.push('VLLM_USE_DEEP_GEMM=0', 'VLLM_USE_FLASHINFER_MOE_FP16=1', 'VLLM_USE_FLASHINFER_SAMPLER=0', 'OMP_NUM_THREADS=4');
     opts.flags.push('--enable-expert-parallel');
     opts.tips.push('MoE optimizations: expert parallel + flashinfer MoE kernels');
@@ -312,6 +328,9 @@ function _detectModelOptimizations(modelName) {
  */
 export function _detectReasoningParser(modelName) {
   const n = (modelName || '').toLowerCase();
+  // StepFun Step-3.x uses Step's native <think> / tool-call tokens. vLLM
+  // registers this parser as step3p5.
+  if (_isStepFunStepModel(modelName)) return 'step3p5';
   // MiniMax M3 — newer vLLM nightly/parser builds use minimax_m3. This must
   // be checked before the M2.x rule and before the generic MiniMax tool parser.
   if (n.includes('minimax') && /\bm3\b/.test(n)) return 'minimax_m3';
@@ -348,6 +367,7 @@ export function _detectReasoningParser(modelName) {
  */
 export function _detectToolParser(modelName) {
   const n = (modelName || '').toLowerCase();
+  if (_isStepFunStepModel(modelName)) return 'step3p5';
   if (n.includes('qwen3') && n.includes('coder')) return 'qwen3_coder';
   if (n.includes('qwen3')) return 'qwen3_xml';
   if (n.includes('qwen')) return 'hermes';   // Qwen2.5 / Qwen2 / Qwen1.5
@@ -601,6 +621,13 @@ export function _buildServeCmd(f, modelName, backend) {
     if (f.dtype && f.dtype !== 'auto') cmd += ` --dtype ${f.dtype}`;
     if (f.max_seqs && f.max_seqs.toString().trim()) cmd += ` --max-running-requests ${f.max_seqs.toString().trim()}`;
     if (f.trust_remote) cmd += ' --trust-remote-code';
+    if (f.auto_tool) cmd += ` --enable-auto-tool-choice --tool-call-parser ${_detectToolParser(modelName)}`;
+    if (f.expert_parallel) cmd += ' --enable-expert-parallel';
+    if (f.reasoning_parser) {
+      const rp = typeof f.reasoning_parser === 'string' && f.reasoning_parser !== 'true'
+        ? f.reasoning_parser : (f._reasoning_parser_value || _detectReasoningParser(modelName) || '');
+      if (rp) cmd += ` --reasoning-parser ${rp}`;
+    }
     if (!f.prefix_cache) cmd += ' --disable-radix-cache';
     if (f.enforce_eager) cmd += ' --disable-cuda-graph';
   } else if (backend === 'llamacpp') {
@@ -909,10 +936,10 @@ async function _fetchDependencies() {
     // matches the engine you're configuring. Unknown packages get no
     // icon (the name alone is fine for librosa, hf_transfer, etc.).
     const _DEP_GLYPHS = {
-      vllm:    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
-      sglang:  '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
-      llama_cpp: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>',
-      ollama:  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 10a6 6 0 0 1 12 0v4a4 4 0 0 1-8 0v-1"/><circle cx="10" cy="9" r="1"/><circle cx="14" cy="9" r="1"/></svg>',
+      vllm: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
+      sglang: '<span aria-hidden="true" style="display:block;width:13px;height:13px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
+      llama_cpp: '<svg width="13" height="13" viewBox="0 0 600 600" fill="none" aria-hidden="true"><path d="M600 392L504.249 558L504.137 557.929C487.252 584.069 458.193 600 426.864 600H120L240 392H600Z" fill="currentColor"/><path d="M240 392H0L199.602 46.0254C216.032 17.5463 246.411 0 279.29 0H466.154L240 392Z" fill="currentColor"/></svg>',
+      ollama: '<img src="/static/icons/ollama-mark-crop.png" alt="" aria-hidden="true" width="13" height="13" style="display:block;width:13px;height:13px;object-fit:contain;" />',
       diffusers: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>',
     };
     const _depGlyphHtml = (name) => {
@@ -2138,7 +2165,10 @@ function _wireTabEvents(body) {
         }
       }
       const shortName = repo.split('/').pop();
-      _retryDownload(shortName, payload);
+      const displayName = payload.include
+        ? `${shortName} · ${_ggufQuantFromPath(String(payload.include).replace(/\*/g, '')) || String(payload.include).replace(/\*/g, '').replace(/\.gguf$/i, '')}`
+        : shortName;
+      _retryDownload(displayName, payload);
       dlInput.value = '';
     };
     dlBtn.addEventListener('click', triggerDownload);
@@ -2179,17 +2209,12 @@ function _wireTabEvents(body) {
       const folded = dlFoldBody.classList.contains('is-folded');
       _setFolded(!folded);
     });
-    // Auto-fold on any downward scroll inside the cookbook modal,
-    // and auto-expand when the user scrolls all the way back to the
-    // top of whichever scroller they're in. The chevron ▸ still
-    // toggles manually.
+    // Auto-fold on any downward scroll inside the cookbook modal. Do not
+    // auto-expand on upward/top scroll — once the user collapses Download,
+    // it should stay collapsed until the header is clicked again.
     const _maybeFold = () => {
       if (dlFoldBody.classList.contains('is-folded')) return;
       _setFolded(true, /* persist */ false);
-    };
-    const _maybeExpand = () => {
-      if (!dlFoldBody.classList.contains('is-folded')) return;
-      _setFolded(false, /* persist */ false);
     };
     // Capture phase so scrolls on nested scrollers (.hwfit-list,
     // .cookbook-body, .modal-content) all hit us.
@@ -2205,7 +2230,6 @@ function _wireTabEvents(body) {
       const y = tgt.scrollTop;
       const prev = _lastY.get(tgt) || 0;
       if (y > prev) _maybeFold();
-      else if (y <= 0) _maybeExpand();
       _lastY.set(tgt, y);
     }, true);
   }
@@ -2621,10 +2645,10 @@ function _renderRecipes() {
   html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="org/model-name, qwen2.5:14b, or HF URL" style="flex:1;min-width:0;" />`;
   html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">Download</button>`;
   html += `</div>`;
-  html += `<div id="cookbook-dl-gguf-row" style="display:none;margin-top:1px;gap:5px;align-items:center;font-size:11px;">`;
-  html += `<span style="opacity:0.65;flex-shrink:0;">GGUF</span>`;
-  html += `<select class="cookbook-field-input" id="cookbook-dl-gguf-quant" style="height:28px;min-width:118px;flex:0 0 auto;"></select>`;
-  html += `<span id="cookbook-dl-gguf-note" style="opacity:0.55;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></span>`;
+  html += `<div id="cookbook-dl-gguf-row" class="cookbook-dl-gguf-row" style="display:none;">`;
+  html += `<span class="cookbook-dl-gguf-label">GGUF</span>`;
+  html += `<select class="cookbook-field-input" id="cookbook-dl-gguf-quant"></select>`;
+  html += `<span id="cookbook-dl-gguf-note"></span>`;
   html += `</div>`;
   // Ollama-library browse used to live here as its own collapsible dropdown,
   // but that duplicated the Engine filter (which already has Ollama). The
@@ -3046,6 +3070,56 @@ export function isVisible() {
   if (Modals.isMinimized('cookbook-modal')) return false;
   return !modal.classList.contains('hidden');
 }
+
+let _sharedSyncInFlight = false;
+let _sharedSyncLast = 0;
+async function _refreshSharedCookbookState(reason = '') {
+  if (!isVisible() || _sharedSyncInFlight) return;
+  const now = Date.now();
+  if (now - _sharedSyncLast < 1500) return;
+  _sharedSyncInFlight = true;
+  _sharedSyncLast = now;
+  try {
+    const ok = await _syncFromServer();
+    if (!ok) return;
+    try { Object.assign(_envState, _readStoredEnvState()); } catch {}
+    const modal = document.getElementById('cookbook-modal');
+    const activeTab = modal?.querySelector('.cookbook-tab.active')?.dataset?.backend || '';
+    if (activeTab === 'Running') {
+      _renderRunningTab();
+    } else if (activeTab === 'Settings') {
+      const active = document.activeElement;
+      const editingSettings = active && active.closest && active.closest('.cookbook-settings-stack');
+      if (!editingSettings) {
+        _renderRecipes();
+        const tab = document.querySelector('#cookbook-modal .cookbook-tab[data-backend="Settings"]');
+        if (tab) tab.click();
+      }
+    }
+  } catch (e) {
+    console.warn('[cookbook] shared state refresh failed', reason, e);
+  } finally {
+    _sharedSyncInFlight = false;
+  }
+}
+
+document.addEventListener('cookbook:state-synced', () => {
+  try { Object.assign(_envState, _readStoredEnvState()); } catch {}
+  if (isVisible()) {
+    const activeTab = document.querySelector('#cookbook-modal .cookbook-tab.active')?.dataset?.backend || '';
+    if (activeTab === 'Running') _renderRunningTab();
+  }
+});
+
+window.addEventListener('focus', () => { _refreshSharedCookbookState('focus'); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _refreshSharedCookbookState('visible');
+});
+setInterval(() => {
+  if (!isVisible()) return;
+  const activeTab = document.querySelector('#cookbook-modal .cookbook-tab.active')?.dataset?.backend || '';
+  if (activeTab === 'Running') _refreshSharedCookbookState('active-poll');
+}, 5000);
 
 // Close button
 document.addEventListener('DOMContentLoaded', () => {

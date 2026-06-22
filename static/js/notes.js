@@ -1896,10 +1896,6 @@ function _renderNotes() {
       ${_hasItems(note) ? `<div class="note-cl-quickadd"><input type="text" class="note-cl-quickadd-input" placeholder="+ Add item" data-note-id="${note.id}" /></div>` : ''}
       ${reminderTagHtml}
       ${noteTags.length ? `<div class="note-card-label">${noteTags.map(t => `<button type="button" class="note-card-label-chip" data-note-label-filter="${_esc(t)}" title="Filter #${_esc(t)}">#${_esc(t)}</button>`).join(' ')}</div>` : ''}
-      ${note.agent_session_id ? `<button class="note-agent-tag" data-note-id="${note.id}" data-session-id="${_esc(note.agent_session_id)}" title="Open the agent's chat for this note">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
-        <span>Agent</span>
-      </button>` : ''}
       <div class="note-card-actions">
         <div class="note-card-colors">${colorDots}</div>
         <span style="flex:1"></span>
@@ -2302,16 +2298,6 @@ function _bindCardEvents(body) {
       e.preventDefault();
       e.stopPropagation();
       _openNoteCornerMenu(btn);
-    });
-  });
-  // Agent tag — opens the chat session the agent ran for this note.
-  body.querySelectorAll('.note-agent-tag').forEach(tag => {
-    tag.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const sid = tag.dataset.sessionId;
-      const _sm = window.sessionModule;
-      if (sid && _sm && _sm.selectSession) { closePanel(); _sm.selectSession(sid); }
     });
   });
   body.querySelectorAll('.note-card-label-chip').forEach(chip => {
@@ -4383,18 +4369,16 @@ function _openTodoAgentMenu(btn) {
   const noteId = btn.dataset.noteId;
   const idx = parseInt(btn.dataset.idx);
   const sid = btn.dataset.sessionId || '';
-  const title = btn.dataset.agentTitle || 'Agent chat';
   const menu = document.createElement('div');
   menu.className = 'note-corner-menu-dropdown note-agent-item-menu';
   menu.innerHTML = `
-    <div class="ncm-title">${_esc(title)}</div>
     ${sid ? `<button type="button" class="ncm-item" data-act="open">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14L21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
-      <span>Open this agent chat</span>
+      <span>Open</span>
     </button>` : ''}
     <button type="button" class="ncm-item" data-act="run">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
-      <span>${sid ? 'Run again for this todo' : 'Start agent for this todo'}</span>
+      <span>${sid ? 'Run again' : 'Run Agent'}</span>
     </button>`;
   _positionNoteMenu(menu, btn);
   const openBtn = menu.querySelector('[data-act="open"]');
