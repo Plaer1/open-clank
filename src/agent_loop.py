@@ -2005,6 +2005,7 @@ async def stream_agent_loop(
         and (_casual_low_signal_turn or not active_email)
         and (_casual_low_signal_turn or not workspace)
         and not forced_tools
+        and not relevant_tools
     )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").

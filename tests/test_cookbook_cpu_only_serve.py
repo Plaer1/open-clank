@@ -68,18 +68,18 @@ def test_vllm_blank_swap_omits_swap_space_flag():
 def test_serve_preflight_uses_selected_server_not_stale_env_host():
     text = SERVE_SRC.read_text(encoding="utf-8")
 
-    assert "const _selectedServeTarget = (() => {" in text
-    assert "const _hostStr = _selectedServeTarget.host || '';" in text
+    assert "function _selectedServeTarget(panel) {" in text
+    assert "const _hostStr = launchTarget.host || '';" in text
     assert "(t.remoteHost || '') === _hostStr" in text
-    assert "const _probeHost = (_selectedServeTarget.host || '').trim();" in text
-    assert "const _portHost = (_selectedServeTarget.host || '').trim();" in text
+    assert "const _probeHost = (launchTarget.host || '').trim();" in text
+    assert "const _portHost = (launchTarget.host || '').trim();" in text
 
 
 def test_vllm_route_strips_swap_space_when_runtime_rejects_it():
     text = ROUTES_SRC.read_text(encoding="utf-8")
 
-    assert "Removing --swap-space 0; off is represented by omitting the vLLM flag." in text
-    assert "vLLM serve does not support --swap-space; removing it" in text
+    assert "Setting vLLM --swap-space 0 so the runtime does not reserve CPU swap per GPU." in text
+    assert "vLLM serve does not expose --swap-space; removing the flag and patching the runtime default to 0." in text
     assert "ODYSSEUS_VLLM_HELP_CMD" in text
     assert "print(shlex.join(parts[:serve_i + 1] + [\"--help\"]))" in text
     assert "eval \"$ODYSSEUS_VLLM_HELP_CMD\" 2>&1 | grep -q -- \"--swap-space\"" in text
