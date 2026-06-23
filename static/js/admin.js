@@ -343,6 +343,28 @@ function initSignupToggle() {
   });
 }
 
+function initShareDefaultsToggle() {
+  const toggle = el('adm-shareDefaultsToggle');
+  fetch('/api/auth/settings', { credentials: 'same-origin' })
+    .then(r => r.json())
+    .then(d => { toggle.checked = !!d.share_defaults_with_users; })
+    .catch(e => console.warn('Settings fetch failed:', e));
+  toggle.addEventListener('change', async () => {
+    try {
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_defaults_with_users: toggle.checked }),
+      });
+      const data = await res.json();
+      toggle.checked = !!data.share_defaults_with_users;
+    } catch (e) {
+      toggle.checked = !toggle.checked;
+    }
+  });
+}
+
 function initAddUser() {
   fetch('/api/auth/policy', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null)
@@ -2986,7 +3008,7 @@ function initLogsView() {
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
     () => settingsModule.initIntegrations()
   ];
