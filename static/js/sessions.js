@@ -16,6 +16,8 @@ let sessions = [];
 let currentSessionId = null;
 let _sessionNavToken = 0;
 let _skipAutoSelect = false;
+const HISTORY_DISPLAY_CHAR_LIMIT = 160000;
+const HISTORY_DISPLAY_TAIL_CHARS = 20000;
 
 const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
@@ -26,6 +28,65 @@ let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
+
+function _paintSessionLoading(chatHistory, label = 'Loading chat') {
+  if (!chatHistory) return;
+  chatHistory.style.transition = '';
+  chatHistory.style.opacity = '1';
+  chatHistory.classList.add('no-animate');
+  chatHistory.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'session-loading-state';
+  wrap.setAttribute('role', 'status');
+  wrap.setAttribute('aria-live', 'polite');
+  wrap.style.cssText = [
+    'min-height:100%',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'gap:10px',
+    'color:var(--muted, var(--fg))',
+    'opacity:0.72',
+    'font-size:12px'
+  ].join(';');
+
+  const spinner = spinnerModule.createWhirlpool(18);
+  const text = document.createElement('span');
+  text.className = 'session-loading-state-label';
+  text.textContent = label;
+  wrap.appendChild(spinner.element);
+  wrap.appendChild(text);
+  chatHistory.appendChild(wrap);
+}
+
+function _updateSessionLoading(chatHistory, label) {
+  const el = chatHistory?.querySelector('.session-loading-state-label');
+  if (el) el.textContent = label;
+}
+
+function _nextPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+function _displayHistoryContent(content) {
+  const text = String(content || '');
+  if (text.length <= HISTORY_DISPLAY_CHAR_LIMIT) return text;
+  const head = text.slice(0, HISTORY_DISPLAY_CHAR_LIMIT - HISTORY_DISPLAY_TAIL_CHARS);
+  const tail = text.slice(-HISTORY_DISPLAY_TAIL_CHARS);
+  const omitted = text.length - head.length - tail.length;
+  return [
+    `> Large message display clipped (${omitted.toLocaleString()} characters omitted). Full content remains stored in chat history/export.`,
+    '',
+    head,
+    '',
+    '```text',
+    `[... ${omitted.toLocaleString()} characters omitted from on-screen history render ...]`,
+    '```',
+    '',
+    tail,
+  ].join('\n');
+}
 
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
@@ -1589,7 +1650,14 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     // place, producing a ReferenceError every selectSession.)
     const isOC = meta && (meta.is_openclaw || id === 'openclaw');
     let msgHistory = [], modelName = null;
+    let paintedLoading = false;
     if (!isOC) {
+      if (chatHistory && prevSessionId !== id) {
+        _paintSessionLoading(chatHistory, 'Loading chat');
+        paintedLoading = true;
+        await _nextPaint();
+        if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+      }
       const res = await fetch(`${API_BASE}/api/history/${id}`);
       const data = await res.json();
       if (navToken !== _sessionNavToken || currentSessionId !== id) return;
@@ -1623,8 +1691,17 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       return;
     }
 
-    // Fade out old content, swap, fade in
-    if (chatHistory) {
+    if (paintedLoading && chatHistory) {
+      _updateSessionLoading(chatHistory, msgHistory.length ? 'Rendering chat' : 'Opening chat');
+      await _nextPaint();
+      if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+      chatHistory.innerHTML = '';
+    }
+
+    // Fade out old content, swap, fade in. When we already painted a loading
+    // state, keep it visible until render starts instead of fading to a blank
+    // pane during slow history fetches.
+    if (chatHistory && !paintedLoading) {
       chatHistory.style.transition = 'opacity 0.12s ease-out';
       chatHistory.style.opacity = '0';
       await new Promise(r => setTimeout(r, 120));
@@ -1647,10 +1724,10 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
         const meta = msg.metadata ? { ...msg.metadata, _fromHistory: true } : null;
         let displayContent;
         if (typeof msg.content === 'string') {
-          displayContent = msg.content;
+          displayContent = _displayHistoryContent(msg.content);
         } else if (Array.isArray(msg.content)) {
           // Multimodal (image/audio attachments): extract text parts, skip binary
-          displayContent = msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n').trim();
+          displayContent = _displayHistoryContent(msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n').trim());
         } else {
           displayContent = '';
         }

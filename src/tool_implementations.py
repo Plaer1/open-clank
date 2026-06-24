@@ -1760,6 +1760,17 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 return value
         return None
 
+    def _normalized_rrule(raw: Any) -> str:
+        """Normalize model-friendly recurrence clearing aliases to no RRULE."""
+        if raw is None:
+            return ""
+        if raw is False:
+            return ""
+        text = str(raw).strip()
+        if text.lower() in {"", "none", "no", "off", "false", "single", "once", "one_off", "one-off"}:
+            return ""
+        return text
+
     def _create_calendar_reminder(summary: str, location: str, dtstart: datetime,
                                   all_day: bool, minutes_before: int,
                                   is_utc: bool = False) -> tuple[Optional[str], Optional[str]]:
@@ -1864,6 +1875,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                     "calendar_href": ev.calendar_id,
                     "event_type": ev.event_type or "",
                     "importance": ev.importance or "normal",
+                    "rrule": ev.rrule or "",
                 })
             if not events:
                 response_text = f"No events between {start_dt.date().isoformat()} and {end_dt.date().isoformat()}."
@@ -1878,6 +1890,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                         line += f" #{ev['event_type']}"
                     if ev.get("importance") and ev["importance"] != "normal":
                         line += f" !{ev['importance']}"
+                    if ev.get("rrule"):
+                        line += f" repeats({ev['rrule']})"
                     if ev.get("location"):
                         line += f" @ {ev['location']}"
                     if ev.get("calendar"):
@@ -2013,7 +2027,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 location=args.get("location", "") or "",
                 dtstart=dtstart, dtend=dtend, all_day=all_day,
                 is_utc=dtstart_is_utc and not all_day,
-                rrule=args.get("rrule", "") or "",
+                rrule=_normalized_rrule(args.get("rrule")),
                 event_type=event_type,
                 importance=importance,
                 caldav_sync_pending="create" if cal.source == "caldav" else None,
@@ -2090,6 +2104,10 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 ev.event_type = _tag or None
             if args.get("importance") is not None:
                 ev.importance = args["importance"]
+            if any(name in args for name in ("rrule", "recurrence", "repeat")):
+                ev.rrule = _normalized_rrule(
+                    args.get("rrule", args.get("recurrence", args.get("repeat")))
+                )
             is_caldav = ev.calendar and ev.calendar.source == "caldav"
             if is_caldav:
                 ev.caldav_sync_pending = "update"

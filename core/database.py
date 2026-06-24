@@ -1670,6 +1670,7 @@ class CalendarEvent(TimestampMixin, Base):
     # `Z`-suffix on serialization so the frontend interprets correctly.
     is_utc      = Column(Boolean, default=False, nullable=False)
     rrule       = Column(String, default="")
+    recurrence_exdates = Column(Text, default="")  # JSON list of skipped occurrence starts
     color       = Column(String, nullable=True)  # per-event color override
     status      = Column(String, default="confirmed")  # confirmed, cancelled
     importance  = Column(String, default="normal")    # low | normal | high | critical
@@ -1833,6 +1834,7 @@ def init_db():
     _migrate_add_calendar_origin()
     _migrate_add_calendar_account_id()
     _migrate_add_caldav_sync_columns()
+    _migrate_add_calendar_recurrence_exdates()
     _migrate_chat_messages_fts()
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()
@@ -2178,6 +2180,28 @@ def _migrate_add_calendar_metadata():
         conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"calendar_events migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_add_calendar_recurrence_exdates():
+    """Add skipped recurrence occurrences for deleting one instance of a series."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
+        if columns and "recurrence_exdates" not in columns:
+            conn.execute("ALTER TABLE calendar_events ADD COLUMN recurrence_exdates TEXT DEFAULT ''")
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"calendar_events recurrence_exdates migration failed: {e}")
     finally:
         try:
             conn.close()
