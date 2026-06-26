@@ -42,7 +42,7 @@ async def test_evaluate_turn_llm_failure(monkeypatch):
         return "http://endpoint.local/v1", "utility-model", {}
 
     async def fake_llm_call_async(url, model, messages, **kwargs):
-        return "this agent execution is a failure"
+        return "  \"Failure\"  "
 
     monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
     monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
@@ -57,6 +57,29 @@ async def test_evaluate_turn_llm_failure(monkeypatch):
 
     assert status == "failure"
     assert "LLM evaluation flagged failure" in reason
+
+
+@pytest.mark.asyncio
+async def test_evaluate_turn_llm_contains_failure_but_not_exact_match(monkeypatch):
+    def fake_resolve_endpoint(prefix, fallback_url=None, owner=None):
+        return "http://endpoint.local/v1", "utility-model", {}
+
+    async def fake_llm_call_async(url, model, messages, **kwargs):
+        return "this agent execution is not a failure"
+
+    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
+    monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
+
+    status, reason = await teacher_escalation.evaluate_turn_llm(
+        user_request="test request",
+        tool_results=[],
+        agent_reply="test reply",
+        student_endpoint_url="http://student.local/v1",
+        owner="alice",
+    )
+
+    assert status == "ok"
+    assert reason is None
 
 
 @pytest.mark.asyncio
@@ -86,7 +109,7 @@ async def test_evaluate_turn_llm_exception_handling(monkeypatch):
 @pytest.mark.asyncio
 async def test_maybe_escalate_triggers_tier2_background_task(monkeypatch):
     # Enable teacher settings
-    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model"}.get(key, default))
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model", "teacher_tier2_enabled": True}.get(key, default))
 
     # Regex check says OK
     monkeypatch.setattr("src.teacher_escalation.evaluate_turn_regex", lambda *args: ("ok", None))
@@ -126,9 +149,31 @@ async def test_maybe_escalate_triggers_tier2_background_task(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_maybe_escalate_tier2_disabled_by_default(monkeypatch):
+    # Enable teacher settings, but keep tier2 disabled
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model", "teacher_tier2_enabled": False}.get(key, default))
+
+    # Regex check says OK
+    monkeypatch.setattr("src.teacher_escalation.evaluate_turn_regex", lambda *args: ("ok", None))
+
+    # Call maybe_escalate
+    task = teacher_escalation.maybe_escalate(
+        student_endpoint_url="http://student.local/v1",
+        mode="agent",
+        user_request="test request",
+        tool_results=[],
+        agent_reply="test reply",
+        owner="alice",
+    )
+
+    # Should not start any background task since Tier 2 is disabled
+    assert task is None
+
+
+@pytest.mark.asyncio
 async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     # Settings and gates
-    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model"}.get(key, default))
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model", "teacher_tier2_enabled": True}.get(key, default))
     monkeypatch.setattr("src.ai_interaction._resolve_model", lambda spec, owner=None: ("http://teacher.local/v1", "teacher-model", {}))
 
     # Regex evaluation says "ok"
@@ -170,3 +215,25 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     assert any("teacher_takeover" in evt for evt in events)
     assert any("tool_output" in evt for evt in events)
     assert any("skill_saved" in evt for evt in events)
+
+
+@pytest.mark.asyncio
+async def test_run_teacher_inline_tier2_disabled_by_default(monkeypatch):
+    # Settings and gates (Tier 2 disabled)
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model", "teacher_tier2_enabled": False}.get(key, default))
+
+    # Regex evaluation says "ok"
+    monkeypatch.setattr("src.teacher_escalation.evaluate_turn_regex", lambda *args: ("ok", None))
+
+    events = []
+    async for evt in teacher_escalation.run_teacher_inline(
+        student_endpoint_url="http://student.local/v1",
+        student_messages=[{"role": "user", "content": "test request"}],
+        student_tool_events=[],
+        student_reply="student reply",
+        owner="alice",
+    ):
+        events.append(evt)
+
+    # Should exit early without any events (no takeover)
+    assert len(events) == 0

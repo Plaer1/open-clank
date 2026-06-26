@@ -420,8 +420,10 @@ async def evaluate_turn_llm(
             headers=headers,
             timeout=20,
         )
-        if response and "failure" in response.lower():
-            return ("failure", f"LLM evaluation flagged failure: {response.strip()}")
+        if response:
+            cleaned_response = response.strip().strip("'\"").lower()
+            if cleaned_response == "failure":
+                return ("failure", f"LLM evaluation flagged failure: {response.strip()}")
     except Exception as e:
         logger.warning(f"Tier 2 LLM self-eval failed: {e}")
 
@@ -529,6 +531,10 @@ def maybe_escalate(
             name="teacher_escalation",
         )
 
+    # Gate 4: Tier 2 LLM self-evaluation requires teacher_tier2_enabled
+    if not get_setting("teacher_tier2_enabled", False):
+        return None
+
     # Tier 2: LLM self-evaluation background task
     async def evaluate_and_maybe_escalate():
         llm_status, llm_reason = await evaluate_turn_llm(
@@ -597,7 +603,9 @@ async def run_teacher_inline(
 
     status, reason = evaluate_turn_regex(student_tool_events, student_reply)
     if status != "failure":
-        # Tier 2: LLM self-evaluation check
+        # Tier 2: LLM self-evaluation check requires teacher_tier2_enabled
+        if not get_setting("teacher_tier2_enabled", False):
+            return
         status, reason = await evaluate_turn_llm(
             user_request=user_request,
             tool_results=student_tool_events,
