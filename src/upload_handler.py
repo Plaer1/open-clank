@@ -112,7 +112,7 @@ class UploadHandler:
         except Exception:
             self.file_detector = None
             logger.warning("python-magic not available, falling back to basic detection")
-        
+
         # In-memory index cache to avoid O(N) disk I/O on every request
         self._index_cache: Optional[Dict[str, Any]] = None
         self._index_mtime: float = 0.0
@@ -368,7 +368,7 @@ class UploadHandler:
             except Exception as e:
                 logger.warning(f"Failed to read uploads database ({candidate}): {e}")
                 continue
-        
+
         self._index_cache = {}
         return {}
 
@@ -390,7 +390,7 @@ class UploadHandler:
         file_hash = info.get("hash")
         if file_hash:
             return f"{new_owner}:{file_hash}"
-        
+
         # Fallback for rows without an explicit hash (should not happen in modern Odysseus)
         if isinstance(key, str) and ":" in key:
             # Join all but the last part if there are multiple colons
