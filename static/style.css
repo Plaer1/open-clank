@@ -20145,7 +20145,7 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="max_seqs"]) {
   position: relative;
-  left: -64px;
+  left: -68px;
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="gpu_mem"]) {
   position: relative;
@@ -22314,6 +22314,8 @@ body.gallery-selecting .gallery-dl-btn,
   font: inherit;
   cursor: pointer;
   text-align: left;
+  position: relative;
+  top: -2px;
 }
 .hwfit-engine-btn-icon,
 .hwfit-engine-item-icon {
