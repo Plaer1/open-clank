@@ -20089,7 +20089,7 @@ body.gallery-selecting .gallery-dl-btn,
   margin: 0;
   flex: 0 0 auto;
   position: relative;
-  top: -4px;
+  top: -8px;
 }
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
