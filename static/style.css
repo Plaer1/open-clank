@@ -20521,7 +20521,7 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-serve-cmd {
   margin: 0;
   padding: 8px 10px;
-  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, var(--bg));
   border: 1px solid var(--border);
   border-top: none;
   border-radius: 4px;
