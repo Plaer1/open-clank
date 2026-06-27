@@ -513,12 +513,29 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   }
   const raw = Math.floor(freeForKv / kvGbPerToken);
   const rounded = Math.max(1024, Math.floor(raw / 1024) * 1024);
-  const ctx = Math.min(modelMax, rounded);
+  let ctx = Math.min(modelMax, rounded);
+  let reasonSuffix = '';
+  if (isUnifiedMode) {
+    // Unified memory should not advertise *less* context than plain GPU mode
+    // for the same llama.cpp launch. It may be slower when pages spill into
+    // system RAM, but the memory pool is at least the GPU path plus overflow.
+    const gpuUsableGb = Math.max(1, totalVramGb - Math.max(1.0, selectedCount * 0.6));
+    const gpuFreeForKv = gpuUsableGb - modelGb;
+    if (gpuFreeForKv > 0) {
+      const gpuRaw = Math.floor(gpuFreeForKv / kvGbPerToken);
+      const gpuRounded = Math.max(1024, Math.floor(gpuRaw / 1024) * 1024);
+      const gpuCtx = Math.min(modelMax, gpuRounded);
+      if (gpuCtx > ctx) {
+        ctx = gpuCtx;
+        reasonSuffix = `; floored to GPU estimate`;
+      }
+    }
+  }
   return {
     ctx,
     modelGb,
     kvGbPerToken,
-    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'})`,
+    reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}${reasonSuffix})`,
   };
 }
 
