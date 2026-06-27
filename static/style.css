@@ -20088,6 +20088,8 @@ body.gallery-selecting .gallery-dl-btn,
   justify-content: flex-end;
   margin: 0;
   flex: 0 0 auto;
+  position: relative;
+  top: -4px;
 }
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
@@ -20143,11 +20145,11 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="max_seqs"]) {
   position: relative;
-  left: -48px;
+  left: -56px;
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="gpu_mem"]) {
   position: relative;
-  left: -48px;
+  left: -56px;
 }
 .hwfit-serve-row-core .hwfit-gpus-label {
   position: relative;
