@@ -468,7 +468,7 @@ function _hwfitShowError(list, host, detail) {
   if (rb) rb.addEventListener('click', () => { _resetGpuToggleState(); _hwfitFetch(true); });
 }
 
-// Client-side "Engine" filter (llama.cpp / vLLM / SGLang / Ollama). Empty =
+// Client-side "Engine" filter (llama.cpp / vLLM / SGLang / Ollama / Diffusers). Empty =
 // show all. Uses the same _detectBackend() the serve commands use, so what you
 // filter to is exactly what would be launched. Pure view filter — no refetch
 // needed. Ollama rows are merged into the main list (see _ensureOllamaLib +
@@ -1804,6 +1804,83 @@ export function _expandModelRow(row, modelData) {
 
 }
 
+const _HWFIT_ENGINE_GLYPHS = {
+  '': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="8" cy="6" r="2" fill="currentColor" stroke="none"></circle><circle cx="16" cy="12" r="2" fill="currentColor" stroke="none"></circle><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"></circle></svg>',
+  vllm: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"></path><path d="M14 4l4 9 3-9"></path></svg>',
+  sglang: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
+  llamacpp: '<svg width="14" height="14" viewBox="0 0 600 600" fill="none" aria-hidden="true"><path d="M600 392L504.249 558L504.137 557.929C487.252 584.069 458.193 600 426.864 600H120L240 392H600Z" fill="currentColor"></path><path d="M240 392H0L199.602 46.0254C216.032 17.5463 246.411 0 279.29 0H466.154L240 392Z" fill="currentColor"></path></svg>',
+  ollama: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;"></span>',
+  diffusers: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"></path></svg>',
+};
+
+function _hwfitEngineGlyph(value) {
+  return _HWFIT_ENGINE_GLYPHS[value] || _HWFIT_ENGINE_GLYPHS[''];
+}
+
+function _bindHwfitEnginePicker(engine) {
+  const wrap = engine?.closest('.hwfit-engine-wrap');
+  const btn = wrap?.querySelector('[data-hwfit-engine-btn]');
+  const menu = wrap?.querySelector('[data-hwfit-engine-menu]');
+  const icon = wrap?.querySelector('[data-hwfit-engine-icon]');
+  const label = wrap?.querySelector('[data-hwfit-engine-label]');
+  if (!engine || !wrap || !btn || !menu || wrap.dataset.enginePickerBound) return;
+  wrap.dataset.enginePickerBound = '1';
+
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const currentLabel = () => {
+    const opt = Array.from(engine.options).find((o) => o.value === engine.value);
+    return opt?.textContent || 'Engine';
+  };
+  const syncButton = () => {
+    if (label) label.textContent = currentLabel();
+    if (icon) icon.innerHTML = _hwfitEngineGlyph(engine.value);
+    menu.querySelectorAll('[data-hwfit-engine-value]').forEach((item) => {
+      const active = item.dataset.hwfitEngineValue === engine.value;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  };
+  const renderMenu = () => {
+    menu.innerHTML = Array.from(engine.options).map((opt) => (
+      `<button type="button" role="option" class="hwfit-engine-item" data-hwfit-engine-value="${opt.value}">`
+      + `<span class="hwfit-engine-item-icon" aria-hidden="true">${_hwfitEngineGlyph(opt.value)}</span>`
+      + `<span class="hwfit-engine-item-label">${opt.textContent}</span>`
+      + '</button>'
+    )).join('');
+    menu.querySelectorAll('[data-hwfit-engine-value]').forEach((item) => {
+      item.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const next = item.dataset.hwfitEngineValue || '';
+        if (engine.value !== next) {
+          engine.value = next;
+          engine.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        syncButton();
+        setOpen(false);
+      });
+    });
+    syncButton();
+  };
+
+  btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setOpen(menu.hidden);
+  });
+  engine.addEventListener('change', syncButton);
+  document.addEventListener('click', (ev) => {
+    if (!wrap.contains(ev.target)) setOpen(false);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') setOpen(false);
+  });
+  renderMenu();
+}
+
 export function _hwfitInit() {
   const uc = document.getElementById('hwfit-usecase');
   const sort = document.getElementById('hwfit-sort');
@@ -1819,6 +1896,7 @@ export function _hwfitInit() {
   // Engine filter is a pure client-side view filter over the already-fetched
   // list (HF + Ollama merged), so just re-render from cache.
   const engine = document.getElementById('hwfit-engine');
+  if (engine) _bindHwfitEnginePicker(engine);
   if (engine) engine.addEventListener('change', () => {
     const list = document.getElementById('hwfit-list');
     if (list && _hwfitCache && Array.isArray(_hwfitCache.models)) {

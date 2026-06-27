@@ -2692,13 +2692,20 @@ function _renderRecipes() {
   // levers (Engine / Quant / Context) live to the right.
   html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
   html += '<span class="hwfit-engine-wrap">';
-  html += '<select class="cookbook-field-input hwfit-engine" id="hwfit-engine" style="height:28px;" title="Filter by serving engine">';
+  html += '<select class="cookbook-field-input hwfit-engine" id="hwfit-engine" style="display:none;" title="Filter by serving engine">';
   html += '<option value="">Engine</option>';
   html += '<option value="llamacpp">llama.cpp</option>';
   html += '<option value="ollama">Ollama</option>';
   html += '<option value="vllm">vLLM</option>';
   html += '<option value="sglang">SGLang</option>';
+  html += '<option value="diffusers">Diffusers</option>';
   html += '</select>';
+  html += '<button type="button" class="cookbook-field-input hwfit-engine-btn" data-hwfit-engine-btn aria-haspopup="listbox" aria-expanded="false" title="Filter by serving engine">';
+  html += '<span class="hwfit-engine-btn-icon" data-hwfit-engine-icon aria-hidden="true"></span>';
+  html += '<span class="hwfit-engine-btn-label" data-hwfit-engine-label>Engine</span>';
+  html += '<svg class="hwfit-engine-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+  html += '</button>';
+  html += '<div class="hwfit-engine-menu" data-hwfit-engine-menu role="listbox" hidden></div>';
   html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-engine-help" title="Rule of thumb: GGUF on single GPU / CPU+RAM → llama.cpp (or Ollama). Safetensors on multi-GPU NVIDIA → vLLM. SGLang is a vLLM-class alternative, sometimes faster on big-MoE / long-context.">?</span>';
   html += '</span>';
   // Quant (Q4/Q8/…). Default is "All" so the list shows the best-scoring

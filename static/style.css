@@ -20479,7 +20479,7 @@ body.gallery-selecting .gallery-dl-btn,
   width: 100%;
 }
 .hwfit-serve-cmd-details {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
 }
 .hwfit-serve-cmd-summary {
   display: flex;
@@ -22201,6 +22201,7 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-toolbar .hwfit-usecase { min-width: 70px; flex-shrink: 0; }
 .hwfit-toolbar .hwfit-quant { min-width: 0; width: 78px; flex-shrink: 0; font-size: 10px; }
 .hwfit-toolbar .hwfit-engine { min-width: 0; width: 86px; flex-shrink: 0; font-size: 10px; }
+.hwfit-toolbar .hwfit-engine-btn { min-width: 0; width: 86px; flex-shrink: 0; font-size: 10px; }
 .hwfit-toolbar .hwfit-search { flex: 1; min-width: 80px; }
 /* Lower-opacity "Search models..." placeholder so it reads as a hint, not
    a label — matches the muted form-field feel of the inline filters. */
@@ -22270,6 +22271,83 @@ body.gallery-selecting .gallery-dl-btn,
   position: relative;
   display: inline-flex;
   align-items: center;
+}
+.hwfit-engine-btn {
+  height: 28px;
+  padding: 0 30px 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.hwfit-engine-btn-icon,
+.hwfit-engine-item-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent, var(--red));
+  flex-shrink: 0;
+}
+.hwfit-engine-btn-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hwfit-engine-caret {
+  position: absolute;
+  right: 6px;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.hwfit-engine-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 120;
+  padding: 4px;
+  background: var(--panel, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.22);
+}
+.hwfit-engine-item {
+  width: 100%;
+  min-height: 26px;
+  padding: 5px 7px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.hwfit-engine-item:hover,
+.hwfit-engine-item.active {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.hwfit-engine-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hwfit-quant-wrap .hwfit-quant,
 .hwfit-engine-wrap .hwfit-engine {
@@ -24055,6 +24133,16 @@ details.hwfit-serve-advanced > .hwfit-llama-batch-row,
 details.hwfit-serve-advanced > .hwfit-llama-monitor-row,
 details.hwfit-serve-advanced > .hwfit-llama-checks-row {
   margin-top: -18px !important;
+}
+details.hwfit-serve-advanced > .hwfit-diff-settings-row {
+  row-gap: 2px;
+}
+details.hwfit-serve-advanced > .hwfit-diff-checks-row,
+details.hwfit-serve-advanced > .hwfit-diff-harmonize-row {
+  margin-top: -10px !important;
+}
+details.hwfit-serve-advanced > .hwfit-diff-checks-row {
+  row-gap: 2px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;

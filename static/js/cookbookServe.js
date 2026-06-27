@@ -1390,7 +1390,7 @@ function _rerenderCachedModels() {
       // Row 2b: Diffusers settings
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
       const deviceMapOpts = ['balanced','auto','sequential'].map(d => `<option value="${d}"${sv('diff_device_map','balanced')===d?' selected':''}>${d}</option>`).join('');
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers hwfit-diff-settings-row">`;
       panelHtml += `<label>Dtype${_h('Precision. bfloat16 recommended for Flux, float16 for SD')} <select class="hwfit-sf" data-field="diff_dtype">${diffDtypeOpts}</select></label>`;
       panelHtml += `<label>Device Map${_h('How to place model on GPUs. balanced = split evenly')} <select class="hwfit-sf" data-field="diff_device_map">${deviceMapOpts}</select></label>`;
       panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', ''))}" placeholder="auto" /></label>`;
@@ -1495,11 +1495,11 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads.')} <input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /></label>`;
       panelHtml += `</div>`;
       // Row 3b: Checkboxes (diffusers)
-      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers">`;
+      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers hwfit-diff-checks-row">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_offload"${sv('diff_offload',false)?' checked':''} /> CPU Offload${_h('Offload parts of model to CPU RAM to save VRAM. Slower but fits larger models')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_attention_slicing"${sv('diff_attention_slicing',false)?' checked':''} /> Attention Slicing${_h('Slice attention computation to reduce peak VRAM. Slower')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_vae_slicing"${sv('diff_vae_slicing',false)?' checked':''} /> VAE Slicing${_h('Process VAE in slices. Reduces VRAM for high-res images')}</label>`;
-      panelHtml += `</div><div class="hwfit-serve-row hwfit-backend-diffusers">`;
+      panelHtml += `</div><div class="hwfit-serve-row hwfit-backend-diffusers hwfit-diff-harmonize-row">`;
       panelHtml += `<label>Harmonize GPU${_h('Separate GPU for img2img/harmonize. Leave empty to use same GPU')}<input type="text" class="hwfit-sf" data-field="diff_harmonize_gpu" value="${esc(sv('diff_harmonize_gpu', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `</div>`;
       // Model-specific optimizations. The checks row always renders for the
