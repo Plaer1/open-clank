@@ -20069,7 +20069,7 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-serve-preset-row {
   display: flex;
   justify-content: flex-end;
-  margin: 4px 0 6px;
+  margin: 0 0 6px;
 }
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
@@ -20086,7 +20086,7 @@ body.gallery-selecting .gallery-dl-btn,
   }
   .hwfit-serve-preset-row {
     justify-content: flex-end;
-    margin: 2px 0 6px;
+    margin: -2px 0 6px;
   }
 }
 .hwfit-serve-row label {
@@ -24041,6 +24041,12 @@ details.hwfit-serve-advanced > .hwfit-serve-checks.hwfit-backend-llamacpp {
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp {
   column-gap: 8px;
   row-gap: 2px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp.cookbook-llama-gpu-only {
+  margin-top: -10px;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp:not(.cookbook-llama-gpu-only):has(.hwfit-sf[data-field="cache_type"]) {
+  margin-top: -10px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;
