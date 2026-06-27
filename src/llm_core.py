@@ -677,6 +677,8 @@ def _detect_provider(url: str) -> str:
     from src.copilot import is_copilot_base
     if is_copilot_base(url):
         return "copilot"
+    if _host_match(url, "cerebras.ai"):
+        return "cerebras"
     if _host_match(url, "mistral.ai"):
         return "mistral"
     return "openai"
@@ -763,6 +765,8 @@ def _provider_label(url: str) -> str:
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
     from src.copilot import is_copilot_base
     if is_copilot_base(url): return "GitHub Copilot"
+    if _host_match(url, "cerebras.ai"):
+        return "cerebras"
     if _host_match(url, "mistral.ai"): return "Mistral"
     if _host_match(url, "deepseek.com"): return "DeepSeek"
     if _host_match(url, "nvidia.com"): return "NVIDIA"
