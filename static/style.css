@@ -24076,7 +24076,7 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_attn_backend"]
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_block_size"]) {
   position: relative;
-  left: -53px;
+  left: -55px;
 }
 details.hwfit-serve-advanced .hwfit-sf[data-field="vllm_block_size"] {
   width: calc(100% - 6px);
