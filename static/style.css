@@ -19350,7 +19350,7 @@ body.gallery-selecting .gallery-dl-btn,
   margin-top: -4px;
 }
 .cookbook-gpu-btn {
-  width: 28px; height: 26px;
+  width: 32px; height: 32px;
   font-size: 12px;
   font-family: 'Fira Code', monospace;
   border: 1px solid var(--border);
@@ -20145,7 +20145,7 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="max_seqs"]) {
   position: relative;
-  left: -68px;
+  left: -66px;
 }
 .hwfit-serve-row-core label:has(.hwfit-sf[data-field="gpu_mem"]) {
   position: relative;
@@ -21471,8 +21471,8 @@ body.gallery-selecting .gallery-dl-btn,
   white-space: nowrap;
 }
 .cookbook-gpu-btn {
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   font-size: 11px;
   font-family: inherit;
@@ -22315,7 +22315,7 @@ body.gallery-selecting .gallery-dl-btn,
   cursor: pointer;
   text-align: left;
   position: relative;
-  top: -2px;
+  top: -4px;
 }
 .hwfit-engine-btn-icon,
 .hwfit-engine-item-icon {
