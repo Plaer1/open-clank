@@ -561,8 +561,9 @@ function _ollamaToHwfitRows(libModels, vramAvail, ramAvail) {
   return out;
 }
 
-export async function _hwfitFetch(fresh = false) {
+export async function _hwfitFetch(fresh = false, opts = {}) {
   const _tk = ++_hwfitFetchToken;
+  const allowNetwork = fresh || opts.allowNetwork !== false;
   const useCase = document.getElementById('hwfit-usecase')?.value || '';
   const search = document.getElementById('hwfit-search')?.value?.trim() || '';
   const remoteHost = _envState.remoteHost || '';
@@ -588,6 +589,13 @@ export async function _hwfitFetch(fresh = false) {
     }
     _hwfitRenderList(list, _applyEngineFilter(_cached.models));
   } else {
+    if (!allowNetwork) {
+      _hwfitCache = null;
+      _hwfitRenderHw(hw, null);
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Press Scan to test hardware and rank models for this server.</div></div>';
+      try { wp.destroy(); } catch {}
+      return;
+    }
     // Show spinner while scanning — stack the spinner above a text label
     // (the .hwfit-loading class is a centered flex ROW, so force column here).
     const loadingDiv = document.createElement('div');
@@ -605,6 +613,10 @@ export async function _hwfitFetch(fresh = false) {
     list.innerHTML = '';
     list.appendChild(loadingDiv);
     _hwfitCache = null;   // no instant paint — clear until the fetch returns
+  }
+  if (!allowNetwork) {
+    try { wp.destroy(); } catch {}
+    return;
   }
   // Only fetch cached model IDs when server changes, not on every search/sort
   const remoteKey = _currentServerValue();
@@ -2168,15 +2180,12 @@ export function _hwfitInit() {
         }
       });
     });
-    // Auto-test when host or port blur
+    // Manual connectivity test after editing host or port. Existing saved
+    // servers are not auto-tested on panel open; unreachable hosts can stall the
+    // Cookbook UI and make opening the panel feel blocked.
     entry.querySelectorAll('.cookbook-srv-host, .cookbook-srv-port').forEach(el => {
       el.addEventListener('blur', () => _testServerConnection(entry));
     });
-    // Initial test for pre-filled rows (existing servers on tab load)
-    if (entry.querySelector('.cookbook-srv-host')?.value?.trim() && !entry.dataset.tested) {
-      entry.dataset.tested = '1';
-      _testServerConnection(entry);
-    }
     // Cancel button on a brand-new server entry: discard it (no confirm — it's
     // unsaved) and re-sync so the dropped blank server doesn't linger.
     const cancelBtn = entry.querySelector('.cookbook-server-cancel-btn');

@@ -3663,9 +3663,10 @@ function _renderCachedModelsData(list, data, host) {
   _rerenderCachedModels();
 }
 
-export async function _fetchCachedModels(fresh = false) {
+export async function _fetchCachedModels(fresh = false, opts = {}) {
   const list = document.getElementById('hwfit-cached-list');
   if (!list) return;
+  const allowNetwork = fresh || opts.allowNetwork !== false;
 
   list.innerHTML = '';
   const _dlWp = spinnerModule.createWhirlpool(22);
@@ -3738,6 +3739,13 @@ export async function _fetchCachedModels(fresh = false) {
     if (cached) {
       _dlWp.destroy();
       _renderCachedModelsData(list, cached, host);
+      return;
+    }
+    if (!allowNetwork) {
+      _dlWp.destroy();
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached model scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Press Scan to check this server\'s model cache.</div></div>';
+      const tagContainer = document.getElementById('serve-tags');
+      if (tagContainer) tagContainer.innerHTML = '';
       return;
     }
     const res = await fetch(`/api/model/cached${params}`);

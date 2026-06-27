@@ -1640,10 +1640,10 @@ function _wireTabEvents(body) {
       });
       if (backend === 'Search') {
         _hwfitInit();
-        _hwfitFetch();
+        _hwfitFetch(false, { allowNetwork: false });
       }
       if (backend === 'Serve') {
-        _fetchCachedModels();
+        _fetchCachedModels(false, { allowNetwork: false });
       }
       if (backend === 'Dependencies') {
         _fetchDependencies();
@@ -1746,7 +1746,7 @@ function _wireTabEvents(body) {
       _applyServerSelection(dlServer.value);
       // Reset toggle state (no flicker) so the new server's hardware re-renders.
       _resetGpuToggleState();
-      _hwfitFetch();
+      _hwfitFetch(false, { allowNetwork: false });
     });
   }
 
@@ -1783,7 +1783,7 @@ function _wireTabEvents(body) {
           if (settingsTab) settingsTab.click();
         });
       }
-      _fetchCachedModels();
+      _fetchCachedModels(false, { allowNetwork: false });
     });
   }
 
@@ -2863,7 +2863,7 @@ function _renderRecipes() {
 
   // Auto-init What Fits
   _hwfitInit();
-  _hwfitFetch();
+  _hwfitFetch(false, { allowNetwork: false });
 }
 
 // ── Public API ──

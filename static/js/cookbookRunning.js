@@ -1862,6 +1862,7 @@ export function _renderRunningTab() {
       body.querySelectorAll('.cookbook-group').forEach(g => {
         g.classList.toggle('hidden', g.dataset.backendGroup !== 'Running');
       });
+      setTimeout(() => _renderRunningTab(), 0);
     });
   } else if (runTab) {
     const _errCount2 = tasks.filter(t => t.status === 'error' || t.status === 'crashed').length;
@@ -2712,7 +2713,7 @@ export function _renderRunningTab() {
     // responds; without this, the user opens the Running tab and sees
     // only the placeholder ("Launched by scheduled task …") because
     // _reconnectTask never fires for status 'ready'/'loading'/'warming'.
-    if (['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status)) {
+    if (_isRunningTabVisible() && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status)) {
       _reconnectTask(el, task);
     }
   }
@@ -3438,6 +3439,23 @@ async function _reconnectTask(el, task) {
 
 let _bgMonitorInterval = null;
 
+function _hasLiveTasks(tasks = null) {
+  const list = tasks || _loadTasks();
+  return list.some(t =>
+    t.status === 'running'
+    || t.status === 'queued'
+    || t.status === 'ready'
+    || _downloadOutputLooksActive(t)
+  );
+}
+
+function _isRunningTabVisible() {
+  const modal = document.getElementById('cookbook-modal');
+  if (!modal || modal.classList.contains('hidden')) return false;
+  const activeTab = modal.querySelector('.cookbook-tab.active')?.dataset?.backend || '';
+  return activeTab === 'Running';
+}
+
 // Reachability check for running serve tasks. The tmux pane can stay alive
 // while the model server inside it has crashed (so no "Process exited" line
 // ever appears) — leaving the card showing "running" forever. So we actively
@@ -3656,7 +3674,9 @@ export function _startBackgroundMonitor() {
     // crashed/etc. whose tmux session is actually still running, and flip
     // them back to running. Internally throttled to 8s so a manual call from
     // the open path or a fast invocation doesn't double up.
-    _selfHealStaleTasks().catch(() => {});
+    if (_hasLiveTasks() || _isRunningTabVisible()) {
+      _selfHealStaleTasks().catch(() => {});
+    }
   }, BG_MONITOR_INTERVAL_MS);
   _pollBackgroundStatus();
   _checkServeReachability();
@@ -3972,17 +3992,15 @@ export function initRunning(shared) {
   _detectModelOptimizations = shared._detectModelOptimizations;
   _buildServeCmd = shared._buildServeCmd;
 
-  // App boot: pull authoritative state from server, then auto-start
-  // the background monitor unconditionally. Used to gate on "already
-  // has running tasks" but that meant when the agent (or anyone)
-  // added a task after boot, the UI never noticed. 10s poll of a
-  // small status endpoint is cheap and gives the agent + the UI a
-  // shared live picture.
+  // App boot: pull authoritative state from server, but don't start the
+  // running-task monitor unless there is real work to watch. Starting it
+  // unconditionally made a plain Cookbook open keep probing stale tmux/SSH
+  // sessions, which is expensive when a saved remote host is unreachable.
   (async () => {
     try {
       await _syncFromServer();
     } catch {}
-    _startBackgroundMonitor();
+    if (_hasLiveTasks()) _startBackgroundMonitor();
   })();
 }
 

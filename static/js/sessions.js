@@ -2,7 +2,7 @@
 // This module handles all session-related operations
 
 import Storage from './storage.js';
-import uiModule, { styledPrompt } from './ui.js';
+import uiModule, { autoResize, styledPrompt } from './ui.js';
 import markdownModule from './markdown.js';
 import chatRenderer from './chatRenderer.js';
 import { providerLogo } from './providers.js';
@@ -1859,6 +1859,9 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     if (msgInput) {
       msgInput.disabled = false;
       msgInput.value = '';
+      msgInput.style.height = '';
+      msgInput.style.overflow = '';
+      autoResize(msgInput);
     }
     const sendBtn2 = document.querySelector('.send-btn');
     if (sendBtn2) {
