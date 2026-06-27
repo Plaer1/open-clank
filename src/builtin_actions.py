@@ -569,6 +569,21 @@ async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
+async def action_email_auto_translate(owner: str, **kwargs) -> Tuple[str, bool]:
+    """Placeholder for the opt-in email translation enrichment task.
+
+    The task is seeded paused so it is visible in Tasks while the detector,
+    cache, and on-demand translation path are built. Returning False makes a
+    manual run show a clear message instead of pretending work happened.
+    """
+    return (
+        "Email auto-translate is registered but not implemented yet. "
+        "Next step: detect foreign-language emails, cache translations by body hash, "
+        "and stream translated text in the email reader without replacing the original.",
+        False,
+    )
+
+
 _TYPE_COLORS = {
     "work":     "#5b8abf",  # blue
     "personal": "#a07ae0",  # purple
@@ -2487,6 +2502,7 @@ BUILTIN_ACTIONS = {
     "tidy_research": action_tidy_research,
     "summarize_emails": action_summarize_emails,
     "draft_email_replies": action_draft_email_replies,
+    "email_auto_translate": action_email_auto_translate,
     "extract_email_events": action_extract_email_events,
     "classify_events": action_classify_events,
     # ping_events removed from the user-facing registry. Calendar reminders
@@ -2511,6 +2527,7 @@ BUILTIN_ACTION_INFO = {
     "tidy_research": "Remove orphaned research files (sessions that were deleted)",
     "summarize_emails": "Pre-generate AI summaries for new inbox emails",
     "draft_email_replies": "Pre-draft AI reply suggestions for new inbox emails",
+    "email_auto_translate": "Detect foreign-language emails and cache translated text for the email reader",
     "extract_email_events": "Scan emails for booking/meeting confirmations and auto-add to calendar",
     "classify_events": "Tag upcoming events with importance (low/normal/high/critical) and type (work/health/travel/etc.); colors them too",
     "daily_brief": "Build a morning digest: today's calendar, unread email count + top senders, active todos",

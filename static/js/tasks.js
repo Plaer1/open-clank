@@ -215,6 +215,7 @@ async function _saveUrgentEmailSettings(prompt) {
 const _EMAIL_ACCOUNT_ACTIONS = new Set([
   'summarize_emails',
   'draft_email_replies',
+  'email_auto_translate',
   'extract_email_events',
   'check_email_urgency',
 ]);
@@ -391,6 +392,7 @@ const _TASK_ICONS = {
   // Email
   summarize_emails:    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
   draft_email_replies: '<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+  email_auto_translate:'<path d="M5 8h9"/><path d="M9 4v4"/><path d="M4 13c2.2-.2 4.2-1.1 5.5-2.8"/><path d="M10.5 13c-1.1-.6-2-1.5-2.7-2.8"/><path d="M14 20l4-9 4 9"/><path d="M15.4 17h5.2"/>',
   extract_email_events:'<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M7 14h5"/><path d="M7 18h8"/>',
   classify_events:    '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M8 15h.01M12 15h.01M16 15h.01"/>',
   learn_sender_signatures:'<path d="M20 6 9 17l-5-5"/><path d="M14 6h6v6"/>',
@@ -418,6 +420,7 @@ function _taskIcon(task) {
 const _MODEL_BACKED_ACTIONS = new Set([
   'summarize_emails',
   'draft_email_replies',
+  'email_auto_translate',
   'extract_email_events',
   'classify_events',
   'learn_sender_signatures',
@@ -562,6 +565,7 @@ const _CATEGORY_MAP = {
   extract_email_events: 'Calendar',
   summarize_emails:           'Email',
   draft_email_replies:        'Email',
+  email_auto_translate:       'Email',
   learn_sender_signatures:    'Email',
   check_email_urgency:        'Email',
   daily_brief:                'Assistant',
@@ -678,6 +682,7 @@ function _renderTaskChips() {
 const _TASK_CACHE_LABELS = {
   summarize_emails: 'email summaries',
   draft_email_replies: 'AI reply drafts',
+  email_auto_translate: 'email translations',
   extract_email_events: 'email calendar cache',
   learn_sender_signatures: 'sender signatures',
   check_email_urgency: 'email tags',

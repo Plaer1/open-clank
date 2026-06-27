@@ -239,6 +239,7 @@ HOUSEKEEPING_DEFAULTS = {
     "tidy_research":        {"name": "Research Tidy",            "trigger_type": "event", "trigger_event": "research_completed", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Research"]},
     "summarize_emails":     {"name": "Email (Summary)",          "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Tidy Email (Summary)"]},
     "draft_email_replies":  {"name": "Email AI Auto Reply",      "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Tidy Email (Replies)", "AI Auto Reply"]},
+    "email_auto_translate": {"name": "Auto-translate Emails",    "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Auto Translate Email", "Email Auto Translate"]},
     "extract_email_events": {"name": "Email Calendar Events",    "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */1 * * *", "ship_paused": True, "legacy_names": ["Email → Calendar Events"]},
     "classify_events":      {"name": "Calendar Classify Events", "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 6,18 * * *", "ship_paused": True, "legacy_names": ["Classify Calendar Events"]},
     "check_email_urgency":   {"name": "Email Tags",               "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 * * * *", "ship_paused": True, "old_cron_expressions": ["*/15 * * * *"], "legacy_names": ["Email Triage", "Urgent Email"]},
@@ -1014,6 +1015,7 @@ class TaskScheduler:
         "learn_sender_signatures",
         "summarize_emails",
         "draft_email_replies",
+        "email_auto_translate",
         "extract_email_events",
         "classify_events",
         "tidy_sessions",
@@ -1027,6 +1029,7 @@ class TaskScheduler:
     _MODEL_BACKED_ACTIONS = frozenset({
         "summarize_emails",
         "draft_email_replies",
+        "email_auto_translate",
         "extract_email_events",
         "classify_events",
         "learn_sender_signatures",
