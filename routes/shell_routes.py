@@ -1148,7 +1148,7 @@ def setup_shell_routes() -> APIRouter:
             {
                 "name": "diffusers",
                 "pip": "diffusers[torch]",
-                "desc": "Image generation pipelines (SD, Flux) with PyTorch",
+                "desc": "Image generation/editing pipelines (SD, Flux) with PyTorch",
                 "category": "Image",
                 "target": "remote",
             },
