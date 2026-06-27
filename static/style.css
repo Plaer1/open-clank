@@ -20066,10 +20066,28 @@ body.gallery-selecting .gallery-dl-btn,
   position: relative;
   left: -33px;
 }
+.hwfit-serve-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+.hwfit-serve-topline .hwfit-serve-runtime-note {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.hwfit-serve-topline .hwfit-serve-runtime-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .hwfit-serve-preset-row {
   display: flex;
   justify-content: flex-end;
-  margin: 0 0 6px;
+  margin: 0;
+  flex: 0 0 auto;
 }
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
@@ -20086,7 +20104,16 @@ body.gallery-selecting .gallery-dl-btn,
   }
   .hwfit-serve-preset-row {
     justify-content: flex-end;
-    margin: -2px 0 6px;
+    margin: -2px 0 0;
+  }
+  .hwfit-serve-topline {
+    flex-wrap: wrap;
+  }
+  .hwfit-serve-topline .hwfit-serve-runtime-note {
+    flex-basis: 100%;
+  }
+  .hwfit-serve-topline .hwfit-serve-runtime-text {
+    white-space: normal;
   }
 }
 .hwfit-serve-row label {
