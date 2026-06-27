@@ -24062,7 +24062,7 @@ details.hwfit-serve-advanced > .hwfit-serve-row label input {
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_attn_backend"]) {
   position: relative;
-  left: -79px;
+  left: -71px;
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_block_size"]) {
   position: relative;
