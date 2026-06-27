@@ -3743,7 +3743,10 @@ export async function _fetchCachedModels(fresh = false, opts = {}) {
     }
     if (!allowNetwork) {
       _dlWp.destroy();
-      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached model scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Press Scan to check this server\'s model cache.</div></div>';
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:8px;text-align:center;"><div>No cached model scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Check this server\'s model cache.</div><button type="button" class="hwfit-gpu-btn serve-empty-scan-btn" style="height:26px;padding:3px 10px;">Scan</button></div>';
+      list.querySelector('.serve-empty-scan-btn')?.addEventListener('click', () => {
+        _fetchCachedModels(true);
+      });
       const tagContainer = document.getElementById('serve-tags');
       if (tagContainer) tagContainer.innerHTML = '';
       return;

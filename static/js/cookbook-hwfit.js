@@ -592,7 +592,11 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
     if (!allowNetwork) {
       _hwfitCache = null;
       _hwfitRenderHw(hw, null);
-      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Press Scan to test hardware and rank models for this server.</div></div>';
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:8px;text-align:center;"><div>No cached scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Test hardware and rank models for this server.</div><button type="button" class="hwfit-gpu-btn hwfit-empty-scan-btn" style="height:26px;padding:3px 10px;">Scan</button></div>';
+      list.querySelector('.hwfit-empty-scan-btn')?.addEventListener('click', () => {
+        _resetGpuToggleState();
+        _hwfitFetch(true);
+      });
       try { wp.destroy(); } catch {}
       return;
     }
