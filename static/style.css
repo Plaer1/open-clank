@@ -24034,7 +24034,7 @@ details.hwfit-serve-advanced > .hwfit-serve-row {
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp,
 details.hwfit-serve-advanced > .hwfit-serve-checks.hwfit-backend-llamacpp {
-  margin-top: -18px;
+  margin-top: -20px;
   position: relative;
   left: 4px;
 }
@@ -24043,10 +24043,10 @@ details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp {
   row-gap: 2px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp.cookbook-llama-gpu-only {
-  margin-top: -10px;
+  margin-top: -8px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp:not(.cookbook-llama-gpu-only):has(.hwfit-sf[data-field="cache_type"]) {
-  margin-top: -10px;
+  margin-top: -8px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;
