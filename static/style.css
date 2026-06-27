@@ -24046,7 +24046,7 @@ details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp.cookbook-
   margin-top: -8px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp:not(.cookbook-llama-gpu-only):has(.hwfit-sf[data-field="cache_type"]) {
-  margin-top: -12px;
+  margin-top: -14px;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;
