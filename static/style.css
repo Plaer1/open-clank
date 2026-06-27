@@ -19350,7 +19350,7 @@ body.gallery-selecting .gallery-dl-btn,
   margin-top: -4px;
 }
 .cookbook-gpu-btn {
-  width: 32px; height: 32px;
+  width: 30px; height: 30px;
   font-size: 12px;
   font-family: 'Fira Code', monospace;
   border: 1px solid var(--border);
@@ -21471,8 +21471,8 @@ body.gallery-selecting .gallery-dl-btn,
   white-space: nowrap;
 }
 .cookbook-gpu-btn {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   font-size: 11px;
   font-family: inherit;
