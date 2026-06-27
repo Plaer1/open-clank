@@ -20339,9 +20339,15 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-sf[data-field="backend"],
 .hwfit-sf[data-field="dtype"],
 .hwfit-sf[data-field="tp"] {
-  height: 28px;
+  height: 32px;
   box-sizing: border-box;
   width: 100%;
+}
+.hwfit-extra-env-label {
+  grid-column: 1 / -1;
+}
+.hwfit-serve-panel[data-backend-active="vllm"] .hwfit-extra-env-label {
+  grid-column: 2 / -1;
 }
 .hwfit-sf:focus {
   border-color: var(--accent, var(--red));
