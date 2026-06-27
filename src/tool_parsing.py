@@ -31,6 +31,12 @@ _TOOL_CALL_RE = re.compile(
     r"\[TOOL_CALL\]\s*\{([\s\S]*?)\}\s*\[/TOOL_CALL\]",
     re.IGNORECASE,
 )
+# Same delimiters as _TOOL_CALL_RE, split so they can be driven by
+# _iter_delimited (a forward-only scan). The closer is `}\s*[/TOOL_CALL]`, so a
+# present-but-unmatched `[/TOOL_CALL]` with no inner `}` ahead simply ends the
+# scan instead of triggering re.finditer's O(n^2) rescan. See _iter_delimited.
+_TOOL_CALL_OPEN_RE = re.compile(r"\[TOOL_CALL\]\s*\{", re.IGNORECASE)
+_TOOL_CALL_CLOSE_RE = re.compile(r"\}\s*\[/TOOL_CALL\]", re.IGNORECASE)
 
 # Pattern 3: XML-style tool calls (minimax, some other models)
 # <minimax:tool_call><invoke name="bash"><parameter name="command">...</parameter></invoke></minimax:tool_call>
@@ -41,6 +47,15 @@ _XML_TOOL_CALL_RE = re.compile(
 )
 _XML_OPEN_TOOL_CALL_RE = re.compile(
     r"<(?:[\w]+:)?(?:tool_call|function_call)>\s*([\s\S]*)\Z",
+    re.IGNORECASE,
+)
+# _XML_TOOL_CALL_RE's delimiters, split for _iter_delimited's forward-only scan.
+_XML_TOOL_CALL_OPEN_RE = re.compile(
+    r"<(?:[\w]+:)?(?:tool_call|function_call)>\s*",
+    re.IGNORECASE,
+)
+_XML_TOOL_CALL_CLOSE_RE = re.compile(
+    r"</(?:[\w]+:)?(?:tool_call|function_call)>",
     re.IGNORECASE,
 )
 _XML_INVOKE_RE = re.compile(
@@ -73,6 +88,9 @@ _TOOL_CODE_RE = re.compile(
     r"<tool_code>\s*\{([\s\S]*?)\}\s*</tool_code>",
     re.IGNORECASE,
 )
+# _TOOL_CODE_RE's delimiters, split for _iter_delimited's forward-only scan.
+_TOOL_CODE_OPEN_RE = re.compile(r"<tool_code>\s*\{", re.IGNORECASE)
+_TOOL_CODE_CLOSE_RE = re.compile(r"\}\s*</tool_code>", re.IGNORECASE)
 
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
@@ -736,6 +754,52 @@ def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
     return None
 
 
+def _iter_delimited(text, open_re, close_re):
+    """Yield ``(match_start, inner_start, inner_end, match_end)`` for each
+    non-overlapping ``open_re ... close_re`` pair, scanning strictly forward.
+
+    For the lazy, non-nesting delimiters here this is equivalent to
+    ``re.finditer`` of ``open_re([\\s\\S]*?)close_re`` (each opener pairs with
+    the first closer after it; the next scan resumes past that closer), but it
+    runs in O(n): the moment an opener has no reachable closer, no later opener
+    can have one either, so we stop. ``re.finditer`` instead retries from every
+    opener and rescans to end-of-string each time -> O(n^2) on attacker-
+    controlled "many openers, no closer" model output (CodeQL py/polynomial-redos).
+
+    A whole-string "is the closer present?" guard is not enough: a stale closer
+    placed before an opener flood, or a closer with no matching inner delimiter
+    (e.g. `[/TOOL_CALL]` but no `}`), keeps the guard true while every opener
+    still rescans. Pairing each opener only with a closer *after* it closes both
+    holes.
+    """
+    pos = 0
+    while True:
+        om = open_re.search(text, pos)
+        if om is None:
+            return
+        cm = close_re.search(text, om.end())
+        if cm is None:
+            return
+        yield om.start(), om.end(), cm.start(), cm.end()
+        pos = cm.end()
+
+
+def _strip_delimited(text: str, open_re, close_re) -> str:
+    """Remove every ``open_re ... close_re`` span (forward-only; see
+    _iter_delimited). Equivalent to ``open_re([\\s\\S]*?)close_re`` ``re.sub('')``
+    for these delimiters, without the O(n^2) rescan on unclosed openers."""
+    spans = list(_iter_delimited(text, open_re, close_re))
+    if not spans:
+        return text
+    out = []
+    last = 0
+    for match_start, _inner_start, _inner_end, match_end in spans:
+        out.append(text[last:match_start])
+        last = match_end
+    out.append(text[last:])
+    return "".join(out)
+
+
 def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
@@ -794,9 +858,14 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             blocks.append(ToolBlock(tag, content))
 
     # Pattern 2: [TOOL_CALL] blocks (only if no fenced blocks found)
+    # _iter_delimited scans the delimiter-bounded formats forward-only so
+    # untrusted "many openers, no closer" output can't drive the O(n^2)
+    # finditer rescan (ReDoS); see its docstring.
     if not blocks:
-        for m in _TOOL_CALL_RE.finditer(text):
-            block = _parse_tool_call_block(m.group(1))
+        for _ms, inner_start, inner_end, _me in _iter_delimited(
+            text, _TOOL_CALL_OPEN_RE, _TOOL_CALL_CLOSE_RE
+        ):
+            block = _parse_tool_call_block(text[inner_start:inner_end])
             if block:
                 blocks.append(block)
 
@@ -809,13 +878,16 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
         if blocks:
             return blocks
         # Try wrapped: <tool_call><invoke ...>...</invoke></tool_call>
-        for m in _XML_TOOL_CALL_RE.finditer(text):
-            for inv in _XML_INVOKE_RE.finditer(m.group(1)):
+        for _ms, inner_start, inner_end, _me in _iter_delimited(
+            text, _XML_TOOL_CALL_OPEN_RE, _XML_TOOL_CALL_CLOSE_RE
+        ):
+            body = text[inner_start:inner_end]
+            for inv in _XML_INVOKE_RE.finditer(body):
                 block = _parse_xml_invoke(inv)
                 if block:
                     blocks.append(block)
             if not blocks:
-                for direct in _XML_DIRECT_TOOL_RE.finditer(m.group(1)):
+                for direct in _XML_DIRECT_TOOL_RE.finditer(body):
                     block = _parse_xml_direct_tool(direct)
                     if block:
                         blocks.append(block)
@@ -843,8 +915,10 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
 
     # Pattern 4: <tool_code> blocks (MiniMax-M2.5 style)
     if not blocks:
-        for m in _TOOL_CODE_RE.finditer(text):
-            block = _parse_tool_code_block(m.group(1))
+        for _ms, inner_start, inner_end, _me in _iter_delimited(
+            text, _TOOL_CODE_OPEN_RE, _TOOL_CODE_CLOSE_RE
+        ):
+            block = _parse_tool_code_block(text[inner_start:inner_end])
             if block:
                 blocks.append(block)
 
@@ -874,11 +948,14 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # / <tool_call> removers below instead of leaking to the user.
     text = _normalize_dsml(text)
     cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub('', text)
-    cleaned = _TOOL_CALL_RE.sub('', cleaned)
+    # Forward-only removal mirrors parse_tool_blocks: _strip_delimited pairs each
+    # opener with a later closer and stops when none is reachable, so untrusted
+    # output can't drive the O(n^2) lazy-rescan (ReDoS); see _iter_delimited.
+    cleaned = _strip_delimited(cleaned, _TOOL_CALL_OPEN_RE, _TOOL_CALL_CLOSE_RE)
     cleaned = _strip_stepfun_tool_markup(cleaned)
-    cleaned = _XML_TOOL_CALL_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _XML_TOOL_CALL_OPEN_RE, _XML_TOOL_CALL_CLOSE_RE)
     cleaned = _XML_OPEN_TOOL_CALL_RE.sub('', cleaned)
-    cleaned = _TOOL_CODE_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _TOOL_CODE_OPEN_RE, _TOOL_CODE_CLOSE_RE)
     if not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(cleaned)
         if raw_web_json:
