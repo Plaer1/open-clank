@@ -1450,21 +1450,21 @@ function _rerenderCachedModels() {
       const llamaSplitModeOpts = ['', 'layer', 'tensor', 'row', 'none'].map(d => `<option value="${d}"${sv('llama_split_mode','')===d?' selected':''}>${d||'default'}</option>`).join('');
 
       // Group 1 — GPU placement (GPU-only, hides in CPU mode)
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp cookbook-llama-gpu-only">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp cookbook-llama-gpu-only hwfit-llama-placement-row">`;
       panelHtml += `<label>${_l('Split Mode','llama.cpp GPU placement. layer = default; tensor splits weights and KV across GPUs.')}<select class="hwfit-sf" data-field="llama_split_mode">${llamaSplitModeOpts}</select></label>`;
       panelHtml += `<label>${_l('Tensor Split','GPU proportions, e.g. 50,50 across two GPUs. Blank = auto.')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="auto" /></label>`;
       panelHtml += `<label>${_l('Main GPU','--main-gpu index inside the visible GPU set. Useful for split mode none/row.')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
       panelHtml += `</div>`;
 
       // Group 2 — Memory tuning (KV cache + MoE-on-CPU + Fit policy)
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-llama-memory-row">`;
       panelHtml += `<label>${_l('KV Cache','cache-type-k/v: quantize the KV cache. q4_0 = smallest (more context), q8_0 = long-context, f16 = full.')}<select class="hwfit-sf" data-field="cache_type">${_kvOpts}</select></label>`;
       panelHtml += `<label class="cookbook-llama-gpu-only">${_l('CPU MoE','n-cpu-moe: number of MoE expert layers to run on CPU when the model is bigger than VRAM. 0 = all on GPU.')}<input type="text" class="hwfit-sf" data-field="n_cpu_moe" value="${esc(sv('n_cpu_moe',''))}" placeholder="0" /></label>`;
       panelHtml += `<label>${_l('Fit','llama.cpp --fit. Leave default unless you need explicit off/on behavior for a preset.')}<select class="hwfit-sf" data-field="llama_fit">${llamaFitOpts}</select></label>`;
       panelHtml += `</div>`;
 
       // Group 3 — Request batching (Batch / UBatch / Parallel)
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-llama-batch-row">`;
       panelHtml += `<label>${_l('Batch','llama.cpp prompt batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
       panelHtml += `<label>${_l('UBatch','llama.cpp physical micro-batch size. Blank = default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
       panelHtml += `<label>${_l('Parallel','llama.cpp parallel slots. Blank = default; 1 matches single-lane presets.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', ''))}" placeholder="1" /></label>`;
@@ -1477,7 +1477,7 @@ function _rerenderCachedModels() {
       // Live VRAM / RAM-spillover monitor for the serve target's GPU. Polls
       // /api/cookbook/gpus while the panel is open so you can SEE whether the
       // config fits VRAM (fast) or spills to system RAM (slow). Populated after mount.
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-vram-monitor" style="align-items:center;gap:8px;font-size:11px;">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp hwfit-vram-monitor hwfit-llama-monitor-row" style="align-items:center;gap:8px;font-size:11px;">`;
       panelHtml += `<span style="opacity:0.7;">GPU memory:</span>`;
       panelHtml += `<span class="hwfit-vram-readout" style="opacity:0.5;">checking…</span>`;
       panelHtml += `</div>`;
@@ -1486,7 +1486,7 @@ function _rerenderCachedModels() {
       // automatically in CPU mode. Order: perf-critical → safety → I/O →
       // niche. MTP Spec sits last because it owns its own numstep widget
       // and is the widest item.
-      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-llamacpp">`;
+      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-llamacpp hwfit-llama-checks-row">`;
       panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="flash_attn"${sv('flash_attn',false)?' checked':''} /> Flash Attn${_h('--flash-attn on: faster attention + needed for quantized KV cache. Auto by default.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="llama_cpu_overflow"${sv('llama_cpu_overflow',false)?' checked':''} /> Allow CPU overflow${_h('OFF (default): cookbook blocks launches that would overflow GPU VRAM. ON: layers/KV cache that do not fit get pushed to CPU (slow).')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb cookbook-llama-gpu-only"><input type="checkbox" class="hwfit-sf" data-field="vision"${sv('vision',false)?' checked':''} /> Vision${_h('Serve with the vision encoder so the model can read images. Auto-finds an mmproj-*.gguf next to the model. Adds ~1 GB VRAM.')}</label>`;
