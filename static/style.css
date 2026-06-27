@@ -24201,14 +24201,14 @@ details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_attn_backend"]
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_block_size"]) {
   position: relative;
-  left: -71px;
+  left: -73px;
 }
 details.hwfit-serve-advanced .hwfit-sf[data-field="vllm_block_size"] {
   width: calc(100% - 6px);
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="swap"]) {
   position: relative;
-  left: -69px;
+  left: -71px;
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype"]) {
   position: relative;
