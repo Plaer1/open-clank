@@ -20069,7 +20069,7 @@ body.gallery-selecting .gallery-dl-btn,
 .hwfit-serve-preset-row {
   display: flex;
   justify-content: flex-end;
-  margin: 0 0 6px;
+  margin: 4px 0 6px;
 }
 /* Expanded serve panel — make sure it can be scrolled past when it
    grows taller than the visible viewport. Caps panel height to viewport
@@ -20086,7 +20086,7 @@ body.gallery-selecting .gallery-dl-btn,
   }
   .hwfit-serve-preset-row {
     justify-content: flex-end;
-    margin: -2px 0 6px;
+    margin: 2px 0 6px;
   }
 }
 .hwfit-serve-row label {
