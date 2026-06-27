@@ -1855,7 +1855,7 @@ function _rerenderCachedModels() {
         vllm:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
         sglang: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
         llamacpp: '<svg width="14" height="14" viewBox="0 0 600 600" fill="none" aria-hidden="true"><path d="M600 392L504.249 558L504.137 557.929C487.252 584.069 458.193 600 426.864 600H120L240 392H600Z" fill="currentColor"/><path d="M240 392H0L199.602 46.0254C216.032 17.5463 246.411 0 279.29 0H466.154L240 392Z" fill="currentColor"/></svg>',
-        ollama: '<img src="/static/icons/ollama-mark-crop.png" alt="" aria-hidden="true" width="14" height="14" style="display:block;width:14px;height:14px;object-fit:contain;" />',
+        ollama: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;"></span>',
         diffusers: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>',
       };
 
