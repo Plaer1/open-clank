@@ -516,9 +516,19 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   let ctx = Math.min(modelMax, rounded);
   let reasonSuffix = '';
   if (isUnifiedMode) {
-    // Unified memory should not advertise *less* context than plain GPU mode
-    // for the same llama.cpp launch. It may be slower when pages spill into
-    // system RAM, but the memory pool is at least the GPU path plus overflow.
+    // Unified memory is not just "GPU math with a slightly bigger VRAM number".
+    // llama.cpp can spill into system RAM, so a conservative pure-VRAM KV
+    // formula makes confusing recommendations like "58G free unified" but the
+    // same context as GPU. Use a system-memory-style cap when there is real
+    // unified headroom, while keeping the GPU estimate as the minimum.
+    const unifiedCap = freeForKv >= 16
+      ? 131072
+      : (freeForKv >= 8 ? 65536 : 32768);
+    const unifiedCtx = Math.min(modelMax, unifiedCap);
+    if (unifiedCtx > ctx) {
+      ctx = unifiedCtx;
+      reasonSuffix = '; unified can spill into system RAM, slower than pure GPU';
+    }
     const gpuUsableGb = Math.max(1, totalVramGb - Math.max(1.0, selectedCount * 0.6));
     const gpuFreeForKv = gpuUsableGb - modelGb;
     if (gpuFreeForKv > 0) {
@@ -527,7 +537,7 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
       const gpuCtx = Math.min(modelMax, gpuRounded);
       if (gpuCtx > ctx) {
         ctx = gpuCtx;
-        reasonSuffix = `; floored to GPU estimate`;
+        reasonSuffix = '; at least the GPU estimate';
       }
     }
   }
