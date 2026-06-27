@@ -24208,7 +24208,7 @@ details.hwfit-serve-advanced .hwfit-sf[data-field="vllm_block_size"] {
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="swap"]) {
   position: relative;
-  left: -53px;
+  left: -69px;
 }
 details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_kv_cache_dtype"]) {
   position: relative;
