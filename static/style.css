@@ -24049,7 +24049,7 @@ details.hwfit-serve-advanced > .hwfit-llama-memory-row {
   margin-top: -20px !important;
 }
 .cookbook-llama-cpu-mode details.hwfit-serve-advanced > .hwfit-llama-memory-row {
-  margin-top: -14px !important;
+  margin-top: -10px !important;
 }
 details.hwfit-serve-advanced > .hwfit-llama-batch-row,
 details.hwfit-serve-advanced > .hwfit-llama-monitor-row,
@@ -24058,6 +24058,13 @@ details.hwfit-serve-advanced > .hwfit-llama-checks-row {
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;
+  grid-template-columns: max-content minmax(0, 1fr);
+  white-space: nowrap;
+}
+details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor .hwfit-vram-readout {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row label select,
 details.hwfit-serve-advanced > .hwfit-serve-row label input {
