@@ -77,10 +77,20 @@ async def run_document_tidy(owner: str) -> str:
         deleted = 0
         kept = 0
         survivors = []  # docs that pass the junk rules, considered for dedup
+        now = datetime.utcnow()
 
         for doc in docs:
             content = (doc.current_content or "").strip()
             title = (doc.title or "").strip().lower()
+            created = doc.created_at
+            is_fresh_empty = (
+                not content
+                and created is not None
+                and (now - created).total_seconds() < 1800
+            )
+            if is_fresh_empty:
+                survivors.append(doc)
+                continue
 
             # Strip markdown noise to get "real" character count
             stripped = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)  # headers

@@ -45,6 +45,30 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 const SERVE_FAVORITES_KEY = 'cookbook-serve-favorite-models';
 
 let _cachedAllModels = [];
+const _CACHED_MODELS_SCAN_KEY = 'cookbook_cached_models_scan_v1';
+const _CACHED_MODELS_SCAN_TTL = 6 * 3600 * 1000;
+
+function _readCachedModelScan(sig) {
+  try {
+    const all = JSON.parse(localStorage.getItem(_CACHED_MODELS_SCAN_KEY) || '{}');
+    const entry = all[sig];
+    if (entry && Date.now() - (entry.ts || 0) < _CACHED_MODELS_SCAN_TTL) return entry.data || null;
+  } catch {}
+  return null;
+}
+
+function _writeCachedModelScan(sig, data) {
+  try {
+    const all = JSON.parse(localStorage.getItem(_CACHED_MODELS_SCAN_KEY) || '{}');
+    all[sig] = { ts: Date.now(), data };
+    const keys = Object.keys(all);
+    if (keys.length > 12) {
+      keys.sort((a, b) => (all[a].ts || 0) - (all[b].ts || 0));
+      for (const k of keys.slice(0, keys.length - 12)) delete all[k];
+    }
+    localStorage.setItem(_CACHED_MODELS_SCAN_KEY, JSON.stringify(all));
+  } catch {}
+}
 
 function _loadServeFavorites() {
   try {
@@ -3563,12 +3587,91 @@ export async function openServePanelForRepo(repo, fields) {
 
 // ── Fetch cached models from server ──
 
-export async function _fetchCachedModels() {
+function _renderCachedModelsData(list, data, host) {
+  // CHANGELOG: 'ready' already excludes partial downloads;
+  // show every complete model regardless of size/backend.
+  const ready = (data.models || []).filter(m => m.status === 'ready');
+
+  const downloading = (data.models || []).filter(m => m.status === 'downloading');
+  const allModels = [...ready, ...downloading];
+  _cachedAllModels = allModels;
+
+  if (!allModels.length) {
+    if (!host) {
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Docker Local uses Odysseus’s cache in <code>data/huggingface</code>. Download a model here, or copy an existing host HuggingFace cache into that folder once.</div></div>';
+    } else {
+      list.innerHTML = '<div class="hwfit-loading">No cached models found</div>';
+    }
+    const tagContainer = document.getElementById('serve-tags');
+    if (tagContainer) tagContainer.innerHTML = '';
+    return;
+  }
+
+  // Auto-detect type + family tags
+  const _tagMap = {};
+  const _familyMap = {};
+  const _families = [
+    [/qwen/i, 'qwen'], [/llama/i, 'llama'], [/mistral|mixtral/i, 'mistral'],
+    [/deepseek/i, 'deepseek'], [/gemma/i, 'gemma'], [/phi/i, 'phi'],
+    [/minimax/i, 'minimax'], [/glm/i, 'glm'], [/flux/i, 'flux'],
+    [/stable.?diffusion|sdxl/i, 'sd'], [/z-image/i, 'z-image'],
+    [/whisper/i, 'whisper'], [/command|cohere/i, 'cohere'],
+    [/yi-/i, 'yi'], [/intern/i, 'intern'], [/falcon/i, 'falcon'],
+  ];
+  for (const m of allModels) {
+    const n = (m.repo_id || '').toLowerCase();
+    let tag = 'other';
+    if (m.backend === 'ollama' || m.is_ollama) tag = 'llm';
+    else if (m.is_diffusion || /flux|sdxl|stable-diffusion|z-image|qwen-image|diffusion|dreamshar/i.test(n)) tag = 'image';
+    else if (/whisper|stt|asr/i.test(n)) tag = 'stt';
+    else if (/tts|cosyvoice|parler/i.test(n)) tag = 'tts';
+    else if (/embed|bge|minilm|e5-/i.test(n)) tag = 'embedding';
+    else if (/lora|adapter/i.test(n)) tag = 'lora';
+    else tag = 'llm';
+    m._tag = tag;
+    _tagMap[tag] = (_tagMap[tag] || 0) + 1;
+    m._family = '';
+    for (const [re, fam] of _families) {
+      if (re.test(n)) { m._family = fam; _familyMap[fam] = (_familyMap[fam] || 0) + 1; break; }
+    }
+    if ((m.backend === 'ollama' || m.is_ollama) && !m._family) {
+      m._family = 'ollama';
+      _familyMap.ollama = (_familyMap.ollama || 0) + 1;
+    }
+  }
+
+  // Render tag chips
+  const tagContainer = document.getElementById('serve-tags');
+  if (tagContainer) {
+    const tagOrder = ['llm', 'image', 'lora', 'embedding', 'tts', 'stt', 'other'];
+    let tagHtml = `<button class="memory-cat-chip active" data-serve-tag="">All (${allModels.length})</button>`;
+    for (const t of tagOrder) {
+      if (!_tagMap[t]) continue;
+      tagHtml += `<button class="memory-cat-chip" data-serve-tag="${t}">${t} (${_tagMap[t]})</button>`;
+    }
+    const sortedFamilies = Object.entries(_familyMap).sort((a, b) => b[1] - a[1]);
+    if (sortedFamilies.length) {
+      for (const [fam, count] of sortedFamilies) {
+        const logo = providerLogo(fam);
+        const logoHtml = logo ? `<span style="width:12px;height:12px;display:inline-flex;align-items:center;vertical-align:-2px;margin-right:2px;opacity:0.6;">${logo}</span>` : '';
+        tagHtml += `<button class="memory-cat-chip" data-serve-tag="fam:${fam}">${logoHtml}${fam} (${count})</button>`;
+      }
+    }
+    tagContainer.innerHTML = tagHtml;
+  }
+
+  _rerenderCachedModels();
+}
+
+export async function _fetchCachedModels(fresh = false) {
   const list = document.getElementById('hwfit-cached-list');
   if (!list) return;
 
   list.innerHTML = '';
-  const _dlWp = spinnerModule.createWhirlpool(18);
+  const _dlWp = spinnerModule.createWhirlpool(22);
+  _dlWp.element.classList.add('cookbook-section-loading-wp');
+  _dlWp.element.style.width = '22px';
+  _dlWp.element.style.height = '22px';
   const _dlWrap = document.createElement('div');
   _dlWrap.className = 'hwfit-loading';
   _dlWrap.style.cssText = 'flex-direction:column;gap:6px;';
@@ -3630,6 +3733,13 @@ export async function _fetchCachedModels() {
     if (host) { qp.set('host', host); const _sp4 = _getPort(host); if (_sp4) qp.set('ssh_port', _sp4); const _plat = _getPlatform(host); if (_plat) qp.set('platform', _plat); }
     if (modelDirs.length) qp.set('model_dir', modelDirs.join(','));
     const params = qp.toString() ? `?${qp}` : '';
+    const scanSig = params || 'local';
+    const cached = fresh ? null : _readCachedModelScan(scanSig);
+    if (cached) {
+      _dlWp.destroy();
+      _renderCachedModelsData(list, cached, host);
+      return;
+    }
     const res = await fetch(`/api/model/cached${params}`);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -3644,80 +3754,9 @@ export async function _fetchCachedModels() {
       throw new Error(`HTTP ${res.status} ${res.statusText}${msg ? `: ${msg}` : ''}`);
     }
     const data = await res.json();
+    _writeCachedModelScan(scanSig, data);
     _dlWp.destroy();
-
-    // CHANGELOG: 'ready' already excludes partial downloads; 
-    // show every complete model regardless of size/backend.
-    const ready = data.models.filter(m => m.status === 'ready');
-
-    const downloading = data.models.filter(m => m.status === 'downloading');
-    const allModels = [...ready, ...downloading];
-    _cachedAllModels = allModels;
-
-    if (!allModels.length) {
-      if (!host) {
-        list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Docker Local uses Odysseus’s cache in <code>data/huggingface</code>. Download a model here, or copy an existing host HuggingFace cache into that folder once.</div></div>';
-      } else {
-        list.innerHTML = '<div class="hwfit-loading">No cached models found</div>';
-      }
-      document.getElementById('serve-tags').innerHTML = '';
-      return;
-    }
-
-    // Auto-detect type + family tags
-    const _tagMap = {};
-    const _familyMap = {};
-    const _families = [
-      [/qwen/i, 'qwen'], [/llama/i, 'llama'], [/mistral|mixtral/i, 'mistral'],
-      [/deepseek/i, 'deepseek'], [/gemma/i, 'gemma'], [/phi/i, 'phi'],
-      [/minimax/i, 'minimax'], [/glm/i, 'glm'], [/flux/i, 'flux'],
-      [/stable.?diffusion|sdxl/i, 'sd'], [/z-image/i, 'z-image'],
-      [/whisper/i, 'whisper'], [/command|cohere/i, 'cohere'],
-      [/yi-/i, 'yi'], [/intern/i, 'intern'], [/falcon/i, 'falcon'],
-    ];
-    for (const m of allModels) {
-      const n = (m.repo_id || '').toLowerCase();
-      let tag = 'other';
-      if (m.backend === 'ollama' || m.is_ollama) tag = 'llm';
-      else if (m.is_diffusion || /flux|sdxl|stable-diffusion|z-image|qwen-image|diffusion|dreamshar/i.test(n)) tag = 'image';
-      else if (/whisper|stt|asr/i.test(n)) tag = 'stt';
-      else if (/tts|cosyvoice|parler/i.test(n)) tag = 'tts';
-      else if (/embed|bge|minilm|e5-/i.test(n)) tag = 'embedding';
-      else if (/lora|adapter/i.test(n)) tag = 'lora';
-      else tag = 'llm';
-      m._tag = tag;
-      _tagMap[tag] = (_tagMap[tag] || 0) + 1;
-      m._family = '';
-      for (const [re, fam] of _families) {
-        if (re.test(n)) { m._family = fam; _familyMap[fam] = (_familyMap[fam] || 0) + 1; break; }
-      }
-      if ((m.backend === 'ollama' || m.is_ollama) && !m._family) {
-        m._family = 'ollama';
-        _familyMap.ollama = (_familyMap.ollama || 0) + 1;
-      }
-    }
-
-    // Render tag chips
-    const tagContainer = document.getElementById('serve-tags');
-    if (tagContainer) {
-      const tagOrder = ['llm', 'image', 'lora', 'embedding', 'tts', 'stt', 'other'];
-      let tagHtml = `<button class="memory-cat-chip active" data-serve-tag="">All (${allModels.length})</button>`;
-      for (const t of tagOrder) {
-        if (!_tagMap[t]) continue;
-        tagHtml += `<button class="memory-cat-chip" data-serve-tag="${t}">${t} (${_tagMap[t]})</button>`;
-      }
-      const sortedFamilies = Object.entries(_familyMap).sort((a, b) => b[1] - a[1]);
-      if (sortedFamilies.length) {
-        for (const [fam, count] of sortedFamilies) {
-          const logo = providerLogo(fam);
-          const logoHtml = logo ? `<span style="width:12px;height:12px;display:inline-flex;align-items:center;vertical-align:-2px;margin-right:2px;opacity:0.6;">${logo}</span>` : '';
-          tagHtml += `<button class="memory-cat-chip" data-serve-tag="fam:${fam}">${logoHtml}${fam} (${count})</button>`;
-        }
-      }
-      tagContainer.innerHTML = tagHtml;
-    }
-
-    _rerenderCachedModels();
+    _renderCachedModelsData(list, data, host);
   } catch (e) {
     _dlWp.destroy();
     list.innerHTML = `<div class="hwfit-loading">Failed: ${esc(e.message)}</div>`;

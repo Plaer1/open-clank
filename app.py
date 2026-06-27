@@ -1001,17 +1001,21 @@ async def _startup_event():
 
     _startup_tasks.append(asyncio.create_task(_warmup_endpoints()))
 
-    # Keep-alive: ping endpoints every 60 seconds to prevent cold starts
-    async def _keepalive_loop():
-        while True:
-            try:
-                await asyncio.sleep(60)
-                await _warmup_endpoints()
-            except Exception as e:
-                logger.warning(f"Keepalive loop error: {e}")
-                await asyncio.sleep(300)  # Back off on error
+    # Keep-alive is opt-in. The ping path performs model discovery, and when
+    # stale LAN endpoints are configured it can add periodic backend pressure
+    # that delays unrelated UI requests such as Notes/Documents.
+    _keepalive_enabled = str(os.getenv("ODYSSEUS_MODEL_KEEPALIVE", "")).lower() in {"1", "true", "yes", "on"}
+    if _keepalive_enabled:
+        async def _keepalive_loop():
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                    await _warmup_endpoints()
+                except Exception as e:
+                    logger.warning(f"Keepalive loop error: {e}")
+                    await asyncio.sleep(300)  # Back off on error
 
-    _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
+        _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
 
     async def _ensure_default_tasks():
         # Create/reconcile default automation tasks + personal assistant for every user.

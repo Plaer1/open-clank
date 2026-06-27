@@ -789,19 +789,19 @@ def setup_chat_routes(
                 "manage_skills",      # skill presets tied to user
             })
 
-        # Active email reader open → strip the tools that let the agent
-        # "drift" to a new compose: create_document (writes a fake email-
-        # shaped .md file) and send_email (sends fresh to a recipient the
-        # agent invented). With those gone, the only paths left for "write
-        # email saying X" are ui_control open_email_reply (draft) and
-        # reply_to_email (immediate send) — both of which use the open
-        # email's UID. Code-level enforcement instead of relying on a
-        # prompt rule the model can ignore.
+        # Active email reader open → strip the tools that let the agent drift
+        # away from the visible email or skip review. The only allowed compose
+        # path is ui_control open_email_reply, which opens the same draft editor
+        # as the Reply button with the generated body pre-filled. This prevents
+        # the model from falling back to direct SMTP when it botches a draft
+        # call, and prevents fake email-shaped documents.
         if active_email_ctx and active_email_ctx.get("uid"):
             disabled_tools.update({
                 "create_document",
                 "send_email",
+                "reply_to_email",
                 "mcp__email__send_email",
+                "mcp__email__reply_to_email",
             })
 
         # Enforce per-user privileges

@@ -577,6 +577,7 @@ export async function _hwfitFetch(fresh = false) {
   const _sig = _scanSig();
   const _cached = fresh ? null : _readScanCache(_sig);
   const wp = spinnerModule.createWhirlpool(18);
+  const _paintedFromCache = !!_cached;
   if (_cached) {
     // Tag the restored cache with its host too (scan-sig keys cache per
     // host, so a hit here is always for the current remoteHost).
@@ -634,6 +635,10 @@ export async function _hwfitFetch(fresh = false) {
           }
         });
       }).catch(() => {});
+  }
+  if (_paintedFromCache) {
+    try { wp.destroy(); } catch {}
+    return;
   }
   try {
     const sortBy = document.getElementById('hwfit-sort')?.value || 'newest';
@@ -1958,16 +1963,17 @@ export function _hwfitInit() {
     dot.className = 'cookbook-srv-status testing';
     dot.title = 'Testing SSH…';
     setMsg('Testing SSH...');
-    const pf = port && port !== '22' ? `-p ${port} ` : '';
-    const cmd = `ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new ${pf}${host} "echo ok"`;
     const t0 = Date.now();
     try {
-      const res = await fetch('/api/shell/exec', {
+      const res = await fetch('/api/cookbook/test-ssh', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: cmd, timeout: 8 }),
+        body: JSON.stringify({ host, ssh_port: port || undefined }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      }
       const ms = Date.now() - t0;
       const out = (data.stdout || '').trim();
       if (data.exit_code === 0 && out.startsWith('ok')) {
@@ -1976,7 +1982,7 @@ export function _hwfitInit() {
         setMsg(`Connected · ${ms} ms`, 'var(--green,#50fa7b)');
       } else {
         dot.className = 'cookbook-srv-status fail';
-        const err = (data.stderr || data.stdout || `exit ${data.exit_code}`).toString().trim().slice(0, 240);
+        const err = (data.stderr || data.stdout || (data.exit_code == null ? 'no exit code' : `exit ${data.exit_code}`)).toString().trim().slice(0, 240);
         dot.title = `SSH failed: ${err}`;
         setMsg(`Failed · ${err}`, 'var(--red,#e06c75)');
       }

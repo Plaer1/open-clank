@@ -873,8 +873,9 @@ async function _fetchDependencies() {
   let _spin = null;
   try {
     const sp = (await import('./spinner.js')).default;
-    _spin = sp.createWhirlpool(28);
-    _spin.element.style.cssText = 'margin:24px auto 0;display:block;';
+    _spin = sp.createWhirlpool(22);
+    _spin.element.classList.add('cookbook-section-loading-wp');
+    _spin.element.style.cssText = 'margin:24px auto 0;display:block;width:22px;height:22px;';
     list.appendChild(_spin.element);
     const label = document.createElement('div');
     label.className = 'hwfit-loading';
@@ -1788,7 +1789,7 @@ function _wireTabEvents(body) {
 
   const scanBtn = document.getElementById('hwfit-cache-scan');
   if (scanBtn) {
-    scanBtn.addEventListener('click', () => _fetchCachedModels());
+    scanBtn.addEventListener('click', () => _fetchCachedModels(true));
   }
 
   const editDirsLink = document.querySelector('.cookbook-serve-dir-edit');
@@ -2286,8 +2287,9 @@ function _wireTabEvents(body) {
       hfList.innerHTML = '';
       try {
         const sp = (await import('./spinner.js')).default;
-        const _spin = sp.createWhirlpool(28);
-        _spin.element.style.cssText = 'margin:24px auto 0;display:block;';
+        const _spin = sp.createWhirlpool(22);
+        _spin.element.classList.add('cookbook-section-loading-wp');
+        _spin.element.style.cssText = 'margin:24px auto 0;display:block;width:22px;height:22px;';
         hfList.appendChild(_spin.element);
         const lbl = document.createElement('div');
         lbl.className = 'hwfit-loading';

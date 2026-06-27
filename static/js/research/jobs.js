@@ -27,16 +27,20 @@ function _markDismissed(ids) {
 }
 
 let _activePollInterval = null;
+let _activePollInFlight = false;
+let _librarySyncInFlight = false;
+let _lastLibrarySyncAt = 0;
+const _LIBRARY_SYNC_MIN_MS = 120000;
 
 export function init(apiBase) {
   _apiBase = apiBase;
-  _reconnectActive();
+  _reconnectActive({ includeLibrary: true, forceLibrary: true });
   // Poll for active sessions periodically so research started elsewhere
   // (e.g. by the agent via trigger_research) gets adopted into the
   // sidebar — _reconnectActive only ran once at load before, so
   // agent-started jobs never appeared until a page reload.
   if (_activePollInterval) clearInterval(_activePollInterval);
-  _activePollInterval = setInterval(() => { _reconnectActive(); }, 12000);
+  _activePollInterval = setInterval(() => { _reconnectActive(); }, 20000);
 }
 
 // Allow an immediate adopt when the chat stream signals a new research
@@ -46,7 +50,13 @@ export function adoptSession(sessionId) {
   _reconnectActive();
 }
 
-async function _reconnectActive() {
+export function refreshLibrary(options = {}) {
+  return _syncLibrary(options);
+}
+
+async function _reconnectActive(options = {}) {
+  if (_activePollInFlight) return;
+  _activePollInFlight = true;
   try {
     // Reconnect to running tasks
     const res = await fetch(`${_apiBase}/api/research/active`, { credentials: 'same-origin' });
@@ -68,7 +78,20 @@ async function _reconnectActive() {
       }
     }
 
-    // Load recent completed research from disk
+    if (options.includeLibrary) await _syncLibrary({ force: !!options.forceLibrary });
+    _notify();
+  } catch {
+  } finally {
+    _activePollInFlight = false;
+  }
+}
+
+async function _syncLibrary(options = {}) {
+  const now = Date.now();
+  if (_librarySyncInFlight) return;
+  if (!options.force && now - _lastLibrarySyncAt < _LIBRARY_SYNC_MIN_MS) return;
+  _librarySyncInFlight = true;
+  try {
     const libRes = await fetch(`${_apiBase}/api/research/library?sort=recent&limit=20`, { credentials: 'same-origin' });
     if (libRes.ok) {
       const libData = await libRes.json();
@@ -90,9 +113,12 @@ async function _reconnectActive() {
         });
       }
     }
-
+    _lastLibrarySyncAt = Date.now();
     _notify();
   } catch {}
+  finally {
+    _librarySyncInFlight = false;
+  }
 }
 
 function _parseDuration(s) {

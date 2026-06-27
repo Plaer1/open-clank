@@ -28,6 +28,7 @@ class DocumentCreate(BaseModel):
 class DocumentUpdate(BaseModel):
     content: str
     summary: Optional[str] = None
+    force_version: bool = False
 
 class DocumentPatch(BaseModel):
     title: Optional[str] = None

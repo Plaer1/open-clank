@@ -116,7 +116,7 @@ async def do_search_chats(query: str, limit: int = 20, owner: str | None = None)
     try:
         from src.session_search import search_session_messages
 
-        results = search_session_messages(query, limit=limit, owner=owner)
+        results = search_session_messages(query, limit=limit, owner=owner, context_messages=3)
         if not results:
             return {"results": f"No chats found matching \"{query}\"."}
 
@@ -130,13 +130,14 @@ async def do_search_chats(query: str, limit: int = 20, owner: str | None = None)
         for sid, result in seen_sessions.items():
             lines.append(f"- **{result.session_name}** (#{sid})")
             lines.append(f"  Link: [Open chat](#{sid})")
-            lines.append(f"  Match ({result.role}): {result.content_snippet}")
+            match_text = (result.content or result.content_snippet or "")[:600]
+            lines.append(f"  Match ({result.role}): {match_text}")
             if result.context_before:
-                before = result.context_before[-1]
-                lines.append(f"  Before ({before['role']}): {before['content'][:180]}")
+                for before in result.context_before:
+                    lines.append(f"  Before ({before['role']}): {before['content'][:500]}")
             if result.context_after:
-                after = result.context_after[0]
-                lines.append(f"  After ({after['role']}): {after['content'][:180]}")
+                for after in result.context_after:
+                    lines.append(f"  After ({after['role']}): {after['content'][:500]}")
             lines.append("")
 
         return {"results": "\n".join(lines)}
@@ -1399,6 +1400,9 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
         "new": "add",
         "save": "add",
         "remind": "add",
+        "get": "view",
+        "read": "view",
+        "open": "view",
         "remove": "delete",
         "remove_item": "toggle_item",
     }
@@ -1457,6 +1461,32 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
                     snippet = n.content[:80].replace("\n", " ")
                     lines.append(f"  {snippet}")
             return {"results": "\n".join(lines)}
+
+        elif action == "view":
+            note_id = args.get("id", "")
+            note = _note_by_prefix(note_id)
+            if not note:
+                return {"error": f"Note '{note_id}' not found", "exit_code": 1}
+            if not _note_visible_to_owner(note, owner):
+                return {"error": "Note not found", "exit_code": 1}
+            lines = [f"Note: {note.title or '(untitled)'}", f"id: {note.id}"]
+            if note.label:
+                lines.append(f"label: {note.label}")
+            if note.due_date:
+                lines.append(f"due_date: {note.due_date}")
+            if note.note_type == "checklist":
+                lines.append("items:")
+                try:
+                    items = json.loads(note.items or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    items = []
+                for i, item in enumerate(items):
+                    mark = "x" if item.get("done") else " "
+                    lines.append(f"- [{mark}] {i}: {item.get('text', '')}")
+            elif note.content:
+                lines.append("content:")
+                lines.append(note.content)
+            return {"response": "\n".join(lines), "note_id": note.id, "exit_code": 0}
 
         elif action == "add":
             # Accept the various field names models emit: `text` is the most
@@ -1612,7 +1642,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
             return {"response": f"Item '{items[index].get('text', '')}' marked {mark}", "exit_code": 0}
 
         else:
-            return {"error": f"Unknown action: {action}. Use list/add/update/delete/toggle_item", "exit_code": 1}
+            return {"error": f"Unknown action: {action}. Use list/view/add/update/delete/toggle_item", "exit_code": 1}
     except Exception as e:
         logger.error(f"manage_notes error: {e}")
         return {"error": str(e), "exit_code": 1}
@@ -3772,6 +3802,63 @@ async def do_list_cached_models(content: str, owner: Optional[str] = None) -> Di
                     seen.add(key)
                     models.append(m)
         if not models:
+            endpoint_models = []
+            try:
+                from core.database import SessionLocal, ModelEndpoint
+
+                db = SessionLocal()
+                try:
+                    query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+                    if owner:
+                        query = query.filter((ModelEndpoint.owner == owner) | (ModelEndpoint.owner == None))  # noqa: E711
+                    else:
+                        query = query.filter(ModelEndpoint.owner == None)  # noqa: E711
+                    for ep in query.all():
+                        raw_models = json.loads(ep.cached_models or "[]") if ep.cached_models else []
+                        for model_id in raw_models or []:
+                            if not model_id:
+                                continue
+                            model_name = str(model_id)
+                            lower_name = model_name.lower()
+                            quantization = "GGUF" if "gguf" in lower_name else "unknown"
+                            endpoint_models.append(
+                                {
+                                    "repo_id": model_name,
+                                    "host": ep.name or "endpoint",
+                                    "source": "model_endpoint_cache",
+                                    "file_size": "unknown",
+                                    "quantization": quantization,
+                                }
+                            )
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.debug(f"list_cached_models endpoint fallback failed: {e}")
+                endpoint_models = []
+            if endpoint_models:
+                seen_endpoint_models = set()
+                deduped_endpoint_models = []
+                for model in endpoint_models:
+                    key = (model.get("host"), model.get("repo_id"))
+                    if key in seen_endpoint_models:
+                        continue
+                    seen_endpoint_models.add(key)
+                    deduped_endpoint_models.append(model)
+                lines = [
+                    f"{len(deduped_endpoint_models)} cached model(s) from configured endpoint cache:"
+                ]
+                for model in deduped_endpoint_models:
+                    lines.append(
+                        f"- {model['repo_id']} — {model.get('host', 'endpoint')}; "
+                        f"size: {model.get('file_size', 'unknown')}; "
+                        f"quantization: {model.get('quantization', 'unknown')}"
+                    )
+                lines.append(
+                    "Endpoint-cache rows are authoritative for configured models; "
+                    "file sizes may be unknown unless the model directory is scanned."
+                )
+                return {"output": "\n".join(lines), "models": deduped_endpoint_models, "exit_code": 0}
+
             # Cache scans can miss models downloaded into the HF default cache
             # when the server has no explicit model_dir configured. Surface
             # completed Cookbook download tasks so the agent doesn't conclude
@@ -4020,7 +4107,11 @@ async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
             for email in (c.get("emails") or []):
                 email = (email or "").strip().lower()
                 if email and "@" in email:
-                    contacts[email] = {"name": c.get("name") or email, "source": "contacts"}
+                    contacts[email] = {
+                        "name": c.get("name") or email,
+                        "source": "contacts",
+                        "phones": [p.strip() for p in (c.get("phones") or []) if p and p.strip()],
+                    }
                     has_email = True
             # Fall back to phone numbers when the contact has no email address
             if not has_email:
@@ -4051,7 +4142,10 @@ async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
         if info.get("phone"):
             lines.append(f"- {info['name']} — phone: {info['phone']} ({info['source']})")
         else:
-            lines.append(f"- {info['name']} <{key}> ({info['source']})")
+            phone_text = ""
+            if info.get("phones"):
+                phone_text = f" — phone: {', '.join(info['phones'])}"
+            lines.append(f"- {info['name']} <{key}>{phone_text} ({info['source']})")
     return {"output": "\n".join(lines), "exit_code": 0}
 
 
@@ -4081,7 +4175,9 @@ async def do_manage_contact(content: str, owner: Optional[str] = None) -> Dict:
             lines = [f"{len(rows)} contacts:"]
             for c in rows:
                 em = ", ".join(c.get("emails") or [])
-                lines.append(f"- {c.get('name') or '(no name)'} <{em}>  [uid={c.get('uid','')}]")
+                phones = ", ".join(c.get("phones") or [])
+                phone_text = f" phones: {phones}" if phones else ""
+                lines.append(f"- {c.get('name') or '(no name)'} <{em}>{phone_text}  [uid={c.get('uid','')}]")
             return {"output": "\n".join(lines), "exit_code": 0}
 
         if action == "add":

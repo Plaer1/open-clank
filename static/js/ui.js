@@ -373,25 +373,6 @@ export function showToast(msg, durationOrOpts) {
 
     toastEl.appendChild(stack);
 
-    // Small × to dismiss the toast without taking the action. Useful when
-    // the user already acted (or just doesn't want the banner sitting there).
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.setAttribute('aria-label', 'Dismiss');
-    closeBtn.title = 'Dismiss';
-    closeBtn.textContent = '×';
-    closeBtn.style.cssText = 'margin-left:8px;padding:0;width:20px;height:20px;line-height:1;border:none;background:none;color:var(--fg);opacity:0.55;cursor:pointer;font-size:18px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;pointer-events:auto;';
-    closeBtn.addEventListener('mouseenter', () => { closeBtn.style.opacity = '1'; });
-    closeBtn.addEventListener('mouseleave', () => { closeBtn.style.opacity = '0.55'; });
-    closeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      clearTimeout(toastEl._hideTimer);
-      toastEl.classList.add('exiting');
-      toastEl.classList.remove('show');
-    });
-    toastEl.appendChild(closeBtn);
-
     toastEl.style.pointerEvents = 'auto';
   } else {
     // No action — restore the default non-blocking behavior.

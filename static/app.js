@@ -1617,6 +1617,7 @@ function initializeEventListeners() {
       // Delay tool glow-up for a staggered effect
       setTimeout(() => applyModeToToggles(mode), 500);
     }
+    window.__odysseusSetChatMode = setMode;
     agentBtn.addEventListener('click', () => {
       // Agent mode turns off research if active
       const resChk = el('research-toggle');
@@ -1692,10 +1693,29 @@ function initializeEventListeners() {
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
+  function bringOpenDocumentToFrontOnMobile() {
+    if (window.innerWidth > 768) return false;
+    if (!documentModule || !documentModule.isPanelOpen || !documentModule.isPanelOpen()) return false;
+    if (!document.body.classList.contains('email-front')) return false;
+    document.body.classList.remove('email-front', 'email-doc-split-active');
+    document.documentElement.style.removeProperty('--email-doc-split-left-x');
+    document.documentElement.style.removeProperty('--email-doc-split-email-w');
+    document.documentElement.style.removeProperty('--email-doc-split-right-x');
+    const docPane = document.getElementById('doc-editor-pane');
+    if (docPane) docPane.style.setProperty('z-index', '10010', 'important');
+    const overflow = el('overflow-doc-btn');
+    if (overflow) overflow.classList.add('active');
+    const indicator = el('doc-indicator-btn');
+    if (indicator) indicator.classList.add('active');
+    const st = loadToggleState(); st.doc = true; saveToggleState(st);
+    return true;
+  }
+
   const overflowDocBtn = el('overflow-doc-btn');
   if (overflowDocBtn) {
     overflowDocBtn.addEventListener('click', async () => {
       if (!documentModule) return;
+      if (bringOpenDocumentToFrontOnMobile()) return;
       if (documentModule.isPanelOpen()) {
         documentModule.closePanel();
         overflowDocBtn.classList.remove('active');
@@ -2304,14 +2324,32 @@ function initializeEventListeners() {
         // IMPORTANT: don't overwrite the user's persisted per-mode tool prefs
         // (`web_agent`, `bash_agent`, `web_chat`, `bash_chat`). Nobody mode is
         // ephemeral — their agent-mode defaults must come back on toggle-off.
+        const beforeNobody = Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {};
+        if (!beforeNobody.nobody_prev_mode) beforeNobody.nobody_prev_mode = beforeNobody.mode || 'agent';
+        Storage.setJSON(Storage.KEYS.TOGGLES, beforeNobody);
         const _offIds = ['web-toggle', 'bash-toggle', 'research-toggle'];
         _offIds.forEach(id => { const c = el(id); if (c) c.checked = false; });
         ['web-toggle-btn', 'bash-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
-        const _ab = el('mode-agent-btn'), _cb = el('mode-chat-btn');
-        if (_ab) _ab.classList.remove('active');
-        if (_cb) _cb.classList.add('active');
+        if (typeof window.__odysseusSetChatMode === 'function') {
+          window.__odysseusSetChatMode('chat');
+        } else {
+          const _ab = el('mode-agent-btn'), _cb = el('mode-chat-btn');
+          if (_ab) {
+            _ab.classList.remove('active');
+            _ab.setAttribute('aria-pressed', 'false');
+          }
+          if (_cb) {
+            _cb.classList.add('active');
+            _cb.setAttribute('aria-pressed', 'true');
+          }
+          const _toggle = _ab?.closest('.mode-toggle') || _cb?.closest('.mode-toggle');
+          if (_toggle) _toggle.classList.add('mode-chat');
+          const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
+          ts.mode = 'chat';
+          Storage.setJSON(Storage.KEYS.TOGGLES, ts);
+        }
         const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-        ts.research = false; ts.mode = 'chat';
+        ts.research = false;
         Storage.setJSON(Storage.KEYS.TOGGLES, ts);
       } else {
         incognitoBtn.innerHTML = INCOGNITO_EYE_OPEN + '<span class="incognito-label">Nobody</span>';
@@ -2335,11 +2373,15 @@ function initializeEventListeners() {
         // Heal any previously-persisted false values from the old Nobody bug
         // so agent-mode defaults (web/bash ON) come back.
         const _ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-        let _dirty = false;
+        const _restoreMode = _ts.nobody_prev_mode || 'agent';
+        delete _ts.nobody_prev_mode;
         ['web_agent', 'bash_agent', 'web_chat', 'bash_chat'].forEach(k => {
-          if (_ts[k] === false) { delete _ts[k]; _dirty = true; }
+          if (_ts[k] === false) delete _ts[k];
         });
-        if (_dirty) Storage.setJSON(Storage.KEYS.TOGGLES, _ts);
+        Storage.setJSON(Storage.KEYS.TOGGLES, _ts);
+        if (typeof window.__odysseusSetChatMode === 'function') {
+          window.__odysseusSetChatMode(_restoreMode === 'chat' ? 'chat' : 'agent');
+        }
         // Reapply the current mode's real defaults to the visible toggles
         const _curMode = (Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {}).mode || 'chat';
         try { applyModeToToggles(_curMode); } catch (_) {}

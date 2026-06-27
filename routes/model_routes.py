@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from core.middleware import require_admin
+from src.constants import COOKBOOK_STATE_FILE
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
@@ -111,6 +112,67 @@ def _clear_endpoint_settings_for_endpoint(settings: dict, ep_id: str, *, include
     return cleared
 
 
+_COOKBOOK_ACTIVE_SERVE_STATUSES = {
+    "starting", "loading", "ready", "running", "restarting",
+}
+
+
+def _active_cookbook_endpoint_ids() -> set[str]:
+    """Endpoint IDs owned by active Cookbook serve tasks.
+
+    Cookbook auto-registers endpoints with ids like ``local-*``. Those rows are
+    managed lifecycle state, not durable user configuration. If a tmux stream is
+    stopped or an old task lingers, the row must stop participating in model
+    selection and defaults.
+    """
+    try:
+        if not os.path.exists(COOKBOOK_STATE_FILE):
+            return set()
+        with open(COOKBOOK_STATE_FILE, "r", encoding="utf-8") as fh:
+            raw = fh.read()
+        state = json.loads(raw)
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for task in state.get("tasks") or []:
+        if not isinstance(task, dict) or task.get("type") != "serve":
+            continue
+        if str(task.get("status") or "").lower() not in _COOKBOOK_ACTIVE_SERVE_STATUSES:
+            continue
+        ep_id = task.get("_endpointId") or task.get("endpointId") or task.get("endpoint_id")
+        if ep_id:
+            out.add(str(ep_id))
+    return out
+
+
+def _disable_stale_cookbook_local_endpoints(db) -> int:
+    """Disable enabled cookbook endpoints whose serve task is no longer active."""
+    active_ids = _active_cookbook_endpoint_ids()
+    if not active_ids:
+        return 0
+    stale = (
+        db.query(ModelEndpoint)
+        .filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+        .filter(ModelEndpoint.id.like("local-%"))
+        .filter(~ModelEndpoint.id.in_(active_ids))
+        .all()
+    )
+    if not stale:
+        return 0
+    settings = _load_settings()
+    touched_settings = False
+    for ep in stale:
+        ep.is_enabled = False
+        ep.model_refresh_mode = "disabled"
+        if _clear_endpoint_settings_for_endpoint(settings, ep.id):
+            touched_settings = True
+        logger.info("Disabled stale Cookbook endpoint %s (%s @ %s)", ep.id, ep.name, ep.base_url)
+    if touched_settings:
+        _save_settings(settings)
+    db.commit()
+    return len(stale)
+
+
 def _clear_user_pref_endpoint_refs(all_prefs: dict, ep_id: str) -> int:
     """Remove endpoint references from scoped or legacy-flat user preferences."""
     if not isinstance(all_prefs, dict):
@@ -124,7 +186,24 @@ def _clear_user_pref_endpoint_refs(all_prefs: dict, ep_id: str) -> int:
     return cleared_users
 
 
-def _default_endpoint_needs_assignment(current_default_id: str, enabled_endpoint_ids) -> bool:
+def _endpoint_visible_model_ids(ep: Any) -> List[str]:
+    """Known visible model ids for an endpoint, including pinned/manual ids."""
+    if ep is None:
+        return []
+    return _visible_models(
+        getattr(ep, "cached_models", None),
+        getattr(ep, "hidden_models", None),
+        getattr(ep, "pinned_models", None),
+    )
+
+
+def _default_endpoint_needs_assignment(
+    current_default_id: str,
+    enabled_endpoint_ids,
+    *,
+    current_default_endpoint: Any = None,
+    current_default_model: str = "",
+) -> bool:
     """Whether the global default chat endpoint should be (re)assigned.
 
     True when nothing is configured yet, or the configured default no longer
@@ -136,7 +215,12 @@ def _default_endpoint_needs_assignment(current_default_id: str, enabled_endpoint
     """
     if not current_default_id:
         return True
-    return current_default_id not in enabled_endpoint_ids
+    if current_default_id not in enabled_endpoint_ids:
+        return True
+    if not (current_default_model or "").strip():
+        return True
+    visible = _endpoint_visible_model_ids(current_default_endpoint)
+    return bool(visible and current_default_model not in visible)
 
 
 # Loopback hosts a user might type for a local model server (LM Studio,
@@ -1166,6 +1250,8 @@ def setup_model_routes(model_discovery):
                 db = SessionLocal()
                 changed = False
                 try:
+                    if _disable_stale_cookbook_local_endpoints(db):
+                        changed = True
                     endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
                     now = _time.time()
                     groups: Dict[str, Dict[str, Any]] = {}
@@ -1239,6 +1325,8 @@ def setup_model_routes(model_discovery):
 
         db = SessionLocal()
         try:
+            if _disable_stale_cookbook_local_endpoints(db):
+                _invalidate_models_cache()
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
             if owner and not is_admin:
                 # Regular users see: their own endpoints + null-owner
@@ -1376,6 +1464,8 @@ def setup_model_routes(model_discovery):
 
         db = SessionLocal()
         try:
+            if _disable_stale_cookbook_local_endpoints(db):
+                _invalidate_models_cache()
             endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
             local_eps = []
             for ep in endpoints:
@@ -1608,6 +1698,8 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         db = SessionLocal()
         try:
+            if _disable_stale_cookbook_local_endpoints(db):
+                _invalidate_models_cache()
             rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
             results = []
             for r in rows:
@@ -1892,7 +1984,18 @@ def setup_model_routes(model_discovery):
                     ModelEndpoint.is_enabled == True  # noqa: E712
                 ).all()
             }
-            if _default_endpoint_needs_assignment(settings.get("default_endpoint_id") or "", enabled_ids):
+            current_default_id = settings.get("default_endpoint_id") or ""
+            current_default_ep = None
+            if current_default_id:
+                current_default_ep = db.query(ModelEndpoint).filter(
+                    ModelEndpoint.id == current_default_id
+                ).first()
+            if _default_endpoint_needs_assignment(
+                current_default_id,
+                enabled_ids,
+                current_default_endpoint=current_default_ep,
+                current_default_model=settings.get("default_model") or "",
+            ):
                 from src.endpoint_resolver import _first_chat_model
                 settings["default_endpoint_id"] = ep.id
                 settings["default_model"] = _first_chat_model(model_ids) or ""

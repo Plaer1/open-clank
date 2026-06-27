@@ -433,6 +433,19 @@ def _ensure_owner_scoped_email_cache_table(conn, table: str, create_sql: str, co
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
         cols = [r[1] for r in info]
         pk_cols = [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])]
+        for col in columns:
+            if col not in cols:
+                if col == "owner":
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN owner TEXT DEFAULT ''")
+                elif col in {"event_uids"}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT '[]'")
+                elif col.startswith("has_") or col.endswith("_created") or col.endswith("_count"):
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER DEFAULT 0")
+                elif col == "created_at":
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT ''")
+                else:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+                cols.append(col)
         if "owner" in cols and pk_cols == ["message_id", "owner"]:
             return
 
@@ -575,6 +588,7 @@ def _init_scheduled_db():
         CREATE TABLE IF NOT EXISTS email_tags (
             message_id TEXT,
             owner TEXT DEFAULT '',
+            account_id TEXT DEFAULT '',
             uid TEXT,
             folder TEXT,
             subject TEXT,
@@ -585,7 +599,7 @@ def _init_scheduled_db():
             moved_to TEXT,
             model_used TEXT,
             created_at TEXT NOT NULL,
-            PRIMARY KEY (message_id, owner)
+            PRIMARY KEY (message_id, owner, account_id)
         )
     """)
     # Backfill migration: older installs created the table with
@@ -593,28 +607,35 @@ def _init_scheduled_db():
     # promote it into the PK by rebuild-copy-swap (SQLite can't ALTER PK).
     try:
         _cols = [r[1] for r in conn.execute("PRAGMA table_info(email_tags)")]
+        _pk_cols = [r[1] for r in sorted(conn.execute("PRAGMA table_info(email_tags)").fetchall(), key=lambda row: row[5] or 99) if r[5]]
         if "owner" not in _cols:
-            # Add the column first so reads/writes don't break mid-migration.
             conn.execute("ALTER TABLE email_tags ADD COLUMN owner TEXT DEFAULT ''")
-            # Rebuild with composite PK. Existing rows get owner='' (legacy
-            # single-user); the urgency scanner will overwrite as it
-            # re-classifies. No data loss.
+            _cols.append("owner")
+        if "account_id" not in _cols:
+            conn.execute("ALTER TABLE email_tags ADD COLUMN account_id TEXT DEFAULT ''")
+            _cols.append("account_id")
+        if _pk_cols != ["message_id", "owner", "account_id"]:
+            # Rebuild with account-aware composite PK. Existing rows get
+            # account_id='' and are still readable as legacy fallback rows;
+            # fresh task runs write exact account ids and no longer block each
+            # other when two accounts share a Message-ID.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS email_tags__new (
                     message_id TEXT,
                     owner TEXT DEFAULT '',
+                    account_id TEXT DEFAULT '',
                     uid TEXT, folder TEXT, subject TEXT, sender TEXT,
                     tags TEXT, spam_verdict INTEGER DEFAULT 0,
                     spam_reason TEXT, moved_to TEXT, model_used TEXT,
                     created_at TEXT NOT NULL,
-                    PRIMARY KEY (message_id, owner)
+                    PRIMARY KEY (message_id, owner, account_id)
                 )
             """)
             conn.execute("""
                 INSERT OR IGNORE INTO email_tags__new
-                  (message_id, owner, uid, folder, subject, sender, tags,
+                  (message_id, owner, account_id, uid, folder, subject, sender, tags,
                    spam_verdict, spam_reason, moved_to, model_used, created_at)
-                SELECT message_id, COALESCE(owner, ''), uid, folder, subject,
+                SELECT message_id, COALESCE(owner, ''), COALESCE(account_id, ''), uid, folder, subject,
                        sender, tags, spam_verdict, spam_reason, moved_to,
                        model_used, created_at
                 FROM email_tags
@@ -630,11 +651,12 @@ def _init_scheduled_db():
             message_id TEXT,
             owner TEXT DEFAULT '',
             uid TEXT,
+            event_uids TEXT DEFAULT '[]',
             events_created INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             PRIMARY KEY (message_id, owner)
         )
-    """, ["message_id", "owner", "uid", "events_created", "created_at"])
+    """, ["message_id", "owner", "uid", "event_uids", "events_created", "created_at"])
     _ensure_owner_scoped_email_cache_table(conn, "email_urgency_alerts", """
         CREATE TABLE IF NOT EXISTS email_urgency_alerts (
             message_id TEXT,
@@ -658,6 +680,64 @@ def _init_scheduled_db():
             message_key TEXT NOT NULL,
             first_seen_at TEXT NOT NULL,
             PRIMARY KEY (owner, account_key, folder, message_key)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_message_index (
+            owner TEXT NOT NULL DEFAULT '',
+            account_key TEXT NOT NULL DEFAULT '',
+            folder TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            message_id TEXT,
+            subject TEXT,
+            from_name TEXT,
+            from_address TEXT,
+            to_text TEXT,
+            cc_text TEXT,
+            date_iso TEXT,
+            date_display TEXT,
+            date_epoch REAL DEFAULT 0,
+            size INTEGER DEFAULT 0,
+            flags TEXT DEFAULT '',
+            has_attachments INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner, account_key, folder, uid)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS ix_email_message_index_folder_date
+        ON email_message_index(owner, account_key, folder, date_epoch DESC)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS ix_email_message_index_message_id
+        ON email_message_index(owner, account_key, message_id)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_body_preview_cache (
+            owner TEXT NOT NULL DEFAULT '',
+            account_key TEXT NOT NULL DEFAULT '',
+            folder TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            message_id TEXT,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner, account_key, folder, uid)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS ix_email_body_preview_message_id
+        ON email_body_preview_cache(owner, account_key, message_id)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_attachment_metadata_cache (
+            owner TEXT NOT NULL DEFAULT '',
+            account_key TEXT NOT NULL DEFAULT '',
+            folder TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            message_id TEXT,
+            attachments_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner, account_key, folder, uid)
         )
     """)
     # Boundary cache — LLM-detected sig/quote start positions in the body.
@@ -1257,12 +1337,14 @@ def _list_attachments_from_msg(msg):
             except Exception:
                 payload = b""
         size = len(payload) if payload is not None else 0
+        content_id = (part.get("Content-ID") or "").strip().strip("<>")
         attachments.append({
             "index": idx,
             "filename": filename,
             "content_type": ct,
             "size": size,
             "is_inline": "inline" in cd.lower(),
+            "content_id": content_id,
         })
         idx += 1
     return attachments
@@ -1701,6 +1783,10 @@ class SendEmailRequest(BaseModel):
     attachments: Optional[List[str]] = None
     # Which account to send from. None = default account.
     account_id: Optional[str] = None
+    # Source message for replies. When present, /send marks this exact message
+    # answered after successful delivery so it leaves undone/reply-soon views.
+    source_uid: Optional[str] = None
+    source_folder: Optional[str] = None
     # Internal marker for Odysseus-generated mail (e.g. reminder, scheduled).
     odysseus_kind: Optional[str] = None
     # If true, /send waits for SMTP + Sent append and returns the sent UID.
