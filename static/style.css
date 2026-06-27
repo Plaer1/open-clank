@@ -24043,15 +24043,15 @@ details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-backend-llamacpp {
   row-gap: 2px;
 }
 details.hwfit-serve-advanced > .hwfit-llama-placement-row {
-  margin-top: -8px !important;
+  margin-top: -6px !important;
 }
 details.hwfit-serve-advanced > .hwfit-llama-memory-row {
-  margin-top: -22px !important;
+  margin-top: -20px !important;
 }
 details.hwfit-serve-advanced > .hwfit-llama-batch-row,
 details.hwfit-serve-advanced > .hwfit-llama-monitor-row,
 details.hwfit-serve-advanced > .hwfit-llama-checks-row {
-  margin-top: -20px !important;
+  margin-top: -18px !important;
 }
 details.hwfit-serve-advanced > .hwfit-serve-row.hwfit-vram-monitor {
   gap: 4px !important;
