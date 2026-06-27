@@ -878,6 +878,8 @@ function _renderHwVisibilityWarning(sys) {
   box.querySelector('[data-hw-action="manual"]')?.addEventListener('click', () => {
     const panel = document.getElementById('hwfit-manual-panel');
     if (panel) panel.classList.remove('hidden');
+    const manualBtn = document.getElementById('hwfit-hw-manual-btn');
+    if (manualBtn) manualBtn.textContent = 'CANCEL';
     document.getElementById('hwfit-hw-manual-btn')?.scrollIntoView?.({
       behavior: 'smooth',
       block: 'center',
@@ -1042,6 +1044,8 @@ export function _hwfitRenderHw(el, sys) {
         _saveManualHwState(null);
         btn.closest('.hwfit-hw-chip-row')?.remove();
         document.getElementById('hwfit-manual-panel')?.classList.add('hidden');
+        const manualBtn = document.getElementById('hwfit-hw-manual-btn');
+        if (manualBtn) manualBtn.textContent = 'EDIT';
         _resetGpuToggleState();
         _hwfitCache = null;
         _hwfitFetch(true);
@@ -1062,16 +1066,20 @@ function _wireManualHardwareControls(el) {
   const btn = document.getElementById('hwfit-hw-manual-btn');
   const panel = document.getElementById('hwfit-manual-panel');
   if (!btn || !panel) return;
+  const syncManualButton = () => {
+    btn.textContent = panel.classList.contains('hidden') ? 'EDIT' : 'CANCEL';
+  };
   const clearManual = () => {
     _saveManualHwState(null);
     el.querySelector('.hwfit-hw-chip-manual')?.remove();
     panel.classList.add('hidden');
+    syncManualButton();
     _resetGpuToggleState();
     _hwfitCache = null;
     _hwfitFetch(true);
   };
   const manual = _manualHwState();
-  btn.textContent = 'EDIT';
+  syncManualButton();
   if (manual) {
     panel.querySelector('.hwfit-manual-mode').value = manual.mode || 'gpu';
     panel.querySelector('.hwfit-manual-backend').value = manual.backend || 'cuda';
@@ -1087,11 +1095,13 @@ function _wireManualHardwareControls(el) {
     btn._hwfitManualBound = true;
     btn.addEventListener('click', () => {
       panel.classList.toggle('hidden');
+      syncManualButton();
       syncMode();
     });
   }
   el.querySelector('.hwfit-hw-chip-toggle[data-hw-chip="manual"]')?.addEventListener('click', () => {
     panel.classList.remove('hidden');
+    syncManualButton();
     syncMode();
   });
   if (!panel._hwfitManualBound) {
@@ -1108,12 +1118,14 @@ function _wireManualHardwareControls(el) {
       _resetGpuToggleState();
       _hwfitCache = null;
       panel.classList.add('hidden');
+      syncManualButton();
       _hwfitRenderHw(el, _manualDisplaySystem(window._hwfitSystemCache, manual));
       _hwfitFetch(true);
     });
     panel.querySelector('.hwfit-hw-manual-clear')?.addEventListener('click', clearManual);
   }
   syncMode();
+  syncManualButton();
 }
 
 export const _fitColors = { perfect: 'var(--green, #50fa7b)', good: 'var(--yellow, #f1fa8c)', marginal: 'var(--orange, #ffb86c)', too_tight: 'var(--red, #ff5555)' };
