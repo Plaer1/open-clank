@@ -513,10 +513,8 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   }
   const raw = Math.floor(freeForKv / kvGbPerToken);
   const rounded = Math.max(1024, Math.floor(raw / 1024) * 1024);
-  const gpuEstimateCtx = Math.min(modelMax, rounded);
-  let ctx = gpuEstimateCtx;
+  let ctx = Math.min(modelMax, rounded);
   let reasonSuffix = '';
-  let unifiedSpill = false;
   if (isUnifiedMode) {
     // Unified memory is not just "GPU math with a slightly bigger VRAM number".
     // llama.cpp can spill into system RAM, so a conservative pure-VRAM KV
@@ -529,7 +527,6 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     const unifiedCtx = Math.min(modelMax, unifiedCap);
     if (unifiedCtx > ctx) {
       ctx = unifiedCtx;
-      unifiedSpill = true;
       reasonSuffix = '; unified can spill into system RAM, slower than pure GPU';
     }
     const gpuUsableGb = Math.max(1, totalVramGb - Math.max(1.0, selectedCount * 0.6));
@@ -548,8 +545,6 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
     ctx,
     modelGb,
     kvGbPerToken,
-    gpuEstimateCtx,
-    unifiedSpill,
     reason: `~${ctx.toLocaleString()} tokens fits llama.cpp KV (${freeForKv.toFixed(1)}G free ${isUnifiedMode ? 'unified' : 'VRAM'}${reasonSuffix})`,
   };
 }
@@ -1660,31 +1655,22 @@ function _rerenderCachedModels() {
           const ggufGb = _selectedGgufSizeGb(m, f.gguf_file);
           fit = _estimateLlamaContextFit(m, f, panel._modelCtxMax, ggufGb || panel._modelWeightsGb, panel._fitSystem, panel._contextProfileData);
         } else {
-          if (_ctxAutoNote) {
-            _ctxAutoNote.textContent = '';
-            _ctxAutoNote.classList.remove('gpu-fit', 'unified-spill');
-          }
+          if (_ctxAutoNote) _ctxAutoNote.textContent = '';
           return;
         }
         if (!fit) {
-          if (_ctxAutoNote) {
-            _ctxAutoNote.textContent = '';
-            _ctxAutoNote.classList.remove('gpu-fit', 'unified-spill');
-          }
+          if (_ctxAutoNote) _ctxAutoNote.textContent = '';
           return;
         }
         if ((fit.needsHardwareScan || fit.needsModelSize) && !fit.ctx) {
           if (_ctxAutoNote) {
             _ctxAutoNote.textContent = fit.reason;
             _ctxAutoNote.title = fit.reason;
-            _ctxAutoNote.classList.remove('gpu-fit', 'unified-spill');
           }
           return;
         }
         if (_ctxAutoNote) {
           _ctxAutoNote.textContent = `Auto ${fit.ctx.toLocaleString()} · ${fit.reason}`;
-          _ctxAutoNote.classList.toggle('gpu-fit', !!fit.ctx && !fit.unifiedSpill);
-          _ctxAutoNote.classList.toggle('unified-spill', !!fit.unifiedSpill);
           const _llamaMemoryLabel = String(f.llama_mode || '').toLowerCase() === 'unified' || f.unified_mem
             ? 'unified system memory'
             : 'selected GPU memory';
@@ -1727,7 +1713,6 @@ function _rerenderCachedModels() {
         if (_ctxAutoNote && data?.model_probe_error && (!ctxMax || !weightsGb)) {
           _ctxAutoNote.textContent = data.model_probe_error;
           _ctxAutoNote.title = data.model_probe_error;
-          _ctxAutoNote.classList.remove('gpu-fit', 'unified-spill');
         }
         return { ctxMax, weightsGb, data };
       }

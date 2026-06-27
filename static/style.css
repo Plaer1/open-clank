@@ -20203,14 +20203,6 @@ body.gallery-selecting .gallery-dl-btn,
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.hwfit-auto-ctx-note.gpu-fit {
-  color: var(--green, var(--color-success, #50fa7b));
-  opacity: 0.82;
-}
-.hwfit-auto-ctx-note.unified-spill {
-  color: var(--yellow, var(--color-warning, #f0ad4e));
-  opacity: 0.9;
-}
 .hwfit-serve-row label select,
 .hwfit-serve-row label input {
   display: block;
