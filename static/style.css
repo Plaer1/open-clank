@@ -20199,6 +20199,10 @@ body.gallery-selecting .gallery-dl-btn,
     flex-direction: column;
     align-items: flex-start;
   }
+  .hwfit-serve-row-core label:has(.hwfit-sf[data-field="max_seqs"]),
+  .hwfit-serve-row-core label:has(.hwfit-sf[data-field="gpu_mem"]) {
+    left: 0;
+  }
   details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="vllm_env_preset"]),
   details.hwfit-serve-advanced label:has(.hwfit-sf[data-field="extra_env"]) {
     grid-column: 1 / -1 !important;
