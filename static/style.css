@@ -31972,8 +31972,9 @@ body.doc-find-active mark.doc-find-mark.current {
   flex: 1 1 auto; min-width: 0;
 }
 .email-attachment-chip.is-expanded > span:not(.att-size):not(.email-attachment-open) {
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .email-attachment-chip .att-size { opacity: 0.5; font-size: 10px; flex-shrink: 0; }
 .email-attachment-chip-muted { opacity: 0.65; }
@@ -32017,6 +32018,15 @@ body.doc-find-active mark.doc-find-mark.current {
   top: -2px;
 }
 .email-attachment-open-label { line-height: 1; }
+.email-attachment-chip.is-expanded .email-attachment-open {
+  width: 24px;
+  min-width: 24px;
+  padding: 0;
+  margin-left: 4px;
+}
+.email-attachment-chip.is-expanded .email-attachment-open-label {
+  display: none;
+}
 @media (max-width: 768px) {
   .doc-email-collapse-btn {
     background: inherit;
@@ -32050,22 +32060,26 @@ body.doc-find-active mark.doc-find-mark.current {
     min-height: 36px !important;
   }
   .email-attachment-chip.is-expanded {
-    flex-wrap: wrap;
-    align-items: flex-start;
+    flex-wrap: nowrap;
+    align-items: center;
     max-width: min(92vw, 360px);
   }
   .email-attachment-chip.is-expanded > span:not(.att-size):not(.email-attachment-open) {
-    flex: 1 1 calc(100% - 24px);
-    white-space: normal;
-    overflow-wrap: anywhere;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     line-height: 1.25;
     min-width: 0;
   }
   .email-attachment-chip.is-expanded .att-size {
-    margin-left: 18px;
+    margin-left: 0;
   }
   .email-attachment-chip.is-expanded .email-attachment-open {
-    margin-left: auto;
+    width: 28px;
+    min-width: 28px;
+    padding: 0;
+    margin-left: 4px;
   }
   .email-compose-chip .compose-chip-name {
     max-width: 190px;
