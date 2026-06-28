@@ -32015,7 +32015,7 @@ body.doc-find-active mark.doc-find-mark.current {
   height: 12px !important;
   margin: 0 !important;
   position: relative;
-  top: -2px;
+  top: 0;
 }
 .email-attachment-open-label { line-height: 1; }
 .email-attachment-chip.is-expanded .email-attachment-open {

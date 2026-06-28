@@ -4192,7 +4192,27 @@ import * as Modals from './modalManager.js';
 
   // ---- Panel open/close ----
 
+  function _closeNotesForDocumentOpen() {
+    try {
+      if (Modals.isRegistered('notes-panel')) {
+        Modals.close('notes-panel');
+        return;
+      }
+    } catch (_) {}
+    if (!document.getElementById('notes-pane') && !document.getElementById('notes-pane-backdrop')) return;
+    import('./notes.js')
+      .then(mod => {
+        const close = mod.closeNotes || mod.closePanel || mod.default?.closeNotes || mod.default?.closePanel;
+        if (typeof close === 'function') close();
+      })
+      .catch(() => {
+        try { document.getElementById('notes-pane')?.remove(); } catch (_) {}
+        try { document.getElementById('notes-pane-backdrop')?.remove(); } catch (_) {}
+      });
+  }
+
   export function openPanel() {
+    _closeNotesForDocumentOpen();
     if (isOpen) return;
     // Clear any pane/divider still sliding out from a just-fired close so we
     // don't end up with two #doc-editor-pane nodes (and a stale close stripping
@@ -6522,6 +6542,7 @@ import * as Modals from './modalManager.js';
   }
 
   export async function loadDocument(docId) {
+    _closeNotesForDocumentOpen();
     // If already in tabs, just switch
     if (docs.has(docId)) {
       _ensureDocPaneMounted();
