@@ -23253,6 +23253,13 @@ body:not(.welcome-ready) #welcome-screen {
 .task-log-row:hover {
   background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
+.task-log-row.task-log-row-error {
+  border-color: color-mix(in srgb, var(--red, #f87171) 35%, var(--border));
+  background: color-mix(in srgb, var(--red, #f87171) 4%, transparent);
+}
+.task-log-row.task-log-row-error:hover {
+  background: color-mix(in srgb, var(--red, #f87171) 7%, transparent);
+}
 .task-log-row.expanded { padding: 8px 10px 6px; }
 .task-log-row-head {
   display: flex;
@@ -23287,6 +23294,13 @@ body:not(.welcome-ready) #welcome-screen {
   align-items: center;
   flex: 0 0 auto;
   margin-right: -3px;
+}
+.task-log-row.task-log-row-error .task-log-name,
+.task-log-row.task-log-row-error .task-log-task-icon {
+  color: var(--red, #f87171);
+}
+.task-log-row.task-log-row-error .task-log-task-icon svg {
+  opacity: 0.82 !important;
 }
 .task-log-task-icon svg {
   top: 0 !important;
