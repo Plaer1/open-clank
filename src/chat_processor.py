@@ -12,6 +12,45 @@ from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_mess
 
 logger = logging.getLogger(__name__)
 
+
+def _clean_search_query(query: str, max_len: int = 200) -> str:
+    """Strip fenced code blocks from a search query while preserving inline
+    code text.
+
+    This is a focused, defensive cleanup for the *final* web-search query
+    selected in ``build_context_preface`` (issue #4547): regardless of whether
+    the query came from the LLM-generated path (#4557) or the first-line
+    fallback, residual fenced / inline markdown should not leak into the search
+    call. Rather than using regex (which is brittle and strips inline code
+    text like ``git reset`` from the query), we render the query to HTML via
+    ``markdown`` and parse it with ``BeautifulSoup`` so that:
+
+    * ``<pre>`` blocks (fenced / indented code) are removed entirely.
+    * ``<code>`` elements (inline code) are preserved as plain text.
+
+    Both libraries are already project dependencies. The result is whitespace
+    collapsed and truncated to ``max_len``; an all-code input collapses to an
+    empty string, which the caller treats as "no query".
+    """
+    import markdown as _md
+    from bs4 import BeautifulSoup as _BS
+
+    html = _md.markdown(query, extensions=["fenced_code"])
+    soup = _BS(html, "html.parser")
+
+    # Remove fenced / indented code blocks.
+    for pre in soup.find_all("pre"):
+        pre.decompose()
+
+    # Preserve inline code by unwrapping <code> to text.
+    for code in soup.find_all("code"):
+        code.replace_with(code.get_text())
+
+    text = soup.get_text(" ", strip=True)
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
+
+
 # ── Stopwords & tokenizer ──
 
 _STOPWORDS = frozenset(
@@ -321,6 +360,13 @@ class ChatProcessor:
                 search_query = " ".join(search_query.split())
                 if len(search_query) > 150:
                     search_query = search_query[:150].strip()
+
+                # Defensive cleanup of the final selected query (interim fix
+                # for #4547): strip any residual fenced/inline markdown so that
+                # neither the generated query nor the first-line fallback leaks
+                # fences or backticks into the search call. No-op on clean
+                # generated queries; collapses to "" when the query is all code.
+                search_query = _clean_search_query(search_query, max_len=150)
 
                 if search_query:
                     # Execute web search using the final selected query
