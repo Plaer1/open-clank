@@ -845,7 +845,12 @@ _EXPLICIT_CONTINUATION_RE = re.compile(
     r"run it|launch it|start it|use that|that one|same|the same|"
     r"first|second|third|the first one|the second one|the third one|"
     r"[123]|[abc]"
-    r")\s*[.!?]*\s*$",
+    # `\s*[.!?]*\s*$` put two \s-matching quantifiers around `[.!?]*`, which
+    # backtracks O(n^2) on a terse reply + whitespace flood (py/polynomial-redos).
+    # `\s*(?:[.!?]+\s*)?$` accepts the same "trailing space/punctuation" tails
+    # (the inner \s* only engages after `[.!?]+`, so no two \s* are adjacent) and
+    # is linear.
+    r")\s*(?:[.!?]+\s*)?$",
     re.IGNORECASE,
 )
 _RETRY_CONTINUATION_RE = re.compile(
