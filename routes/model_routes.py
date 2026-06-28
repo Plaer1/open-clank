@@ -1396,7 +1396,7 @@ def setup_model_routes(model_discovery):
         return {"hosts": [], "items": items}
 
     @router.get("/models")
-    def api_models(request: Request, refresh: bool = False):
+    def api_models(request: Request, refresh: bool = False, background: bool = True):
         """Get available models — per-user (caller sees only their endpoints +
         legacy/shared null-owner rows). Cached per-user for 30s."""
         # Require auth; "" is the unconfigured single-user mode, treated as
@@ -1438,8 +1438,11 @@ def setup_model_routes(model_discovery):
             return cache_entry["data"]
         result = _fetch_models(owner=owner, is_admin=_is_admin)
         _models_cache[_cache_key] = {"data": result, "time": now}
-        # Kick off background refresh to update caches from live endpoints
-        _refresh_caches_bg(force=refresh)
+        # Kick off background refresh to update caches from live endpoints.
+        # Page boot can opt out with background=false so opening Odysseus does
+        # not start endpoint probes against slow/offline model servers.
+        if background or refresh:
+            _refresh_caches_bg(force=refresh)
         return result
 
     # Brief cache for local-probe results so picker-open doesn't hammer

@@ -3968,7 +3968,7 @@ function startOdysseusApp() {
   }
 
   // Non-critical: load in parallel, resolve silently
-  modelsModule.refreshModels(true).then(() => {
+  modelsModule.refreshModels(false).then(() => {
     const modelsBox = document.getElementById('models');
     const hasModels = modelsBox && modelsBox.querySelector('.models-row');
     if (!hasModels) {
