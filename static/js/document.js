@@ -1111,7 +1111,7 @@ import * as Modals from './modalManager.js';
     if (_pdfPaneProximityWired || !pane) return;
     _pdfPaneProximityWired = true;
     let raf = 0;
-    const buffer = 30;
+    const buffer = 44;
     pane.addEventListener('mousemove', (ev) => {
       if (raf) return;
       raf = requestAnimationFrame(() => {
@@ -1469,7 +1469,12 @@ import * as Modals from './modalManager.js';
     };
     if (!_isTouch) {
       wrap.addEventListener('mouseenter', () => _setHandlesVisible(true));
-      wrap.addEventListener('mouseleave', () => _setHandlesVisible(false));
+      // Handles intentionally sit outside the annotation rectangle. Hiding on
+      // wrap mouseleave makes them disappear while moving toward those controls;
+      // pane-level proximity below owns hiding once the cursor is genuinely away.
+      for (const h of [del, grip, resize, menuBtn].filter(Boolean)) {
+        h.addEventListener('mouseenter', () => _setHandlesVisible(true));
+      }
     }
     wrap.addEventListener('pointerdown', (ev) => {
       if (ev.target === del || ev.target === grip || ev.target === resize || ev.target === menuBtn) return;
