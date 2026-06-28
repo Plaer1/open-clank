@@ -508,6 +508,7 @@ def setup_gallery_routes() -> APIRouter:
                 from sqlalchemy import or_
                 q = q.filter(or_(
                     GalleryImage.prompt.ilike(term),
+                    GalleryImage.caption.ilike(term),
                     GalleryImage.tags.ilike(term),
                     GalleryImage.ai_tags.ilike(term),
                 ))

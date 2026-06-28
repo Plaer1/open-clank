@@ -267,6 +267,32 @@ def setup_upload_routes(upload_handler):
         os.makedirs(cache_dir, exist_ok=True)
         return os.path.join(cache_dir, file_id + ".txt")
 
+    def _sync_gallery_caption_for_upload(info: dict | None, owner: str | None, text: str) -> None:
+        """Copy upload OCR/vision text onto the promoted gallery image row."""
+        if not info:
+            return
+        file_hash = info.get("hash")
+        if not file_hash:
+            return
+        db = SessionLocal()
+        try:
+            q = db.query(GalleryImage).filter(
+                GalleryImage.file_hash == file_hash,
+                GalleryImage.is_active == True,  # noqa: E712
+            )
+            if owner:
+                q = q.filter(GalleryImage.owner == owner)
+            img = q.first()
+            if not img:
+                return
+            img.caption = (text or "").strip()
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning("Failed to sync OCR caption to gallery image: %s", e)
+        finally:
+            db.close()
+
     @router.get("/{file_id}/vision")
     async def get_vision_text(request: Request, file_id: str, force: int = 0):
         """Return the vision-model OCR/description for an uploaded image.
@@ -293,7 +319,9 @@ def setup_upload_routes(upload_handler):
         if not force and os.path.exists(cache_path):
             try:
                 with open(cache_path, encoding="utf-8") as f:
-                    return {"text": f.read(), "cached": True}
+                    cached_text = f.read()
+                _sync_gallery_caption_for_upload(info, file_owner or current_user, cached_text)
+                return {"text": cached_text, "cached": True}
             except Exception as e:
                 logger.warning(f"Vision cache read failed for {file_id}: {e}")
         from src.document_processor import analyze_image_with_vl
@@ -307,6 +335,7 @@ def setup_upload_routes(upload_handler):
                 f.write(text)
         except Exception as e:
             logger.warning(f"Vision cache write failed for {file_id}: {e}")
+        _sync_gallery_caption_for_upload(info, file_owner or current_user, text)
         return {"text": text, "cached": False}
 
     @router.put("/{file_id}/vision")
@@ -334,6 +363,7 @@ def setup_upload_routes(upload_handler):
             raise HTTPException(400, "text must be a string")
         with open(_vision_cache_path(file_id), "w", encoding="utf-8") as f:
             f.write(text)
+        _sync_gallery_caption_for_upload(info, file_owner or current_user, text)
         return {"ok": True}
 
     async def periodic_rate_limit_cleanup():

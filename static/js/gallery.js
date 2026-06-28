@@ -1201,7 +1201,7 @@ function _renderGrid() {
       .replace(/\.[^.]+$/, '')       // drop extension
       .replace(/[_-]+/g, ' ')
       .trim();
-    const labelText = (img.prompt || '').trim() || fallbackName || 'Photo';
+    const labelText = (img.caption || '').trim() || (img.prompt || '').trim() || fallbackName || 'Photo';
     const promptPreview = labelText.length > 60 ? labelText.substring(0, 58) + '...' : labelText;
     const favCls = img.favorite ? ' gallery-fav-active' : '';
     html += `
@@ -1410,6 +1410,7 @@ function _openDetail(img) {
             <svg class="gallery-name-enter" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
           </div>
         </div>
+        ${img.caption ? `<div class="gallery-detail-section"><label>OCR Caption</label><div class="gallery-detail-prompt">${_esc(img.caption)}</div></div>` : ''}
         ${img.prompt && img.model !== 'imported' ? `<div class="gallery-detail-section"><label>Prompt</label><div class="gallery-detail-prompt">${_esc(img.prompt)}</div></div>` : ''}
         <div class="gallery-detail-section gallery-detail-section-date">
           <label>Date</label>
