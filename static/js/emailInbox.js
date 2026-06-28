@@ -1185,6 +1185,7 @@ async function _deleteEmail(em) {
   if (!ok) return;
   const row = document.querySelector(`.email-item[data-uid="${CSS.escape(String(em.uid))}"]`);
   const busy = _showEmailDeleteOverlay(row);
+  await busy?.ready;
   try {
     await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(_currentFolder)}${_acct()}`, { method: 'DELETE' });
     busy?.remove?.();
@@ -1208,7 +1209,9 @@ function _showEmailDeleteOverlay(target) {
   target.style.pointerEvents = 'none';
   target.classList.add('email-delete-busy');
   target.appendChild(overlay);
+  const ready = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   return {
+    ready,
     remove() {
       try { wp.destroy?.(); } catch (_) {}
       overlay.remove();

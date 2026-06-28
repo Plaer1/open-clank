@@ -722,6 +722,7 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
     if (!ok) return;
   }
   const busy = _showEmailDeleteOverlay(card);
+  await busy?.ready;
   const wasExpanded = !!card?.classList?.contains('doclib-card-expanded');
   const sibling = wasExpanded
     ? (_findSiblingEmailCard(card, +1) || _findSiblingEmailCard(card, -1))
@@ -767,7 +768,9 @@ function _showEmailDeleteOverlay(target) {
   target.style.pointerEvents = 'none';
   target.classList.add('email-delete-busy');
   target.appendChild(overlay);
+  const ready = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   return {
+    ready,
     remove() {
       try { wp.destroy?.(); } catch (_) {}
       overlay.remove();
@@ -6582,6 +6585,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       icon: _trashIcon,
       action: async () => {
         const busy = _showEmailDeleteOverlay(card);
+        await busy?.ready;
         try {
           await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
         } catch (e) {
@@ -6606,6 +6610,7 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
         );
         if (!ok) return;
         const busy = _showEmailDeleteOverlay(card);
+        await busy?.ready;
         try {
           await fetch(`${API_BASE}/api/email/delete-permanent/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
         } catch (e) {
@@ -6819,7 +6824,17 @@ function _showCardMenu(em, anchor) {
       const subject = em.subject || '(no subject)';
       const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
       if (!ok) return;
-      await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
+      const card = document.querySelector(`#email-lib-grid .doclib-card[data-uid="${CSS.escape(String(em.uid))}"]`);
+      const busy = _showEmailDeleteOverlay(card);
+      await busy?.ready;
+      try {
+        await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
+      } catch (e) {
+        busy?.remove?.();
+        showToast('Failed to delete email');
+        throw e;
+      }
+      busy?.remove?.();
       await _animateEmailCardRemoval([em.uid]);
       state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
       _renderGrid();

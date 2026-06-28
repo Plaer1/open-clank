@@ -29296,8 +29296,9 @@ button .spinner-whirlpool {
     0 0 12px -3px color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
 }
 
-.email-delete-busy {
-  opacity: 0.72;
+.email-delete-busy > :not(.email-delete-overlay) {
+  opacity: 0.42;
+  transition: opacity 0.12s ease;
 }
 
 .email-delete-overlay {
