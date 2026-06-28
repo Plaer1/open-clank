@@ -4761,8 +4761,14 @@ function _openMobileFullscreenEdit(id, fromCard) {
   const headerActions = overlay.querySelector('.note-fullscreen-actions');
   const archiveBtn = form.querySelector('.note-form-archive-btn');
   const deleteBtn  = form.querySelector('.note-form-delete-btn');
-  if (headerActions && archiveBtn) headerActions.appendChild(archiveBtn);
-  if (headerActions && deleteBtn)  headerActions.appendChild(deleteBtn);
+  if (headerActions && archiveBtn) {
+    archiveBtn.classList.remove('note-form-collapsible');
+    headerActions.appendChild(archiveBtn);
+  }
+  if (headerActions && deleteBtn) {
+    deleteBtn.classList.remove('note-form-collapsible');
+    headerActions.appendChild(deleteBtn);
+  }
   // The built-in archive/delete handlers re-render the notes grid but
   // leave THIS overlay sitting in front of it — looks like nothing
   // happened. Add follow-up listeners that close the overlay so the

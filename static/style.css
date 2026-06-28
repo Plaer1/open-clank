@@ -33887,6 +33887,9 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
   .note-form-remind-btn { color: var(--accent, var(--red)) !important; }
   .note-form-remind-btn > svg { color: var(--accent, var(--red)); }
   .note-form-archive-btn { display: none !important; }
+  .note-fullscreen-actions .note-form-archive-btn {
+    display: inline-flex !important;
+  }
   .note-form-save.archive-mode {
     color: var(--accent, var(--red)) !important;
     border-color: color-mix(in srgb, var(--accent, var(--red)) 50%, transparent) !important;
