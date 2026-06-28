@@ -477,7 +477,8 @@ async function loadEndpoints() {
       return;
     }
     const rowHtml = data.map(ep => {
-      const visibleCount = ep.models.length;
+      const epModels = Array.isArray(ep.models) ? ep.models : [];
+      const visibleCount = epModels.length;
       const totalCount = visibleCount + (ep.hidden_count || 0);
       // `ep.models` is the *visible* set — when every model is hidden it's
       // empty, but we still need to render the expand panel so the user can
