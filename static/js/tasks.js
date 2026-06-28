@@ -6,8 +6,10 @@ import uiModule from './ui.js';
 import markdownModule from './markdown.js';
 import * as spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 import { sortModelIds } from './modelSort.js';
 import { ordinalSuffix } from './util/ordinal.js';
+import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
 const API_BASE = window.location.origin;
 let _open = false;
@@ -982,7 +984,7 @@ function _showTaskDropdown(anchor, items) {
   }
   document.querySelectorAll('.task-dropdown').forEach(d => {
     if (typeof d._dismiss === 'function') d._dismiss();
-    else d.remove();
+    else dismissOrRemove(d);
   });
   const dd = document.createElement('div');
   dd.className = 'task-dropdown';
@@ -999,10 +1001,14 @@ function _showTaskDropdown(anchor, items) {
     }
     btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = 'none'; });
-    btn.addEventListener('click', (e) => { e.stopPropagation(); dd.remove(); item.action(); });
+    btn.addEventListener('click', (e) => { e.stopPropagation(); close(); item.action(); });
     dd.appendChild(btn);
   });
   document.body.appendChild(dd);
+  // Sit above the currently-raised tool modal at any stack depth (#4720): the
+  // modal bring-to-front counter climbs unbounded, so a hardcoded z eventually
+  // loses. topPortalZ() derives the value from the live tool-window stack.
+  dd.style.zIndex = String(topPortalZ());
   const rect = anchor.getBoundingClientRect();
   let top = rect.bottom + 4;
   let left = rect.right - dd.offsetWidth;
@@ -1011,20 +1017,16 @@ function _showTaskDropdown(anchor, items) {
   dd.style.top = top + 'px';
   dd.style.left = left + 'px';
   const openedAt = performance.now();
-  const close = (e) => {
+  const close = bindMenuDismiss(dd, () => { dd.remove(); }, (ev) => {
     // Ignore any clicks that occur within 250ms of the open (covers touch
     // "ghost click" duplicates that were firing right after pointerup and
-    // removing the dropdown before the user could see it).
-    if (performance.now() - openedAt < 250) return;
-    if (!dd.contains(e.target)) { dd.remove(); document.removeEventListener('click', close); }
-  };
+    // removing the dropdown before the user could see it) — treat as inside.
+    if (performance.now() - openedAt < 250) return false;
+    return !dd.contains(ev.target);
+  });
   dd._dismiss = () => {
-    dd.remove();
-    document.removeEventListener('click', close);
+    close();
   };
-  // requestAnimationFrame so the listener is registered AFTER the current
-  // pointer/click event cycle has finished bubbling.
-  requestAnimationFrame(() => document.addEventListener('click', close));
 }
 
 // ---- Presets ----

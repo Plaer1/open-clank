@@ -44,6 +44,17 @@ from routes.email_helpers import (
 
 logger = logging.getLogger(__name__)
 
+# Recovers a `[{"action": ...}, ...]` JSON array from raw LLM output when the
+# fenced-block strip leaves nothing usable. Runs on model output influenced by
+# untrusted email bodies, so it must not backtrack: the object content class is
+# `[^{}]` (brace-delimited, greedy) rather than the old `[^[\]]*?` lazy runs,
+# which exploded exponentially on inputs like `[{"action"},{` + `}},{{` * N
+# (CodeQL py/redos #198).
+_CAL_ACTION_ARRAY_RE = re.compile(
+    r'\[\s*\{[^{}]*"action"[^{}]*\}\s*(?:,\s*\{[^{}]*\}\s*)*\]',
+    re.DOTALL,
+)
+
 
 def _extract_json_array_from_text(text: str):
     """Return the last valid JSON array embedded in model output, if any."""
@@ -603,7 +614,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         cal_extract = _strip_think(_raw_original)
                         cal_extract = re.sub(r"^```(?:json)?\s*|\s*```$", "", cal_extract, flags=re.MULTILINE).strip()
                         if not cal_extract and _raw_original:
-                            matches = list(re.finditer(r'\[\s*\{[^[\]]*?"action"[^[\]]*?\}\s*(?:,\s*\{[^[\]]*?\}\s*)*\]', _raw_original, re.DOTALL))
+                            matches = list(_CAL_ACTION_ARRAY_RE.finditer(_raw_original))
                             if matches:
                                 cal_extract = matches[-1].group()
                         logger.info(f"[cal-extract] uid={uid.decode() if isinstance(uid, bytes) else uid} folder={_folder} subj={subject[:50]!r} raw_len={len(cal_extract)} orig_len={len(_raw_original)} raw={cal_extract[:800]!r}")
@@ -735,23 +746,30 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             logger.warning(f"[cal-extract] no JSON array found on raw={cal_extract[:200]!r}")
                     except Exception as e:
                         logger.warning(f"[cal-extract] Meeting extraction LLM call failed for uid={uid}: {e}")
-                    # Record successfully parsed results so we don't re-LLM
-                    # no-op emails. If the model returned no parseable JSON,
-                    # leave it uncached so a future run can retry.
-                    try:
-                        if _cal_parse_ok:
-                            _cc = _sql3.connect(SCHEDULED_DB)
-                            _cc.execute(
-                                "INSERT OR REPLACE INTO email_calendar_extractions "
-                                "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid),
-                                 json.dumps(_cal_event_uids), _cal_run_count, datetime.utcnow().isoformat())
-                            )
-                            _cc.commit()
-                            _cc.close()
-                            _cal_existing.add(message_id)
-                    except Exception as ce:
-                        logger.debug(f"Could not cache calendar extraction: {ce}")
+                    else:
+                        # Record successfully parsed results so we don't re-LLM
+                        # no-op emails. Transient LLM failures are retried on
+                        # the next poll run.
+                        try:
+                            if _cal_parse_ok:
+                                _cc = _sql3.connect(SCHEDULED_DB)
+                                _cc.execute(
+                                    "INSERT OR REPLACE INTO email_calendar_extractions "
+                                    "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                    (
+                                        message_id,
+                                        account_owner or "",
+                                        uid.decode() if isinstance(uid, bytes) else str(uid),
+                                        json.dumps(_cal_event_uids),
+                                        _cal_run_count,
+                                        datetime.utcnow().isoformat(),
+                                    ),
+                                )
+                                _cc.commit()
+                                _cc.close()
+                                _cal_existing.add(message_id)
+                        except Exception as ce:
+                            logger.debug(f"Could not cache calendar extraction: {ce}")
 
                 if need_urgent:
                     try:

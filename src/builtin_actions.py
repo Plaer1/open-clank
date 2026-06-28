@@ -2445,6 +2445,8 @@ async def action_cookbook_serve(
             )
             if existing is None:
                 display_name = repo_id.split("/")[-1] if "/" in repo_id else repo_id
+                ssh_port = str(srv.get("port") or cfg.get("ssh_port") or "")
+                platform = str(srv.get("platform") or cfg.get("platform") or "linux")
                 placeholder = (
                     f"Launched by scheduled task {task_name!r} — waiting for tmux output…\n"
                     f"  session: {sid}\n"
@@ -2462,8 +2464,8 @@ async def action_cookbook_serve(
                     "ts": int(_time.time() * 1000),
                     "payload": {"repo_id": repo_id, "remote_host": host or "", "_cmd": cmd},
                     "remoteHost": host or "",
-                    "sshPort": "",
-                    "platform": "linux",
+                    "sshPort": ssh_port or "",
+                    "platform": platform or "linux",
                     "_serveReady": False,
                     "_endpointAdded": bool(endpoint_id),
                 }
