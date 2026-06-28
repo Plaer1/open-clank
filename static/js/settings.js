@@ -1722,24 +1722,6 @@ async function initAgentSettings() {
     (curR != null ? ' · ' + curR + ' steps/message' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
-  // Standalone Email Safety toggle (separate card on the AI Defaults tab).
-  // Default to ON if the setting isn't present so a fresh install is safe.
-  var emailConfirm = el('set-agentEmailConfirm');
-  if (emailConfirm) {
-    try {
-      var s = await fetch('/api/auth/settings', { credentials: 'same-origin' }).then(r => r.json());
-      emailConfirm.checked = s.agent_email_confirm !== false;
-    } catch (_) {}
-    emailConfirm.addEventListener('change', async () => {
-      try {
-        await fetch('/api/auth/settings', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent_email_confirm: !!emailConfirm.checked }),
-        });
-      } catch (_) {}
-    });
-  }
 }
 
 /* ═══════════════════════════════════════════
