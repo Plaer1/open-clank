@@ -29296,6 +29296,27 @@ button .spinner-whirlpool {
     0 0 12px -3px color-mix(in srgb, var(--accent, var(--red)) 65%, transparent);
 }
 
+.email-delete-busy {
+  opacity: 0.72;
+}
+
+.email-delete-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--panel, var(--bg)) 82%, transparent);
+  pointer-events: none;
+}
+
+.email-delete-overlay .spinner-whirlpool,
+.email-delete-overlay .ai-spinner-whirlpool {
+  margin: 0 !important;
+}
+
 .doclib-card.email-card-removing {
   pointer-events: none !important;
   max-height: 0 !important;

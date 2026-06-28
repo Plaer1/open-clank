@@ -1183,13 +1183,40 @@ async function _deleteEmail(em) {
   const { styledConfirm } = await import('./ui.js');
   const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
   if (!ok) return;
+  const row = document.querySelector(`.email-item[data-uid="${CSS.escape(String(em.uid))}"]`);
+  const busy = _showEmailDeleteOverlay(row);
   try {
     await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(_currentFolder)}${_acct()}`, { method: 'DELETE' });
+    busy?.remove?.();
     _emails = _emails.filter(e => e.uid !== em.uid);
     _renderList();
   } catch (e) {
+    busy?.remove?.();
     console.error('Failed to delete:', e);
   }
+}
+
+function _showEmailDeleteOverlay(target) {
+  if (!target) return null;
+  const wp = spinnerModule.createWhirlpool(16);
+  const overlay = document.createElement('div');
+  overlay.className = 'email-delete-overlay';
+  overlay.appendChild(wp.element);
+  const prevPos = target.style.position;
+  const prevPointerEvents = target.style.pointerEvents;
+  if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+  target.style.pointerEvents = 'none';
+  target.classList.add('email-delete-busy');
+  target.appendChild(overlay);
+  return {
+    remove() {
+      try { wp.destroy?.(); } catch (_) {}
+      overlay.remove();
+      target.classList.remove('email-delete-busy');
+      target.style.pointerEvents = prevPointerEvents;
+      target.style.position = prevPos;
+    }
+  };
 }
 
 async function _toggleDone(em, itemEl) {

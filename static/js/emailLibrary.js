@@ -721,6 +721,7 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
     const ok = await styledConfirm(`Delete "${subject}"?`, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
     if (!ok) return;
   }
+  const busy = _showEmailDeleteOverlay(card);
   const wasExpanded = !!card?.classList?.contains('doclib-card-expanded');
   const sibling = wasExpanded
     ? (_findSiblingEmailCard(card, +1) || _findSiblingEmailCard(card, -1))
@@ -730,9 +731,11 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
     await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
   } catch (err) {
     console.error('Failed to delete email:', err);
+    busy?.remove?.();
     showToast('Failed to delete email');
     return;
   }
+  busy?.remove?.();
   await _animateEmailCardRemoval([em.uid]);
   state._libEmails = state._libEmails.filter(e => String(e.uid) !== String(em.uid));
   state._selectedUids.delete(em.uid);
@@ -750,6 +753,29 @@ async function _deleteEmailAndAdvance(em, card, opts = {}) {
   } else {
     document.getElementById('email-lib-modal')?.classList.remove('email-reading');
   }
+}
+
+function _showEmailDeleteOverlay(target) {
+  if (!target) return null;
+  const wp = spinnerModule.createWhirlpool(18);
+  const overlay = document.createElement('div');
+  overlay.className = 'email-delete-overlay';
+  overlay.appendChild(wp.element);
+  const prevPos = target.style.position;
+  const prevPointerEvents = target.style.pointerEvents;
+  if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+  target.style.pointerEvents = 'none';
+  target.classList.add('email-delete-busy');
+  target.appendChild(overlay);
+  return {
+    remove() {
+      try { wp.destroy?.(); } catch (_) {}
+      overlay.remove();
+      target.classList.remove('email-delete-busy');
+      target.style.pointerEvents = prevPointerEvents;
+      target.style.position = prevPos;
+    }
+  };
 }
 
 function _animateEmailCardRemoval(uids, opts = {}) {
@@ -6555,9 +6581,16 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
       label: 'Move to Trash',
       icon: _trashIcon,
       action: async () => {
+        const busy = _showEmailDeleteOverlay(card);
         try {
           await fetch(`${API_BASE}/api/email/delete/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
-        } catch (e) { console.error(e); }
+        } catch (e) {
+          console.error(e);
+          busy?.remove?.();
+          showToast('Failed to delete email');
+          return;
+        }
+        busy?.remove?.();
         await closeAndRemove();
       },
     },
@@ -6572,9 +6605,16 @@ function _showReaderMoreMenu(em, card, reader, anchor) {
           { confirmText: 'Delete', cancelText: 'Cancel', danger: true }
         );
         if (!ok) return;
+        const busy = _showEmailDeleteOverlay(card);
         try {
           await fetch(`${API_BASE}/api/email/delete-permanent/${em.uid}?folder=${encodeURIComponent(state._libFolder)}${_acct()}`, { method: 'DELETE' });
-        } catch (e) { console.error(e); }
+        } catch (e) {
+          console.error(e);
+          busy?.remove?.();
+          showToast('Failed to delete email');
+          return;
+        }
+        busy?.remove?.();
         await closeAndRemove();
       },
     },
