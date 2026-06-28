@@ -1147,6 +1147,12 @@ def _build_system_prompt(
     if active_document:
         set_active_document(active_document.id)
         _doc_raw = active_document.current_content or ""
+        _document_writing_style = ""
+        try:
+            from src.settings import load_settings as _load_settings
+            _document_writing_style = (_load_settings().get("document_writing_style", "") or "").strip()
+        except Exception:
+            _document_writing_style = ""
         _doc_title_l = (active_document.title or "").strip().lower()
         _is_email_doc = (
             active_document.language == "email"
@@ -1237,6 +1243,21 @@ def _build_system_prompt(
                     f'text must match the document EXACTLY and must NOT include the leading line-number '
                     f'or tab (those are reference-only). To rewrite entirely: update_document.'
                 )
+                if _document_writing_style:
+                    doc_ctx += (
+                        "\n\nDOCUMENT WRITING STYLE — use only for normal prose writing/revision in this "
+                        "document, not for code/data/JSON and not for email-specific greetings or signatures:\n"
+                        f"{_document_writing_style}"
+                    )
+                else:
+                    doc_ctx += (
+                        "\n\nStyle safety: if the user asks to write/rewrite this document \"in my style\" "
+                        "or \"as my style\", do NOT infer that style from memories, identity, public persona, "
+                        "creator/channel references, or biographical facts. There is no saved document writing "
+                        "style. Ask the user for a style sample or a document writing style description before "
+                        "rewriting for style. You may still make ordinary requested edits that do not depend on "
+                        "knowing the user's personal style."
+                    )
         _doc_message = untrusted_context_message("active editor document", doc_ctx)
         _doc_message["_protected"] = True
 
