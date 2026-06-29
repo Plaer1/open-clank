@@ -92,6 +92,13 @@ function _displayHistoryContent(content) {
   ].join('\n');
 }
 
+function _stripUserVisionBlocks(text) {
+  return String(text || '').replace(
+    /\n*\[Image: ([^\]]+)\]\n[\s\S]*?(?=\n*\[Image: |\n*\[Image attached: |\n*=== File: |\n*\[PDF content\]:|$)/g,
+    ''
+  ).trim();
+}
+
 function _historyPageLimit() {
   return window.innerWidth <= 768 ? HISTORY_PAGE_LIMIT_MOBILE : HISTORY_PAGE_LIMIT_DESKTOP;
 }
@@ -114,6 +121,7 @@ function _renderHistoryMessage(msg, modelName) {
     displayContent = '';
   }
   if (msg.role === 'user') {
+    displayContent = _stripUserVisionBlocks(displayContent);
     const trimmed = displayContent.trim();
     if (
       trimmed === 'Continue where you left off' ||
