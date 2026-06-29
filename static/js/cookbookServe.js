@@ -3657,7 +3657,10 @@ function _renderCachedModelsData(list, data, host) {
     if (!host) {
       list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Docker Local uses Odysseus’s cache in <code>data/huggingface</code>. Download a model here, or copy an existing host HuggingFace cache into that folder once.</div></div>';
     } else {
-      list.innerHTML = '<div class="hwfit-loading">No cached models found</div>';
+      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:8px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">No complete model folders were found on this server.</div><button type="button" class="hwfit-gpu-btn serve-empty-scan-btn" style="height:26px;padding:3px 10px;">Refresh</button></div>';
+      list.querySelector('.serve-empty-scan-btn')?.addEventListener('click', () => {
+        _fetchCachedModels(true);
+      });
     }
     const tagContainer = document.getElementById('serve-tags');
     if (tagContainer) tagContainer.innerHTML = '';
@@ -3822,12 +3825,16 @@ export async function _fetchCachedModels(fresh = false, opts = {}) {
       throw new Error(`HTTP ${res.status} ${res.statusText}${msg ? `: ${msg}` : ''}`);
     }
     const data = await res.json();
+    if (data && data.error) throw new Error(data.error);
     _writeCachedModelScan(scanSig, data);
     _dlWp.destroy();
     _renderCachedModelsData(list, data, host);
   } catch (e) {
     _dlWp.destroy();
-    list.innerHTML = `<div class="hwfit-loading">Failed: ${esc(e.message)}</div>`;
+    list.innerHTML = `<div class="hwfit-loading" style="flex-direction:column;gap:8px;text-align:center;"><div style="color:var(--red);font-weight:600;">Cached model scan failed</div><div style="font-size:11px;opacity:0.65;max-width:420px;line-height:1.4;">${esc(e.message)}</div><button type="button" class="hwfit-gpu-btn serve-empty-scan-btn" style="height:26px;padding:3px 10px;">Retry</button></div>`;
+    list.querySelector('.serve-empty-scan-btn')?.addEventListener('click', () => {
+      _fetchCachedModels(true);
+    });
   }
 }
 

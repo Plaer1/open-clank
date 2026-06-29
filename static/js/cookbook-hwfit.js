@@ -625,7 +625,6 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
   // Only fetch cached model IDs when server changes, not on every search/sort
   const remoteKey = _currentServerValue();
   if (!_cachedModelIds || _lastCacheHost() !== remoteKey) {
-    _setLastCacheHost(remoteKey);
     const _cacheSrv = _serverByVal(_envState.remoteServerKey || remoteHost);
     const _cachePort = _cacheSrv?.port || '';
     const _cacheParams = new URLSearchParams();
@@ -637,9 +636,11 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
     fetch(`/api/model/cached?${_cacheParams}`, { credentials: 'same-origin' })
       .then(r => r.json())
       .then(d => {
+        if (d && d.error) throw new Error(d.error);
         // Exclude stalled (download-shell) entries — a 12 KB README-only
         // folder shouldn't count as "downloaded" in the Scan/Download list.
         _cachedModelIds = new Set((d.models || []).filter(m => m.status !== 'stalled').map(m => m.repo_id));
+        _setLastCacheHost(remoteKey);
         // Re-mark rows if already rendered
         list.querySelectorAll('.hwfit-row[data-model]').forEach(row => {
           const name = row.dataset.model;
@@ -650,7 +651,10 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
             }
           }
         });
-      }).catch(() => {});
+      }).catch((err) => {
+        console.warn('Cached model marker scan failed:', err);
+        _setLastCacheHost('');
+      });
   }
   if (_paintedFromCache) {
     try { wp.destroy(); } catch {}

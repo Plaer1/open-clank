@@ -932,10 +932,16 @@ def setup_cookbook_routes() -> APIRouter:
                 cwd=str(Path.home()),
             )
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stderr_txt = stderr_b.decode(errors="replace").strip()
+        stdout_txt = stdout_b.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            msg = stderr_txt or f"Cached model scan failed with exit code {proc.returncode}"
+            logger.warning(f"Cached model scan failed host={host or 'local'} rc={proc.returncode}: {msg[:500]}")
+            return {"models": [], "host": host or "local", "error": msg}
 
         models = []
         try:
-            raw = json.loads(stdout_b.decode(errors="replace").strip())
+            raw = json.loads(stdout_txt)
             for m in raw:
                 size_gb = m["size_bytes"] / (1024 ** 3)
                 if size_gb >= 1:
@@ -963,8 +969,11 @@ def setup_cookbook_routes() -> APIRouter:
                     entry["gguf_files"] = m["gguf_files"]
                 models.append(entry)
         except Exception as e:
-            logger.warning(f"Failed to parse cached models: {e}")
-            logger.warning(f"stderr: {stderr_b.decode(errors='replace')[:500]}")
+            logger.warning(f"Failed to parse cached models host={host or 'local'}: {e}")
+            if stderr_txt:
+                logger.warning(f"stderr: {stderr_txt[:500]}")
+            msg = stderr_txt or stdout_txt[:500] or str(e)
+            return {"models": [], "host": host or "local", "error": msg}
 
         return {"models": models, "host": host or "local"}
 
