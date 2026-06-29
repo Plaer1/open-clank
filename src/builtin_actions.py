@@ -15,6 +15,7 @@ from src.auth_helpers import owner_filter
 from core.platform_compat import IS_WINDOWS, find_bash
 from core.constants import internal_api_base
 from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
+from src.interactive_gate import wait_for_interactive_quiet
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                     "\"drop\":[{\"id\":\"existing id\",\"reason\":\"short reason\"}]}\n\n"
                     f"MEMORIES:\n{json.dumps(items, ensure_ascii=False)}"
                 )
+                await wait_for_interactive_quiet("memory consolidation action")
                 raw = await llm_call_async_with_fallback(
                     candidates,
                     messages=[{"role": "user", "content": prompt}],
@@ -749,6 +751,7 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
                     f"EVENTS: {_json.dumps(items)}"
                 )
                 try:
+                    await wait_for_interactive_quiet("calendar classification action")
                     raw = await llm_call_async_with_fallback(
                         llm_candidates,
                         messages=[{"role": "user", "content": prompt}],
@@ -1023,6 +1026,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
             )
 
             try:
+                await wait_for_interactive_quiet("sender signature action")
                 raw = await llm_call_async_with_fallback(
                     candidates,
                     messages=[{"role": "user", "content": prompt}],
@@ -1863,6 +1867,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                     f"Snippet:\n{item.get('body','')}\n"
                 )
                 try:
+                    await wait_for_interactive_quiet("email urgency action")
                     raw = await llm_call_async_with_fallback(
                         candidates,
                         [{"role": "user", "content": prompt}],
