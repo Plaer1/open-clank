@@ -10408,6 +10408,7 @@ const documentModule = {
   newDocument,
   loadDocument,
   injectFreshDoc,
+  replaceEmailReplyBody,
   ensurePaneMounted: _ensureDocPaneMounted,
   loadSessionDocs,
   ensureDocPanel,

@@ -914,12 +914,10 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
     }
 
     if (_docModule) {
-      // Only reuse an existing doc tab if the user really just wants to "view"
-      // the email again. For reply/reply-all/forward/ai-reply, always create
-      // a fresh draft — otherwise a previously-emptied doc (sent reply, AI
-      // reply that came back blank, etc.) keeps coming back instead of a
-      // proper pre-filled reply.
-      const reuseExisting = (mode === 'view' || mode === 'open');
+      // Agent-provided reply text should land in the email draft the user
+      // already has open. Otherwise mobile users see the source email while the
+      // agent silently creates a second draft elsewhere.
+      const reuseExisting = (mode === 'view' || mode === 'open' || (!!aiSuggestedBody && mode !== 'forward'));
       const existingDocId = (reuseExisting && _docModule.findEmailDocId)
         ? _docModule.findEmailDocId(em.uid, _currentFolder)
         : null;
@@ -927,6 +925,10 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
         if (!_docModule.isPanelOpen()) _docModule.openPanel();
         await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         await _docModule.loadDocument(existingDocId);
+        if (aiSuggestedBody && typeof _docModule.replaceEmailReplyBody === 'function') {
+          await _docModule.replaceEmailReplyBody(existingDocId, aiSuggestedBody);
+          _bringEmailReplyDraftToFrontOnMobile();
+        }
       } else {
         // If the user already has a chat session open, reuse it instead of
         // spawning a new one. They asked for this explicitly — opening reply
