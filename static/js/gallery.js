@@ -14,7 +14,12 @@ let _open = false;
 let _galleryResizeHandler = null;
 
 // Auto-refresh gallery when new image is generated
-window.addEventListener('gallery-refresh', () => {
+window.addEventListener('gallery-refresh', (e) => {
+  if (e?.detail?.source === 'chat-upload' && _sort !== 'recent') {
+    _sort = 'recent';
+    const sortSel = document.getElementById('gallery-sort');
+    if (sortSel) sortSel.value = 'recent';
+  }
   if (_open) _fetchLibrary(false);
 });
 let _items = [];
@@ -1894,6 +1899,13 @@ export function openGallery() {
   if (_open) return;
   _open = true;
   _galleryCascaded = false;   // replay the domino-in cascade on each open
+  let _freshChatUpload = false;
+  try {
+    const ts = Number(localStorage.getItem('gallery-fresh-chat-upload') || '0');
+    _freshChatUpload = ts > 0 && Date.now() - ts < 5 * 60 * 1000;
+    if (_freshChatUpload) localStorage.removeItem('gallery-fresh-chat-upload');
+  } catch (_) {}
+  if (_freshChatUpload) _sort = 'recent';
   // State is preserved across close/reopen — filters, album, sort, items,
   // albums, people — so reopening the gallery feels instant. Use the search
   // input or "All" chip to clear the active filter.
@@ -1955,9 +1967,9 @@ export function openGallery() {
             <option value="">All sources</option>
           </select>
           <select class="gallery-sort" id="gallery-sort">
-            <option value="shuffle">Random</option>
-            <option value="recent">Recent</option>
-            <option value="oldest">Oldest</option>
+            <option value="shuffle"${_sort === 'shuffle' ? ' selected' : ''}>Random</option>
+            <option value="recent"${_sort === 'recent' ? ' selected' : ''}>Recent</option>
+            <option value="oldest"${_sort === 'oldest' ? ' selected' : ''}>Oldest</option>
           </select>
           <button class="gallery-select-btn gallery-toolbar-action" id="gallery-select-btn" title="Select for bulk actions"><span style="position:relative;top:1px;">Select</span></button>
         </div>
