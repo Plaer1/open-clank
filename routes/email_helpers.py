@@ -424,10 +424,17 @@ SCHEDULED_DB = Path(SCHEDULED_EMAILS_DB)
 OWNER_SCOPED_EMAIL_CACHE_TABLES = {
     "email_summaries",
     "email_ai_replies",
+    "email_translations",
     "email_calendar_extractions",
     "email_urgency_alerts",
     "sender_signatures",
 }
+
+
+def email_translation_body_hash(body: str) -> str:
+    import hashlib as _hashlib
+    normalized = (body or "").strip()
+    return _hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _email_cache_owner_clause(owner: str = "") -> tuple[str, tuple[str, ...]]:
@@ -437,8 +444,15 @@ def _email_cache_owner_clause(owner: str = "") -> tuple[str, tuple[str, ...]]:
     return "(owner = '' OR owner IS NULL)", ()
 
 
-def _ensure_owner_scoped_email_cache_table(conn, table: str, create_sql: str, columns: list[str]):
+def _ensure_owner_scoped_email_cache_table(
+    conn,
+    table: str,
+    create_sql: str,
+    columns: list[str],
+    pk_columns: list[str] | None = None,
+):
     """Rebuild legacy Message-ID-only cache tables with owner in the PK."""
+    desired_pk_cols = pk_columns or ["message_id", "owner"]
     conn.execute(create_sql)
     try:
         info = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -457,7 +471,7 @@ def _ensure_owner_scoped_email_cache_table(conn, table: str, create_sql: str, co
                 else:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
                 cols.append(col)
-        if "owner" in cols and pk_cols == ["message_id", "owner"]:
+        if "owner" in cols and pk_cols == desired_pk_cols:
             return
 
         conn.execute(f"ALTER TABLE {table} RENAME TO {table}__old")
@@ -590,6 +604,25 @@ def _init_scheduled_db():
             PRIMARY KEY (message_id, owner)
         )
     """, ["message_id", "owner", "uid", "folder", "reply", "model_used", "created_at"])
+    _ensure_owner_scoped_email_cache_table(conn, "email_translations", """
+        CREATE TABLE IF NOT EXISTS email_translations (
+            body_hash TEXT,
+            owner TEXT DEFAULT '',
+            target_language TEXT DEFAULT 'English',
+            uid TEXT,
+            folder TEXT,
+            subject TEXT,
+            sender TEXT,
+            translation TEXT,
+            same_language INTEGER DEFAULT 0,
+            model_used TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (body_hash, owner, target_language)
+        )
+    """, [
+        "body_hash", "owner", "target_language", "uid", "folder", "subject", "sender",
+        "translation", "same_language", "model_used", "created_at",
+    ], ["body_hash", "owner", "target_language"])
     # Email tags / spam classification cache. SECURITY: keyed by
     # (message_id, owner) because Message-IDs are GLOBAL (a newsletter goes
     # to many users with the same Message-ID). Without owner-scoping, a

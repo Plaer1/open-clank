@@ -55,7 +55,7 @@ from routes.email_helpers import (
     _friendly_email_auth_error,
     SendEmailRequest, ExtractStyleRequest,
     ATTACHMENTS_DIR, COMPOSE_UPLOADS_DIR, SCHEDULED_DB,
-    attachment_extract_dir, _email_cache_owner_clause,
+    attachment_extract_dir, _email_cache_owner_clause, email_translation_body_hash,
 )
 from routes.email_pollers import _start_poller
 
@@ -3971,6 +3971,36 @@ def setup_email_routes():
             if not body:
                 return {"success": False, "error": "No body provided"}
 
+            body_hash = email_translation_body_hash(body)
+            try:
+                _c = _sql3.connect(SCHEDULED_DB)
+                owner_clause, owner_params = _email_cache_owner_clause(owner)
+                row = _c.execute(
+                    f"SELECT translation, same_language, model_used FROM email_translations "
+                    f"WHERE body_hash = ? AND target_language = ? AND {owner_clause}",
+                    (body_hash, target_language, *owner_params),
+                ).fetchone()
+                _c.close()
+                if row:
+                    if int(row[1] or 0):
+                        return {
+                            "success": True,
+                            "same_language": True,
+                            "language": target_language,
+                            "model_used": row[2] or "cached",
+                            "cached": True,
+                        }
+                    if row[0]:
+                        return {
+                            "success": True,
+                            "translation": row[0],
+                            "language": target_language,
+                            "model_used": row[2] or "cached",
+                            "cached": True,
+                        }
+            except Exception as e:
+                logger.warning(f"Failed to read email translation cache: {e}")
+
             candidates = []
             seen = set()
 
@@ -4028,6 +4058,21 @@ def setup_email_routes():
             content = (content or "").strip()
             content = _extract_reply(content)
             if "<<<SAME_LANGUAGE>>>" in content:
+                try:
+                    _c = _sql3.connect(SCHEDULED_DB)
+                    _c.execute("""
+                        INSERT OR REPLACE INTO email_translations
+                        (body_hash, owner, target_language, uid, folder, subject, sender,
+                         translation, same_language, model_used, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
+                        subject, sender, "", 1, model, datetime.utcnow().isoformat(),
+                    ))
+                    _c.commit()
+                    _c.close()
+                except Exception as e:
+                    logger.warning(f"Failed to cache same-language email translation: {e}")
                 return {"success": True, "same_language": True, "language": target_language, "model_used": model}
             marker = re.search(r"<<<TRANSLATION>>>\s*(.*?)\s*<<<END>>>", content, re.S | re.I)
             if marker:
@@ -4037,6 +4082,21 @@ def setup_email_routes():
                 content = re.sub(r"\s*<<<END>>>\s*$", "", content, flags=re.I).strip()
             if not content:
                 return {"success": False, "error": "Empty response from model"}
+            try:
+                _c = _sql3.connect(SCHEDULED_DB)
+                _c.execute("""
+                    INSERT OR REPLACE INTO email_translations
+                    (body_hash, owner, target_language, uid, folder, subject, sender,
+                     translation, same_language, model_used, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    body_hash, owner, target_language, data.get("uid", ""), data.get("folder", ""),
+                    subject, sender, content, 0, model, datetime.utcnow().isoformat(),
+                ))
+                _c.commit()
+                _c.close()
+            except Exception as e:
+                logger.warning(f"Failed to cache email translation: {e}")
             return {"success": True, "translation": content, "language": target_language, "model_used": model}
         except Exception as e:
             logger.error(f"Failed to translate email: {e}")
