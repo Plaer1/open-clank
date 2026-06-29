@@ -29480,7 +29480,7 @@ button .spinner-whirlpool {
 .email-list-skeleton {
   position: absolute;
   inset: 0;
-  padding: 10px 12px;
+  padding: 10px 7px;
   display: flex;
   flex-direction: column;
   gap: 8px;
