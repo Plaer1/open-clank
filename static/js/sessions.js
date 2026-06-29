@@ -168,26 +168,9 @@ function _renderHistoryMessage(msg, modelName) {
     markdownModule.squashOutsideCode(markdownModule.renderContent(displayContent || ''))
   );
   if (msg.role === 'user' && Array.isArray(meta?.attachments) && meta.attachments.length) {
-    const cards = document.createElement('div');
-    cards.className = 'attach-cards history-attach-cards';
-    for (const att of meta.attachments) {
-      const card = document.createElement('div');
-      card.className = 'attach-card history-attach-card';
-      const icon = document.createElement('span');
-      icon.className = 'attach-card-icon';
-      icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
-      const name = document.createElement('span');
-      name.className = 'attach-card-name';
-      name.textContent = att.name || 'Image attached';
-      const size = document.createElement('span');
-      size.className = 'attach-card-size';
-      size.textContent = 'image';
-      card.appendChild(icon);
-      card.appendChild(name);
-      card.appendChild(size);
-      cards.appendChild(card);
+    if (chatRenderer.buildAttachCards) {
+      body.appendChild(chatRenderer.buildAttachCards(meta.attachments));
     }
-    body.appendChild(cards);
   }
 
   wrap.appendChild(roleEl);

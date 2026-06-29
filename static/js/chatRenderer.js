@@ -81,7 +81,7 @@ function _formatSize(bytes) {
 // Build the `.attach-cards` element for a message's attachment list. Shared by
 // addMessage and updateMessageAttachments so a live (optimistic) user bubble
 // can be re-rendered with real upload ids once the upload resolves.
-function buildAttachCards(attachments) {
+export function buildAttachCards(attachments) {
   const attachWrap = document.createElement('div');
   attachWrap.className = 'attach-cards';
   for (const att of attachments) {
@@ -2672,6 +2672,7 @@ const chatRenderer = {
   createMsgFooter,
   displayMetrics,
   addMessage,
+  buildAttachCards,
   updateMessageAttachments,
 };
 
