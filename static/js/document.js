@@ -3591,6 +3591,42 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // textarea for an optional steering note, then Fast (lightning) or Full
   // (concentric dot) buttons; both feed into _aiReply with the chosen mode.
   let _docAiReplyChoiceMenu = null;
+  const _AI_REPLY_CONTEXT_STORE_PREFIX = 'odysseus:email-ai-reply-context:v1:';
+  function _docAiReplyContextKey() {
+    try {
+      const sourceUid = document.getElementById('doc-email-source-uid')?.value?.trim() || '';
+      const sourceFolder = document.getElementById('doc-email-source-folder')?.value?.trim() || 'INBOX';
+      const inReplyTo = document.getElementById('doc-email-in-reply-to')?.value?.trim() || '';
+      const to = document.getElementById('doc-email-to')?.value?.trim() || '';
+      const subject = document.getElementById('doc-email-subject')?.value?.trim() || '';
+      const stable = sourceUid
+        ? `uid:${sourceFolder}:${sourceUid}`
+        : inReplyTo
+          ? `msg:${inReplyTo}`
+          : activeDocId
+            ? `doc:${activeDocId}`
+            : `compose:${to}:${subject}`;
+      return _AI_REPLY_CONTEXT_STORE_PREFIX + stable;
+    } catch (_) {
+      return '';
+    }
+  }
+  function _loadDocAiReplyContext(key) {
+    if (!key) return '';
+    try { return localStorage.getItem(key) || ''; } catch (_) { return ''; }
+  }
+  function _saveDocAiReplyContext(key, value) {
+    if (!key) return;
+    try {
+      const text = String(value || '');
+      if (text.trim()) localStorage.setItem(key, text);
+      else localStorage.removeItem(key);
+    } catch (_) {}
+  }
+  function _clearDocAiReplyContext(key) {
+    if (!key) return;
+    try { localStorage.removeItem(key); } catch (_) {}
+  }
   function _closeDocAiReplyChoice() {
     if (_docAiReplyChoiceMenu) {
       // Tear down through the menu's registered dismiss (drops its outside-click
@@ -3645,6 +3681,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       </div>
     `;
     const noteInput = menu.querySelector('[data-note-input]');
+    const contextKey = _docAiReplyContextKey();
+    if (noteInput) {
+      noteInput.value = _loadDocAiReplyContext(contextKey);
+      noteInput.addEventListener('input', () => {
+        _saveDocAiReplyContext(contextKey, noteInput.value || '');
+      });
+    }
     setTimeout(() => noteInput?.focus(), 0);
     menu.addEventListener('mousedown', (ev) => ev.stopPropagation());
     document.body.appendChild(menu);
@@ -3662,13 +3705,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       ev.stopPropagation();
       const mode = choice.getAttribute('data-mode') || 'ai-reply-fast';
       const noteHint = (noteInput?.value || '').trim();
+      _saveDocAiReplyContext(contextKey, noteInput?.value || '');
       close();
-      await _aiReply({ mode, noteHint });
+      await _aiReply({ mode, noteHint, contextKey });
     });
   }
 
   async function _aiReply(opts = {}) {
-    const { mode = 'auto', noteHint = '' } = (opts || {});
+    const { mode = 'auto', noteHint = '', contextKey = '' } = (opts || {});
     const to = document.getElementById('doc-email-to')?.value?.trim() || '';
     const subject = document.getElementById('doc-email-subject')?.value?.trim() || '';
     const textarea = document.getElementById('doc-editor-textarea');
@@ -3751,6 +3795,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         // own work and the original quote are untouched.
         const newBody = currentBody ? cleanReply + '\n\n' + currentBody : cleanReply;
         await _streamEmailBodyText(textarea, newBody);
+        _clearDocAiReplyContext(contextKey || _docAiReplyContextKey());
         if (uiModule) uiModule.showToast(`AI draft inserted (${data.model_used || 'AI'})`);
       } else {
         const rawMsg = data.error || 'Failed to generate reply';
