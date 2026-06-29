@@ -4252,13 +4252,14 @@ def setup_email_routes():
                 _add(*cand)
             for cand in resolve_chat_fallback_candidates(owner=owner) or []:
                 _add(*cand)
+            _messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ]
             try:
-                reply = await llm_call_async_with_fallback(
+                reply_raw = await llm_call_async_with_fallback(
                     _candidates,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_msg},
-                    ],
+                    messages=_messages,
                     temperature=0.7,
                     max_tokens=1024 if fast_reply else 6144,
                     timeout=60 if fast_reply else 180,
@@ -4268,9 +4269,51 @@ def setup_email_routes():
                 _attempted = ", ".join(f"{m}@{u.split('/')[2] if '/' in u else u}" for u, m, _ in _candidates) or "no candidates"
                 return {"success": False, "error": f"All endpoints failed ({_attempted}): {detail}. Check your API keys in Settings → Services."}
 
-            reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
+            reply = _apply_email_style_mechanics(_extract_reply(reply_raw or ""))
             if not reply:
-                return {"success": False, "error": "LLM returned empty response"}
+                logger.warning(
+                    "AI reply returned empty usable text on first pass model=%s raw_len=%s; retrying candidates",
+                    model,
+                    len(reply_raw or ""),
+                )
+                retry_system = (
+                    system_prompt
+                    + "\n\nRETRY BECAUSE PREVIOUS OUTPUT WAS EMPTY: You MUST return a non-empty email reply body. "
+                    "If unsure, write a short, honest reply using only the facts in the original email and user instructions. "
+                    "Still use the exact <<<REPLY>>> and <<<END>>> markers."
+                )
+                retry_user = user_msg + "\n\nReturn a usable, non-empty reply now. Do not return an empty marker block."
+                retry_messages = [
+                    {"role": "system", "content": retry_system},
+                    {"role": "user", "content": retry_user},
+                ]
+                for cand_url, cand_model, cand_headers in _candidates:
+                    try:
+                        raw_retry = await llm_call_async(
+                            cand_url,
+                            cand_model,
+                            retry_messages,
+                            headers=cand_headers,
+                            temperature=0.3,
+                            max_tokens=1536 if fast_reply else 4096,
+                            timeout=45 if fast_reply else 120,
+                            max_retries=1,
+                        )
+                        retry_reply = _apply_email_style_mechanics(_extract_reply(raw_retry or ""))
+                        if retry_reply:
+                            reply = retry_reply
+                            model = cand_model
+                            break
+                        logger.warning(
+                            "AI reply retry still empty model=%s raw_len=%s",
+                            cand_model,
+                            len(raw_retry or ""),
+                        )
+                    except Exception as retry_exc:
+                        logger.warning("AI reply retry failed model=%s: %s", cand_model, retry_exc)
+            if not reply:
+                _attempted = ", ".join(f"{m}@{u.split('/')[2] if '/' in u else u}" for u, m, _ in _candidates) or "no candidates"
+                return {"success": False, "error": f"AI reply returned blank text after retrying: {_attempted}"}
 
             # Cache so next click is instant
             if message_id:
