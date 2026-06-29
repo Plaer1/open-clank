@@ -142,7 +142,7 @@ export function removePending(idx) {
 /**
  * Upload all pending files to server
  */
-export async function uploadPending() {
+export async function uploadPending(opts = {}) {
   if (pendingFiles.length === 0) return [];
   _lastUploadCancelled = false;
 
@@ -169,6 +169,7 @@ export async function uploadPending() {
 
   const fd = new FormData();
   pendingFiles.forEach(f => fd.append('files', f, f.name || 'paste.png'));
+  if (opts.sessionId) fd.append('session_id', opts.sessionId);
   _uploadAbortCtrl = new AbortController();
   _uploading = true;
   const timeoutId = setTimeout(() => {

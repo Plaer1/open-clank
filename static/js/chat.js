@@ -686,7 +686,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       let ids = [];
       try {
-        ids = await fileHandlerModule.uploadPending();
+        ids = await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() });
       } catch(e) {
         console.error('upload failed', e);
       }

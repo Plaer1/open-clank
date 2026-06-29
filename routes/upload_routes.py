@@ -6,11 +6,11 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Request, File, UploadFile, HTTPException
-from typing import List
+from fastapi import APIRouter, Request, File, UploadFile, HTTPException, Form
+from typing import List, Optional
 import logging
 from core.middleware import require_admin
-from core.database import SessionLocal, GalleryImage
+from core.database import SessionLocal, GalleryImage, Session as DbSession
 from src.auth_helpers import effective_user
 from src.constants import GENERATED_IMAGES_DIR
 from src.upload_handler import count_recent_uploads
@@ -56,7 +56,17 @@ def setup_upload_routes(upload_handler):
 
         raise HTTPException(404, "File not found")
 
-    def _promote_chat_image_to_gallery(meta: dict, owner: str | None) -> str | None:
+    def _valid_session_id_for_owner(db, session_id: str | None, owner: str | None) -> str | None:
+        if not session_id:
+            return None
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if not sess:
+            return None
+        if owner and sess.owner and sess.owner != owner:
+            return None
+        return session_id
+
+    def _promote_chat_image_to_gallery(meta: dict, owner: str | None, session_id: str | None = None) -> str | None:
         """Make chat-uploaded images visible in Gallery without changing chat storage."""
         is_image_file = getattr(upload_handler, "is_image_file", None)
         if not callable(is_image_file):
@@ -105,6 +115,7 @@ def setup_upload_routes(upload_handler):
                 prompt=meta.get("name") or "Chat upload",
                 model="chat-upload",
                 owner=owner,
+                session_id=_valid_session_id_for_owner(db, session_id, owner),
                 file_hash=file_hash,
                 width=meta.get("width"),
                 height=meta.get("height"),
@@ -120,7 +131,11 @@ def setup_upload_routes(upload_handler):
             db.close()
     
     @router.post("")
-    async def api_upload(request: Request, files: List[UploadFile] = File(...)):
+    async def api_upload(
+        request: Request,
+        files: List[UploadFile] = File(...),
+        session_id: Optional[str] = Form(None),
+    ):
         """Upload files with enhanced security and organization."""
         if not files:
             raise HTTPException(400, "No files uploaded")
@@ -148,7 +163,7 @@ def setup_upload_routes(upload_handler):
             try:
                 owner = effective_user(request)
                 meta = upload_handler.save_upload(u, client_ip, owner=owner)
-                gallery_id = _promote_chat_image_to_gallery(meta, owner)
+                gallery_id = _promote_chat_image_to_gallery(meta, owner, session_id)
                 item = {
                     "id": meta["id"],
                     "name": meta["name"],
