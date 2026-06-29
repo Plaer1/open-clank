@@ -730,6 +730,15 @@ def setup_chat_routes(
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
             if not active_doc:
+                _email_doc_q = _doc_db.query(DBDocument).filter(
+                    DBDocument.session_id == session,
+                    DBDocument.is_active == True,
+                    DBDocument.language == "email",
+                )
+                active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
+                if active_doc:
+                    logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
+            if not active_doc:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
