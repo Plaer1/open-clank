@@ -3753,7 +3753,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         await _streamEmailBodyText(textarea, newBody);
         if (uiModule) uiModule.showToast(`AI draft inserted (${data.model_used || 'AI'})`);
       } else {
-        if (uiModule) uiModule.showError(data.error || 'Failed to generate reply');
+        const rawMsg = data.error || 'Failed to generate reply';
+        const msg = /empty response/i.test(rawMsg)
+          ? 'AI reply failed: AI returned empty response.'
+          : rawMsg;
+        if (uiModule) uiModule.showError(msg);
       }
     } catch (e) {
       if (uiModule) uiModule.showError('Failed to generate AI reply');

@@ -804,7 +804,10 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
           if (result.success && result.reply) {
             aiSuggestedBody = _cleanAiReplyText(result.reply);
           } else {
-            const _msg = result.error || 'AI reply could not be generated';
+            const _rawMsg = result.error || 'AI reply could not be generated';
+            const _msg = /empty response/i.test(_rawMsg)
+              ? 'AI returned empty response.'
+              : _rawMsg;
             console.error('AI reply generation failed:', _msg);
             import('./ui.js').then(m => m.showError && m.showError('AI reply failed: ' + _msg)).catch(() => {});
             return;
