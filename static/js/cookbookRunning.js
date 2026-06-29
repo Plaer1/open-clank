@@ -29,7 +29,8 @@ function _statusLabel(status, type) {
 function _taskBadge(task) {
   if (task._unreachable && task.status === 'running') return { text: 'unreachable', cls: 'cookbook-task-error' };
   if (task.type === 'download' && task.status === 'running') {
-    return { text: _statusLabel(task.status, task.type), cls: 'cookbook-task-downloading' };
+    const progress = String(task.progress || '').trim();
+    return { text: progress || _statusLabel(task.status, task.type), cls: 'cookbook-task-downloading' };
   }
   if (task.type === 'serve' && task.status === 'running' && task.progress) {
     // Same green "running" pill — just with dynamic phase text, so it doesn't
@@ -3769,6 +3770,34 @@ async function _pollBackgroundStatus() {
       const localTasks = _loadTasks();
       let changed = false;
       const completedDeps = [];
+      const localIds = new Set(localTasks.map(t => t.sessionId).filter(Boolean));
+      for (const live of tasks) {
+        const sid = live?.session_id;
+        if (!sid || localIds.has(sid) || _isTombstoned(sid)) continue;
+        const liveType = live.type || 'download';
+        const liveStatus = live.status === 'completed' ? 'done' : (live.status || 'running');
+        const name = live.model || sid;
+        const remoteHost = live.remote && live.remote !== 'local' ? live.remote : '';
+        localTasks.push(_redactTaskForStorage({
+          id: sid,
+          sessionId: sid,
+          name,
+          type: liveType,
+          status: liveStatus,
+          progress: live.progress || '',
+          output: live.output_tail || '',
+          ts: Date.now(),
+          payload: {
+            repo_id: name,
+            remote_host: remoteHost,
+            _cmd: live.cmd || '(adopted from live tmux status)',
+          },
+          remoteHost,
+          _adoptedExternally: true,
+        }));
+        localIds.add(sid);
+        changed = true;
+      }
       for (const task of localTasks) {
         const live = statusById.get(task.sessionId);
         if (!live) continue;

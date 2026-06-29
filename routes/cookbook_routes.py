@@ -2456,7 +2456,14 @@ def setup_cookbook_routes() -> APIRouter:
         require_admin(request)
         if _cookbook_state_path.exists():
             try:
-                return _state_for_client(json.loads(_cookbook_state_path.read_text(encoding="utf-8")))
+                state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
+                saved_tasks = state.get("tasks", [])
+                tasks = saved_tasks if isinstance(saved_tasks, list) else list(saved_tasks.values()) if isinstance(saved_tasks, dict) else []
+                try:
+                    _maybe_sweep_orphans(tasks, state)
+                except Exception as _sweep_e:
+                    logger.warning(f"state orphan sweep failed (non-fatal): {_sweep_e!r}")
+                return _state_for_client(state)
             except Exception:
                 return _state_for_client({})
         return _state_for_client({})
@@ -2786,6 +2793,54 @@ def setup_cookbook_routes() -> APIRouter:
                     continue
                 if sid in known_sids:
                     continue
+                try:
+                    cap = subprocess.run(
+                        ssh_base + [host, "tmux", "capture-pane", "-t", sid, "-p", "-S", "-300"],
+                        timeout=6, capture_output=True, text=True,
+                    )
+                    pane = cap.stdout or ""
+                except Exception:
+                    pane = ""
+
+                if sid.startswith("cookbook-"):
+                    repo_id = ""
+                    try:
+                        script = subprocess.run(
+                            ssh_base + [host, "cat", f".{sid}_run.sh"],
+                            timeout=6, capture_output=True, text=True,
+                        )
+                        script_text = script.stdout or ""
+                    except Exception:
+                        script_text = ""
+                    m_repo = re.search(r"repo_id\s*=\s*['\"]([^'\"]+/[^'\"]+)['\"]", script_text)
+                    if not m_repo:
+                        m_repo = re.search(r"snapshot_download\(\s*repo_id\s*=\s*['\"]([^'\"]+/[^'\"]+)['\"]", script_text)
+                    if not m_repo:
+                        m_repo = re.search(r"(?:https://huggingface\.co/)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", script_text)
+                    repo_id = m_repo.group(1) if m_repo else f"adopted:{sid}"
+                    import time as _t2
+                    tasks.append({
+                        "id": sid,
+                        "sessionId": sid,
+                        "name": repo_id.split("/")[-1] if "/" in repo_id else repo_id,
+                        "type": "download",
+                        "status": "running",
+                        "output": (pane or f"Auto-adopted from orphan tmux download session on {host}.")[-5000:],
+                        "ts": int(_t2.time() * 1000),
+                        "payload": {
+                            "repo_id": repo_id,
+                            "remote_host": host,
+                            "_cmd": "(orphan tmux download - original launch cmd recovered from tmux/session only)",
+                        },
+                        "remoteHost": host,
+                        "sshPort": sport,
+                        "platform": "linux",
+                        "_adoptedExternally": True,
+                    })
+                    known_sids.add(sid)
+                    adopted_any = True
+                    logger.info(f"auto-adopted orphan download tmux session {sid!r} on {host}")
+                    continue
                 # Adopt any session whose pane is currently running a
                 # known model-server process (checked below). The earlier
                 # prefix gate (serve-/cookbook-) dropped legitimate
@@ -2815,14 +2870,6 @@ def setup_cookbook_routes() -> APIRouter:
                 # Try to recover a plausible repo_id + port from the
                 # pane buffer. Cheap heuristic — if we can't, register
                 # with placeholder fields; the UI still shows it.
-                try:
-                    cap = subprocess.run(
-                        ssh_base + [host, "tmux", "capture-pane", "-t", sid, "-p", "-S", "-300"],
-                        timeout=6, capture_output=True, text=True,
-                    )
-                    pane = cap.stdout or ""
-                except Exception:
-                    pane = ""
                 import re as _re_orphan
                 # vLLM banner: "model   /path/...". Falls back to the
                 # raw vllm-serve command if the banner already scrolled.
@@ -3212,6 +3259,28 @@ def setup_cookbook_routes() -> APIRouter:
     def _cookbook_tasks_status_sync():
         import subprocess
 
+        def _pick_download_progress(lines: list[str]) -> str:
+            """Pick the most useful live HF progress line from a tmux pane."""
+            if not lines:
+                return ""
+            downloading_lines = [l for l in lines if l.startswith("Downloading")]
+            if downloading_lines:
+                return downloading_lines[-1]
+            progress_lines = [
+                l for l in lines
+                if re.search(r"\b(?:100|[1-9]?\d)%", l)
+                and (
+                    "<" in l
+                    or "it/s" in l
+                    or "B/s" in l
+                    or "safetensors" in l
+                    or ".gguf" in l.lower()
+                )
+            ]
+            if progress_lines:
+                return progress_lines[-1]
+            return lines[-1]
+
         def _download_cache_complete(repo_id: str, remote_host: str = "", ssh_port: str = "", cache_root: str = "") -> bool:
             """Best-effort check for a completed HF cache entry.
 
@@ -3393,11 +3462,7 @@ def setup_cookbook_routes() -> APIRouter:
                             encoding="utf-8", errors="replace"
                         ).strip()[-12000:]
                         lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
-                        downloading_lines = [l for l in lines if l.startswith("Downloading")]
-                        if downloading_lines:
-                            progress_text = downloading_lines[-1]
-                        elif lines:
-                            progress_text = lines[-1]
+                        progress_text = _pick_download_progress(lines)
                 except Exception:
                     pass
             else:
@@ -3431,11 +3496,7 @@ def setup_cookbook_routes() -> APIRouter:
                             if cap.returncode == 0:
                                 full_snapshot = cap.stdout.strip()
                                 lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
-                                downloading_lines = [l for l in lines if l.startswith("Downloading")]
-                                if downloading_lines:
-                                    progress_text = downloading_lines[-1]
-                                elif lines:
-                                    progress_text = lines[-1]
+                                progress_text = _pick_download_progress(lines)
                         except Exception:
                             pass
 
