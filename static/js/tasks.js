@@ -2001,6 +2001,17 @@ async function _renderActivityView() {
       return;
     }
     list.innerHTML = _stackActivityEntries(filtered).map(_renderActivityEntry).join('');
+    if (_activityHasMore && !q) {
+      list.insertAdjacentHTML('beforeend', `
+        <button type="button" class="memory-toolbar-btn tasks-activity-load-more" id="tasks-activity-load-more" style="width:100%;justify-content:center;margin-top:6px;">
+          Load more
+        </button>
+      `);
+      list.querySelector('#tasks-activity-load-more')?.addEventListener('click', () => {
+        _activityLimit = Math.min(200, _activityLimit + 40);
+        _renderActivityView();
+      });
+    }
     _wireActivityRows(list);
   };
 
@@ -2060,10 +2071,11 @@ async function _renderActivityView() {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=100`, { credentials: 'same-origin' });
+    const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=${_activityLimit}&max_result_chars=6000`, { credentials: 'same-origin' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const runs = data.runs || [];
+    _activityHasMore = !!data.has_more && _activityLimit < 200;
     const list = document.getElementById('tasks-activity-list');
     if (!list) return;
     if (runs.length === 0) {
@@ -2105,6 +2117,8 @@ async function _renderActivityView() {
 }
 
 let _activityEntries = [];
+let _activityLimit = 40;
+let _activityHasMore = false;
 
 function _stackActivityEntries(entries) {
   const out = [];

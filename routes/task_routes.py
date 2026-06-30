@@ -894,10 +894,11 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         return {"ok": True, "message": "Task stopped"}
 
     @router.get("/runs/recent")
-    async def list_recent_runs(request: Request, limit: int = 50):
+    async def list_recent_runs(request: Request, limit: int = 50, max_result_chars: int = 6000):
         """Recent task runs across ALL tasks for this owner. Drives the Activity view."""
         user = _owner(request)
         limit = max(1, min(limit, 200))
+        max_result_chars = max(500, min(max_result_chars, 20000))
         db = SessionLocal()
         try:
             q = db.query(TaskRun, ScheduledTask).join(
@@ -931,10 +932,20 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 deduped.append((r, t))
                 if len(deduped) >= limit:
                     break
+
+            def _clip_run(r: TaskRun) -> dict:
+                d = _run_to_dict(r)
+                for key in ("result", "error"):
+                    val = d.get(key)
+                    if isinstance(val, str) and len(val) > max_result_chars:
+                        d[key] = val[:max_result_chars].rstrip() + "\n\n[Activity preview truncated]"
+                return d
+
             return {
+                "has_more": len(rows) > len(deduped),
                 "runs": [
                     {
-                        **_run_to_dict(r),
+                        **_clip_run(r),
                         "task_name": _display_task_name(t),
                         "task_type": t.task_type or "llm",
                         "action": t.action,
