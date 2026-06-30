@@ -2668,6 +2668,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     summary.title = summary.textContent;
   }
 
+  function _setEmailHeaderInputValue(id, value, { preserveFocused = true, preserveNonEmpty = false } = {}) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const next = value || '';
+    if (preserveFocused && document.activeElement === el) return;
+    if (preserveNonEmpty && !next && el.value) return;
+    if (el.value !== next) el.value = next;
+  }
+
   function _setEmailHeaderCollapsed(collapsed, { manual = true } = {}) {
     const header = document.getElementById('doc-email-header');
     const btn = document.getElementById('doc-email-collapse-btn');
@@ -2730,13 +2739,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     document.getElementById('doc-editor-highlight')?.classList.add('email-mode');
     let fields = _parseEmailHeader(doc.content || '');
     fields = _emailFieldsWithLocalDraft(fields);
-    const toInput = document.getElementById('doc-email-to');
     const subjectInput = document.getElementById('doc-email-subject');
-    const inReplyTo = document.getElementById('doc-email-in-reply-to');
-    const refs = document.getElementById('doc-email-references');
     const textarea = document.getElementById('doc-editor-textarea');
-    if (toInput) toInput.value = fields.to;
-    if (subjectInput) subjectInput.value = fields.subject;
+    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveNonEmpty: true });
     _setEmailHeaderCollapsed(!!(doc && doc._emailHeaderCollapsed), { manual: false });
     if (subjectInput && !subjectInput._emailTabBodyBound) {
       subjectInput._emailTabBodyBound = true;
@@ -2747,12 +2753,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         }
       });
     }
-    if (inReplyTo) inReplyTo.value = fields.inReplyTo;
-    if (refs) refs.value = fields.references;
-    const sourceUid = document.getElementById('doc-email-source-uid');
-    const sourceFolder = document.getElementById('doc-email-source-folder');
-    if (sourceUid) sourceUid.value = fields.sourceUid || '';
-    if (sourceFolder) sourceFolder.value = fields.sourceFolder || '';
+    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveNonEmpty: true });
     // Show/hide unread button only if we have a source UID (came from inbox)
     const unreadBtn = document.getElementById('doc-email-unread-btn');
     if (unreadBtn) unreadBtn.style.display = fields.sourceUid ? '' : 'none';
@@ -2875,11 +2879,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const ccRow = document.getElementById('doc-email-cc-row');
     const bccRow = document.getElementById('doc-email-bcc-row');
     const ccToggle = document.getElementById('doc-email-show-cc');
-    const ccInput = document.getElementById('doc-email-cc');
-    const bccInput = document.getElementById('doc-email-bcc');
-    if (ccInput) ccInput.value = fields.cc || '';
-    if (bccInput) bccInput.value = fields.bcc || '';
-    const hasCcBcc = !!(fields.cc || fields.bcc);
+    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveNonEmpty: true });
+    const hasCcBcc = !!(
+      fields.cc ||
+      fields.bcc ||
+      document.getElementById('doc-email-cc')?.value ||
+      document.getElementById('doc-email-bcc')?.value
+    );
     if (ccRow) ccRow.style.display = hasCcBcc ? '' : 'none';
     if (bccRow) bccRow.style.display = hasCcBcc ? '' : 'none';
     if (ccToggle) ccToggle.style.display = hasCcBcc ? 'none' : '';
@@ -2898,19 +2905,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       return;
     }
 
-    const setValue = (id, value) => {
-      const el = document.getElementById(id);
-      const next = value || '';
-      if (el && el.value !== next) el.value = next;
-    };
-    setValue('doc-email-to', fields.to);
-    setValue('doc-email-subject', fields.subject);
-    setValue('doc-email-in-reply-to', fields.inReplyTo);
-    setValue('doc-email-references', fields.references);
-    setValue('doc-email-source-uid', fields.sourceUid || '');
-    setValue('doc-email-source-folder', fields.sourceFolder || '');
-    setValue('doc-email-cc', fields.cc || '');
-    setValue('doc-email-bcc', fields.bcc || '');
+    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveNonEmpty: true });
+    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveNonEmpty: true });
 
     const unreadBtn = document.getElementById('doc-email-unread-btn');
     if (unreadBtn) unreadBtn.style.display = fields.sourceUid ? '' : 'none';
@@ -4029,7 +4031,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const prevId = activeDocId;
     if (prevId && prevId !== docId && docs.has(prevId)) {
       const prev = docs.get(prevId);
-      if (!(prev.content || '').trim() && !(prev.title || '').trim()) {
+      if (prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
         fetch(`${API_BASE}/api/document/${prevId}`, { method: 'DELETE' }).catch(() => {});
         docs.delete(prevId);
         _syncDocIndicator();
@@ -8828,6 +8830,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         }),
       });
       if (res.status === 404) {
+        if (silent && localDoc?.language === 'email') {
+          return;
+        }
         // Streaming/empty email drafts can leave a local tab pointing at a temp
         // or already-deleted document. Do not keep surfacing autosave errors for
         // a document the backend no longer knows about.
