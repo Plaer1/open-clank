@@ -97,6 +97,21 @@ def _has_recent_browser_activity(now: float | None = None) -> bool:
     return ((now if now is not None else time.monotonic()) - _LAST_BROWSER_ACTIVITY) < ttl
 
 
+def has_foreground_activity(now: float | None = None) -> bool:
+    """Return True when foreground browser/model work should stop background jobs.
+
+    This is intentionally narrower than `wait_for_interactive_quiet`: active
+    request tracking is good for delaying task startup, but a running task
+    should not cancel itself just because the UI polls a passive endpoint.
+    Browser heartbeats and active chat streams are the durable "user is here"
+    signals.
+    """
+    if not _enabled():
+        return False
+    t = now if now is not None else time.monotonic()
+    return _has_recent_browser_activity(t) or _has_active_chat_stream()
+
+
 def _has_active_chat_stream() -> bool:
     """Best-effort check for foreground model work that outlives HTTP requests.
 
