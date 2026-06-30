@@ -87,6 +87,37 @@ function initForegroundActivityHeartbeat() {
 }
 initForegroundActivityHeartbeat();
 
+function initRailHoverLabels() {
+  const labels = {
+    'rail-search-btn': 'Search',
+    'rail-new-session': 'New',
+    'rail-delete-session': 'Delete',
+    'rail-chats': 'Chat',
+    'rail-documents': 'Docs',
+    'rail-calendar': 'Calendar',
+    'rail-compare': 'Compare',
+    'rail-cookbook': 'Cookbook',
+    'rail-research': 'Research',
+    'rail-email': 'Email',
+    'rail-gallery': 'Gallery',
+    'rail-archive': 'Library',
+    'rail-memory': 'Brain',
+    'rail-notes': 'Notes',
+    'rail-tasks': 'Tasks',
+    'rail-theme': 'Theme',
+    'rail-settings': 'Settings',
+  };
+  document.querySelectorAll('#icon-rail .icon-rail-btn').forEach(btn => {
+    if (btn.querySelector('.rail-hover-label')) return;
+    const label = labels[btn.id] || btn.getAttribute('aria-label') || btn.getAttribute('title') || '';
+    if (!label) return;
+    const span = document.createElement('span');
+    span.className = 'rail-hover-label';
+    span.textContent = String(label).replace(/\s*\([^)]*\)\s*/g, '').trim();
+    btn.appendChild(span);
+  });
+}
+
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
 window.fetch = async function(...args) {
@@ -3420,6 +3451,7 @@ function startOdysseusApp() {
   window.__odysseusAppStarted = true;
   // Set CSS variables
   document.documentElement.style.setProperty('--line-height', '20px');
+  initRailHoverLabels();
 
   // Smooth keyboard open/close on mobile — keep chat scrolled to bottom
   if (window.visualViewport && 'ontouchstart' in window) {

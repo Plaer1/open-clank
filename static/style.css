@@ -1120,11 +1120,9 @@ body.bg-pattern-sparkles {
     }
     .rail-new-chat svg { transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1); }
     .rail-new-chat:hover svg { transform: rotate(90deg); }
-    /* A "New" label slides out from the right of the + as it spins, so users
-       discover what the icon does without needing the tooltip. */
-    .rail-new-chat { position: relative; }
-    .rail-new-chat::after {
-      content: 'New';
+    /* Sleek hover labels for the mini sidebar. Use a real child span instead
+       of ::before/::after so status dots and minimized indicators keep working. */
+    .rail-hover-label {
       position: absolute;
       left: 100%;
       top: 50%;
@@ -1143,7 +1141,7 @@ body.bg-pattern-sparkles {
       z-index: 20;
       transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
-    .rail-new-chat:hover::after {
+    .icon-rail-btn:hover .rail-hover-label {
       opacity: 1;
       transform: translateY(-50%) translateX(0);
     }
