@@ -53,6 +53,40 @@ window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
 
+function initForegroundActivityHeartbeat() {
+  let lastSent = 0;
+  const minGapMs = 12000;
+  const send = (force = false) => {
+    if (document.visibilityState === 'hidden') return;
+    const now = Date.now();
+    if (!force && now - lastSent < minGapMs) return;
+    lastSent = now;
+    try {
+      if (navigator.sendBeacon) {
+        const body = new Blob(['{}'], { type: 'application/json' });
+        if (navigator.sendBeacon('/api/activity/heartbeat', body)) return;
+      }
+    } catch (_) {}
+    fetch('/api/activity/heartbeat', {
+      method: 'POST',
+      credentials: 'same-origin',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }).catch(() => {});
+  };
+  send(true);
+  window.addEventListener('focus', () => send(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') send(true);
+  });
+  ['pointerdown', 'keydown', 'touchstart', 'scroll'].forEach(type => {
+    window.addEventListener(type, () => send(false), { passive: true, capture: true });
+  });
+  setInterval(() => send(false), 15000);
+}
+initForegroundActivityHeartbeat();
+
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
 window.fetch = async function(...args) {

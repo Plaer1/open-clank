@@ -595,6 +595,14 @@ webhook_manager = WebhookManager(api_key_manager=api_key_manager)
 auth_router = setup_auth_routes(auth_manager)
 app.include_router(auth_router)
 
+
+@app.post("/api/activity/heartbeat")
+async def activity_heartbeat():
+    from src.interactive_gate import mark_browser_activity
+    await mark_browser_activity()
+    return {"ok": True}
+
+
 # Uploads
 from routes.upload_routes import setup_upload_routes
 upload_router, upload_cleanup_func = setup_upload_routes(upload_handler)

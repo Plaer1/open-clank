@@ -15,6 +15,7 @@ import time
 
 _ACTIVE_REQUESTS = 0
 _LAST_ACTIVITY = 0.0
+_LAST_BROWSER_ACTIVITY = 0.0
 _COND: asyncio.Condition | None = None
 
 
@@ -37,6 +38,14 @@ def _max_wait_seconds() -> float:
         return 0.0
 
 
+def _browser_active_seconds() -> float:
+    """How long a visible Odysseus browser heartbeat blocks background tasks."""
+    try:
+        return max(0.0, float(os.getenv("BACKGROUND_TASK_BROWSER_ACTIVE_SECONDS", "45")))
+    except Exception:
+        return 45.0
+
+
 def _condition() -> asyncio.Condition:
     global _COND
     if _COND is None:
@@ -45,6 +54,7 @@ def _condition() -> asyncio.Condition:
 
 
 _PASSIVE_EXACT_PATHS = {
+    "/api/activity/heartbeat",
     "/api/tasks/notifications",
     "/api/research/active",
     "/api/email/urgency-state",
@@ -67,6 +77,24 @@ def should_track_interactive_request(path: str, method: str = "GET") -> bool:
     if any(path.startswith(prefix) for prefix in _PASSIVE_PREFIXES):
         return False
     return True
+
+
+async def mark_browser_activity() -> None:
+    """Record that an authenticated browser tab is visibly using Odysseus."""
+    global _LAST_BROWSER_ACTIVITY
+    if not _enabled():
+        return
+    cond = _condition()
+    async with cond:
+        _LAST_BROWSER_ACTIVITY = time.monotonic()
+        cond.notify_all()
+
+
+def _has_recent_browser_activity(now: float | None = None) -> bool:
+    ttl = _browser_active_seconds()
+    if ttl <= 0 or _LAST_BROWSER_ACTIVITY <= 0:
+        return False
+    return ((now if now is not None else time.monotonic()) - _LAST_BROWSER_ACTIVITY) < ttl
 
 
 def _has_active_chat_stream() -> bool:
@@ -133,11 +161,12 @@ async def wait_for_interactive_quiet(label: str = "") -> bool:
             now = time.monotonic()
             quiet_remaining = quiet - (now - _LAST_ACTIVITY)
             active_stream = _has_active_chat_stream()
-            if _ACTIVE_REQUESTS <= 0 and quiet_remaining <= 0 and not active_stream:
+            browser_active = _has_recent_browser_activity(now)
+            if _ACTIVE_REQUESTS <= 0 and quiet_remaining <= 0 and not active_stream and not browser_active:
                 return waited
 
             waited = True
-            timeout = 0.25 if (_ACTIVE_REQUESTS > 0 or active_stream) else min(max(quiet_remaining, 0.05), 0.5)
+            timeout = 0.25 if (_ACTIVE_REQUESTS > 0 or active_stream or browser_active) else min(max(quiet_remaining, 0.05), 0.5)
             if deadline is not None:
                 remaining = deadline - now
                 if remaining <= 0:
