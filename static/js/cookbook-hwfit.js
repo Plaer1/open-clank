@@ -80,6 +80,7 @@ export let _cachedModelIds = null; // repo IDs already downloaded
 // after the user has switched servers.
 let _hwfitFetchToken = 0;
 let _dismissedHwChips = new Set();
+let _hwfitAutoScanStarted = new Set();
 // Permanently removed (X-clicked) chips. Separate from _dismissedHwChips
 // so the ranker treats "off" and "removed" the same (both ignore the
 // hardware) but the UI keeps "off" chips visible to toggle back on,
@@ -592,12 +593,29 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
     if (!allowNetwork) {
       _hwfitCache = null;
       _hwfitRenderHw(hw, null);
-      list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:8px;text-align:center;"><div>No cached scan yet</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Test hardware and rank models for this server.</div><button type="button" class="hwfit-gpu-btn hwfit-empty-scan-btn" style="height:26px;padding:3px 10px;">Scan</button></div>';
-      list.querySelector('.hwfit-empty-scan-btn')?.addEventListener('click', () => {
-        _resetGpuToggleState();
-        _hwfitFetch(true);
-      });
-      try { wp.destroy(); } catch {}
+      const loadingDiv = document.createElement('div');
+      loadingDiv.className = 'hwfit-loading';
+      loadingDiv.style.cssText = 'flex-direction:column;gap:6px;text-align:center;';
+      loadingDiv.appendChild(wp.element);
+      const loadingTitle = document.createElement('div');
+      loadingTitle.textContent = 'No cached scan yet';
+      loadingTitle.style.cssText = 'font-size:12px;opacity:0.7;';
+      const loadingLbl = document.createElement('div');
+      loadingLbl.textContent = 'Scanning hardware…';
+      loadingLbl.style.cssText = 'font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;';
+      loadingDiv.appendChild(loadingTitle);
+      loadingDiv.appendChild(loadingLbl);
+      list.innerHTML = '';
+      list.appendChild(loadingDiv);
+      if (!_hwfitAutoScanStarted.has(_sig)) {
+        _hwfitAutoScanStarted.add(_sig);
+        setTimeout(() => {
+          if (_tk === _hwfitFetchToken) {
+            _resetGpuToggleState();
+            _hwfitFetch(true, { autoFromEmpty: true });
+          }
+        }, 60);
+      }
       return;
     }
     // Show spinner while scanning — stack the spinner above a text label
