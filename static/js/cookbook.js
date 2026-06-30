@@ -205,7 +205,7 @@ export function _sshCmd(host, cmd, port) {
 /** Get SSH port for a given host (or task object) */
 function _getPort(hostOrTask) {
   if (!hostOrTask) return '';
-  if (typeof hostOrTask === 'object') return hostOrTask.sshPort || _getPort(hostOrTask.remoteServerKey || hostOrTask.remoteHost);
+  if (typeof hostOrTask === 'object') return hostOrTask.sshPort || _getPort(hostOrTask.remoteServerKey || hostOrTask.remoteHost || hostOrTask.payload?.remote_host);
   const selected = hostOrTask === _envState.remoteHost ? _selectedServer() : null;
   const srv = selected || _serverByVal(hostOrTask);
   return srv?.port || '';

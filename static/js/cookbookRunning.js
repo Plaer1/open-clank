@@ -764,6 +764,11 @@ function _redactStoredText(value) {
     .replace(/((?:api[_-]?key|token|authorization|password|passwd|secret)\s*[=:]\s*)(["']?)[^\s"']+/gi, '$1$2[redacted]');
 }
 
+function _isServeOutputPlaceholder(value) {
+  const text = String(value || '').trim();
+  return !text || /^Launched via agent\s+—\s+waiting for tmux output/i.test(text);
+}
+
 function _redactTaskForStorage(task) {
   if (!task || typeof task !== 'object') return task;
   const safe = { ...task };
@@ -882,18 +887,23 @@ function _animateOutThenRemove(el, sessionId) {
 
 // ── tmux / Windows session commands ──
 
+function _taskRemoteHost(task) {
+  return task?.remoteHost || task?.payload?.remote_host || '';
+}
+
 export function _tmuxCmd(task, tmuxArgs) {
   if (_isWindows(task)) {
     return _winSessionCmd(task, tmuxArgs);
   }
-  if (task.remoteHost) {
-    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} 'tmux ${tmuxArgs}' 2>/dev/null`;
+  const host = _taskRemoteHost(task);
+  if (host) {
+    return `ssh ${_sshPrefix(_getPort(task))}${host} 'tmux ${tmuxArgs}' 2>/dev/null`;
   }
   return `tmux ${tmuxArgs} 2>/dev/null`;
 }
 
 function _winSessionCmd(task, tmuxArgs) {
-  const host = task.remoteHost;
+  const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
   const sid = task.sessionId;
   const pf = _sshPrefix(_getPort(task));
@@ -925,12 +935,13 @@ function _winSessionCmd(task, tmuxArgs) {
 
 function _winPowerShellCmd(task, ps) {
   const command = `powershell -Command "${ps}"`;
-  if (!task.remoteHost) return command;
-  return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(command)}`;
+  const host = _taskRemoteHost(task);
+  if (!host) return command;
+  return `ssh ${_sshPrefix(_getPort(task))}${host} ${_shQuote(command)}`;
 }
 
 function _winSessionStopTreePs(task) {
-  const host = task.remoteHost;
+  const host = _taskRemoteHost(task);
   const sd = host ? '$env:TEMP\\odysseus-sessions' : '$env:TEMP\\odysseus-tmux';
   const sid = task.sessionId;
   const stopTree = `function Stop-Tree([int]$Id) { Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $Id) -ErrorAction SilentlyContinue | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }; Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }`;
@@ -944,8 +955,9 @@ export function _tmuxGracefulKill(task) {
     const ps = _winSessionStopTreePs(task);
     return _winPowerShellCmd(task, ps);
   }
-  if (task.remoteHost) {
-    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} 'tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
+  const host = _taskRemoteHost(task);
+  if (host) {
+    return `ssh ${_sshPrefix(_getPort(task))}${host} 'tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
   }
   return `tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null`;
 }
@@ -970,8 +982,9 @@ export function _tmuxForceKill(task) {
     `  done; ` +
     `fi; ` +
     `tmux kill-session -t ${sid} 2>/dev/null`;
-  if (task.remoteHost) {
-    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(inner)}`;
+  const host = _taskRemoteHost(task);
+  if (host) {
+    return `ssh ${_sshPrefix(_getPort(task))}${host} ${_shQuote(inner)}`;
   }
   return inner;
 }
@@ -986,8 +999,9 @@ export function _tmuxIsAliveCheck(task) {
   }
   const sid = task.sessionId;
   const inner = `if tmux has-session -t ${sid} 2>/dev/null; then echo ALIVE; else echo DEAD; fi`;
-  if (task.remoteHost) {
-    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(inner)}`;
+  const host = _taskRemoteHost(task);
+  if (host) {
+    return `ssh ${_sshPrefix(_getPort(task))}${host} ${_shQuote(inner)}`;
   }
   return inner;
 }
@@ -1022,8 +1036,9 @@ function _ollamaUnloadCommand(task, outputText = '') {
   const base = _ollamaBaseUrlForTask(task, outputText);
   const body = JSON.stringify({ model, prompt: '', keep_alive: 0, stream: false });
   const inner = `curl -sf -X POST ${_shQuote(base + '/api/generate')} -H 'Content-Type: application/json' -d ${_shQuote(body)} >/dev/null 2>&1 || true`;
-  if (task.remoteHost) {
-    return `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} ${_shQuote(inner)}`;
+  const host = _taskRemoteHost(task);
+  if (host) {
+    return `ssh ${_sshPrefix(_getPort(task))}${host} ${_shQuote(inner)}`;
   }
   return inner;
 }
@@ -1032,7 +1047,7 @@ function _endpointUrlForTask(task, outputText = '') {
   if (_taskLooksOllama(task, outputText)) {
     return _ollamaBaseUrlForTask(task, outputText) + '/v1';
   }
-  const host = _connectHostFromRemote(task.remoteHost);
+  const host = _connectHostFromRemote(_taskRemoteHost(task));
   const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
   const port = portMatch ? portMatch[1] : '8000';
   return `http://${host}:${port}/v1`;
@@ -2107,6 +2122,12 @@ export function _renderRunningTab() {
       }
       const startNow = el.querySelector('.cookbook-task-start-now');
       if (startNow) startNow.style.display = (task.type === 'download' && task.status === 'queued') ? '' : 'none';
+      const pre = el.querySelector('.cookbook-output-pre');
+      if (pre && typeof task.output === 'string' && task.output && pre.textContent !== task.output) {
+        const atBottom = (pre.scrollHeight - pre.scrollTop - pre.clientHeight) < 40;
+        pre.textContent = task.output;
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+      }
       const terminalDiag = _terminalServeDiagnosis(task, el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
       if (terminalDiag) {
         _showDiagnosis(el, terminalDiag, el.querySelector('.cookbook-output-pre')?.textContent || task.output || '');
@@ -2757,7 +2778,7 @@ async function _reconnectTask(el, task) {
       const res = await fetch('/api/shell/exec', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: _tmuxCmd(task, `capture-pane -t ${task.sessionId} -p -S -200`), timeout: 15 }),
+        body: JSON.stringify({ command: _tmuxCmd(task, `capture-pane -t ${task.sessionId} -p -S -500`), timeout: 15 }),
       });
       const data = await res.json();
 
@@ -3837,7 +3858,9 @@ async function _pollBackgroundStatus() {
           const previous = String(task.output || '');
           const tail = String(live.output_tail || '');
           if (tail && !previous.endsWith(tail)) {
-            updates.output = `${previous ? `${previous}\n` : ''}${tail}`.slice(-5000);
+            updates.output = _isServeOutputPlaceholder(previous)
+              ? tail.slice(-5000)
+              : `${previous ? `${previous}\n` : ''}${tail}`.slice(-5000);
           }
         }
         if (live.diagnosis && !task._diagnosisDismissed) {

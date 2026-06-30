@@ -842,7 +842,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
         isAgentMode = true;
       }
-      if (isIncognito) isAgentMode = false;
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
       if (el('web-toggle').checked) {
         if (isAgentMode) {
@@ -880,7 +879,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       currentAbort = abortCtrl;
 
       const _tState = Storage.loadToggleState();
-      const _isAgent = !isIncognito && (_tState.mode || 'chat') === 'agent';
+      const _isAgent = (_tState.mode || 'chat') === 'agent';
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
