@@ -2588,9 +2588,47 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return -1;
   }
 
+  function _emailQuoteStartOffset(text) {
+    const original = String(text || '');
+    if (!original) return -1;
+    const boundary = String.raw`(?:^|\n|<br\s*\/?>|<\/(?:p|div|blockquote|li|tr|h[1-6])>)`;
+    const patterns = [
+      new RegExp(`${boundary}\\s*(?:[-_=–—\\s]|&nbsp;){3,}(?:previous|original|forwarded)\\s+(?:message|email|mail)(?:[-_=–—\\s]|&nbsp;){3,}`, 'i'),
+      new RegExp(`${boundary}\\s*On\\s+.{1,700}?\\s+wrote:\\s*`, 'i'),
+      new RegExp(`${boundary}\\s*-{2,}\\s*Original Message\\s*-{2,}`, 'i'),
+    ];
+    let best = -1;
+    for (const re of patterns) {
+      const m = re.exec(original);
+      if (!m) continue;
+      let idx = m.index;
+      const prefix = m[0].match(/^(?:\n|<br\s*\/?>|<\/(?:p|div|blockquote|li|tr|h[1-6])>)/i);
+      if (prefix) idx += prefix[0].length;
+      if (best < 0 || idx < best) best = idx;
+    }
+    const fromRe = new RegExp(`${boundary}\\s*From:\\s*\\S`, 'i');
+    const fromMatch = fromRe.exec(original);
+    if (fromMatch) {
+      let idx = fromMatch.index;
+      const prefix = fromMatch[0].match(/^(?:\n|<br\s*\/?>|<\/(?:p|div|blockquote|li|tr|h[1-6])>)/i);
+      if (prefix) idx += prefix[0].length;
+      const nearby = original.slice(idx, idx + 1200);
+      if (/(?:^|\n|<br\s*\/?>|<\/(?:p|div|blockquote|li|tr|h[1-6])>)\s*(?:To|Subject):\s*/i.test(nearby)) {
+        if (best < 0 || idx < best) best = idx;
+      }
+    }
+    return best;
+  }
+
   function _splitEmailReplyQuote(text) {
     const original = String(text || '');
     if (!original) return { body: '', quote: '', stripped: false };
+    const htmlQuoteOffset = _emailQuoteStartOffset(original);
+    if (htmlQuoteOffset >= 0) {
+      const body = original.slice(0, htmlQuoteOffset).trim();
+      const quote = original.slice(htmlQuoteOffset).trim();
+      return { body, quote, stripped: true };
+    }
     const lines = original.split('\n');
     const quoteIdx = _emailQuoteStartIndex(lines);
     if (quoteIdx < 0) return { body: original.trim(), quote: '', stripped: false };
