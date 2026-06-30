@@ -38270,6 +38270,23 @@ body.research-panel-view #research-divider { display:none; }
 }
 .research-job-actions {
   display:flex; gap:4px; margin-top:6px;
+  align-items:center;
+}
+.research-job-thumb {
+  width: 64px;
+  height: 40px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: 0 0 64px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: var(--panel, var(--bg));
+}
+.research-job-thumb-empty {
+  display: inline-block;
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--fg) 7%, transparent),
+      color-mix(in srgb, var(--fg) 3%, transparent));
 }
 /* Push the first dim (dismiss/delete) button — and everything after it — to
    the right edge of the actions row. `:first-of-type` would match the very

@@ -1,7 +1,7 @@
 /**
  * Deep Research side panel — open/close, form, job rendering, library.
  */
-import * as jobs from './jobs.js';
+import * as jobs from './jobs.js?v=20260630researchthumb';
 import themeModule from '../theme.js';
 import createResearchSynapse from '../researchSynapse.js';
 import spinnerModule from '../spinner.js';
@@ -994,6 +994,11 @@ function _buildJobCard(job) {
     const failNote = failed
       ? `<div class="research-job-failnote">Couldn't extract anything — try rephrasing the question, or switch the search engine in Settings.</div>`
       : '';
+    const thumbSource = (job.sources || []).find(s => s && (s.image || s.og_image));
+    const thumbUrl = job.thumbnail || thumbSource?.image || thumbSource?.og_image || '';
+    const thumbnail = thumbUrl
+      ? `<img class="research-job-thumb" src="${_esc(thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+      : '<span class="research-job-thumb research-job-thumb-empty" aria-hidden="true"></span>';
     card.innerHTML = `
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${doneBadge}
@@ -1002,6 +1007,7 @@ function _buildJobCard(job) {
       </div>
       ${failNote}
       <div class="research-job-actions">
+        ${thumbnail}
         <button class="research-job-action research-job-action-report" data-action="report" title="Visual report">${_externalIcon} Visual Report</button>
         <button class="research-job-action" data-action="chat" title="Open follow-up chat with this research as context">${_chatIcon} Discuss</button>
         <button class="research-job-action research-job-action-dim" data-action="copy" title="Copy report to clipboard">${_copyIcon}</button>
