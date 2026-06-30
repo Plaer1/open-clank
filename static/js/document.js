@@ -2223,6 +2223,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     document.querySelectorAll('.md-toolbar-edit-only').forEach(el => {
       el.style.display = (lang === 'markdown' && _mdActive) ? 'none' : '';
     });
+    const fsBtn = document.getElementById('doc-fontsize-btn');
+    if (fsBtn) {
+      const doc = activeDocId && docs.get(activeDocId);
+      const isPdfDoc = !!(doc && _isFormBackedDoc(doc.content || ''));
+      fsBtn.style.display = (isPdfDoc || (lang === 'markdown' && _mdActive)) ? 'none' : '';
+    }
     const mdToolbar = document.getElementById('doc-md-toolbar');
     if (mdToolbar) {
       mdToolbar.classList.toggle('md-preview-active', lang === 'markdown' && !!_mdActive);
