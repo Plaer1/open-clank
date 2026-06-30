@@ -36,6 +36,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let _emailStreamRenderedBody = '';
   let _emailStreamTargetBody = '';
   let _emailLocalDraftDebounce = null;
+  let _emailRichbodySaveDebounce = null;
   const _EMAIL_LOCAL_DRAFT_PREFIX = 'odysseus.email.replyDraft.v1:';
 
   // Diff mode state
@@ -2353,7 +2354,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   function _persistEmailLocalDraftSoon() {
     clearTimeout(_emailLocalDraftDebounce);
-    _emailLocalDraftDebounce = setTimeout(_persistEmailLocalDraftNow, 250);
+    _emailLocalDraftDebounce = setTimeout(_persistEmailLocalDraftNow, 800);
   }
 
   function _clearEmailLocalDraft(sourceUid, sourceFolder, inReplyTo) {
@@ -2393,20 +2394,41 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const ta = document.getElementById('doc-editor-textarea');
     if (!ta) return;
     ta.value = rich.innerText;
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    const doc = activeDocId && docs.get(activeDocId);
+    if (doc && doc.language === 'email') {
+      const fields = _parseEmailHeader(doc.content || '');
+      doc.content = _buildEmailContent(
+        document.getElementById('doc-email-to')?.value || fields.to || '',
+        document.getElementById('doc-email-subject')?.value || fields.subject || '',
+        document.getElementById('doc-email-in-reply-to')?.value || fields.inReplyTo || '',
+        document.getElementById('doc-email-references')?.value || fields.references || '',
+        rich.innerHTML,
+        document.getElementById('doc-email-source-uid')?.value || fields.sourceUid || '',
+        document.getElementById('doc-email-source-folder')?.value || fields.sourceFolder || '',
+        document.getElementById('doc-email-cc')?.value || fields.cc || '',
+        document.getElementById('doc-email-bcc')?.value || fields.bcc || '',
+      );
+    }
+  }
+  function _scheduleEmailRichbodySave() {
+    _persistEmailLocalDraftSoon();
+    clearTimeout(_emailRichbodySaveDebounce);
+    _emailRichbodySaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 2500);
   }
   function _wireEmailRichbody(rich) {
     if (rich._wired) { _syncEmailRichbody(rich); return; }
     rich._wired = true;
     rich.addEventListener('input', () => {
       _syncEmailRichbody(rich);
-      _persistEmailLocalDraftSoon();
+      _scheduleEmailRichbodySave();
     });
     // Highlight toolbar buttons (B / I / S, headings, lists) when the caret
     // sits inside formatted text. queryCommandState reflects the live
     // selection — we just translate that into .is-active classes the CSS
     // already understands.
-    const syncActive = () => {
+    let syncActiveFrame = 0;
+    const syncActiveNow = () => {
+      syncActiveFrame = 0;
       if (!rich.isConnected || rich.style.display === 'none') return;
       // Only sync when focus is inside the rich body — otherwise selection
       // outside it (e.g. clicking the toolbar itself) gives misleading state.
@@ -2430,10 +2452,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         if (lBtn) lBtn.classList.toggle('is-active', !!inList);
       } catch (_) {}
     };
+    const syncActive = () => {
+      if (syncActiveFrame) return;
+      syncActiveFrame = requestAnimationFrame(syncActiveNow);
+    };
     rich.addEventListener('keyup',    syncActive);
     rich.addEventListener('mouseup',  syncActive);
     rich.addEventListener('focus',    syncActive);
-    rich.addEventListener('input',    syncActive);
     // selectionchange fires on the document; filter to selections inside rich.
     document.addEventListener('selectionchange', () => {
       const sel = window.getSelection();
