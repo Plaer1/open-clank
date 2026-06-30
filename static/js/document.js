@@ -2540,17 +2540,43 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _emailStreamAnimFrame = requestAnimationFrame(tick);
   }
 
-  function _stripEmailReplyQuoteText(text) {
+  function _emailQuoteStartIndex(lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = String(lines[i] || '').trim();
+      if (
+        /^[-_=–—\s]{3,}(previous|original|forwarded)\s+(message|email|mail)[-_=–—\s]{3,}$/i.test(line)
+        || /^On .+ wrote:\s*$/i.test(line)
+        || /^-{2,}\s*Original Message\s*-{2,}$/i.test(line)
+      ) {
+        return i;
+      }
+      // Some pasted/converted threads lose the separator and start directly
+      // with mail headers. Treat that as quoted history only when the nearby
+      // lines look like a real header block.
+      if (/^From:\s+\S/i.test(line)) {
+        const nearby = lines.slice(i + 1, i + 8).map(l => String(l || '').trim());
+        if (nearby.some(l => /^To:\s+/i.test(l)) || nearby.some(l => /^Subject:\s+/i.test(l))) {
+          return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  function _splitEmailReplyQuote(text) {
     const original = String(text || '');
-    if (!original) return { body: '', stripped: false };
+    if (!original) return { body: '', quote: '', stripped: false };
     const lines = original.split('\n');
-    const quoteIdx = lines.findIndex(line =>
-      /^-{5,}\s*Previous message\s*-{5,}$/i.test(line.trim())
-      || /^On .+ wrote:\s*$/i.test(line.trim())
-    );
-    if (quoteIdx <= 0) return { body: original.trim(), stripped: false };
+    const quoteIdx = _emailQuoteStartIndex(lines);
+    if (quoteIdx < 0) return { body: original.trim(), quote: '', stripped: false };
     const body = lines.slice(0, quoteIdx).join('\n').trim();
-    return { body, stripped: !!body };
+    const quote = lines.slice(quoteIdx).join('\n').trim();
+    return { body, quote, stripped: true };
+  }
+
+  function _stripEmailReplyQuoteText(text) {
+    const split = _splitEmailReplyQuote(text);
+    return { body: split.body, stripped: split.stripped };
   }
 
   function _emailReplyOwnText(text) {
@@ -6543,12 +6569,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const doc = docs.get(docId);
     if (!doc) return;
     const fields = _parseEmailHeader(doc.content || '');
-    const lines = String(fields.body || '').split('\n');
-    const quoteIdx = lines.findIndex(line =>
-      /^-{5,}\s*Previous message\s*-{5,}$/i.test(line.trim())
-      || /^On .+ wrote:\s*$/i.test(line.trim())
-    );
-    const quote = quoteIdx >= 0 ? lines.slice(quoteIdx).join('\n') : '';
+    const oldSplit = _splitEmailReplyQuote(fields.body || '');
+    const quote = oldSplit.quote;
     const ownText = _emailReplyOwnText(fields.body || '');
     if (!force && ownText && !/^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText)) {
       if (uiModule) uiModule.showToast('AI reply ready, but draft was edited');
@@ -9940,7 +9962,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // and enterDiffMode().
     if (_diffModeActive) exitDiffMode(true);
     let docId = data.doc_id;
-    const newContent = data.content || '';
+    let newContent = data.content || '';
 
     // Migrate streaming temp doc to real ID
     if (streamingId && streamingId.startsWith('_streaming_') && docs.has(streamingId)) {
@@ -9990,6 +10012,35 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const textarea = document.getElementById('doc-editor-textarea');
     const oldContent = (docId === activeDocId && textarea) ? textarea.value : '';
     const isExistingDoc = docs.has(docId);
+    if (isExistingDoc) {
+      const existingDoc = docs.get(docId);
+      const existingLang = ((existingDoc?.language || data.language || '') + '').toLowerCase();
+      const oldFields = _parseEmailHeader(existingDoc?.content || '');
+      const newFields = _parseEmailHeader(newContent || '');
+      if (
+        existingLang === 'email'
+        && oldFields.body
+        && newFields.body
+        && (oldFields.inReplyTo || oldFields.sourceUid || newFields.inReplyTo || newFields.sourceUid)
+      ) {
+        const oldSplit = _splitEmailReplyQuote(oldFields.body);
+        if (oldSplit.quote) {
+          const newSplit = _splitEmailReplyQuote(newFields.body);
+          const nextBody = `${(newSplit.body || newFields.body || '').trim()}\n\n${oldSplit.quote}`.trim();
+          newContent = _buildEmailContent(
+            newFields.to || oldFields.to,
+            newFields.subject || oldFields.subject,
+            newFields.inReplyTo || oldFields.inReplyTo,
+            newFields.references || oldFields.references,
+            nextBody,
+            newFields.sourceUid || oldFields.sourceUid,
+            newFields.sourceFolder || oldFields.sourceFolder,
+            newFields.cc || oldFields.cc,
+            newFields.bcc || oldFields.bcc,
+          );
+        }
+      }
+    }
 
     // Add or update in docs map
     if (isExistingDoc) {
