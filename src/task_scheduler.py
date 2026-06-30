@@ -1712,8 +1712,15 @@ class TaskScheduler:
 
         target = (output or "").strip()
         explicit = ""
+        account_id = ""
         if target.startswith("email:"):
             explicit = target.split(":", 1)[1].strip()
+            if "|account=" in explicit:
+                explicit, account_id = explicit.split("|account=", 1)
+                explicit = explicit.strip()
+                account_id = account_id.strip()
+            if explicit == "self":
+                explicit = ""
         elif "@" in target:
             explicit = target
 
@@ -1721,7 +1728,7 @@ class TaskScheduler:
             from routes.email_routes import _resolve_send_config
             from routes.email_helpers import _send_smtp_message
 
-            cfg = _resolve_send_config(owner=task.owner or "")
+            cfg = _resolve_send_config(account_id=account_id or None, owner=task.owner or "")
             to_addr = explicit or cfg.get("from_address") or cfg.get("smtp_user") or ""
             if not to_addr:
                 raise RuntimeError("No email recipient resolved for task output")

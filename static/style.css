@@ -23427,6 +23427,8 @@ body:not(.welcome-ready) #welcome-screen {
   font-variant-numeric: tabular-nums;
 }
 .task-log-force-run {
+  appearance: none;
+  box-sizing: border-box;
   border: 0;
   background: color-mix(in srgb, var(--fg) 7%, transparent);
   box-shadow: none;
@@ -23434,7 +23436,9 @@ body:not(.welcome-ready) #welcome-screen {
   opacity: .82;
   margin-left: 7px;
   padding: 1px 6px 1px 4px;
+  height: 18px;
   min-height: 16px;
+  max-height: 18px;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;

@@ -254,6 +254,34 @@ function _taskPromptConfig(prompt) {
   }
 }
 
+function _parseTaskEmailOutputTarget(output) {
+  const raw = String(output || '').trim();
+  if (!raw) return { enabled: false, to: '', accountId: '' };
+  if (raw === 'email') return { enabled: true, to: '', accountId: '' };
+  if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(raw)) return { enabled: true, to: raw, accountId: '' };
+  if (!raw.startsWith('email:')) return { enabled: false, to: '', accountId: '' };
+  let payload = raw.slice('email:'.length).trim();
+  let accountId = '';
+  const marker = '|account=';
+  const markerIdx = payload.indexOf(marker);
+  if (markerIdx >= 0) {
+    accountId = payload.slice(markerIdx + marker.length).trim();
+    payload = payload.slice(0, markerIdx).trim();
+  }
+  return {
+    enabled: true,
+    to: payload && payload !== 'self' ? payload : '',
+    accountId,
+  };
+}
+
+function _buildTaskEmailOutputTarget(to, accountId) {
+  const cleanTo = String(to || '').trim();
+  const cleanAccount = String(accountId || '').trim();
+  const base = `email:${cleanTo || 'self'}`;
+  return cleanAccount ? `${base}|account=${cleanAccount}` : (cleanTo ? base : 'email');
+}
+
 async function _renderEmailActionOptions(action, existing, extra) {
   if (!_EMAIL_ACCOUNT_ACTIONS.has(action)) return;
   const accounts = (await _fetchEmailAccountsForTasks()).filter(a => a && a.enabled !== false);
@@ -1141,6 +1169,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
       <select id="task-form-output" class="task-form-input">
         <option value="session">Session</option>
       </select>
+      <div id="task-form-output-extra"></div>
 
       <label class="task-form-label">Model <span style="opacity:0.5;font-weight:normal;font-size:10px;">(optional — overrides session default)</span></label>
       <select id="task-form-model" class="task-form-input">
@@ -1411,28 +1440,70 @@ function _showForm(existing, initTaskType, initTriggerType) {
   renderTriggerOpts();
 
   // Populate output targets
+  const renderOutputExtra = async () => {
+    const outputSel = document.getElementById('task-form-output');
+    const extra = document.getElementById('task-form-output-extra');
+    if (!outputSel || !extra) return;
+    const currentTo = document.getElementById('task-form-output-email-to')?.value;
+    const currentAccountId = document.getElementById('task-form-output-email-account')?.value;
+    extra.innerHTML = '';
+    if (outputSel.value !== 'email') return;
+    const parsed = _parseTaskEmailOutputTarget(existing?.output_target || '');
+    if (currentTo != null) parsed.to = currentTo;
+    if (currentAccountId != null) parsed.accountId = currentAccountId;
+    const accounts = (await _fetchEmailAccountsForTasks()).filter(a => a && a.enabled !== false);
+    const options = [
+      `<option value="" ${parsed.accountId ? '' : 'selected'}>Default sending account</option>`,
+      ...accounts.map(a => {
+        const id = String(a.id || '');
+        const label = a.name || a.from_address || a.imap_user || id.slice(0, 8);
+        const suffix = a.is_default ? ' (default)' : '';
+        return `<option value="${_escHtml(id)}" ${id === parsed.accountId ? 'selected' : ''}>${_escHtml(label + suffix)}</option>`;
+      }),
+    ].join('');
+    extra.innerHTML = `
+      <div class="task-form-output-email" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:6px;">
+        <label>
+          <span class="task-form-label" style="margin-top:0;">From</span>
+          <select id="task-form-output-email-account" class="task-form-input">${options}</select>
+        </label>
+        <label>
+          <span class="task-form-label" style="margin-top:0;">To</span>
+          <input id="task-form-output-email-to" class="task-form-input" type="email" value="${_escHtml(parsed.to)}" placeholder="Me / selected account" />
+        </label>
+      </div>
+      <div class="memory-desc" style="font-size:10px;margin-top:3px;">Leave To blank to send to the selected account’s own address.</div>
+    `;
+  };
+
   _fetchOutputTargets().then(targets => {
     const outputSel = document.getElementById('task-form-output');
     if (!outputSel || targets.length <= 1) return;
     outputSel.innerHTML = '';
+    const existingEmailOutput = _parseTaskEmailOutputTarget(existing?.output_target || '');
     let matchedOutput = false;
     for (const t of targets) {
       const opt = document.createElement('option');
       opt.value = t.value;
       opt.textContent = t.label;
-      if (existing?.output_target === t.value) {
+      if (existingEmailOutput.enabled && t.value === 'email') {
+        opt.selected = true;
+        matchedOutput = true;
+      } else if (!existingEmailOutput.enabled && existing?.output_target === t.value) {
         opt.selected = true;
         matchedOutput = true;
       }
       outputSel.appendChild(opt);
     }
-    if (existing?.output_target && !matchedOutput) {
+    if (existing?.output_target && !matchedOutput && !existingEmailOutput.enabled) {
       const opt = document.createElement('option');
       opt.value = existing.output_target;
       opt.textContent = existing.output_target.includes('@') ? `Email: ${existing.output_target}` : existing.output_target;
       opt.selected = true;
       outputSel.appendChild(opt);
     }
+    outputSel.addEventListener('change', renderOutputExtra);
+    renderOutputExtra();
   });
 
   // Populate model dropdown from /api/models. Value is "endpoint_url::model"
@@ -1517,7 +1588,13 @@ function _showForm(existing, initTaskType, initTriggerType) {
   // Save
   document.getElementById('task-form-save').addEventListener('click', async () => {
     const nameEl = document.getElementById('task-form-name');
-    const outputTarget = document.getElementById('task-form-output')?.value || 'session';
+    const outputSelValue = document.getElementById('task-form-output')?.value || 'session';
+    let outputTarget = outputSelValue;
+    if (outputSelValue === 'email') {
+      const to = document.getElementById('task-form-output-email-to')?.value || '';
+      const accountId = document.getElementById('task-form-output-email-account')?.value || '';
+      outputTarget = _buildTaskEmailOutputTarget(to, accountId);
+    }
 
     const payload = {
       task_type: taskType,
