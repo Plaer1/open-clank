@@ -15,7 +15,11 @@ import logging
 from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
-from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
+from src.llm_core import (
+    stream_llm,
+    stream_llm_with_fallback,
+    _is_ollama_native_url,
+)
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -576,11 +580,13 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         tool_lines = []
         for name, _default_section in TOOL_SECTIONS.items():
             if name in included:
-                tool_lines.append(_compact_tool_line(name, _section_text(name, _default_section)))
+                tool_lines.append(f"- `{name}`")
         parts = [
-            _AGENT_PREAMBLE,
+            "You are an AI assistant with native tool/function calling. "
+            "Only the tool schemas provided by the API are available for this turn. "
+            "Use native tool calls when action is needed; do not write tool syntax or tool instructions in chat.",
             "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
-            _AGENT_RULES,
+            _API_AGENT_RULES,
         ]
         parts.extend(_domain_rules_for_tools(included))
         return "\n\n".join(parts)
@@ -973,6 +979,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("notes_calendar_tasks")
     if has(r"\b(calendar|event|meeting|appointment|schedule)\b"):
         domains.add("notes_calendar_tasks")
+    _code_write_intent = has(
+        r"\b(?:python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
+        r"ruby|php|swift|kotlin|bash|shell|html|css|sql)\b",
+        r"\b(?:code|script|program|game|function|class|module|app)\b",
+    )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
@@ -991,7 +1002,18 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("ui")
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
-    if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash|python)\b"):
+    if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
+        domains.add("files")
+    if has(
+        r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
+        r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
+        r"ruby|php|swift|kotlin|bash|shell|html|css|sql|code|script|program|game"
+        r")\b",
+        r"\b("
+        r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
+        r"ruby|php|swift|kotlin|bash|shell|html|css|sql"
+        r")\b.{0,40}\b(file|script|program|app)\b",
+    ):
         domains.add("files")
     # Managing detached bash jobs: "kill the background job", "stop the job",
     # "kill that job", "check the job output", "is the bg job done".
@@ -1020,6 +1042,128 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         "domains": domains,
         "retrieval_query": retrieval_query,
     }
+
+
+def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
+    """Return whether an open document should affect this turn.
+
+    The editor can stay open while the user asks unrelated things ("who am I?",
+    "search news"). In those cases injecting document context/tools makes small
+    models overfit to the visible document and call suggest/edit tools. Keep the
+    active document only for explicit document domains or common document-edit
+    continuations.
+    """
+    if active_document is None:
+        return False
+    if "documents" in (intent.get("domains") or set()):
+        return True
+    text = str(last_user or "").strip().lower()
+    if not text:
+        return False
+    return bool(re.search(
+        r"\b("
+        r"document|doc|draft|text|poem|story|essay|outline|letter|paragraph|"
+        r"stanza|line|title|heading|section|sentence|word|caps|uppercase|"
+        r"lowercase|rewrite|reword|style|tone|suggest|suggestions|feedback|"
+        r"improve|edit|change|remove|delete|replace|add another|append|"
+        r"original text|in the document|the document|this document"
+        r")\b",
+        text,
+    ))
+
+
+def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
+    facts: List[str] = []
+    seen = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        source = str((metadata or {}).get("source") or "")
+        if not source.startswith("saved memory:"):
+            continue
+        content = str(message.get("content") or "")
+        content = re.sub(r"(?m)^\s*Source:\s*saved memory:[^\n]*\n?", "", content)
+        content = content.replace("Core facts about the user:", "")
+        content = re.sub(
+            r"Memory context\. Do not reference unless the user asks about these topics\.\s*",
+            "",
+            content,
+        )
+        for line in content.splitlines():
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            fact = line[2:].strip()
+            if not fact or fact in seen:
+                continue
+            seen.add(fact)
+            facts.append(fact)
+            if len(facts) >= 12:
+                break
+        if len(facts) >= 12:
+            break
+    if not facts:
+        return None
+    logger.info("[agent-intent] odysseus doc minimal memory facts=%s", len(facts))
+    return {
+        "role": "user",
+        "content": (
+            "Saved user memory facts from Odysseus Brain. These are the same "
+            "user facts available in the normal prompt path. Use them when "
+            "the user asks for personalization, identity, background, "
+            "preferences, or anything about \"me\" or \"my\":\n"
+            + "\n".join(f"- {fact}" for fact in facts)
+        ),
+    }
+
+
+def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream_create: bool = False) -> List[Dict]:
+    """Tiny prompt path for the Odysseus document LoRA.
+
+    This model is trained on document tool behavior, so avoid the normal agent
+    rule stack and send only the task plus the active document when editing.
+    """
+    latest = _extract_last_user_message(messages)
+    if stream_create:
+        system = (
+            "You are Odysseus. Create the requested document by streaming exactly one fenced block:\n"
+            "```document\n"
+            "Title\n"
+            "markdown\n"
+            "Document content\n"
+            "```\n"
+            "Do not use function calls or tool calls. Do not write anything before the fence. "
+            "Use saved user memory facts when the user asks for something relating to them."
+        )
+    else:
+        system = (
+            "You are Odysseus. Use the provided function when it is needed. "
+            "After a successful tool call, answer briefly."
+        )
+    out = [{"role": "system", "content": system}]
+    memory_message = _minimal_saved_memory_message(messages)
+    if memory_message:
+        out.append(memory_message)
+    if active_document is not None:
+        content = active_document.current_content or ""
+        out.append({
+            "role": "user",
+            "content": (
+                "Active document:\n"
+                f"Title: {active_document.title}\n"
+                f"Language: {active_document.language or 'text'}\n"
+                "Content:\n"
+                f"{content}"
+            ),
+        })
+    out.append({"role": "user", "content": latest})
+    return out
+
+
+def _normalize_stream_document_fences(text: str) -> str:
+    """Treat visible ```document blocks as create_document tool blocks."""
+    return re.sub(r"```document(\s*\n)", r"```create_document\1", text or "")
 
 
 def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
@@ -1674,7 +1818,13 @@ def _build_base_prompt(
 
 
 
-def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num: int, is_api_model: bool = False):
+def _resolve_tool_blocks(
+    round_response: str,
+    native_tool_calls: list,
+    round_num: int,
+    is_api_model: bool = False,
+    allow_fenced_for_api: bool = False,
+):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
     converted_calls = []  # native calls that converted, ALIGNED with tool_blocks
@@ -1707,7 +1857,7 @@ def _resolve_tool_blocks(round_response: str, native_tool_calls: list, round_num
         # falling back to DSML). Dropping the whole parser would silently lose
         # those too. Non-native / textual-only models keep every pattern,
         # fenced blocks included, since that's their *only* tool channel.
-        tool_blocks = parse_tool_blocks(round_response, skip_fenced=is_api_model)
+        tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
 
@@ -2104,13 +2254,15 @@ async def stream_agent_loop(
     _intent = _classify_agent_request(messages, _last_user)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
+    _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
+    _prompt_active_document = active_document if _active_document_relevant else None
     _direct_low_signal = (
         _low_signal_turn
         and not bool(_intent.get("continuation"))
         and not plan_mode
         and not approved_plan
         and not guide_only
-        and (_casual_low_signal_turn or active_document is None)
+        and (_casual_low_signal_turn or not _active_document_relevant)
         and (_casual_low_signal_turn or not active_email)
         and (_casual_low_signal_turn or not workspace)
         and not forced_tools
@@ -2120,11 +2272,12 @@ async def stream_agent_loop(
     # user turns only for explicit continuations ("yes", "do it", "1").
     _retrieval_query = str(_intent.get("retrieval_query") or _last_user)
     logger.info(
-        "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s retrieval_query=%r",
+        "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s active_doc_relevant=%s retrieval_query=%r",
         _last_user[:120],
         bool(_intent.get("continuation")),
         _low_signal_turn,
         sorted(_intent.get("domains") or []),
+        _active_document_relevant,
         _retrieval_query[:200],
     )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
@@ -2303,10 +2456,11 @@ async def stream_agent_loop(
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
 
-    # If a document is open the model needs the editing tools available
-    # regardless of which selection path (RAG, keyword, caller-provided) ran
-    # or what keywords were in the latest user message.
-    if _relevant_tools is not None and active_document is not None:
+    # If this turn targets the open document, keep editing tools available
+    # regardless of which selection path (RAG, keyword, caller-provided) ran.
+    # Do not leak document tools into unrelated turns just because the editor
+    # panel is open.
+    if _relevant_tools is not None and _active_document_relevant:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
 
     # Current-turn chat uploads are real files under the upload/data root. Make
@@ -2364,6 +2518,23 @@ async def stream_agent_loop(
                         )
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
+
+    _ody_doc_finetune_mode = (
+        (model or "").lower().startswith("odysseus-qwen3")
+        and "documents" in (_intent.get("domains") or set())
+        and "files" not in (_intent.get("domains") or set())
+        and not guide_only
+    )
+    _ody_doc_stream_create_mode = _ody_doc_finetune_mode and _prompt_active_document is None
+    if _ody_doc_finetune_mode and _relevant_tools is not None:
+        if _prompt_active_document is not None:
+            _relevant_tools = {
+                "edit_document", "update_document", "suggest_document",
+                "ask_user", "update_plan",
+            }
+        else:
+            _relevant_tools = {"create_document", "ask_user", "update_plan"}
+        logger.info("[agent-intent] odysseus doc finetune tool clamp=%s", sorted(_relevant_tools))
 
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
@@ -2443,7 +2614,7 @@ async def stream_agent_loop(
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
-        messages, model, active_document, mcp_mgr, disabled_tools,
+        messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_compact_agent_prompt,
@@ -2452,6 +2623,19 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
+    if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
+        messages = _minimal_odysseus_doc_messages(
+            messages,
+            _prompt_active_document,
+            stream_create=_ody_doc_stream_create_mode,
+        )
+        mcp_schemas = []
+        logger.info(
+            "[agent-intent] odysseus doc minimal prompt active active_doc=%s stream_create=%s messages=%s",
+            bool(_prompt_active_document),
+            _ody_doc_stream_create_mode,
+            len(messages),
+        )
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -2607,6 +2791,7 @@ async def stream_agent_loop(
     _doc_acc = ""          # accumulated tool-call JSON arguments
     _doc_opened = False    # whether doc_stream_open was sent
     _doc_last_len = 0      # last content length sent
+    _doc_stream_create_completed = False
 
     # Set when the loop runs out of rounds while the agent was still actively
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
@@ -2661,6 +2846,15 @@ async def stream_agent_loop(
                     if s.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
                 ]
                 all_tool_schemas = base_schemas + mcp_schemas
+            if _ody_doc_finetune_mode:
+                if _ody_doc_stream_create_mode:
+                    all_tool_schemas = []
+                else:
+                    _doc_schema_names = {"edit_document", "update_document", "suggest_document"}
+                    all_tool_schemas = [
+                        t for t in all_tool_schemas
+                        if t.get("function", {}).get("name") in _doc_schema_names
+                    ]
             if disabled_tools:
                 all_tool_schemas = [
                     t for t in all_tool_schemas
@@ -2706,6 +2900,7 @@ async def stream_agent_loop(
             max_tokens=max_tokens,
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
+            tool_choice_none=_ody_doc_stream_create_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,
         ):
@@ -2832,14 +3027,26 @@ async def stream_agent_loop(
                             round_response += data["delta"]
                             full_response += data["delta"]
                         yield chunk  # Stream all rounds
-                        # Detect text-fence doc streaming for rounds 2+
-                        # (round 1 is handled by frontend fence detection + server fenced block path)
+                        # Detect text-fence doc streaming. Normal agent prompts
+                        # use ```create_document; the doc LoRA streaming path
+                        # uses neutral ```document to avoid triggering learned
+                        # hidden native tool-call output.
                         if (
-                            round_num > 1
+                            (round_num > 1 or _ody_doc_stream_create_mode)
                             and not _doc_acc
                             and not (tool_policy and tool_policy.blocks("create_document"))
                         ):
-                            _fence_marker = '```create_document\n'
+                            _fence_markers = (
+                                ('```document\n', 'document')
+                                if _ody_doc_stream_create_mode
+                                else ('```create_document\n',)
+                            )
+                            _fence_marker = None
+                            for _mk in _fence_markers:
+                                _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
+                                if _candidate in round_response[_doc_scan_from:]:
+                                    _fence_marker = _candidate
+                                    break
                             # Open a new block if we're not currently inside one
                             # and there's an unstreamed marker in the response.
                             # The marker search starts at the byte after the
@@ -2847,7 +3054,7 @@ async def stream_agent_loop(
                             # `create_document` block in the same round gets
                             # detected (previously only the first one was
                             # streamed and the rest were silently dropped).
-                            if not _doc_opened and _fence_marker in round_response[_doc_scan_from:]:
+                            if not _doc_opened and _fence_marker:
                                 _fi = round_response.index(_fence_marker, _doc_scan_from)
                                 _fa = round_response[_fi + len(_fence_marker):]
                                 _fl = _fa.split('\n')
@@ -2900,11 +3107,36 @@ async def stream_agent_loop(
             _round_first_token_logged,
         )
         tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
-            round_response,
+            _normalize_stream_document_fences(round_response) if _ody_doc_stream_create_mode else round_response,
             native_tool_calls,
             round_num,
             is_api_model=(_is_api_model and not guide_only),
+            allow_fenced_for_api=_ody_doc_stream_create_mode,
         )
+        if _ody_doc_stream_create_mode and tool_blocks:
+            create_idx = next(
+                (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
+                None,
+            )
+            if create_idx is None:
+                logger.info(
+                    "[agent] odysseus doc stream-create discarded non-create tool call(s): %s",
+                    [block.tool_type for block in tool_blocks],
+                )
+                tool_blocks = []
+                converted_calls = []
+            else:
+                if len(tool_blocks) > 1 or create_idx != 0:
+                    logger.info(
+                        "[agent] odysseus doc stream-create keeping first create_document and dropping extras: %s",
+                        [block.tool_type for block in tool_blocks],
+                    )
+                tool_blocks = [tool_blocks[create_idx]]
+                converted_calls = (
+                    [converted_calls[create_idx]]
+                    if create_idx < len(converted_calls)
+                    else converted_calls[:1]
+                )
 
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
@@ -3528,6 +3760,12 @@ async def stream_agent_loop(
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
+            if (
+                _ody_doc_stream_create_mode
+                and block.tool_type == "create_document"
+                and result.get("action") == "create"
+            ):
+                _doc_stream_create_completed = True
 
         # If budget was hit, stop the loop
         if budget_hit:
@@ -3538,6 +3776,13 @@ async def stream_agent_loop(
         # arrives as the next message and the agent resumes from there. The
         # question text is already in the streamed response, so it persists.
         if _awaiting_user:
+            break
+
+        if _doc_stream_create_completed:
+            if not full_response.strip():
+                full_response = "Done."
+                yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+            logger.info("[agent] odysseus doc stream-create completed after one create_document")
             break
 
         # Feed results back to LLM for next round

@@ -1048,6 +1048,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
+      let lastToolThread = null;      // Visible tool timeline for tool-only turns
       let roundFinalized = false;     // Whether current round's text is finalized
       let _sourcesHtml = '';          // Sources box HTML to prepend to body
       let _sourcesExpanded = false;   // Track if user expanded sources during stream
@@ -1055,6 +1056,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _sourcesType = '';          // 'web' or 'research'
       let _findingsData = null;      // Raw findings data for collapsible box
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
+      function _metricsTargetForTurn() {
+        const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
+        const visibleText = visibleRound ? (visibleRound.querySelector('.body')?.textContent || '').trim() : '';
+        if (lastToolThread && lastToolThread.isConnected && (!visibleRound || !visibleText || visibleText === 'Done.')) {
+          return lastToolThread;
+        }
+        return visibleRound || holder;
+      }
       // Insert sources box as a stable DOM node that won't be replaced during streaming.
       // Returns the content container to use for innerHTML updates.
       function _ensureStreamLayout(body) {
@@ -1332,7 +1341,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               _streamSawDone = true;
               // Always update background map if entry exists (even if user switched back)
               var bgDone = _backgroundStreams.get(streamSessionId);
-              if (bgDone) {
+              if (bgDone && !_isBg) {
+                _backgroundStreams.delete(streamSessionId);
+              } else if (bgDone) {
                 bgDone.status = 'completed';
                 bgDone.accumulated = accumulated;
                 if (_isBg) {
@@ -1456,9 +1467,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
 
                 // --- Text-fence doc streaming (for models that don't use native tool calls) ---
-                if (!_docFenceOpened && documentModule && roundText.includes('```create_document\n')) {
-                  const fenceIdx = roundText.indexOf('```create_document\n');
-                  const afterFence = roundText.slice(fenceIdx + '```create_document\n'.length);
+                if (!_docFenceOpened && documentModule && (roundText.includes('```create_document\n') || roundText.includes('```document\n'))) {
+                  const fenceMarker = roundText.includes('```document\n') ? '```document\n' : '```create_document\n';
+                  const fenceIdx = roundText.indexOf(fenceMarker);
+                  const afterFence = roundText.slice(fenceIdx + fenceMarker.length);
                   const fenceLines = afterFence.split('\n');
                   if (fenceLines.length >= 1 && fenceLines[0].trim()) {
                     _docFenceOpened = true;
@@ -1467,7 +1479,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     const knownLangs = ['python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text','plain','ruby','swift','kotlin','php','email','csv','xml','toml','ini'];
                     const isLang = fenceLines.length >= 2 && knownLangs.includes(fenceLines[1].trim().toLowerCase());
                     const lang = isLang ? fenceLines[1].trim() : '';
-                    _docFenceContentStart = fenceIdx + '```create_document\n'.length + title.length + 1 + (isLang ? fenceLines[1].length + 1 : 0);
+                    _docFenceContentStart = fenceIdx + fenceMarker.length + title.length + 1 + (isLang ? fenceLines[1].length + 1 : 0);
                     documentModule.streamDocOpen(title, lang);
                   }
                 }
@@ -2033,6 +2045,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (bgM) bgM.metrics = json.data;
                   continue;
                 }
+                if (metrics) {
+                  const metricsTarget = _metricsTargetForTurn();
+                  if (metricsTarget) displayMetrics(metricsTarget, metrics);
+                }
 
               } else if (json.type === 'message_saved') {
                 // Wire the persisted DB id onto the just-streamed bubble so it
@@ -2113,6 +2129,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   chatBox.appendChild(threadWrap);
                 }
                 threadWrap.classList.add('streaming');
+                lastToolThread = threadWrap;
                 const toolLabel = _toolLabels[json.tool.toLowerCase()] || json.tool;
                 const toolIcon = _toolIcons[json.tool.toLowerCase()] || '\u25B6';
                 const node = document.createElement('div')
@@ -2471,6 +2488,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
 
       _renderStream();
+      if (spinner && spinner.element) { try { spinner.destroy(); } catch (_) {} spinner = null; }
       _cancelThinkingTimer();
       _removeThinkingSpinner();
       // Stop any thread pulse animations
@@ -2650,7 +2668,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
         // Attach footer to the last visible bubble (roundHolder for multi-round agent, holder for single)
         const footerTarget = (roundHolder && roundHolder !== holder && roundHolder.style.display !== 'none') ? roundHolder : holder;
-        footerTarget.appendChild(createMsgFooter(footerTarget));
+        if (!footerTarget.querySelector('.msg-footer')) {
+          footerTarget.appendChild(createMsgFooter(footerTarget));
+        }
         // Add "View Report" link for completed research
         if (_researchingStreamIds.has(streamSessionId)) {
           _appendViewReportLink(footerTarget, streamSessionId);
@@ -2690,7 +2710,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
         }
         if (metrics) {
-          displayMetrics(footerTarget, metrics);
+          displayMetrics(_metricsTargetForTurn() || footerTarget, metrics);
         }
         // Attach variant navigation if this was a regeneration
         _attachVariantNav(footerTarget);

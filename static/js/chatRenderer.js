@@ -1753,7 +1753,7 @@ export function displayMetrics(messageElement, metrics) {
   const cost = _billableCost(model, inputTokens, outputTokens);
 
   // Nothing useful to show — bail out (only if ALL metrics are missing)
-  if (!responseTime && !outputTokens && tps == null && !ctxPct) return;
+  if (!responseTime && !inputTokens && !outputTokens && tps == null && !ctxPct) return;
 
   // Accumulate session cost (only on fresh metrics, not history reload)
   if (!metrics._fromHistory) {
@@ -1776,9 +1776,11 @@ export function displayMetrics(messageElement, metrics) {
       ? `${outputTokens} tok · ${costStr0}`
       : outputTokens
         ? `${outputTokens} tok · ${responseTime != null ? responseTime + 's' : ''}`
-        : responseTime != null
-          ? `${responseTime}s`
-          : '';
+        : inputTokens
+          ? `${inputTokens} in${responseTime != null ? ' · ' + responseTime + 's' : ''}`
+          : responseTime != null
+            ? `${responseTime}s`
+            : '';
   if (!metricsLabel) return;
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
@@ -1996,6 +1998,13 @@ export function displayMetrics(messageElement, metrics) {
   }
 
   let footer = messageElement.querySelector('.msg-footer');
+  if (!footer) {
+    footer = createMsgFooter(messageElement);
+    if (messageElement.classList?.contains('agent-thread')) {
+      footer.classList.add('agent-thread-footer');
+    }
+    messageElement.appendChild(footer);
+  }
   if (footer) {
     const actions = footer.querySelector('.msg-actions');
     if (actions) {

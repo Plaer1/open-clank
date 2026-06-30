@@ -1361,6 +1361,7 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
 
     return merged
 
+
 def _normalize_anthropic_url(url: str) -> str:
     """Ensure Anthropic URL points to /v1/messages."""
     url = url.rstrip("/")
@@ -1845,7 +1846,8 @@ async def llm_call_async(
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                     tool_choice_none: bool = False):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1905,6 +1907,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = tools
+        elif tool_choice_none:
+            payload["tool_choice"] = "none"
         # Mistral thinking-capable models — send reasoning_effort so Mistral
         # activates thinking mode and returns structured reasoning_content.
         # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT

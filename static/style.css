@@ -3363,6 +3363,10 @@ body.bg-pattern-sparkles {
       transition: color .15s;
     }
     .msg-footer .response-metrics:hover { color:var(--fg); }
+    .agent-thread > .agent-thread-footer {
+      margin-top: 4px;
+      margin-left: 2px;
+    }
     /* Context usage ring — right side of footer */
     .ctx-ring {
       display: inline-flex;
