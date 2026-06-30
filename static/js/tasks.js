@@ -1948,7 +1948,7 @@ async function _renderActivityView() {
   const body = modal?.querySelector('.modal-body');
   if (!body) return;
   body.innerHTML = `
-    <div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+    <div class="admin-card tasks-activity-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
       <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
         <h2 style="margin:0;padding:0;line-height:1;">Activity</h2>
         <button class="memory-toolbar-btn" id="tasks-activity-refresh" title="Refresh" style="margin-left:auto;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></button>
@@ -1958,7 +1958,7 @@ async function _renderActivityView() {
         <input type="text" id="tasks-activity-search" placeholder="Filter activity…" class="memory-search-input" style="flex:1;" />
       </div>
       <div class="tasks-activity-filters" id="tasks-activity-chips" style="display:flex;gap:5px;margin-bottom:8px;flex-wrap:wrap;"></div>
-      <div id="tasks-activity-list" class="memory-list" style="flex:1;overflow:auto;font-size:13px;"></div>
+      <div id="tasks-activity-list" class="memory-list tasks-activity-list" style="flex:1;overflow:auto;font-size:13px;min-height:0;"></div>
     </div>
   `;
 
@@ -2123,6 +2123,7 @@ let _activityHasMore = false;
 function _stackActivityEntries(entries) {
   const out = [];
   const byKey = new Map();
+  const maxStack = 8;
   const hourBucket = (ts) => {
     const d = ts ? new Date(ts) : null;
     if (!d || Number.isNaN(d.getTime())) return '';
@@ -2150,7 +2151,12 @@ function _stackActivityEntries(entries) {
       /^Email\b/i.test(entry.taskName || '') ? hourBucket(entry.ts) : '',
     ].join('\u0001');
     const existing = byKey.get(key);
-    if (existing && entry.status !== 'running' && entry.status !== 'queued') {
+    if (
+      existing
+      && entry.status !== 'running'
+      && entry.status !== 'queued'
+      && (existing.repeatCount || 1) < maxStack
+    ) {
       existing.repeatCount = (existing.repeatCount || 1) + 1;
       continue;
     }

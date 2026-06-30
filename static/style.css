@@ -11063,7 +11063,7 @@ textarea.memory-add-input {
   text-transform: uppercase;
   letter-spacing: 0.3px;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 999px;
   flex-shrink: 0;
   cursor: pointer;
   border: 1px solid transparent;
@@ -23305,6 +23305,14 @@ body:not(.welcome-ready) #welcome-screen {
   top: 8px;
 }
 .tasks-modal-content { max-width: 600px; width: min(600px, 92vw); background: var(--bg); font-size: 12px; }
+.tasks-activity-card,
+.tasks-activity-list {
+  min-height: 0;
+}
+.tasks-activity-list {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 
 /* Tasks tabs reuse the .memory-tab look. The Brain window's tab bar is
    full-bleed (its underline spans the whole modal width). The Tasks bar is a

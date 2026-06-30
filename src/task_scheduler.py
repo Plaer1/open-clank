@@ -687,6 +687,12 @@ class TaskScheduler:
         db = SessionLocal()
         try:
             now = _utcnow()
+            foreground_active = False
+            try:
+                from src.interactive_gate import has_foreground_activity
+                foreground_active = has_foreground_activity()
+            except Exception:
+                foreground_active = False
             async with self._executing_lock:
                 # Snapshot under the lock so we don't race with mid-iteration adds.
                 executing_snapshot = set(self._executing)
@@ -700,8 +706,13 @@ class TaskScheduler:
                 for task in due:
                     if task.id in self._executing:
                         continue
+                    if foreground_active:
+                        task.next_run = now + timedelta(minutes=15)
+                        continue
                     self._executing.add(task.id)
                     to_dispatch.append(task.id)
+                if foreground_active and due:
+                    db.commit()
             for task_id in to_dispatch:
                 asyncio.create_task(self._execute_task(task_id))
         finally:
@@ -754,6 +765,7 @@ class TaskScheduler:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
             self._mark_run_aborted(task_id, run_id)
+            self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
             raise
         finally:
             handle = self._task_handles.get(task_id)
@@ -762,6 +774,28 @@ class TaskScheduler:
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
+
+    def _defer_immediately_due_task(self, task_id: str, *, delay: timedelta):
+        """A queued task can be cancelled before _execute_task_locked gets a DB
+        handle. If its next_run stays in the past, the scheduler dispatches it
+        again on the next tick and spams aborted Activity rows."""
+        try:
+            from core.database import SessionLocal, ScheduledTask
+            db = SessionLocal()
+            try:
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                if (
+                    task
+                    and task.status == "active"
+                    and task.next_run is not None
+                    and task.next_run <= _utcnow()
+                ):
+                    task.next_run = _utcnow() + delay
+                    db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("Failed to defer cancelled queued task %s", task_id, exc_info=True)
 
     async def _execute_task_locked(
         self,
