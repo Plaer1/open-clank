@@ -23459,7 +23459,7 @@ body:not(.welcome-ready) #welcome-screen {
   line-height: 1;
   cursor: pointer;
   position: relative;
-  top: -1px;
+  top: -3px;
 }
 .task-log-force-run svg,
 .task-log-stop svg {
