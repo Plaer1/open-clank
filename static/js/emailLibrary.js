@@ -6356,6 +6356,18 @@ async function _maybeAutoTranslateEmail(reader) {
     const res = await fetch(`${API_BASE}/api/email/config`);
     const cfg = await res.json();
     if (!cfg || !cfg.email_auto_translate) return;
+    try {
+      const sid = window.sessionModule?.getCurrentSessionId?.() || '';
+      if (sid) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 800);
+        const statusRes = await fetch(`${API_BASE}/api/chat/stream_status/${encodeURIComponent(sid)}`, {
+          signal: ctrl.signal,
+        }).catch(() => null);
+        clearTimeout(timer);
+        if (statusRes && statusRes.ok) return;
+      }
+    } catch (_) {}
     await _translateEmail(reader, cfg.email_translate_language || 'English', { auto: true });
   } catch (_) {}
 }

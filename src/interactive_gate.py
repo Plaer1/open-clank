@@ -69,6 +69,29 @@ def should_track_interactive_request(path: str, method: str = "GET") -> bool:
     return True
 
 
+def _has_active_chat_stream() -> bool:
+    """Best-effort check for foreground model work that outlives HTTP requests.
+
+    Chat/agent streams are detached from the browser SSE so a stream can keep
+    running after the request that started it has returned. Background LLM
+    tasks must still wait for those runs; otherwise helpers like email
+    auto-translate compete with the user's active chat on the same local model.
+    """
+    try:
+        from routes import chat_routes as _chat_routes
+        active_streams = getattr(_chat_routes, "_active_streams", {}) or {}
+        if active_streams:
+            return True
+    except Exception:
+        pass
+    try:
+        from src import agent_runs
+        runs = getattr(agent_runs, "_RUNS", {}) or {}
+        return any(getattr(run, "status", None) == "running" for run in runs.values())
+    except Exception:
+        return False
+
+
 @asynccontextmanager
 async def track_interactive_request(path: str = "", method: str = ""):
     global _ACTIVE_REQUESTS, _LAST_ACTIVITY
@@ -109,11 +132,12 @@ async def wait_for_interactive_quiet(label: str = "") -> bool:
         async with cond:
             now = time.monotonic()
             quiet_remaining = quiet - (now - _LAST_ACTIVITY)
-            if _ACTIVE_REQUESTS <= 0 and quiet_remaining <= 0:
+            active_stream = _has_active_chat_stream()
+            if _ACTIVE_REQUESTS <= 0 and quiet_remaining <= 0 and not active_stream:
                 return waited
 
             waited = True
-            timeout = 0.25 if _ACTIVE_REQUESTS > 0 else min(max(quiet_remaining, 0.05), 0.5)
+            timeout = 0.25 if (_ACTIVE_REQUESTS > 0 or active_stream) else min(max(quiet_remaining, 0.05), 0.5)
             if deadline is not None:
                 remaining = deadline - now
                 if remaining <= 0:
