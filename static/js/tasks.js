@@ -2706,6 +2706,7 @@ function _renderMainView() {
 // ---- Modal ----
 
 export function openTasks(focusId, opts) {
+  startNotificationPolling();
   const o = opts || {};
   const openActivityForFailure = _taskFailurePending && !focusId && o.filter === undefined;
   _setTaskFailurePending(false);
@@ -2936,9 +2937,6 @@ function stopNotificationPolling() {
     _notifInterval = null;
   }
 }
-
-// Start polling on module load
-startNotificationPolling();
 
 const tasksModule = { openTasks, closeTasks, isTasksOpen, startNotificationPolling, stopNotificationPolling };
 export default tasksModule;

@@ -5,7 +5,7 @@
 
 import spinnerModule from './spinner.js';
 import sessionModule from './sessions.js';
-import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen, prewarmEmailLibrary } from './emailLibrary.js';
+import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen } from './emailLibrary.js';
 import * as Modals from './modalManager.js';
 import { applyEdgeDock } from './modalSnap.js';
 import { buildReplyAllCc } from './emailLibrary/replyRecipients.js';
@@ -274,10 +274,11 @@ function _bindEvents() {
     });
   }
 
-  // Initial unread count check, refresh every 60s
-  _refreshUnreadCount();
+  // Delay the lightweight unread badge check so opening Odysseus doesn't
+  // compete with the initial chat/session paint. The full email list now loads
+  // only when the inbox is actually opened.
+  setTimeout(_refreshUnreadCount, 8000);
   setInterval(_refreshUnreadCount, 60000);
-  prewarmEmailLibrary({ delay: 3000 });
 
   // Deep-link: #email=<folder>:<uid> opens the library and expands that card
   _maybeOpenFromHash();
