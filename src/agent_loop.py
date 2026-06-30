@@ -1055,11 +1055,27 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     """
     if active_document is None:
         return False
+    raw_doc = getattr(active_document, "current_content", "") or ""
+    title_l = (getattr(active_document, "title", "") or "").strip().lower()
+    is_email_doc = (
+        getattr(active_document, "language", None) == "email"
+        or title_l in {"new email", "new mail", "new message"}
+        or ("To:" in raw_doc[:400] and "Subject:" in raw_doc[:400] and "\n---\n" in raw_doc)
+    )
     if "documents" in (intent.get("domains") or set()):
         return True
     text = str(last_user or "").strip().lower()
     if not text:
         return False
+    if is_email_doc and re.search(
+        r"\b("
+        r"email|mail|reply|respond|response|draft|compose|send|"
+        r"tell them|tell her|tell him|say|write|make it say|"
+        r"japanese|japan|polite|formal|tone|style"
+        r")\b",
+        text,
+    ):
+        return True
     return bool(re.search(
         r"\b("
         r"document|doc|draft|text|poem|story|essay|outline|letter|paragraph|"

@@ -6539,7 +6539,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }));
   }
 
-  export async function replaceEmailReplyBody(docId, replyText) {
+  export async function replaceEmailReplyBody(docId, replyText, { force = false } = {}) {
     const doc = docs.get(docId);
     if (!doc) return;
     const fields = _parseEmailHeader(doc.content || '');
@@ -6550,7 +6550,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     );
     const quote = quoteIdx >= 0 ? lines.slice(quoteIdx).join('\n') : '';
     const ownText = _emailReplyOwnText(fields.body || '');
-    if (ownText && !/^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText)) {
+    if (!force && ownText && !/^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText)) {
       if (uiModule) uiModule.showToast('AI reply ready, but draft was edited');
       return;
     }
@@ -10430,6 +10430,21 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return activeDocId;
   }
 
+  export function getActiveEmailComposerContext() {
+    if (!activeDocId) return null;
+    const doc = docs.get(activeDocId);
+    if (!doc || doc.language !== 'email') return null;
+    const fields = _parseEmailHeader(doc.content || '');
+    return {
+      docId: activeDocId,
+      sourceUid: fields.sourceUid || '',
+      sourceFolder: fields.sourceFolder || 'INBOX',
+      inReplyTo: fields.inReplyTo || '',
+      to: fields.to || '',
+      subject: fields.subject || '',
+    };
+  }
+
   /** Find an open email tab by source UID + folder. Returns docId or null. */
   export function findEmailDocId(uid, folder) {
     if (uid == null) return null;
@@ -10472,6 +10487,7 @@ const documentModule = {
   exitDiffMode,
   isDiffModeActive,
   getCurrentDocId,
+  getActiveEmailComposerContext,
   findEmailDocId,
   getSelectionContext,
   clearSelection,

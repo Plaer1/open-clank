@@ -780,9 +780,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
 
       // Auto-save document editor content before sending so the AI sees latest text
-      const activeDocIdForSend = documentModule && typeof documentModule.getCurrentDocId === 'function'
+      const activeEmailComposerCtx = documentModule && typeof documentModule.getActiveEmailComposerContext === 'function'
+        ? documentModule.getActiveEmailComposerContext()
+        : null;
+      let activeDocIdForSend = documentModule && typeof documentModule.getCurrentDocId === 'function'
         ? documentModule.getCurrentDocId()
         : null;
+      if (!activeDocIdForSend && activeEmailComposerCtx?.docId) {
+        activeDocIdForSend = activeEmailComposerCtx.docId;
+      }
       if (documentModule && activeDocIdForSend) {
         try { await documentModule.saveDocument(); } catch(e) { console.warn('doc auto-save failed', e); }
       }
@@ -826,7 +832,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       try {
         const getEmailCtx = window.__odysseusGetActiveEmailContext;
         const emCtx = typeof getEmailCtx === 'function' ? getEmailCtx() : null;
-        if (emCtx && emCtx.uid) {
+        if (activeEmailComposerCtx && activeEmailComposerCtx.sourceUid) {
+          fd.append('active_email_uid', String(activeEmailComposerCtx.sourceUid));
+          fd.append('active_email_folder', String(activeEmailComposerCtx.sourceFolder || 'INBOX'));
+        } else if (emCtx && emCtx.uid) {
           fd.append('active_email_uid', String(emCtx.uid));
           fd.append('active_email_folder', String(emCtx.folder || 'INBOX'));
           if (emCtx.account) fd.append('active_email_account', String(emCtx.account));
