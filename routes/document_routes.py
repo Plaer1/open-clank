@@ -802,12 +802,17 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             to_delete = []
             now = datetime.now(timezone.utc)
             for doc in docs:
-                content = (doc.current_content or "").strip()
-                title_raw = (doc.title or "").strip()
-                title = title_raw.lower()
                 created = doc.created_at
                 if created and created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
+
+                # Skip freshly created documents to avoid deleting them while the user is actively editing
+                if created and (now - created).total_seconds() < 900:  # 15 minutes
+                    continue
+
+                content = (doc.current_content or "").strip()
+                title_raw = (doc.title or "").strip()
+                title = title_raw.lower()
                 is_fresh_empty = (
                     not content
                     and created is not None
@@ -848,10 +853,6 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 if _is_email_stub:
                     to_delete.append(doc); deleted += 1; continue
                 if title in _JUNK_TITLES:
-                    to_delete.append(doc); deleted += 1; continue
-                if real_len < 30:
-                    to_delete.append(doc); deleted += 1; continue
-                if "\n" not in content and real_len < 50:
                     to_delete.append(doc); deleted += 1; continue
 
                 # Fix empty or placeholder titles on survivors
