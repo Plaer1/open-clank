@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -66,6 +67,9 @@ _HF_TOKEN_STATUS_SNIPPET = (
 def setup_cookbook_routes() -> APIRouter:
     router = APIRouter(tags=["cookbook"])
     _cookbook_state_path = Path(COOKBOOK_STATE_FILE)
+    _state_get_cache = {"ts": 0.0, "mtime": 0.0, "value": None}
+    _tasks_status_cache = {"ts": 0.0, "value": None}
+    _tasks_status_inflight = {"task": None}
 
     def _mask_secret(value: str) -> str:
         if not value:
@@ -2463,19 +2467,29 @@ def setup_cookbook_routes() -> APIRouter:
     async def get_cookbook_state(request: Request):
         """Load saved cookbook state (tasks, servers, presets, settings)."""
         require_admin(request)
+        now = time.monotonic()
+        try:
+            mtime = _cookbook_state_path.stat().st_mtime if _cookbook_state_path.exists() else 0.0
+        except Exception:
+            mtime = 0.0
+        cached = _state_get_cache.get("value")
+        if cached is not None and _state_get_cache.get("mtime") == mtime and now - float(_state_get_cache.get("ts") or 0) < 1.5:
+            return cached
         if _cookbook_state_path.exists():
             try:
                 state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
                 saved_tasks = state.get("tasks", [])
                 tasks = saved_tasks if isinstance(saved_tasks, list) else list(saved_tasks.values()) if isinstance(saved_tasks, dict) else []
-                try:
-                    _maybe_sweep_orphans(tasks, state)
-                except Exception as _sweep_e:
-                    logger.warning(f"state orphan sweep failed (non-fatal): {_sweep_e!r}")
-                return _state_for_client(state)
+                client_state = _state_for_client(state)
+                _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
+                return client_state
             except Exception:
-                return _state_for_client({})
-        return _state_for_client({})
+                client_state = _state_for_client({})
+                _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
+                return client_state
+        client_state = _state_for_client({})
+        _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
+        return client_state
 
     @router.post("/api/cookbook/state")
     async def save_cookbook_state(request: Request):
@@ -2583,7 +2597,19 @@ def setup_cookbook_routes() -> APIRouter:
                             f"not in incoming body (race guard): "
                             f"{[t.get('sessionId') for t in preserved]}")
                 data["tasks"] = incoming_tasks + preserved
-            atomic_write_json(str(_cookbook_state_path), _state_for_storage(data, on_disk), indent=2)
+            storage_state = _state_for_storage(data, on_disk)
+            if storage_state == on_disk:
+                return {"ok": True, "preserved": len(preserved), "unchanged": True}
+            atomic_write_json(str(_cookbook_state_path), storage_state, indent=2)
+            try:
+                mtime = _cookbook_state_path.stat().st_mtime
+                _state_get_cache.update({
+                    "ts": time.monotonic(),
+                    "mtime": mtime,
+                    "value": _state_for_client(storage_state),
+                })
+            except Exception:
+                pass
             return {"ok": True, "preserved": len(preserved)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -2705,10 +2731,10 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"models": out}
 
-    # Rate-limit for the orphan-tmux adoption sweep. 60s interval so SSH
+    # Rate-limit for the orphan-tmux adoption sweep. Five-minute interval so SSH
     # work is genuinely sparse even on an actively-polled cookbook page.
     _last_orphan_sweep_ts = [0.0]
-    _ORPHAN_SWEEP_MIN_INTERVAL_S = 60.0
+    _ORPHAN_SWEEP_MIN_INTERVAL_S = 300.0
     # Concurrency guard so two requests racing don't both spawn a sweep.
     _orphan_sweep_inflight = [False]
 
@@ -3263,7 +3289,26 @@ def setup_cookbook_routes() -> APIRouter:
         event loop. Now the whole body runs in a worker thread via
         asyncio.to_thread so other requests stay responsive."""
         require_admin(request)
-        return await asyncio.to_thread(_cookbook_tasks_status_sync)
+        now = time.monotonic()
+        cached = _tasks_status_cache.get("value")
+        if cached is not None and now - float(_tasks_status_cache.get("ts") or 0) < 2.0:
+            return cached
+        inflight = _tasks_status_inflight.get("task")
+        if inflight and not inflight.done():
+            return await inflight
+
+        async def _compute():
+            data = await asyncio.to_thread(_cookbook_tasks_status_sync)
+            _tasks_status_cache.update({"ts": time.monotonic(), "value": data})
+            return data
+
+        task = asyncio.create_task(_compute())
+        _tasks_status_inflight["task"] = task
+        try:
+            return await task
+        finally:
+            if _tasks_status_inflight.get("task") is task:
+                _tasks_status_inflight["task"] = None
 
     def _cookbook_tasks_status_sync():
         import subprocess

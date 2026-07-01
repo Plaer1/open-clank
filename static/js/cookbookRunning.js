@@ -369,7 +369,7 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 
 // Polling / timeout intervals
 const TASK_POLL_INTERVAL_MS = 3000;       // delay between reconnect-loop iterations
-const BG_MONITOR_INTERVAL_MS = 5000;      // background task status poll
+const BG_MONITOR_INTERVAL_MS = 10000;     // background task status poll
 const STALE_PROGRESS_MS = 5 * 60 * 1000;  // download with no progress this long = stale
 const STARTUP_STALE_PROGRESS_MS = 45 * 1000; // 0%-forever startup stall: retry much sooner
 
@@ -3457,6 +3457,10 @@ async function _reconnectTask(el, task) {
 // ── Background monitor ──
 
 let _bgMonitorInterval = null;
+let _bgPollInFlight = false;
+const BG_LEADER_KEY = 'odysseus-cookbook-bg-leader';
+const BG_LEADER_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const BG_LEADER_TTL_MS = 15000;
 
 function _hasLiveTasks(tasks = null) {
   const list = tasks || _loadTasks();
@@ -3475,67 +3479,122 @@ function _isRunningTabVisible() {
   return activeTab === 'Running';
 }
 
+function _foregroundChatBusy() {
+  try {
+    return !!window.__odysseusChatBusy || Date.now() < (window.__odysseusChatBusyUntil || 0);
+  } catch {
+    return false;
+  }
+}
+
+function _claimBackgroundLeader() {
+  if (document.visibilityState !== 'visible') return false;
+  const now = Date.now();
+  try {
+    const raw = localStorage.getItem(BG_LEADER_KEY);
+    const current = raw ? JSON.parse(raw) : null;
+    if (
+      !current
+      || !current.id
+      || current.id === BG_LEADER_ID
+      || now - Number(current.ts || 0) > BG_LEADER_TTL_MS
+    ) {
+      localStorage.setItem(BG_LEADER_KEY, JSON.stringify({ id: BG_LEADER_ID, ts: now }));
+      return true;
+    }
+    return current.id === BG_LEADER_ID;
+  } catch (_) {
+    return true;
+  }
+}
+
+function _canBackgroundPoll() {
+  if (_foregroundChatBusy()) return false;
+  if (document.visibilityState !== 'visible') return false;
+  return _claimBackgroundLeader();
+}
+
 // Reachability check for running serve tasks. The tmux pane can stay alive
 // while the model server inside it has crashed (so no "Process exited" line
 // ever appears) — leaving the card showing "running" forever. So we actively
 // probe the registered endpoint (same /probe-local the model picker uses) and
 // flag the card "unreachable" (red) when the server stops answering.
+let _serveReachabilityInFlight = false;
+let _serveReachabilityLastAt = 0;
 async function _checkServeReachability() {
+  // This reaches out to local model servers. Keep it out of the normal chat
+  // path unless the user is actively looking at the Running tab.
+  if (_foregroundChatBusy()) return;
+  if (!_isRunningTabVisible()) return;
+  const now = Date.now();
+  if (_serveReachabilityInFlight || now - _serveReachabilityLastAt < 10000) return;
+  _serveReachabilityInFlight = true;
+  _serveReachabilityLastAt = now;
   let serveTasks;
   try {
     serveTasks = _loadTasks().filter(t => t.type === 'serve' && t.status === 'running');
-  } catch { return; }
-  if (!serveTasks.length) return;
+  } catch {
+    _serveReachabilityInFlight = false;
+    return;
+  }
+  if (!serveTasks.length) {
+    _serveReachabilityInFlight = false;
+    return;
+  }
   let eps = [], probe = {};
   try {
     [eps, probe] = await Promise.all([
       fetch('/api/model-endpoints', { credentials: 'same-origin' }).then(r => r.json()).catch(() => []),
       fetch('/api/model-endpoints/probe-local', { credentials: 'same-origin' }).then(r => r.json()).catch(() => ({})),
     ]);
-  } catch { return; }
-  for (const task of serveTasks) {
-    const host = _connectHostFromRemote(task.remoteHost);
-    const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
-    const port = portMatch ? portMatch[1] : '8000';
-    const baseUrl = `http://${host}:${port}/v1`;
-    const ep = (eps || []).find(e => e.base_url === baseUrl);
-    if (!ep) continue;                       // not registered yet — can't judge
-    const pr = probe[ep.id];
-    if (!pr || pr.alive === undefined) continue;  // not probed (non-local) — skip
-    // Record the first time it actually answers. Until then the server is still
-    // LOADING/warming (the endpoint can get registered on the 300s timeout for a
-    // big model that hasn't finished loading), and a not-yet-answering server is
-    // not "unreachable" — flagging it as such while you're launching is a false
-    // alarm. Only treat it as unreachable once it has been reachable at least once.
-    if (pr.alive === true && !task._everReachable) {
-      task._everReachable = true;
-      _updateTask(task.sessionId, { _everReachable: true });
-    }
-    const unreachable = pr.alive === false;
-    if (unreachable && !task._everReachable) continue;  // still coming up, not crashed
-    if (!!task._unreachable !== unreachable) {
-      _updateTask(task.sessionId, { _unreachable: unreachable });
-    }
-    const el = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"]`);
-    if (el) {
-      el.classList.toggle('cookbook-task-unreachable', unreachable);
-      const badge = el.querySelector('.cookbook-task-status');
-      if (badge) {
-        if (unreachable) {
-          badge.textContent = 'unreachable';
-          badge.className = 'cookbook-task-status cookbook-task-error';
-          badge.title = pr.error || 'Server not responding — it may have crashed';
-        } else if (badge.textContent === 'unreachable') {
-          // Recovered — restore the normal running label.
-          badge.textContent = _statusLabel('running', task.type);
-          badge.className = 'cookbook-task-status cookbook-task-running';
-          badge.title = '';
+    for (const task of serveTasks) {
+      const host = _connectHostFromRemote(task.remoteHost);
+      const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
+      const port = portMatch ? portMatch[1] : '8000';
+      const baseUrl = `http://${host}:${port}/v1`;
+      const ep = (eps || []).find(e => e.base_url === baseUrl);
+      if (!ep) continue;                       // not registered yet — can't judge
+      const pr = probe[ep.id];
+      if (!pr || pr.alive === undefined) continue;  // not probed (non-local) — skip
+      // Record the first time it actually answers. Until then the server is still
+      // LOADING/warming (the endpoint can get registered on the 300s timeout for a
+      // big model that hasn't finished loading), and a not-yet-answering server is
+      // not "unreachable" — flagging it as such while you're launching is a false
+      // alarm. Only treat it as unreachable once it has been reachable at least once.
+      if (pr.alive === true && !task._everReachable) {
+        task._everReachable = true;
+        _updateTask(task.sessionId, { _everReachable: true });
+      }
+      const unreachable = pr.alive === false;
+      if (unreachable && !task._everReachable) continue;  // still coming up, not crashed
+      if (!!task._unreachable !== unreachable) {
+        _updateTask(task.sessionId, { _unreachable: unreachable });
+      }
+      const el = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"]`);
+      if (el) {
+        el.classList.toggle('cookbook-task-unreachable', unreachable);
+        const badge = el.querySelector('.cookbook-task-status');
+        if (badge) {
+          if (unreachable) {
+            badge.textContent = 'unreachable';
+            badge.className = 'cookbook-task-status cookbook-task-error';
+            badge.title = pr.error || 'Server not responding — it may have crashed';
+          } else if (badge.textContent === 'unreachable') {
+            // Recovered — restore the normal running label.
+            badge.textContent = _statusLabel('running', task.type);
+            badge.className = 'cookbook-task-status cookbook-task-running';
+            badge.title = '';
+          }
         }
       }
+      if (unreachable) _showCookbookNotif(true);
     }
-    if (unreachable) _showCookbookNotif(true);
+    _refreshServerDots();
+  } catch {
+    // Non-fatal: the normal task status poll continues separately.
+  } finally {
+    _serveReachabilityInFlight = false;
   }
-  _refreshServerDots();
 }
 
 function _serveTaskFailed(task) {
@@ -3687,6 +3746,7 @@ export async function _selfHealStaleTasks(opts = {}) {
 export function _startBackgroundMonitor() {
   if (_bgMonitorInterval) return;
   _bgMonitorInterval = setInterval(() => {
+    if (!_canBackgroundPoll()) return;
     _pollBackgroundStatus();
     _checkServeReachability();
     // Auto-reconnect: every cycle, look for download tasks marked finished/
@@ -3697,8 +3757,10 @@ export function _startBackgroundMonitor() {
       _selfHealStaleTasks().catch(() => {});
     }
   }, BG_MONITOR_INTERVAL_MS);
-  _pollBackgroundStatus();
-  _checkServeReachability();
+  if (_canBackgroundPoll()) {
+    _pollBackgroundStatus();
+    _checkServeReachability();
+  }
 }
 
 function _stopBackgroundMonitor() {
@@ -3748,6 +3810,8 @@ async function _probeEndpointUntilOnline(epId, host, port) {
 }
 
 async function _pollBackgroundStatus() {
+  if (!_canBackgroundPoll() || _bgPollInFlight) return;
+  _bgPollInFlight = true;
   try {
     // Pull any tasks the server knows about that aren't in localStorage
     // yet (e.g. agent-spawned downloads/serves). Without this merge,
@@ -4013,6 +4077,8 @@ async function _pollBackgroundStatus() {
     }
   } catch (e) {
     // Silent fail
+  } finally {
+    _bgPollInFlight = false;
   }
 }
 

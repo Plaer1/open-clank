@@ -242,8 +242,7 @@ export function _renderGpuToggles(system) {
       container._activeCount = undefined;   // default to the new pool's max
       delete container.dataset.rendered;    // force a count-button rebuild
       _renderGpuToggles(system);
-      _hwfitCache = null;
-      _hwfitFetch();
+      _hwfitFetch(false, { keepPrevious: true, forceRevalidate: true });
     });
   }
 
@@ -275,8 +274,7 @@ export function _renderGpuToggles(system) {
           }
         }
       }
-      _hwfitCache = null;
-      _hwfitFetch();
+      _hwfitFetch(false, { keepPrevious: true, forceRevalidate: true });
     });
   }
 }
@@ -436,6 +434,27 @@ function _readScanCache(sig) {
   return null;
 }
 
+function _readNearestScanCache(sig) {
+  try {
+    const wanted = JSON.parse(sig || '{}');
+    const all = JSON.parse(localStorage.getItem(_SCAN_CACHE_KEY) || '{}');
+    let best = null;
+    for (const [key, entry] of Object.entries(all)) {
+      if (!entry || !entry.data || (Date.now() - (entry.ts || 0)) >= _SCAN_CACHE_TTL) continue;
+      let parsed = null;
+      try { parsed = JSON.parse(key); } catch { continue; }
+      if (!parsed) continue;
+      if ((parsed.h || '') !== (wanted.h || '')) continue;
+      if ((parsed.hk || '') !== (wanted.hk || '')) continue;
+      if (JSON.stringify(parsed.m || {}) !== JSON.stringify(wanted.m || {})) continue;
+      if (JSON.stringify(parsed.d || []) !== JSON.stringify(wanted.d || [])) continue;
+      if (!best || (entry.ts || 0) > (best.ts || 0)) best = entry;
+    }
+    return best?.data || null;
+  } catch {}
+  return null;
+}
+
 function _writeScanCache(sig, data) {
   try {
     const all = JSON.parse(localStorage.getItem(_SCAN_CACHE_KEY) || '{}');
@@ -565,6 +584,8 @@ function _ollamaToHwfitRows(libModels, vramAvail, ramAvail) {
 export async function _hwfitFetch(fresh = false, opts = {}) {
   const _tk = ++_hwfitFetchToken;
   const allowNetwork = fresh || opts.allowNetwork !== false;
+  const keepPrevious = !!opts.keepPrevious;
+  const forceRevalidate = !!opts.forceRevalidate;
   const useCase = document.getElementById('hwfit-usecase')?.value || '';
   const search = document.getElementById('hwfit-search')?.value?.trim() || '';
   const remoteHost = _envState.remoteHost || '';
@@ -577,7 +598,10 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
   // reload shows the last result with no spinner. We still fetch fresh below and
   // swap it in. If there's no cache hit, fall back to the spinner.
   const _sig = _scanSig();
-  const _cached = fresh ? null : _readScanCache(_sig);
+  let _cached = fresh ? null : _readScanCache(_sig);
+  if (!_cached && !fresh && (!allowNetwork || keepPrevious)) {
+    _cached = _readNearestScanCache(_sig);
+  }
   const wp = spinnerModule.createWhirlpool(18);
   const _paintedFromCache = !!_cached;
   if (_cached) {
@@ -590,7 +614,10 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
     }
     _hwfitRenderList(list, _applyEngineFilter(_cached.models));
   } else {
-    if (!allowNetwork) {
+    const canKeepPrevious = keepPrevious && _hwfitCache && Array.isArray(_hwfitCache.models);
+    if (canKeepPrevious) {
+      try { wp.destroy(); } catch {}
+    } else if (!allowNetwork) {
       _hwfitCache = null;
       _hwfitRenderHw(hw, null);
       const loadingDiv = document.createElement('div');
@@ -618,23 +645,25 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
       }
       return;
     }
-    // Show spinner while scanning — stack the spinner above a text label
-    // (the .hwfit-loading class is a centered flex ROW, so force column here).
-    const loadingDiv = document.createElement('div');
-    loadingDiv.className = 'hwfit-loading';
-    loadingDiv.style.flexDirection = 'column';
-    loadingDiv.style.gap = '6px';
-    loadingDiv.appendChild(wp.element);
-    // Text label like the other cookbook tabs: "Loading…", then if the scan runs
-    // long (remote SSH hardware probe), switch to "Scanning hardware…".
-    const loadingLbl = document.createElement('div');
-    loadingLbl.textContent = 'Loading…';
-    loadingLbl.style.cssText = 'text-align:center;opacity:0.5;font-size:11px;';
-    loadingDiv.appendChild(loadingLbl);
-    setTimeout(() => { if (loadingLbl.isConnected) loadingLbl.textContent = 'Scanning hardware…'; }, 2000);
-    list.innerHTML = '';
-    list.appendChild(loadingDiv);
-    _hwfitCache = null;   // no instant paint — clear until the fetch returns
+    if (!canKeepPrevious) {
+      // Show spinner while scanning — stack the spinner above a text label
+      // (the .hwfit-loading class is a centered flex ROW, so force column here).
+      const loadingDiv = document.createElement('div');
+      loadingDiv.className = 'hwfit-loading';
+      loadingDiv.style.flexDirection = 'column';
+      loadingDiv.style.gap = '6px';
+      loadingDiv.appendChild(wp.element);
+      // Text label like the other cookbook tabs: "Loading…", then if the scan runs
+      // long (remote SSH hardware probe), switch to "Scanning hardware…".
+      const loadingLbl = document.createElement('div');
+      loadingLbl.textContent = 'Loading…';
+      loadingLbl.style.cssText = 'text-align:center;opacity:0.5;font-size:11px;';
+      loadingDiv.appendChild(loadingLbl);
+      setTimeout(() => { if (loadingLbl.isConnected) loadingLbl.textContent = 'Scanning hardware…'; }, 2000);
+      list.innerHTML = '';
+      list.appendChild(loadingDiv);
+      _hwfitCache = null;   // no instant paint — clear until the fetch returns
+    }
   }
   if (!allowNetwork) {
     try { wp.destroy(); } catch {}
@@ -674,7 +703,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
         _setLastCacheHost('');
       });
   }
-  if (_paintedFromCache) {
+  if (_paintedFromCache && !forceRevalidate) {
     try { wp.destroy(); } catch {}
     return;
   }

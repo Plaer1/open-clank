@@ -3095,8 +3095,48 @@ export function isVisible() {
 
 let _sharedSyncInFlight = false;
 let _sharedSyncLast = 0;
+const SHARED_STATE_LEADER_KEY = 'odysseus-cookbook-shared-state-leader';
+const SHARED_STATE_LEADER_ID = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const SHARED_STATE_LEADER_TTL_MS = 12000;
+
+function _foregroundChatBusy() {
+  try {
+    return !!window.__odysseusChatBusy || Date.now() < (window.__odysseusChatBusyUntil || 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+function _claimSharedStateLeader() {
+  if (document.visibilityState !== 'visible') return false;
+  const now = Date.now();
+  try {
+    const raw = localStorage.getItem(SHARED_STATE_LEADER_KEY);
+    const current = raw ? JSON.parse(raw) : null;
+    if (
+      !current
+      || !current.id
+      || current.id === SHARED_STATE_LEADER_ID
+      || now - Number(current.ts || 0) > SHARED_STATE_LEADER_TTL_MS
+    ) {
+      localStorage.setItem(SHARED_STATE_LEADER_KEY, JSON.stringify({ id: SHARED_STATE_LEADER_ID, ts: now }));
+      return true;
+    }
+    return current.id === SHARED_STATE_LEADER_ID;
+  } catch (_) {
+    return true;
+  }
+}
+
+function _canRefreshSharedCookbookState() {
+  if (!isVisible() || _sharedSyncInFlight) return false;
+  if (document.visibilityState !== 'visible') return false;
+  if (_foregroundChatBusy()) return false;
+  return _claimSharedStateLeader();
+}
+
 async function _refreshSharedCookbookState(reason = '') {
-  if (!isVisible() || _sharedSyncInFlight) return;
+  if (!_canRefreshSharedCookbookState()) return;
   const now = Date.now();
   if (now - _sharedSyncLast < 1500) return;
   _sharedSyncInFlight = true;

@@ -227,6 +227,9 @@ function _initModelPickerDropdown() {
   const _LOCAL_PROBE_TTL_MS = 5000;
 
   async function _refreshLocalProbe() {
+    try {
+      if (window.__odysseusChatBusy || Date.now() < (window.__odysseusChatBusyUntil || 0)) return;
+    } catch (_) {}
     const now = Date.now();
     if (now - _localProbeFetchedAt < _LOCAL_PROBE_TTL_MS) return;
     _localProbeFetchedAt = now;

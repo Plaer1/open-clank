@@ -2186,7 +2186,7 @@ function initializeEventListeners() {
     const pickerWrap = el('model-picker-wrap');
     if (!inputTop || !pickerWrap) return;
 
-    const PLACEHOLDER_HIDE_WIDTH = 400;
+    const PLACEHOLDER_COMPACT_WIDTH = 400;
     const PICKER_HIDE_WIDTH = 220;
     const TOOLBAR_HIDE_WIDTH = 160;
     const textarea = el('message');
@@ -2199,9 +2199,10 @@ function initializeEventListeners() {
       const w = inputTop.clientWidth;
       // Hide model picker
       pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
-      // Hide placeholder text
+      // Keep a prompt inside the composer even when the picker crowds the row.
+      // A blank placeholder makes the mobile/compact empty state feel broken.
       if (textarea) {
-        textarea.setAttribute('placeholder', w < PLACEHOLDER_HIDE_WIDTH ? '' : 'Message Odysseus...');
+        textarea.setAttribute('placeholder', w < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...');
       }
       // Hide entire bottom toolbar (tools, mode toggle) — only send button remains
       if (inputBottom) {
@@ -3449,6 +3450,12 @@ function initializeEventListeners() {
 function startOdysseusApp() {
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
+  const _bumpChatPriority = (ms = 10000) => {
+    try {
+      window.__odysseusChatBusyUntil = Math.max(window.__odysseusChatBusyUntil || 0, Date.now() + ms);
+    } catch (_) {}
+  };
+  _bumpChatPriority(10000);
   // Set CSS variables
   document.documentElement.style.setProperty('--line-height', '20px');
   initRailHoverLabels();
@@ -3617,9 +3624,16 @@ function startOdysseusApp() {
   const chatForm = document.getElementById('chat-form');
   const originalSubmit = chatModule.handleChatSubmit;
   let _submitting = false;
+  const _messageInput = document.getElementById('message') || document.getElementById('message-input');
+  if (_messageInput) {
+    _messageInput.addEventListener('focus', () => _bumpChatPriority(15000));
+    _messageInput.addEventListener('input', () => _bumpChatPriority(15000));
+    _messageInput.addEventListener('pointerdown', () => _bumpChatPriority(15000), { passive: true });
+  }
 
   function handleSubmit(e) {
     if (e) e.preventDefault();
+    _bumpChatPriority(30000);
     // Debounce: prevent double-submit while a request is being initiated
     if (_submitting) return;
     _submitting = true;

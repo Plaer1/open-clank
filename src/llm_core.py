@@ -110,6 +110,18 @@ _HARMONY_MARKERS = (
 )
 _HARMONY_MAX_MARKER_LEN = max(len(marker) for marker in _HARMONY_MARKERS)
 
+_VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE = re.compile(
+    r"(?:\|end\|)+\|?assistan(?:t)?\|?"
+    r"|\|assistan(?:t)?\|"
+    r"|<\|im_start\|>\s*assistant"
+    r"|<\|im_end\|>",
+    re.IGNORECASE,
+)
+
+
+def _strip_visible_chat_template_artifacts(text: str) -> str:
+    return _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
+
 
 def _harmony_suffix_hold_len(text: str) -> int:
     """Return how many trailing chars could be the start of a harmony marker."""
@@ -2317,6 +2329,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         if reasoning:
                                             yield _stream_delta_event(reasoning, thinking=True)
                                         if content:
+                                            content = _strip_visible_chat_template_artifacts(content)
+                                            if not content:
+                                                continue
                                             content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
                                             content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
                                             stripped = content.lstrip()

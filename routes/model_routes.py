@@ -1479,6 +1479,7 @@ def setup_model_routes(model_discovery):
     # within ~8s of the user noticing.
     _LOCAL_PROBE_TTL = 8.0
     _local_probe_cache: Dict[str, Any] = {"data": None, "time": 0.0}
+    _local_probe_inflight: Dict[str, Any] = {"task": None}
 
     @router.get("/model-endpoints/probe-local")
     async def probe_local_endpoints(request: Request):
@@ -1493,60 +1494,72 @@ def setup_model_routes(model_discovery):
                 (now - _local_probe_cache["time"]) < _LOCAL_PROBE_TTL):
             return _local_probe_cache["data"]
 
-        db = SessionLocal()
-        try:
-            if _disable_stale_cookbook_local_endpoints(db):
-                _invalidate_models_cache()
-            endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
-            local_eps = []
-            for ep in endpoints:
-                base = _normalize_base(ep.base_url)
-                kind = _effective_endpoint_kind(ep, base)
-                if _classify_endpoint(base, kind) == "local":
-                    local_eps.append((ep.id, base, ep.api_key))
-        finally:
-            db.close()
-
-        grouped: Dict[str, Dict[str, Any]] = {}
-        for ep_id, base, api_key in local_eps:
-            key = _refresh_key(base, api_key)
-            grouped.setdefault(key, {"base": base, "api_key": api_key, "endpoint_ids": []})["endpoint_ids"].append(ep_id)
-
-        async def _probe_one(data: Dict[str, Any]) -> Dict[str, Any]:
-            t0 = _time.time()
-            try:
-                import asyncio as _asyncio
-                # Bumped 1.5s → 3.5s. The previous 1.5s budget was clipping
-                # local vLLM endpoints on Tailscale links where the model
-                # server is still loading (Qwen3.5-122B takes 2–3 min to
-                # warm); /v1/models can take 500–2500 ms on a busy box,
-                # which pushed _ping_endpoint's full path-discovery sweep
-                # past the cap and marked the row offline despite the
-                # user actively chatting with it.
-                ping = await _asyncio.to_thread(_ping_endpoint, data["base"], data.get("api_key"), 3.5)
-                lat = round((_time.time() - t0) * 1000)
-                return {
-                    "alive": bool(ping.get("reachable")),
-                    "latency_ms": lat,
-                    "status_code": ping.get("status_code"),
-                    "error": ping.get("error"),
-                }
-            except Exception as e:
-                return {"alive": False, "latency_ms": None, "status_code": None, "error": str(e)[:120]}
-
         import asyncio as _asyncio
-        results_list = await _asyncio.gather(
-            *[_probe_one(data) for data in grouped.values()],
-            return_exceptions=False,
-        )
-        results: Dict[str, Any] = {}
-        for data, r in zip(grouped.values(), results_list):
-            for eid in data["endpoint_ids"]:
-                results[eid] = r
+        task = _local_probe_inflight.get("task")
+        if task is not None and not task.done():
+            return await task
 
-        _local_probe_cache["data"] = results
-        _local_probe_cache["time"] = now
-        return results
+        async def _compute_local_probe() -> Dict[str, Any]:
+            db = SessionLocal()
+            try:
+                if _disable_stale_cookbook_local_endpoints(db):
+                    _invalidate_models_cache()
+                endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+                local_eps = []
+                for ep in endpoints:
+                    base = _normalize_base(ep.base_url)
+                    kind = _effective_endpoint_kind(ep, base)
+                    if _classify_endpoint(base, kind) == "local":
+                        local_eps.append((ep.id, base, ep.api_key))
+            finally:
+                db.close()
+
+            grouped: Dict[str, Dict[str, Any]] = {}
+            for ep_id, base, api_key in local_eps:
+                key = _refresh_key(base, api_key)
+                grouped.setdefault(key, {"base": base, "api_key": api_key, "endpoint_ids": []})["endpoint_ids"].append(ep_id)
+
+            async def _probe_one(data: Dict[str, Any]) -> Dict[str, Any]:
+                t0 = _time.time()
+                try:
+                    # Bumped 1.5s → 3.5s. The previous 1.5s budget was clipping
+                    # local vLLM endpoints on Tailscale links where the model
+                    # server is still loading (Qwen3.5-122B takes 2–3 min to
+                    # warm); /v1/models can take 500–2500 ms on a busy box,
+                    # which pushed _ping_endpoint's full path-discovery sweep
+                    # past the cap and marked the row offline despite the
+                    # user actively chatting with it.
+                    ping = await _asyncio.to_thread(_ping_endpoint, data["base"], data.get("api_key"), 3.5)
+                    lat = round((_time.time() - t0) * 1000)
+                    return {
+                        "alive": bool(ping.get("reachable")),
+                        "latency_ms": lat,
+                        "status_code": ping.get("status_code"),
+                        "error": ping.get("error"),
+                    }
+                except Exception as e:
+                    return {"alive": False, "latency_ms": None, "status_code": None, "error": str(e)[:120]}
+
+            results_list = await _asyncio.gather(
+                *[_probe_one(data) for data in grouped.values()],
+                return_exceptions=False,
+            )
+            results: Dict[str, Any] = {}
+            for data, r in zip(grouped.values(), results_list):
+                for eid in data["endpoint_ids"]:
+                    results[eid] = r
+
+            _local_probe_cache["data"] = results
+            _local_probe_cache["time"] = _time.time()
+            return results
+
+        task = _asyncio.create_task(_compute_local_probe())
+        _local_probe_inflight["task"] = task
+        try:
+            return await task
+        finally:
+            if _local_probe_inflight.get("task") is task:
+                _local_probe_inflight["task"] = None
 
     @router.get("/ping")
     def ping_endpoints(request: Request):

@@ -43,6 +43,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+
+  function _setForegroundChatBusy(active) {
+    try {
+      window.__odysseusChatBusy = !!active;
+      window.__odysseusChatBusyUntil = active ? Date.now() + 120000 : Date.now() + 1200;
+    } catch (_) {}
+  }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
   // ── Auto-recovery: when a turn's stream silently dies (connection drop) or
   // goes quiet while the connection is alive, re-engage the model with a
@@ -99,6 +106,94 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const body = msgEl.querySelector('.body');
     if (body) chatRenderer.appendReportButton(body, sessionId);
   }
+
+  function _stripDocumentFenceForChat(text, { final = false } = {}) {
+    let s = String(text || '').replace(/<?\|end\|>?/g, '');
+    const markerMatch = /```(?:create_document|documen(?:t)?)\s*\n/i.exec(s);
+    if (!markerMatch) return s;
+    const before = s.slice(0, markerMatch.index).trimEnd();
+    const fenceStart = markerMatch.index;
+    const openingEnd = s.indexOf('\n', fenceStart);
+    const closeIdx = openingEnd >= 0 ? s.indexOf('\n```', openingEnd + 1) : -1;
+    const after = closeIdx >= 0 ? s.slice(closeIdx + 4).trimStart() : '';
+    const visible = [before, after].filter(Boolean).join('\n\n').trim();
+    return final && !visible ? 'Done.' : visible;
+  }
+
+  function _showDocumentWritingStatus(contentEl) {
+    const msg = contentEl && contentEl.closest ? contentEl.closest('.msg') : null;
+    const chatBox = document.getElementById('chat-history');
+    if (!msg || !chatBox) {
+      if (contentEl) contentEl.textContent = 'Writing...';
+      return;
+    }
+    let thread = msg._docWritingThread;
+    if (!thread || !thread.isConnected) {
+      thread = document.createElement('div');
+      thread.className = 'agent-thread streaming has-bottom';
+      thread.dataset.docWriting = '1';
+      const prev = msg.previousElementSibling;
+      if (prev && (prev.classList.contains('msg') || prev.classList.contains('agent-thread'))) {
+        thread.classList.add('has-top');
+      }
+      const node = document.createElement('div');
+      node.className = 'agent-thread-node running';
+      node.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">▶</span><span class="agent-thread-tool">Writing</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content"></div>';
+      thread.appendChild(node);
+      chatBox.insertBefore(thread, msg);
+      msg._docWritingThread = thread;
+
+      const waveEl = node.querySelector('.agent-thread-wave');
+      if (waveEl) {
+        const waveFrames = ['▁▂▃', '▂▃▄', '▃▄▅', '▄▅▆', '▅▆▇', '▆▅▄', '▅▄▃', '▄▃▂'];
+        let waveIdx = 0;
+        node._waveInterval = setInterval(() => {
+          waveIdx = (waveIdx + 1) % waveFrames.length;
+          waveEl.textContent = waveFrames[waveIdx];
+        }, 100);
+      }
+      node._startTime = Date.now();
+      node._elapsedTicker = setInterval(() => {
+        const hdr = node.querySelector('.agent-thread-header');
+        if (!hdr) return;
+        let el = hdr.querySelector('.agent-thread-elapsed');
+        if (!el) {
+          el = document.createElement('span');
+          el.className = 'agent-thread-elapsed';
+          const icon = hdr.querySelector('.agent-thread-icon');
+          if (icon && icon.nextSibling) hdr.insertBefore(el, icon.nextSibling);
+          else hdr.appendChild(el);
+        }
+        const s = (Date.now() - node._startTime) / 1000;
+        el.textContent = s < 60 ? `${s.toFixed(2)}s` : `${Math.floor(s / 60)}m ${(s % 60).toFixed(2).padStart(5, '0')}s`;
+      }, 50);
+    }
+    msg.style.display = 'none';
+  }
+
+  function _finishDocumentWritingStatus(msg, ok = true) {
+    const thread = msg && msg._docWritingThread;
+    if (!thread || !thread.isConnected) return;
+    thread.classList.remove('streaming');
+    const node = thread.querySelector('.agent-thread-node');
+    if (!node) return;
+    if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
+    if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
+    node.classList.remove('running');
+    if (!ok) node.classList.add('error');
+    const icon = node.querySelector('.agent-thread-icon');
+    if (icon) icon.textContent = ok ? '✓' : '✗';
+    const wave = node.querySelector('.agent-thread-wave');
+    if (wave) wave.remove();
+    if (!node.querySelector('.agent-thread-status')) {
+      const status = document.createElement('span');
+      status.className = 'agent-thread-status';
+      status.textContent = ok ? 'done' : 'failed';
+      const header = node.querySelector('.agent-thread-header');
+      if (header) header.appendChild(status);
+    }
+  }
+
   let currentAccumulated = ''; // Track accumulated text across function scope
   let currentHolder = null; // Track current message holder
   let currentSpinner = null; // Track current spinner for stop cleanup
@@ -241,12 +336,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       submitBtn.dataset.mode = 'streaming';
       submitBtn.dataset.phase = 'processing';
       isStreaming = true;
+      _setForegroundChatBusy(true);
       _startStallWatchdog();
     } else if (state === 'idle') {
       submitBtn.dataset.mode = '';
       delete submitBtn.dataset.phase;
       submitBtn.classList.remove('recording');
       isStreaming = false;
+      _setForegroundChatBusy(false);
       _stopStallWatchdog();
       // Defer to global updater which handles mic/newchat/send modes
       if (window._updateSendBtnIcon) {
@@ -266,6 +363,126 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // API key pattern for the guard in handleChatSubmit
   const API_KEY_RE = /^(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_\-]{30,}|xai-[a-zA-Z0-9]{20,})$/;
+
+  const _queuedAgentRequests = [];
+  let _queuedDrainTimer = null;
+  let _queuedPromoteTimer = null;
+  let _queuedRequestSeq = 0;
+  let _queuedBubbleHost = null;
+
+  function _escapeQueueText(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function _ensureQueuedBubbleHost() {
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return null;
+    if (_queuedBubbleHost && _queuedBubbleHost.isConnected) return _queuedBubbleHost;
+    let host = document.getElementById('chat-queued-bubble-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'chat-queued-bubble-host';
+      host.className = 'chat-queued-bubble-host';
+    }
+    chatBox.appendChild(host);
+    _queuedBubbleHost = host;
+    return host;
+  }
+
+  function _createQueuedBubble(item) {
+    const host = _ensureQueuedBubbleHost();
+    if (!host) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-user msg-user-queued';
+    wrap.dataset.queueId = item.id;
+    wrap.title = 'Queued - click to send now and stop the current response';
+    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
+    wrap.addEventListener('click', (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
+      _promoteQueuedRequest(item.id);
+    });
+    host.appendChild(wrap);
+    uiModule.scrollHistory();
+    return wrap;
+  }
+
+  function _removeQueuedRequest(id) {
+    const idx = _queuedAgentRequests.findIndex(item => item.id === id);
+    if (idx < 0) return null;
+    const [item] = _queuedAgentRequests.splice(idx, 1);
+    if (item && item.el && item.el.parentNode) item.el.remove();
+    return item;
+  }
+
+  function _setComposerAndSend(message) {
+    const input = uiModule.el('message');
+    if (!input) return false;
+    input.value = message;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (uiModule.autoResize) uiModule.autoResize(input);
+    setTimeout(() => {
+      handleChatSubmit({ preventDefault() {} }).catch(err => {
+        console.error('queued send failed', err);
+        try { uiModule.showError && uiModule.showError('Queued send failed: ' + (err?.message || err)); } catch (_) {}
+      });
+    }, 0);
+    return true;
+  }
+
+  function _sendQueuedWhenIdle(item) {
+    if (!item) return;
+    const trySend = () => {
+      if (isStreaming || _sendInFlight) {
+        _queuedPromoteTimer = setTimeout(trySend, 220);
+        return;
+      }
+      _queuedPromoteTimer = null;
+      _setComposerAndSend(item.message);
+    };
+    if (_queuedPromoteTimer) clearTimeout(_queuedPromoteTimer);
+    _queuedPromoteTimer = setTimeout(trySend, 320);
+  }
+
+  function _promoteQueuedRequest(id) {
+    const item = _removeQueuedRequest(id);
+    if (!item) return;
+    if (!isStreaming && !_sendInFlight) {
+      _setComposerAndSend(item.message);
+      return;
+    }
+    try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
+    const input = uiModule.el('message');
+    const submitBtn = document.querySelector('.send-btn');
+    if (input) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    if (submitBtn) submitBtn.click();
+    _sendQueuedWhenIdle(item);
+  }
+
+  function _queueAgentRequest(message) {
+    const msg = String(message || '').trim();
+    if (!msg) return false;
+    const item = { id: `q${++_queuedRequestSeq}`, message: msg, createdAt: Date.now(), el: null };
+    item.el = _createQueuedBubble(item);
+    _queuedAgentRequests.push(item);
+    try { uiModule.showToast && uiModule.showToast(_queuedAgentRequests.length === 1 ? 'Queued for after this response' : `${_queuedAgentRequests.length} requests queued`); } catch (_) {}
+    return true;
+  }
+
+  function _drainQueuedAgentRequests() {
+    if (isStreaming || _sendInFlight || !_queuedAgentRequests.length) return;
+    if (_queuedDrainTimer) return;
+    _queuedDrainTimer = setTimeout(() => {
+      _queuedDrainTimer = null;
+      if (isStreaming || _sendInFlight || !_queuedAgentRequests.length) return;
+      const next = _queuedAgentRequests[0];
+      if (!next) return;
+      _removeQueuedRequest(next.id);
+      _setComposerAndSend(next.message);
+    }, 180);
+  }
 
 
   /**
@@ -290,8 +507,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       return;
     }
 
-    // If currently streaming, stop it
+    // If currently streaming, a non-empty composer means "queue this next".
+    // Empty composer keeps the existing Stop behavior.
     if (isStreaming) {
+      const queuedInput = uiModule.el('message');
+      const queuedText = (queuedInput && queuedInput.value || '').trim();
+      if (queuedText) {
+        if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
+          try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
+          return;
+        }
+        if (_queueAgentRequest(queuedText)) {
+          queuedInput.value = '';
+          queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
+          if (uiModule.autoResize) uiModule.autoResize(queuedInput);
+        }
+        return;
+      }
       if (fileHandlerModule.isUploading && fileHandlerModule.isUploading()) {
         fileHandlerModule.cancelUpload && fileHandlerModule.cancelUpload();
       }
@@ -343,6 +575,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const messageInput = uiModule.el('message');
         if (messageInput) messageInput.disabled = false;
         currentAccumulated = '';
+        _drainQueuedAgentRequests();
         return;
       }
       // Render whatever was accumulated so far
@@ -420,6 +653,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // --- Send-path entry: block re-clicks between submit and stream start ---
     if (_sendInFlight) return;
     _sendInFlight = true;
+    _setForegroundChatBusy(true);
     // Instant visual feedback so the user sees their click was accepted
     // even before the streaming button state kicks in below.
     const _earlyMessageInput = uiModule.el('message');
@@ -427,6 +661,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (submitBtn) submitBtn.classList.add('send-pending');
     const _releaseSendFlag = () => {
       _sendInFlight = false;
+      _setForegroundChatBusy(isStreaming);
       if (_earlyMessageInput) _earlyMessageInput.disabled = false;
       if (submitBtn) submitBtn.classList.remove('send-pending');
     };
@@ -1104,12 +1339,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         'web_search': 'Searching',
         'bash': 'Running',
         'python': 'Running',
-        'create_document': 'Writing',
-        'update_document': 'Writing',
         'read_document': 'Reading',
         'edit_file': 'Editing',
         'read_file': 'Reading',
         'write_file': 'Writing',
+        'create_document': 'Writing',
+        'edit_document': 'Editing',
+        'update_document': 'Rewriting',
+        'suggest_document': 'Reviewing',
         'list_files': 'Browsing',
         'image_gen': 'Generating',
         'generate_image': 'Generating',
@@ -1208,7 +1445,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Direct render helper for streaming text
       _renderStream = () => {
-        let dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
+        let dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText)));
         const bodyEl = roundHolder.querySelector('.body');
         const contentEl = _ensureStreamLayout(bodyEl);
 
@@ -1287,6 +1524,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // what keeps code-block hover buttons from flickering and avoids the O(N^2)
         // re-parse/re-highlight of the whole message on every token.
         // See streamingRenderer.js / streamingSegmenter.js.
+        if (_docFenceOpened && !dt.trim()) {
+          _showDocumentWritingStatus(contentEl);
+          uiModule.scrollHistory();
+          return;
+        }
         const renderer = contentEl._streamRenderer ||
           (contentEl._streamRenderer = createStreamRenderer(contentEl, {
             render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
@@ -1476,8 +1718,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
 
                 // --- Text-fence doc streaming (for models that don't use native tool calls) ---
-                if (!_docFenceOpened && documentModule && (roundText.includes('```create_document\n') || roundText.includes('```document\n'))) {
-                  const fenceMarker = roundText.includes('```document\n') ? '```document\n' : '```create_document\n';
+                if (!_docFenceOpened && documentModule && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
+                  const fenceMarker = roundText.includes('```document\n') ? '```document\n' : (roundText.includes('```documen\n') ? '```documen\n' : '```create_document\n');
                   const fenceIdx = roundText.indexOf(fenceMarker);
                   const afterFence = roundText.slice(fenceIdx + fenceMarker.length);
                   const fenceLines = afterFence.split('\n');
@@ -2089,7 +2331,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!roundFinalized) {
                   roundFinalized = true;
                   if (spinner && spinner.element) spinner.destroy();
-                  const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
+                  const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText)));
                   if (dt.trim()) {
                     var _body3 = roundHolder.querySelector('.body');
                     var _contentEl3 = _ensureStreamLayout(_body3);
@@ -2559,9 +2801,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // Clear streaming minHeight lock
         const _streamContent = roundHolder.querySelector('.stream-content');
         if (_streamContent) _streamContent.style.minHeight = '';
+        if (_docFenceOpened) {
+          _finishDocumentWritingStatus(roundHolder, true);
+          roundHolder.style.display = '';
+        }
 
         // Finalize the last round's bubble — flatten stream-content wrapper for clean DOM
-        const finalDisplay = stripToolBlocks(roundText);
+        const finalDisplay = stripToolBlocks(_stripDocumentFenceForChat(roundText, { final: _docFenceOpened }));
         if (finalDisplay.trim()) {
           var _body4 = roundHolder.querySelector('.body');
           // Preserve sources expanded state before final render
@@ -3033,6 +3279,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           sessionModule.loadSessions();
         }
       }, 3000);
+      _drainQueuedAgentRequests();
     }
   }
 
@@ -3240,6 +3487,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Clear local state WITHOUT aborting the fetch
     currentAbort = null;
     isStreaming = false;
+    _setForegroundChatBusy(false);
     currentHolder = null;
     currentAccumulated = '';
     // Reset submit button so the new chat is ready to send
@@ -3302,6 +3550,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const decoder = new TextDecoder();
     let buffer = '';
     let roundText = '';
+    let docFenceOpened = false;
     let gotDelta = false;
     let leftSession = false;
     let metricsData = null;
@@ -3316,8 +3565,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     };
 
     const renderDelta = () => {
-      const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(roundText));
-      contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt));
+      const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText, { final: docFenceOpened })));
+      if (docFenceOpened && !dt.trim()) {
+        _showDocumentWritingStatus(contentDiv);
+      } else {
+        contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt));
+      }
       uiModule.scrollHistory();
     };
 
@@ -3348,6 +3601,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           try { json = JSON.parse(payload); } catch (_) { continue; }
           if (json.delta) {
             roundText += json.delta;
+            if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
+              docFenceOpened = true;
+              rich = true;
+            }
             if (!gotDelta) { gotDelta = true; try { spinner.destroy(); } catch (_) {} }
             renderDelta();
           } else if (json.type === 'doc_stream_open') {
@@ -3355,7 +3612,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (documentModule) documentModule.streamDocOpen(json.title || '', json.lang || '');
           } else if (json.type === 'doc_stream_delta') {
             rich = true;
-            if (documentModule && json.delta) documentModule.streamDocDelta(json.delta);
+            if (documentModule) documentModule.streamDocDelta(json.content || json.delta || '');
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
@@ -3372,6 +3629,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
 
     cleanup();
+    if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
     if (leftSession) { if (holder.parentNode) holder.remove(); return true; }
 
     const onThisSession = sessionModule.getCurrentSessionId &&
@@ -3391,6 +3649,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
     // Rich response (tools, sources, docs, multi-round) or user moved on:
     // reload from the DB for the full canonical render.
+    if (holder._docWritingThread && holder._docWritingThread.parentNode) holder._docWritingThread.remove();
     if (holder.parentNode) holder.remove();
     if (onThisSession) sessionModule.selectSession(sessionId);
     else sessionModule.loadSessions();
