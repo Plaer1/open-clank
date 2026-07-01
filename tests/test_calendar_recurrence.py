@@ -86,7 +86,7 @@ def test_expand_non_recurring_returns_single():
 
 
 def test_expand_rrule_skips_deleted_occurrence_exdate():
-    cal = _import_calendar_helpers()
+    cal = import_calendar_routes()
     ev = _make_event(
         dtstart=datetime(2026, 7, 1, 14, 0),
         dtend=datetime(2026, 7, 1, 15, 0),

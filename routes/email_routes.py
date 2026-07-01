@@ -2388,6 +2388,8 @@ def setup_email_routes():
         owner: str = Depends(require_owner),
     ):
         """Read email body. Cached for 30m, sync IMAP work runs in a thread."""
+        mark_seen = True if mark_seen is True or str(mark_seen).lower() == "true" else False
+        full = True if full is True or str(full).lower() == "true" else False
         fixture_result = _fixture_email_read(uid, folder, owner)
         if fixture_result is not None:
             return fixture_result

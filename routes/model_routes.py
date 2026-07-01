@@ -218,6 +218,8 @@ def _default_endpoint_needs_assignment(
         return True
     if current_default_id not in enabled_endpoint_ids:
         return True
+    if current_default_endpoint is None:
+        return False
     if not (current_default_model or "").strip():
         return True
     visible = _endpoint_visible_model_ids(current_default_endpoint)

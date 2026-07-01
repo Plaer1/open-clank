@@ -137,6 +137,8 @@ def setup_upload_routes(upload_handler):
         session_id: Optional[str] = Form(None),
     ):
         """Upload files with enhanced security and organization."""
+        if not isinstance(session_id, str):
+            session_id = None
         if not files:
             raise HTTPException(400, "No files uploaded")
             
