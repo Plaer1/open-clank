@@ -48,6 +48,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     try {
       window.__odysseusChatBusy = !!active;
       window.__odysseusChatBusyUntil = active ? Date.now() + 120000 : Date.now() + 1200;
+      window.dispatchEvent(new CustomEvent('odysseus:chat-busy-change', { detail: { active: !!active } }));
     } catch (_) {}
   }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
@@ -326,7 +327,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // arrow out for the stop icon — otherwise the swap happens mid-flight
       // and the user sees nothing fly out.
       setTimeout(() => {
-        submitBtn.innerHTML = _stopSvg;
+        if (submitBtn.dataset.mode !== 'streaming') return;
+        const msgInput = uiModule.el('message');
+        const hasQueuedText = !!(msgInput && msgInput.value && msgInput.value.trim());
+        submitBtn.innerHTML = hasQueuedText && icons ? icons.send : _stopSvg;
+        submitBtn.dataset.phase = hasQueuedText ? 'queue' : 'processing';
+        submitBtn.title = hasQueuedText ? 'Queue message' : 'Stop generation';
         submitBtn.classList.remove('anim-launch');
         void submitBtn.offsetWidth;
         submitBtn.classList.add('anim-land');
@@ -471,6 +477,24 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     return true;
   }
 
+  export function queueStreamingComposerRequest() {
+    if (!isStreaming) return false;
+    const queuedInput = uiModule.el('message');
+    const queuedText = (queuedInput && queuedInput.value || '').trim();
+    if (!queuedText) return false;
+    if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
+      try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
+      return true;
+    }
+    if (_queueAgentRequest(queuedText)) {
+      queuedInput.value = '';
+      queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
+      if (uiModule.autoResize) uiModule.autoResize(queuedInput);
+      try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
+    }
+    return true;
+  }
+
   function _drainQueuedAgentRequests() {
     if (isStreaming || _sendInFlight || !_queuedAgentRequests.length) return;
     if (_queuedDrainTimer) return;
@@ -507,21 +531,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       return;
     }
 
-    // If currently streaming, a non-empty composer means "queue this next".
-    // Empty composer keeps the existing Stop behavior.
+    // If currently streaming, keyboard Enter can queue a non-empty composer.
+    // Clicking the stop icon should still stop normally, even if text exists.
     if (isStreaming) {
-      const queuedInput = uiModule.el('message');
-      const queuedText = (queuedInput && queuedInput.value || '').trim();
-      if (queuedText) {
-        if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
-          try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
-          return;
-        }
-        if (_queueAgentRequest(queuedText)) {
-          queuedInput.value = '';
-          queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
-          if (uiModule.autoResize) uiModule.autoResize(queuedInput);
-        }
+      const queueRequestedAt = Number(window.__odysseusQueueStreamingSubmit || 0);
+      const shouldQueueStreamingSubmit = queueRequestedAt && Date.now() - queueRequestedAt < 1200;
+      window.__odysseusQueueStreamingSubmit = 0;
+      if (shouldQueueStreamingSubmit && queueStreamingComposerRequest()) {
         return;
       }
       if (fileHandlerModule.isUploading && fileHandlerModule.isUploading()) {
