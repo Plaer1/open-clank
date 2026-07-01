@@ -1757,8 +1757,9 @@ export function createUserMsgFooter(msgElement) {
  * Display performance metrics for a message.
  */
 export function displayMetrics(messageElement, metrics) {
-  const existingMetrics = messageElement.querySelector('.response-metrics');
-  if (existingMetrics) existingMetrics.remove();
+  messageElement
+    .querySelectorAll('.response-metrics, .metrics-divider, .ctx-divider, .ctx-ring')
+    .forEach((el) => el.remove());
 
   const metricsContainer = document.createElement('span');
   metricsContainer.className = 'response-metrics';
@@ -1806,6 +1807,7 @@ export function displayMetrics(messageElement, metrics) {
   metricsContainer.style.cursor = 'pointer';
   metricsContainer.title = 'Click for details';
   const metricsDivider = document.createElement('span');
+  metricsDivider.className = 'metrics-divider';
   metricsDivider.textContent = ' | ';
   metricsDivider.style.color = 'var(--color-muted-alt)';
   metricsDivider.style.pointerEvents = 'none';

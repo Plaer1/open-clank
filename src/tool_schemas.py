@@ -1212,18 +1212,88 @@ FUNCTION_TOOL_SCHEMAS = [
 # Converter: native function call -> ToolBlock
 # ---------------------------------------------------------------------------
 
+def _decode_loose_json_string(value: str) -> str:
+    """Decode common JSON string escapes without requiring inner quotes to be escaped."""
+    out = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch != "\\" or i + 1 >= len(value):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = value[i + 1]
+        if nxt == "n":
+            out.append("\n")
+        elif nxt == "r":
+            out.append("\r")
+        elif nxt == "t":
+            out.append("\t")
+        elif nxt == "b":
+            out.append("\b")
+        elif nxt == "f":
+            out.append("\f")
+        elif nxt in ('"', "\\", "/"):
+            out.append(nxt)
+        elif nxt == "u" and i + 5 < len(value):
+            try:
+                out.append(chr(int(value[i + 2:i + 6], 16)))
+                i += 4
+            except ValueError:
+                out.append("\\" + nxt)
+        else:
+            out.append("\\" + nxt)
+        i += 2
+    return "".join(out)
+
+
+def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[dict]:
+    """Salvage obvious malformed document tool args from local model wrappers.
+
+    The doc LoRA sometimes emits the right native tool call but puts raw quotes
+    inside the document text, making the surrounding JSON invalid. Treat that as
+    a wrapper parse failure, not a semantic tool-choice failure.
+    """
+    if tool_type != "update_document" or not isinstance(arguments, str):
+        return None
+    raw = arguments.strip()
+    if not raw.startswith("{") or not raw.endswith("}"):
+        return None
+    for key in ("content", "conten"):
+        marker = f'"{key}"'
+        key_pos = raw.find(marker)
+        if key_pos < 0:
+            continue
+        colon_pos = raw.find(":", key_pos + len(marker))
+        if colon_pos < 0:
+            continue
+        first_quote = raw.find('"', colon_pos + 1)
+        if first_quote < 0:
+            continue
+        close_brace = raw.rfind("}")
+        last_quote = raw.rfind('"', first_quote + 1, close_brace)
+        if last_quote <= first_quote:
+            continue
+        content = _decode_loose_json_string(raw[first_quote + 1:last_quote])
+        return {"content": content}
+    return None
+
+
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
+    tool_type = _TOOL_NAME_MAP.get(name, name)
     try:
         if not arguments or (isinstance(arguments, str) and not arguments.strip()):
             args = {}
         else:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
     except (json.JSONDecodeError, TypeError):
-        logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
-        return None
-
-    tool_type = _TOOL_NAME_MAP.get(name, name)
+        args = _repair_document_function_args(tool_type, arguments)
+        if args is not None:
+            logger.warning(f"Repaired malformed document function call arguments for {name}")
+        else:
+            logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
+            return None
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
     # ["ls -la"], string, or number) as function arguments. Most local tools keep
