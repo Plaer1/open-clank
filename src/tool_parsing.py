@@ -172,6 +172,21 @@ _GEMMA_TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern 4c: Open-function wrapper emitted by some local MLX/Exo models.
+# Example:
+#   <function_model>
+#   <function_call>web_search</function_call>
+#   <parameters>{"query":"Sweden news today"}</parameters>
+#   </function_model>
+_FUNCTION_MODEL_OPEN_RE = re.compile(r"<function_model>\s*", re.IGNORECASE)
+_FUNCTION_MODEL_CLOSE_RE = re.compile(r"</function_model>", re.IGNORECASE)
+_FUNCTION_MODEL_NAME_RE = re.compile(
+    r"<function_call>\s*([A-Za-z_][\w-]*)\s*</function_call>",
+    re.IGNORECASE,
+)
+_FUNCTION_MODEL_PARAMS_OPEN_RE = re.compile(r"<parameters>\s*", re.IGNORECASE)
+_FUNCTION_MODEL_PARAMS_CLOSE_RE = re.compile(r"</parameters>", re.IGNORECASE)
+
 
 # Pattern 5: DeepSeek DSML markup leaking into content. When deepseek
 # models can't emit structured tool_calls (e.g. we sent no tool schemas
@@ -885,6 +900,24 @@ def _parse_gemma_tool_call(tool_name: str, body: str) -> Optional[ToolBlock]:
     return function_call_to_tool_block(tool_name, json.dumps(params))
 
 
+def _parse_function_model_call(body: str) -> Optional[ToolBlock]:
+    """Parse <function_model><function_call>tool</...><parameters>...</...>."""
+    name_match = _FUNCTION_MODEL_NAME_RE.search(body or "")
+    if not name_match:
+        return None
+    tool_name = name_match.group(1).strip().lower().replace("-", "_")
+    params = "{}"
+    for _ms, inner_start, inner_end, _me in _iter_delimited(
+        body,
+        _FUNCTION_MODEL_PARAMS_OPEN_RE,
+        _FUNCTION_MODEL_PARAMS_CLOSE_RE,
+    ):
+        params = body[inner_start:inner_end].strip() or "{}"
+        break
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(tool_name, params)
+
+
 def _iter_delimited(text, open_re, close_re):
     """Yield ``(match_start, inner_start, inner_end, match_end)`` for each
     non-overlapping ``open_re ... close_re`` pair, scanning strictly forward.
@@ -1136,6 +1169,15 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
             if block:
                 blocks.append(block)
 
+    # Pattern 4c: <function_model> wrapper from local MLX/Exo models.
+    if not blocks:
+        for _ms, inner_start, inner_end, _me in _iter_delimited(
+            text, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE
+        ):
+            block = _parse_function_model_call(text[inner_start:inner_end])
+            if block:
+                blocks.append(block)
+
     # Pattern 6: local text-model web_search call leaked as prose + bare JSON.
     if not blocks and not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(text)
@@ -1182,6 +1224,7 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _XML_OPEN_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _strip_delimited(cleaned, _TOOL_CODE_OPEN_RE, _TOOL_CODE_CLOSE_RE)
     cleaned = _GEMMA_TOOL_CALL_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE)
     if not skip_fenced:
         raw_web_json = _parse_raw_web_json_lookup(cleaned)
         if raw_web_json:
