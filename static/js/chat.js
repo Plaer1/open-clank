@@ -2573,6 +2573,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (json.ui_event) {
                   chatStream.handleUIControl(json);
                 }
+                // Native document tool calls can arrive as a completed
+                // tool_output without the text-fence streaming path. Open the
+                // document editor from the real doc metadata carried on the
+                // tool result so "create a document" never leaves only a chat
+                // link behind if the later doc_update event is missed.
+                if (
+                  documentModule
+                  && json.doc_id
+                  && ['create_document', 'update_document', 'edit_document'].includes(json.tool)
+                ) {
+                  documentModule.handleDocUpdate({
+                    type: 'doc_update',
+                    doc_id: json.doc_id,
+                    title: json.document_title || '',
+                    language: json.document_language || '',
+                    version: json.document_version || 1,
+                    content: json.document_content || '',
+                  });
+                }
 
                 // Schedule a thinking spinner between tool rounds (short delay so
                 // agent_step in the same SSE chunk can cancel it before it shows)
