@@ -216,7 +216,14 @@ def _normalize_integration_base_url(base_url: Any) -> str:
 
 
 def _join_integration_url(base_url: str, path: str) -> str:
-    return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    base = base_url.rstrip("/")
+    rel = path.lstrip("/")
+    if not rel:
+        # A bare "/" must resolve to the base URL itself, not base + "/".
+        # POST-to-base integrations (e.g. Discord webhooks) 404 on the
+        # trailing-slash variant of their URL.
+        return base
+    return urljoin(base + "/", rel)
 
 
 def load_integrations() -> List[Dict[str, Any]]:
