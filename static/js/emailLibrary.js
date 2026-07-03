@@ -5284,6 +5284,63 @@ function _wireAttachmentHandlers(reader, folder) {
   // a ReferenceError when this fn is called from contexts that don't have
   // _isMobileUA in scope (e.g. _openEmailAsTab, _openEmailWindow).
   const _isMobileUA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  reader.querySelectorAll('.email-attachments-download-all').forEach(btn => {
+    if (btn.dataset.wired === '1') return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      if (btn.dataset.downloading === '1') return;
+      const uid = btn.dataset.attUid;
+      const sourceFolder = btn.dataset.attFolder || useFolder;
+      const count = Number(btn.dataset.attCount || 0);
+      if (!uid) return;
+      const originalHtml = btn.innerHTML;
+      const originalTitle = btn.title;
+      btn.dataset.downloading = '1';
+      btn.classList.add('is-loading');
+      try {
+        const sp = window.spinnerModule || (await import('./spinner.js')).default;
+        const wp = sp.createWhirlpool(12);
+        wp.element.style.margin = '0';
+        btn.textContent = '';
+        btn.appendChild(wp.element);
+        const label = document.createElement('span');
+        label.textContent = 'All';
+        btn.appendChild(label);
+      } catch (_) {
+        btn.textContent = 'All...';
+      }
+      try {
+        const url = `${API_BASE}/api/email/attachments-download/${encodeURIComponent(uid)}?folder=${encodeURIComponent(sourceFolder)}${_acct()}`;
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) {
+          const msg = await res.text().catch(() => '');
+          console.error('attachments zip download failed', res.status, msg);
+          location.href = url;
+          return;
+        }
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `email-${uid}-attachments.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        try { uiModule.showToast && uiModule.showToast(`Downloading ${count || 'all'} attachments`); } catch (_) {}
+      } catch (e) {
+        console.error('attachments zip download error', e);
+        try { const { showError } = await import('./ui.js'); showError('Could not download attachments'); } catch (_) {}
+      } finally {
+        delete btn.dataset.downloading;
+        btn.classList.remove('is-loading');
+        btn.title = originalTitle;
+        btn.innerHTML = originalHtml;
+      }
+    });
+  });
   reader.querySelectorAll('.email-attachment-open').forEach(openBtn => {
     if (openBtn.dataset.wired === '1') return;
     openBtn.dataset.wired = '1';
@@ -5487,11 +5544,15 @@ function _buildAttsHtmlFor(uid, data) {
       ? `Thread attachments (${related.length})`
       : `Hidden inline attachments (${hidden.length})`;
   const startCollapsed = !visible.length && !related.length;
+  const downloadAllBtn = visible.length > 4
+    ? `<button type="button" class="email-attachments-download-all" title="Download all attachments" data-att-uid="${_esc(uid)}" data-att-folder="${_esc(data.folder || state._libFolder || 'INBOX')}" data-att-count="${visible.length}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>All</span></button>`
+    : '';
   return (
     `<div class="email-reader-atts-wrap${startCollapsed ? ' collapsed' : ''}">`
     +   '<div class="email-reader-atts-header email-summary-toggle" role="button" tabindex="0">'
     +     '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>'
     +     `<span>${label}</span>`
+    +     downloadAllBtn
     +     '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
     +   '</div>'
     +   visibleSection

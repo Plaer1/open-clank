@@ -23,6 +23,8 @@ import smtplib
 import json
 import re
 import html
+import io
+import zipfile
 from html.parser import HTMLParser as _HTMLParser
 import logging
 import uuid
@@ -33,7 +35,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from src.constants import DATA_DIR
 
 from src.llm_core import llm_call_async
@@ -63,6 +65,14 @@ logger = logging.getLogger(__name__)
 
 ODYSSEUS_MAIL_ORIGIN = "odysseus-ui"
 EMAIL_READ_ATTACHMENT_VERSION = 2
+
+
+def _safe_attachment_zip_name(name: str, fallback: str) -> str:
+    """Return a zip entry filename without path traversal or empty names."""
+    base = Path(str(name or "")).name.strip() or fallback
+    base = re.sub(r"[\x00-\x1f\x7f]+", "_", base)
+    base = base.replace("/", "_").replace("\\", "_").strip(". ") or fallback
+    return base[:180] or fallback
 
 
 def _coerce_port(value, default):
@@ -2529,6 +2539,59 @@ def setup_email_routes():
         except Exception as e:
             logger.error(f"Failed to download attachment {uid}/{index}: {e}")
             return {"error": "Mail operation failed"}
+
+    @router.get("/attachments-download/{uid}")
+    async def download_all_attachments(uid: str, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+        """Download all visible attachments for an email as a zip archive."""
+        try:
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder), readonly=True)
+                status, msg_data = _imap_uid_fetch(conn, uid, "(RFC822)")
+            if status != "OK":
+                raise HTTPException(status_code=404, detail="Email not found")
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+            attachments = [
+                att for att in _list_attachments_from_msg(msg)
+                if not _is_likely_signature_image_attachment(att)
+            ]
+            if not attachments:
+                raise HTTPException(status_code=404, detail="No downloadable attachments")
+
+            target_dir = attachment_extract_dir(folder, uid)
+            zip_buf = io.BytesIO()
+            used_names: dict[str, int] = {}
+            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for att in attachments:
+                    idx = att.get("index")
+                    if idx is None:
+                        continue
+                    filepath = _extract_attachment_to_disk(msg, int(idx), target_dir)
+                    if not filepath or not Path(filepath).exists():
+                        continue
+                    fallback = f"attachment-{idx}"
+                    arcname = _safe_attachment_zip_name(att.get("filename") or Path(filepath).name, fallback)
+                    stem = Path(arcname).stem
+                    suffix = Path(arcname).suffix
+                    seen = used_names.get(arcname, 0)
+                    used_names[arcname] = seen + 1
+                    if seen:
+                        arcname = f"{stem}-{seen + 1}{suffix}"
+                    zf.write(str(filepath), arcname)
+            zip_buf.seek(0)
+            if not zip_buf.getbuffer().nbytes:
+                raise HTTPException(status_code=404, detail="No downloadable attachments")
+            zip_name = _safe_attachment_zip_name(f"email-{uid}-attachments.zip", "attachments.zip")
+            return StreamingResponse(
+                zip_buf,
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to download attachments zip {uid}: {e}")
+            raise HTTPException(status_code=500, detail="Mail operation failed")
 
     @router.get("/inline-image/{uid}")
     async def inline_image(
