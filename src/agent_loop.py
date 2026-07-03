@@ -1079,6 +1079,20 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     ):
         return True
     if re.search(
+        r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
+        r".{0,80}\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
+        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary|draft|content)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
+        r"title|heading|body|intro|introduction|conclusion|schedule|itinerary)\b"
+        r".{0,80}\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b",
+        text,
+    ):
+        return True
+    if re.search(
         r"\b(?:add|insert|include|apply|put)\b.+\b(?:to it|to this|there|in it|in this|in the text|in the document)\b",
         text,
     ):
@@ -2662,6 +2676,33 @@ async def stream_agent_loop(
         else:
             _relevant_tools = {"create_document", "ask_user", "update_plan"}
         logger.info("[agent-intent] odysseus doc finetune tool clamp=%s", sorted(_relevant_tools))
+
+    if (
+        _relevant_tools is not None
+        and _active_document_relevant
+        and "files" not in _intent_domains
+        and not uploaded_files
+        and not workspace
+    ):
+        _doc_irrelevant_file_tools = {
+            "append_file",
+            "bash",
+            "edit_file",
+            "glob",
+            "grep",
+            "ls",
+            "read_file",
+            "replace_file",
+            "run_shell",
+            "write_file",
+        }
+        _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
+        if _removed_doc_file_tools:
+            _relevant_tools.difference_update(_doc_irrelevant_file_tools)
+            logger.info(
+                "[agent-intent] active document turn removed file tools=%s",
+                _removed_doc_file_tools,
+            )
 
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
