@@ -20795,6 +20795,12 @@ body.gallery-selecting .gallery-dl-btn,
   border-color: var(--border);
   color: var(--fg);
 }
+.cookbook-task-menu-btn.cookbook-menu-active {
+  opacity: 1 !important;
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  border-color: var(--border);
+  color: var(--fg);
+}
 @media (max-width: 768px) {
   .cookbook-task .cookbook-task-menu-btn {
     opacity: 0.72;

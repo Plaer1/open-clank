@@ -205,6 +205,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
+  let _staleStreamProbeInFlight = false;
+  const STALE_LOCAL_STREAM_MS = 15000;
 
   /** Check if an SSE reader is still actively connected for a session. */
   function hasActiveStream(sessionId) {
@@ -3108,6 +3110,21 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             return;
           }
 
+          if (abortReason === 'stale-local') {
+            const staleMsg = 'Stream connection ended. Composer unlocked; send again if needed.';
+            if (holder && !accumulated) {
+              holder.querySelector('.body').innerHTML =
+                `<div style="opacity:0.7;font-style:italic;padding:4px 0;">[${staleMsg}]</div>`;
+            } else if (holder && accumulated) {
+              const staleNote = document.createElement('div');
+              staleNote.className = 'stopped-indicator';
+              staleNote.innerHTML = `<span style="opacity:0.7;">[${staleMsg}]</span>`;
+              holder.querySelector('.body').appendChild(staleNote);
+            }
+            currentAbort = null;
+            return;
+          }
+
           // User-initiated stop (or browser navigation abort).
           // Stopped before any text arrived — keep the bubble as a
           // "Cancelled by user" record (so it survives a refresh).
@@ -3414,12 +3431,51 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     box.appendChild(bar);
     if (uiModule.scrollHistory) uiModule.scrollHistory();
   }
+  async function _probeStaleLocalStream() {
+    if (!isStreaming || _staleStreamProbeInFlight) return;
+    if (Date.now() - _lastReaderActivity < STALE_LOCAL_STREAM_MS) return;
+    const sid = _streamSessionId || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    if (!sid) return;
+    if (_backgroundStreams.has(sid) || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid)) return;
+    _staleStreamProbeInFlight = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/chat/stream_status/${encodeURIComponent(sid)}`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (!isStreaming || _backgroundStreams.has(sid)) return;
+      if (res.status !== 404) return;
+
+      console.warn('[stream-watchdog] Local stream was stale and server has no active stream. Unlocking composer.');
+      if (currentAbort && !currentAbort.signal.aborted) {
+        currentAbort._reason = 'stale-local';
+        currentAbort.abort();
+      }
+      isStreaming = false;
+      _setForegroundChatBusy(false);
+      _sendInFlight = false;
+      if (_webLockRelease) {
+        _webLockRelease();
+        _webLockRelease = null;
+      }
+      const submitBtn = document.querySelector('.send-btn');
+      if (submitBtn) updateSubmitButton('idle', submitBtn);
+      const messageInput = uiModule.el('message');
+      if (messageInput) messageInput.disabled = false;
+      _drainQueuedAgentRequests();
+    } catch (err) {
+      console.warn('[stream-watchdog] Stream status probe failed:', err);
+    } finally {
+      _staleStreamProbeInFlight = false;
+    }
+  }
+
   function _startStallWatchdog() {
-    // Disabled: the server-side stall detector / auto-continue (agent
-    // loop-breaker) handles quiet/stalled streams now, so the manual
-    // "Quiet for Nm — still working?" banner is redundant (and annoying).
+    // Keep the old noisy stall banner disabled. This watchdog only unlocks
+    // a dead local stream after the backend confirms no active stream exists.
     if (_stallWatchdog) { clearInterval(_stallWatchdog); _stallWatchdog = null; }
     _removeStallBanner();
+    _stallWatchdog = setInterval(_probeStaleLocalStream, 5000);
   }
   function _stopStallWatchdog() {
     if (_stallWatchdog) { clearInterval(_stallWatchdog); _stallWatchdog = null; }

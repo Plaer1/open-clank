@@ -57,9 +57,24 @@ function _downloadDisplayName(name, task) {
   return part ? `${name} · ${part}` : name;
 }
 
+function _downloadNameFromPayload(name, payload) {
+  const rawName = String(name || '').trim();
+  // Defensive: failed/restarted downloads can inherit the wrapper executable
+  // name if older state was saved from a command preview. The row title should
+  // always be the model/repo, never "bash" or "python".
+  const looksLikeLauncher = /^(?:bash|sh|zsh|python|python3|pwsh|powershell|cmd|tmux)$/i.test(rawName);
+  const base = (!rawName || looksLikeLauncher)
+    ? String(payload?.repo_id || payload?.repo || '').split('/').pop()
+    : rawName;
+  const include = payload?.include || '';
+  if (!include || String(base || '').includes(' · ')) return base || rawName || 'download';
+  const part = _ggufDisplayPartFromPath(String(include).replace(/\*/g, ''));
+  return part ? `${base} · ${part}` : (base || rawName || 'download');
+}
+
 function _taskDisplayName(task) {
   const name = String(task?.name || '').trim();
-  if (task?.type === 'download') return _downloadDisplayName(name, task);
+  if (task?.type === 'download') return _downloadDisplayName(_downloadNameFromPayload(name, task?.payload), task);
   if (task?.type !== 'serve') return name;
   const gguf = task?.payload?._fields?.gguf_file || task?.payload?.gguf_file || '';
   if (!gguf || name.includes(' · ')) return name;
@@ -1384,6 +1399,7 @@ async function _retryDownload(name, payload, replaceSessionId = '') {
       const tasks = _loadTasks();
       const task = tasks.find(t => t.sessionId === replaceSessionId);
       if (task) {
+        task.name = _downloadNameFromPayload(name || task.name, _payload);
         task.id = data.session_id;
         task.sessionId = data.session_id;
         task.status = 'running';
@@ -2344,10 +2360,18 @@ export function _renderRunningTab() {
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
       menuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
+        const existing = document.querySelector('.cookbook-task-dropdown');
+        if (existing && existing._anchor === menuBtn) {
+          if (typeof existing._dismiss === 'function') existing._dismiss();
+          else existing.remove();
+          return;
+        }
         document.querySelectorAll('.cookbook-task-dropdown').forEach(d => { if (typeof d._dismiss === 'function') d._dismiss(); else d.remove(); });
 
         const dropdown = document.createElement('div');
         dropdown.className = 'cookbook-task-dropdown';
+        dropdown._anchor = menuBtn;
+        menuBtn.classList.add('cookbook-menu-active');
 
         const items = [];
         // ── Run section ─────────────────────────────────────────────
@@ -2549,7 +2573,7 @@ export function _renderRunningTab() {
         }
 
         const closeHandler = (ev) => {
-          if (!dropdown.contains(ev.target) && ev.target !== menuBtn) {
+          if (!dropdown.contains(ev.target) && ev.target !== menuBtn && !menuBtn.contains(ev.target)) {
             _cleanup();
           }
         };
@@ -2561,6 +2585,7 @@ export function _renderRunningTab() {
         const _cleanup = () => {
           _unreg(); _unreg = () => {};
           dropdown.remove();
+          menuBtn.classList.remove('cookbook-menu-active');
           document.removeEventListener('click', closeHandler);
           window.removeEventListener('scroll', scrollClose, true);
           window.visualViewport?.removeEventListener('scroll', scrollClose);
