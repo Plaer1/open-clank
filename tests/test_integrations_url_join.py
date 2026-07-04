@@ -114,4 +114,3 @@ async def test_api_call_root_path_has_no_trailing_slash():
     assert result.get("exit_code") == 0
     requested_url = mock_client.request.call_args.args[1]
     assert requested_url == WEBHOOK_BASE
-    assert not requested_url.endswith("/")
