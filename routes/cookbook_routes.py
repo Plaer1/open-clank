@@ -1214,7 +1214,12 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
                 runner_lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
             else:
-                runner_lines.append(f"command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 || {_pip_install_fallback_chain('huggingface_hub', python_cmd='\"$ODYSSEUS_PY\" -m pip', upgrade=True)}")
+                hf_hub_install = _pip_install_fallback_chain(
+                    "huggingface_hub",
+                    python_cmd='"$ODYSSEUS_PY" -m pip',
+                    upgrade=True,
+                )
+                runner_lines.append(f"command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 || {hf_hub_install}")
                 runner_lines.append('hash -r 2>/dev/null || true')
                 runner_lines.append('ODYSSEUS_HF_CLI="$(command -v hf || command -v huggingface-cli || true)"')
                 runner_lines.append('if [ -z "$ODYSSEUS_HF_CLI" ]; then echo "ERROR: HF CLI not found after installing huggingface_hub."; exit 127; fi')
@@ -1222,7 +1227,11 @@ def setup_cookbook_routes() -> APIRouter:
                     runner_lines.append("export HF_HUB_ENABLE_HF_TRANSFER=0")
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=4")
                 else:
-                    runner_lines.append(f"\"$ODYSSEUS_PY\" -c 'import hf_transfer' 2>/dev/null || {_pip_install_fallback_chain('hf_transfer', python_cmd='\"$ODYSSEUS_PY\" -m pip')}")
+                    hf_transfer_install = _pip_install_fallback_chain(
+                        "hf_transfer",
+                        python_cmd='"$ODYSSEUS_PY" -m pip',
+                    )
+                    runner_lines.append(f"\"$ODYSSEUS_PY\" -c 'import hf_transfer' 2>/dev/null || {hf_transfer_install}")
                     runner_lines.append("\"$ODYSSEUS_PY\" -c 'import hf_transfer' 2>/dev/null && export HF_HUB_ENABLE_HF_TRANSFER=1")
                     runner_lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
                 # Surface whether the HF token actually reached THIS server, so a gated
