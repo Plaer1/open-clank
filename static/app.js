@@ -54,7 +54,13 @@ window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
 
 function _isMobileChatInput() {
-  return window.innerWidth <= 768 || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  return window.innerWidth <= 768;
+}
+
+function _submitChatFormDirect(form) {
+  if (!form) return;
+  if (form.requestSubmit) form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 }
 
 function _isForegroundChatBusy() {
@@ -101,9 +107,7 @@ function _submitMobileQueuedInput(input) {
   }
   window.__odysseusQueueStreamingSubmit = now;
   const form = document.getElementById('chat-form');
-  const submitBtn = form && form.querySelector('button[type="submit"]');
-  if (submitBtn) submitBtn.click();
-  else if (form) form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  _submitChatFormDirect(form);
   return true;
 }
 
@@ -248,6 +252,50 @@ async function _createDirectChatFromPreferredModel() {
   return false;
 }
 
+async function _hasUsableChatModel() {
+  try {
+    const pending = sessionModule?.getPendingChat?.();
+    if (pending && pending.url && pending.modelId) return true;
+  } catch (_) {}
+  try {
+    const current = sessionModule?.getSessions?.()
+      ?.find(s => s.id === sessionModule?.getCurrentSessionId?.());
+    if (current && current.endpoint_url && current.model) return true;
+  } catch (_) {}
+  const dc = await _refreshDefaultChat();
+  if (dc && dc.endpoint_url && dc.model) return true;
+  try {
+    const items = window.modelsModule?.getCachedItems?.() || [];
+    if (items.some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length))) {
+      return true;
+    }
+  } catch (_) {}
+  try {
+    const res = await fetch(`${API_BASE}/api/models?background=false`, { credentials: 'same-origin' });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return (data.items || []).some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
+  } catch (_) {
+    return false;
+  }
+}
+
+async function _syncWelcomeModelHint() {
+  const tip = document.getElementById('welcome-tip');
+  const sub = document.getElementById('welcome-sub');
+  if (!tip && !sub) return;
+  const hasModel = await _hasUsableChatModel();
+  if (hasModel) {
+    if (sub && !sub.dataset.researchOrigText) sub.textContent = 'New chat ready.';
+    if (tip) tip.textContent = 'Pick a model if you want, or just type.';
+  } else {
+    if (sub && !sub.dataset.researchOrigText) {
+      sub.innerHTML = 'Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.';
+    }
+    if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
+  }
+}
+
 // ============================================
 // EVENT LISTENERS INITIALIZATION
 // ============================================
@@ -258,9 +306,9 @@ function initializeEventListeners() {
   // File attachments (inside overflow menu)
   const _overflowAttach = el('overflow-attach-btn');
   if (_overflowAttach) _overflowAttach.addEventListener('click', fileHandlerModule.openPicker);
-  el('file-input').addEventListener('change', (e)=>{
-    for (const f of e.target.files) fileHandlerModule.addFiles([f]);
-    fileHandlerModule.renderAttachStrip();
+  el('file-input').addEventListener('change', async (e)=>{
+    await fileHandlerModule.addFiles(Array.from(e.target.files || []));
+    e.target.value = '';
     // Refocus textarea after file picker closes (mobile keyboard)
     const ta = el('message');
     if (ta) setTimeout(() => ta.focus(), 100);
@@ -274,7 +322,7 @@ function initializeEventListeners() {
       if (item.kind === 'file'){
         const f = item.getAsFile();
         if (f) {
-          fileHandlerModule.addFiles([f]);
+          await fileHandlerModule.addFiles([f]);
           changed = true;
         }
       }
@@ -434,8 +482,10 @@ function initializeEventListeners() {
         }
         const body = child.querySelector('.body');
         // Prefer dataset.raw (original markdown) over innerText (rendered HTML as text)
-        // to avoid extra newlines and formatting artifacts.
-        const text = body ? (body.dataset.raw || body.innerText || body.textContent || '').trim() : '';
+        // to avoid extra newlines and formatting artifacts. Raw text lives on
+        // the outer .msg in the main renderer; keep body.dataset.raw as a legacy
+        // fallback for older/reused render paths.
+        const text = (child.dataset?.raw || body?.dataset?.raw || body?.innerText || body?.textContent || '').trim();
         if (text) parts.push(`${label}: ${text}`);
       } else if (child.classList?.contains('agent-thread')) {
         const lines = ['[Tool calls]'];
@@ -3176,10 +3226,7 @@ function initializeEventListeners() {
     }, { passive: true });
   })();
 
-  // New session button on icon rail
-  const railNewSession = el('rail-new-session');
-  if (railNewSession) {
-    railNewSession.addEventListener('click', async () => {
+  async function _handleNewChatAction({ preferModel = true, focus = true } = {}) {
       if (!sessionModule) return;
       if (_closeCompareIfActive()) return;
       _deactivateIncognito();
@@ -3188,18 +3235,24 @@ function initializeEventListeners() {
       // Clear research mode if active
       const _resChk = el('research-toggle');
       if (_resChk && _resChk.checked) _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
+      if (preferModel && await _createDirectChatFromPreferredModel()) return;
       // No models at all — show welcome screen
-      sessionModule.setCurrentSessionId(null);
-      if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
+      _startFreshChat();
       const docBtn3 = el('overflow-doc-btn');
       if (docBtn3) docBtn3.classList.remove('active', 'has-docs');
-      const box = el('chat-history');
-      if (box) box.innerHTML = '';
-      if (chatModule && chatModule.showWelcomeScreen) {
-        chatModule.showWelcomeScreen();
-      }
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
+      if (focus) {
+        const input = el('message');
+        if (input) { try { input.focus(); } catch (_) {} }
+      }
+  }
+
+  // New session button on icon rail
+  const railNewSession = el('rail-new-session');
+  if (railNewSession) {
+    railNewSession.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      await _handleNewChatAction();
     });
   }
 
@@ -3226,31 +3279,17 @@ function initializeEventListeners() {
   // Logo click → new chat (same logic as rail new-session button)
   const brandBtn = el('sidebar-brand-btn');
   if (brandBtn) {
-    brandBtn.addEventListener('click', async () => {
-      if (!sessionModule) return;
-      if (_closeCompareIfActive()) return;
-      _deactivateIncognito();
-      if (presetsModule && presetsModule.deactivateCharacter) presetsModule.deactivateCharacter();
-      // Clear research toggle when starting a fresh chat (not via research button)
-      _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
-      // No models at all — show welcome screen
-      sessionModule.setCurrentSessionId(null);
-      if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
-      const docBtn2 = el('overflow-doc-btn');
-      if (docBtn2) docBtn2.classList.remove('active', 'has-docs');
-      const box = el('chat-history');
-      if (box) box.innerHTML = '';
-      if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
-      document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
+    brandBtn.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      await _handleNewChatAction();
     });
   }
 
   const sidebarNewChatBtn = el('sidebar-new-chat-btn');
   if (sidebarNewChatBtn) {
-    sidebarNewChatBtn.addEventListener('click', () => {
-      const brandBtn = el('sidebar-brand-btn');
-      if (brandBtn) brandBtn.click();
+    sidebarNewChatBtn.addEventListener('click', async (e) => {
+      if (e) { e.preventDefault(); e.stopImmediatePropagation(); }
+      await _handleNewChatAction();
     });
   }
 
@@ -3339,8 +3378,7 @@ function initializeEventListeners() {
             }
             window.__odysseusQueueStreamingSubmit = Date.now();
           }
-          const submitBtn = form.querySelector('button[type="submit"]');
-          if (submitBtn) submitBtn.click();
+          _submitChatFormDirect(form);
         }
       }
     });
@@ -3519,7 +3557,7 @@ function initializeEventListeners() {
         // Now submit the form (the /new command handler will process it)
         setTimeout(() => {
           const form = el('chat-form');
-          if (form) form.querySelector('button[type="submit"]').click();
+          _submitChatFormDirect(form);
         }, 0);
       }
     };
@@ -3960,7 +3998,7 @@ function startOdysseusApp() {
           }
           window.__odysseusQueueStreamingSubmit = Date.now();
         }
-        handleSubmit(e);
+        _submitChatFormDirect(document.getElementById('chat-form'));
       }
     });
   }
@@ -4038,14 +4076,13 @@ function startOdysseusApp() {
     _showDropHighlight();
   });
 
-  chatContainer.addEventListener('drop', (e) => {
+  chatContainer.addEventListener('drop', async (e) => {
     e.preventDefault();
     e.stopPropagation();
     _hideDropHighlight();
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-    fileHandlerModule.addFiles(files);
-    fileHandlerModule.renderAttachStrip();
+    await fileHandlerModule.addFiles(files);
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
   });
 
@@ -4062,12 +4099,13 @@ function startOdysseusApp() {
     attachStrip.style.borderRadius = '4px';
   });
   
-  attachStrip.addEventListener('drop', (e) => {
+  attachStrip.addEventListener('drop', async (e) => {
     e.preventDefault();
     attachStrip.style.backgroundColor = '';
     
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
+    await fileHandlerModule.addFiles(files);
 
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to chat`);
 
@@ -4135,14 +4173,13 @@ function startOdysseusApp() {
     if (_compareActive() && !e.relatedTarget) _hideCmpShield();
   }, true);
   window.addEventListener('dragend', _hideCmpShield, true);
-  window.addEventListener('drop', (e) => {
+  window.addEventListener('drop', async (e) => {
     if (!_isFileDrag(e) || !_compareActive()) return;
     e.preventDefault();
     _hideCmpShield();
     const files = Array.from(e.dataTransfer.files || []);
     if (!files.length) return;
-    fileHandlerModule.addFiles(files);
-    fileHandlerModule.renderAttachStrip();
+    await fileHandlerModule.addFiles(files);
     uiModule.showToast(`Added ${files.length} file${files.length > 1 ? 's' : ''} to attach`);
   }, true);
 
@@ -4177,24 +4214,40 @@ function startOdysseusApp() {
     console.error('Session module not loaded!');
   }
 
-  // Non-critical: load in parallel, resolve silently
-  modelsModule.refreshModels(false).then(() => {
-    try { sessionModule.updateModelPicker(); } catch (_) {}
-    const modelsBox = document.getElementById('models');
-    const hasModels = modelsBox && modelsBox.querySelector('.models-row');
-    if (!hasModels) {
-      const tip = document.getElementById('welcome-tip');
-      if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
-    }
-  }).catch(() => {});
-  modelsModule.refreshProviders();
-  ragModule.loadPersonalDocs();
-  memoryModule.loadMemories(); // Ensure memories are loaded on page load
-  
-  // Ensure the memory list is rendered after loading
-  setTimeout(async () => {
-    await memoryModule.loadMemories();
-  }, 1000);
+  const runNonCriticalStartup = (fn, delay = 4000) => {
+    let tries = 0;
+    const run = () => {
+      const busy = !!window.__odysseusChatBusy
+        || Date.now() < (window.__odysseusChatBusyUntil || 0)
+        || !!document.querySelector('.send-btn[data-mode="streaming"], .send-btn.send-pending');
+      if (busy && tries < 12) {
+        tries += 1;
+        setTimeout(run, 2500);
+        return;
+      }
+      try { fn(); } catch (e) { console.warn('non-critical startup task failed:', e); }
+    };
+    setTimeout(() => {
+      if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(run, { timeout: 5000 });
+      } else {
+        run();
+      }
+    }, delay);
+  };
+
+  // Non-critical startup work must not compete with first paint, chat send, or
+  // chat switching. Panels load their own data when opened; these are only warmups.
+  _syncWelcomeModelHint().catch(() => {});
+  runNonCriticalStartup(() => {
+    modelsModule.refreshModels(false).then(() => {
+      try { sessionModule.updateModelPicker(); } catch (_) {}
+      _syncWelcomeModelHint().catch(() => {});
+    }).catch(() => {});
+  }, 3500);
+  runNonCriticalStartup(() => modelsModule.refreshProviders(), 6500);
+  runNonCriticalStartup(() => ragModule.loadPersonalDocs(), 9000);
+  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
   
   // Ensure proper initial state
   voiceRecorderModule.init();

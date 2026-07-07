@@ -52,6 +52,49 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     } catch (_) {}
   }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
+  function _createChatSendPerf() {
+    const started = (performance && performance.now) ? performance.now() : Date.now();
+    let last = started;
+    let reported = false;
+    const stages = [];
+    const now = () => (performance && performance.now) ? performance.now() : Date.now();
+    return {
+      mark(name) {
+        const t = now();
+        stages.push({ name, delta_ms: Math.round(t - last), at_ms: Math.round(t - started) });
+        last = t;
+      },
+      report(extra) {
+        if (reported) return;
+        const total = Math.round(now() - started);
+        const slowStage = stages.some(s => (s.delta_ms || 0) >= 1500);
+        if (total < 1500 && !slowStage) return;
+        reported = true;
+        const payload = JSON.stringify({
+          type: 'chat_send',
+          total_ms: total,
+          stages,
+          extra: extra || '',
+          session: sessionModule && sessionModule.getCurrentSessionId ? sessionModule.getCurrentSessionId() : '',
+        });
+        try {
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon(`${API_BASE}/api/client-perf`, new Blob([payload], { type: 'application/json' }));
+            return;
+          }
+        } catch (_) {}
+        try {
+          fetch(`${API_BASE}/api/client-perf`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+            keepalive: true,
+            credentials: 'same-origin',
+          }).catch(() => {});
+        } catch (_) {}
+      }
+    };
+  }
   // ── Auto-recovery: when a turn's stream silently dies (connection drop) or
   // goes quiet while the connection is alive, re-engage the model with a
   // completion handshake instead of leaving it hung. Capped so it can't loop.
@@ -119,6 +162,26 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const after = closeIdx >= 0 ? s.slice(closeIdx + 4).trimStart() : '';
     const visible = [before, after].filter(Boolean).join('\n\n').trim();
     return final && !visible ? 'Done.' : visible;
+  }
+
+  function _stripIncompleteRawToolJsonForChat(text) {
+    const s = String(text || '');
+    const starts = ['[{"function"', '[\n{"function"', '{"function"'];
+    let idx = -1;
+    for (const marker of starts) idx = Math.max(idx, s.lastIndexOf(marker));
+    if (idx < 0) return s;
+    const tail = s.slice(idx);
+    // Complete raw OpenAI-style function blobs are removed by stripToolBlocks.
+    // While the stream is still mid-JSON, hide the tail so it never flashes in
+    // the chat bubble as prose.
+    if (!/"type"\s*:\s*"function"/.test(tail) || !/\}\s*\]?\s*(?:<\/?\|(?:assistant|assistan|user|system|tool)\|>?)?\s*$/i.test(tail)) {
+      return s.slice(0, idx);
+    }
+    return s;
+  }
+
+  function _streamDisplayText(text, opts = {}) {
+    return stripToolBlocks(_stripIncompleteRawToolJsonForChat(_stripDocumentFenceForChat(text, opts)));
   }
 
   function _showDocumentWritingStatus(contentEl) {
@@ -670,6 +733,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
     // --- Send-path entry: block re-clicks between submit and stream start ---
     if (_sendInFlight) return;
+    const _sendPerf = _createChatSendPerf();
     _sendInFlight = true;
     _setForegroundChatBusy(true);
     // Instant visual feedback so the user sees their click was accepted
@@ -728,8 +792,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
     // Materialize pending session (deferred from model click) on first message
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
+      _sendPerf.mark('pending_session_begin');
       const ok = await sessionModule.materializePendingSession();
+      _sendPerf.mark('pending_session_done');
       if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
+    }
+
+    if (!sessionModule.getCurrentSessionId()) {
+      // Auto-create a session using default chat config. Always fetch fresh
+      // so that a recent Settings change takes effect without a page reload.
+      try {
+        const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+        if (pending && pending.url && pending.modelId) {
+          const ok = await sessionModule.materializePendingSession();
+          if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
+        }
+      } catch (_) {}
     }
 
     if (!sessionModule.getCurrentSessionId()) {
@@ -738,8 +816,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       try {
         let dc = null;
         try {
+          _sendPerf.mark('default_chat_fetch_begin');
           const dcRes = await fetch('/api/default-chat');
           dc = await dcRes.json();
+          _sendPerf.mark('default_chat_fetch_done');
           if (dc && dc.endpoint_url && dc.model) {
             try { window.__odysseusDefaultChat = dc; } catch (_) {}
           }
@@ -747,8 +827,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
         }
         if (dc.endpoint_url && dc.model) {
+          _sendPerf.mark('direct_chat_create_begin');
           await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
+          _sendPerf.mark('direct_chat_materialize_done');
           if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
         } else {
           el('message').value = '';
@@ -904,6 +987,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (!skipBubble) {
         _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
       }
+      _sendPerf.mark('user_bubble_visible');
       messageInput.value = '';
       messageInput.style.height = '';
       messageInput.dispatchEvent(new Event('input'));
@@ -939,9 +1023,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       let ids = [];
       try {
+        _sendPerf.mark('upload_begin');
         ids = await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() });
+        _sendPerf.mark('upload_done');
       } catch(e) {
         console.error('upload failed', e);
+        _sendPerf.mark('upload_failed');
       }
       if (_pendingAttachInfo && !ids.length && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) {
         if (_userMsgEl && _userMsgEl.parentNode) _userMsgEl.remove();
@@ -1039,11 +1126,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let activeDocIdForSend = documentModule && typeof documentModule.getCurrentDocId === 'function'
         ? documentModule.getCurrentDocId()
         : null;
-      if (!activeDocIdForSend && activeEmailComposerCtx?.docId) {
+      if (activeEmailComposerCtx?.docId) {
         activeDocIdForSend = activeEmailComposerCtx.docId;
       }
       if (documentModule && activeDocIdForSend) {
-        try { await documentModule.saveDocument(); } catch(e) { console.warn('doc auto-save failed', e); }
+        try {
+          _sendPerf.mark('doc_save_begin');
+          await documentModule.saveDocument();
+          _sendPerf.mark('doc_save_done');
+        } catch(e) {
+          console.warn('doc auto-save failed', e);
+          _sendPerf.mark('doc_save_failed');
+        }
       }
 
       // Inject document selection context if present
@@ -1075,7 +1169,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // Auto-save & send active doc ID so the backend sees latest content
       if (documentModule && activeDocIdForSend) {
-        try { await documentModule.saveDocument({ silent: true }); } catch (_e) { /* best-effort */ }
+        try {
+          _sendPerf.mark('doc_silent_save_begin');
+          await documentModule.saveDocument({ silent: true });
+          _sendPerf.mark('doc_silent_save_done');
+        } catch (_e) {
+          _sendPerf.mark('doc_silent_save_failed');
+        }
         fd.append('active_doc_id', activeDocIdForSend);
       }
       // Active email context — when an email reader is open, pass its
@@ -1094,7 +1194,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           if (emCtx.account) fd.append('active_email_account', String(emCtx.account));
         }
       } catch (_e) { /* best-effort */ }
-      // Web toggle: pre-search in Chat mode, tool permission in Agent mode
+      // Web toggle: pre-search in Chat mode only. Agent mode should not
+      // opportunistically hit SearXNG just because the chat search toggle is
+      // on; explicit web/current-info requests are handled by the backend
+      // intent gate.
       const toggleState = Storage.loadToggleState();
       let isAgentMode = (toggleState.mode || 'chat') === 'agent';
       const incognitoChk = el('incognito-toggle');
@@ -1106,13 +1209,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
       if (el('web-toggle').checked) {
-        if (isAgentMode) {
-          fd.append('allow_web_search', 'true');
-        } else {
+        if (!isAgentMode) {
           fd.append('use_web', 'true');
         }
-      } else if (isAgentMode) {
-        fd.append('allow_web_search', 'false');
+      }
+      if (isAgentMode) {
+        fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
       }
       if (el('research-toggle').checked) {
         fd.append('use_research', 'true');
@@ -1247,12 +1349,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }
         catch { return ''; }
       })();
+      _sendPerf.mark('chat_stream_post_begin');
       const res = await fetch(`${API_BASE}/api/chat_stream`, {
         method: 'POST',
         body: fd,
         headers: { 'X-Tz-Offset': String(_tzOffsetMin), 'X-Tz-Name': _tzName },
         signal: abortCtrl.signal
       });
+      _sendPerf.mark('chat_stream_headers');
+      _sendPerf.report('headers_received');
       
       if (!res.ok) {
         clearResponseTimeout();
@@ -1298,6 +1403,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (_chatLog) _chatLog.setAttribute('aria-busy', 'true');
 
       const reader = res.body.getReader();
+      _sendPerf.mark('reader_ready');
+      _sendPerf.report('reader_ready');
       const decoder = new TextDecoder();
       let buffer = '';
       let metrics = null;
@@ -1339,6 +1446,32 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           body.appendChild(contentDiv);
         }
         return contentDiv;
+      }
+      function _ensureVisibleRoundForDelta() {
+        if (!roundHolder || roundHolder.style.display !== 'none') return;
+        const box = document.getElementById('chat-history');
+        if (!box) {
+          roundHolder.style.display = '';
+          return;
+        }
+        const newWrap = document.createElement('div');
+        newWrap.className = 'msg msg-ai msg-continuation streaming';
+        const newRole = document.createElement('div');
+        newRole.className = 'role';
+        const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
+        const requested = holder?._requestedModel || metaS?.model || modelName;
+        const actual = holder?._actualModel || requested;
+        newRole.textContent = _modelRouteLabel(requested, actual) || '';
+        _applyModelColor(newRole, actual);
+        newWrap.appendChild(newRole);
+        const newBody = document.createElement('div');
+        newBody.className = 'body';
+        newWrap.appendChild(newBody);
+        box.appendChild(newWrap);
+        if (lastToolThread && lastToolThread.isConnected) lastToolThread.classList.add('has-bottom');
+        roundHolder = newWrap;
+        roundText = '';
+        roundFinalized = false;
       }
       const esc = uiModule.esc;
       // Remove thinking spinner helper
@@ -1463,7 +1596,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Direct render helper for streaming text
       _renderStream = () => {
-        let dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText)));
+        let dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText));
         const bodyEl = roundHolder.querySelector('.body');
         const contentEl = _ensureStreamLayout(bodyEl);
 
@@ -1718,24 +1851,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (!_thinkOpen) { _delta = '<think>' + _delta; _thinkOpen = true; }
                 } else if (_thinkOpen) {
                   _delta = '</think>' + _delta; _thinkOpen = false;
-                }
-                const wasEmpty = !accumulated;
-                accumulated += _delta;
-                roundText += _delta;
-                currentAccumulated = accumulated; // Update global tracker
-                // First token arrived — switch stop button from processing to streaming
-                if (wasEmpty && submitBtn && !_isBg) {
-                  submitBtn.dataset.phase = 'receiving';
+	                }
+	                const wasEmpty = !accumulated;
+	                accumulated += _delta;
+	                currentAccumulated = accumulated; // Update global tracker
+	                // First token arrived — switch stop button from processing to streaming
+	                if (wasEmpty && submitBtn && !_isBg) {
+	                  submitBtn.dataset.phase = 'receiving';
                 }
 
                 // Update background map if running in background
                 if (_isBg) {
                   var bgEntry = _backgroundStreams.get(streamSessionId);
-                  if (bgEntry) bgEntry.accumulated = accumulated;
-                  continue; // Skip all DOM writes
-                }
+	                  if (bgEntry) bgEntry.accumulated = accumulated;
+	                  continue; // Skip all DOM writes
+	                }
+	                _ensureVisibleRoundForDelta();
+	                roundText += _delta;
 
-                // --- Text-fence doc streaming (for models that don't use native tool calls) ---
+	                // --- Text-fence doc streaming (for models that don't use native tool calls) ---
                 if (!_docFenceOpened && documentModule && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
                   const fenceMarker = roundText.includes('```document\n') ? '```document\n' : (roundText.includes('```documen\n') ? '```documen\n' : '```create_document\n');
                   const fenceIdx = roundText.indexOf(fenceMarker);
@@ -1870,7 +2004,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
                     // Extract raw thinking text (strip known thinking wrappers and prefixes)
-                    var thinkText = markdownModule.normalizeThinkingMarkup(roundText)
+                    var thinkText = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
                       .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
                       .replace(/<\|channel>thought\s*\n?/gi, '')
                       .replace(/<\|channel>response\s*\n?/gi, '')
@@ -2303,6 +2437,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!_isBg) {
                   uiModule.showToast('Context compacted — older messages summarized');
                 }
+              } else if (json.type === 'context_trimmed') {
+                if (!_isBg) {
+                  const d = json.data || {};
+                  const before = Number(d.messages_before || 0);
+                  const after = Number(d.messages_after || 0);
+                  const detail = before && after && before > after ? ` (${after}/${before} messages sent)` : '';
+                  uiModule.showToast(`Context trimmed for this model${detail}`);
+                }
               } else if (json.type === 'metrics') {
                 metrics = json.data;
                 if (!_isBg && holder && metrics) {
@@ -2349,7 +2491,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!roundFinalized) {
                   roundFinalized = true;
                   if (spinner && spinner.element) spinner.destroy();
-                  const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText)));
+                  const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText));
                   if (dt.trim()) {
                     var _body3 = roundHolder.querySelector('.body');
                     var _contentEl3 = _ensureStreamLayout(_body3);
@@ -2844,7 +2986,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
 
         // Finalize the last round's bubble — flatten stream-content wrapper for clean DOM
-        const finalDisplay = stripToolBlocks(_stripDocumentFenceForChat(roundText, { final: _docFenceOpened }));
+        const finalDisplay = _streamDisplayText(roundText, { final: _docFenceOpened });
         if (finalDisplay.trim()) {
           var _body4 = roundHolder.querySelector('.body');
           // Preserve sources expanded state before final render
@@ -2910,11 +3052,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           _body4b.innerHTML = _sourcesData ? _buildSourcesBox(_sourcesData, _sourcesType, _wasExpanded2) : _sourcesHtml;
         } else if (roundHolder !== holder) {
           // Check if there's thinking content worth showing
-          const _thinkingOnly = markdownModule.extractThinkingBlocks(roundText);
+          const _thinkingOnly = markdownModule.extractThinkingBlocks(_streamDisplayText(roundText));
           if (_thinkingOnly.thinkingBlocks?.length && !_thinkingOnly.content) {
             // Show thinking in a collapsed section even if no visible reply text
             const _body4c = roundHolder.querySelector('.body');
-            if (_body4c) _body4c.innerHTML = markdownModule.processWithThinking(roundText);
+            if (_body4c) _body4c.innerHTML = markdownModule.processWithThinking(_streamDisplayText(roundText));
           } else {
             roundHolder.style.display = 'none';
             // Thread above expected a bubble below — remove has-bottom since bubble is hidden
@@ -3656,7 +3798,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     };
 
     const renderDelta = () => {
-      const dt = markdownModule.normalizeThinkingMarkup(stripToolBlocks(_stripDocumentFenceForChat(roundText, { final: docFenceOpened })));
+      const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText, { final: docFenceOpened }));
       if (docFenceOpened && !dt.trim()) {
         _showDocumentWritingStatus(contentDiv);
       } else {

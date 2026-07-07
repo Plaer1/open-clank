@@ -565,6 +565,12 @@ export function mdToHtml(src, opts) {
     new RegExp(`(^|[^\\[(])#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\b`, 'g'),
     '$1[#$2](#$2)',
   );
+  // Legacy search_chats output used bare session hashes (`#<uuid>`). Upgrade
+  // those too so old answers and model summaries remain clickable.
+  s = s.replace(
+    /(^|[^\[(])#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi,
+    '$1[#session-$2](#session-$2)',
+  );
 
   // Convert markdown images before links so ![alt](url) does not become
   // literal "!" plus a normal link.
