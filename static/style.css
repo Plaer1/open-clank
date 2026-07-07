@@ -8688,7 +8688,7 @@ button.hamburger {
 .attach-crop-overlay {
   position: fixed;
   inset: 0;
-  z-index: 100000;
+  z-index: var(--attach-crop-z, 100001);
   background: rgba(0, 0, 0, 0.72);
   display: flex;
   align-items: center;

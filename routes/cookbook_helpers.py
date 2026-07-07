@@ -1306,6 +1306,7 @@ def _diagnose_serve_output(text: str) -> dict | None:
             "SGLang native kernel/runtime is missing or mismatched on this server.",
             [
                 {"label": "repair sglang-kernel in this Python environment", "op": "dependency", "package": "sglang-kernel"},
+                {"label": "install OS packages: libnuma-dev python3.12-dev build-essential", "op": "manual"},
                 {"label": "if libnvrtc is still missing, install the matching CUDA/NVRTC runtime on this host", "op": "manual"},
             ],
         ),

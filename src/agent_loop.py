@@ -796,50 +796,6 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
     return ""
 
 
-_REMINDER_TIME_RE = re.compile(
-    r"\b(?:today|tonight|tomorrow|tmrw|yesterday)\b(?:\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
-    r"|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:today|tonight|tomorrow|tmrw|yesterday)\b"
-    r"|\bin\s+\d+\s*(?:hour|hr|minute|min|day)s?\b",
-    re.IGNORECASE,
-)
-
-
-def _extract_reminder_due_from_user(text: str) -> str:
-    t = str(text or "").strip()
-    if not re.search(r"\b(remind|reminder|alarm)\b", t, re.IGNORECASE):
-        return ""
-    m = _REMINDER_TIME_RE.search(t)
-    return m.group(0).strip() if m else ""
-
-
-def _repair_manage_notes_reminder_block(block: ToolBlock, last_user: str) -> ToolBlock:
-    """Carry reminder time from the user message when the model omits due_date."""
-    if block.tool_type != "manage_notes":
-        return block
-    try:
-        args = json.loads(block.content or "{}")
-    except Exception:
-        return block
-    if not isinstance(args, dict) or args.get("due_date"):
-        return block
-
-    action = str(args.get("action") or "").replace("-", "_").strip().lower()
-    if action not in {"add", "create", "new", "save", "remind", "reminder"}:
-        return block
-
-    due = _extract_reminder_due_from_user(last_user)
-    if not due:
-        return block
-    args["due_date"] = due
-    if not args.get("title"):
-        cleaned = re.sub(r"\b(make|create|add|set)\b", "", str(last_user or ""), flags=re.IGNORECASE)
-        cleaned = re.sub(r"\b(a|an)?\s*(reminder|alarm)\b", "", cleaned, flags=re.IGNORECASE)
-        cleaned = _REMINDER_TIME_RE.sub("", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" :,-") or "Reminder"
-        args["title"] = cleaned[:120]
-    return ToolBlock(block.tool_type, json.dumps(args, ensure_ascii=False))
-
-
 def _user_turn_count(messages: List[Dict]) -> int:
     """Count real user turns in the message list."""
     count = 0
@@ -4004,7 +3960,6 @@ async def stream_agent_loop(
         tool_result_texts = []  # plain text for native tool role messages
         budget_hit = False
         for i, block in enumerate(tool_blocks):
-            block = _repair_manage_notes_reminder_block(block, _last_user)
             # --- Tool budget check ---
             if max_tool_calls > 0 and total_tool_calls >= max_tool_calls:
                 yield f'data: {json.dumps({"type": "budget_exceeded", "limit": max_tool_calls, "used": total_tool_calls})}\n\n'
