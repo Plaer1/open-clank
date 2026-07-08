@@ -1,0 +1,22 @@
+[package]
+name = "fm-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+blake2 = { workspace = true }
+rusqlite = { version = "0.35", features = ["bundled", "vtab"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
+lru = "0.12"
+
+[features]
+default = ["http-embed"]
+http-embed = ["reqwest"]

@@ -1,0 +1,18 @@
+[package]
+name = "fm-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+fm-core = { path = "../fm-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rmcp = { version = "0.5", features = ["server", "transport-io"] }
+schemars = "1"
