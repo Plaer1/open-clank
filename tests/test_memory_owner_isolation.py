@@ -1,10 +1,13 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 import routes.memory_routes as memory_routes
 from src.memory import MemoryManager
 
 
-def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path):
     manager = MemoryManager(str(tmp_path))
     alice_memory = manager.add_entry("Project codename is Odyssey", owner="alice")
     bob_memory = manager.add_entry("Project codename is Odyssey", owner="bob")
@@ -18,7 +21,7 @@ def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path):
         if route.path == "/api/memory/search" and "POST" in route.methods
     )
 
-    result = search(
+    result = await search(
         request=None,
         query="Project codename is Odyssey",
         session_id=None,

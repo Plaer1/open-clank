@@ -22,6 +22,7 @@ export const dict: Record<string, string> = {
   "tui.prompt.placeholder.normal": "Type your message... (type / for commands)",
   "tui.prompt.placeholder.shell": 'Run a command... "{{example}}"',
   "tui.prompt.ghost": "{{prediction}}  (Tab to accept)",
+  "tui.paste.image.fallback_path": "Model has no vision support — inserted image path instead",
   "tui.home.placeholder.example.todo": "Fix a TODO in the codebase",
   "tui.home.placeholder.example.stack": "What is the tech stack of this project?",
   "tui.home.placeholder.example.tests": "Fix broken tests",
@@ -45,7 +46,7 @@ export const dict: Record<string, string> = {
   "tui.tips.shell_prefix":
     "Start a message with {highlight}!{/highlight} to run shell commands directly (e.g., {highlight}!ls -la{/highlight})",
   "tui.tips.tab_agent":
-    "Press {highlight}Tab{/highlight} or {highlight}Shift+Tab{/highlight} to cycle between Build, Plan, and Compose agents",
+    "Press {highlight}Tab{/highlight} or {highlight}Shift+Tab{/highlight} to cycle between Build, Plan, Compose, and Orchestrator agents",
   "tui.tips.theme_mode":
     "Run {highlight}/dark{/highlight} for dark mode or {highlight}/light{/highlight} for light mode",
   "tui.tips.doc": "Run {highlight}/doc{/highlight} to open the user documentation",
@@ -56,7 +57,7 @@ export const dict: Record<string, string> = {
   "tui.tips.redo": "Use {highlight}/redo{/highlight} to restore previously undone messages and file changes",
   "tui.tips.share": "Run {highlight}/share{/highlight} to create a public link to your conversation at opencode.ai",
   "tui.tips.drag_drop": "Drag and drop images or PDFs into the terminal to add them as context",
-  "tui.tips.paste_image": "Press {highlight}Ctrl+V{/highlight} to paste images from your clipboard into the prompt",
+  "tui.tips.paste_image": "Press {highlight}Ctrl+V{/highlight} to paste images from your clipboard (on macOS use Ctrl+V, not Cmd+V — the terminal intercepts Cmd+V)",
   "tui.tips.editor":
     "Press {highlight}Ctrl+X E{/highlight} or {highlight}/editor{/highlight} to compose messages in your external editor",
   "tui.tips.init": "Run {highlight}/init{/highlight} to auto-generate project rules based on your codebase",
@@ -195,6 +196,42 @@ export const dict: Record<string, string> = {
   "tui.slash.deep-research.description":
     "deep multi-source, fact-checked research report (runs the deep-research workflow)",
 
+  // Built-in bundled skill descriptions (user-facing, decoupled from SKILL.md description which targets the LLM)
+  "tui.skill.docx-official.description": "Create, edit, and read Microsoft Word (.docx) files",
+  "tui.skill.xlsx-official.description": "Create, edit, and read Microsoft Excel (.xlsx) workbooks",
+  "tui.skill.pdf-official.description": "Create, edit, transform, and read PDF files",
+  "tui.skill.pptx-official.description": "Create, edit, and read Microsoft PowerPoint (.pptx) decks",
+  "tui.skill.mimocode.description": "Self-documentation for MiMoCode features, config, and commands",
+  "tui.skill.evolve.description": "Rewrite any layer of yourself — tools, behavior hooks, knowledge, workflows, even the UI",
+  "tui.skill.frontend-design.description": "Guidance for distinctive, intentional visual UI design",
+  "tui.skill.loop.description": "Schedule a prompt to run on a recurring interval",
+  "tui.skill.html-to-video-pipeline.description": "Short-video magic — make short videos with HTML",
+  "tui.skill.arxiv.description": "Search, cite, download, and track arXiv papers",
+  "tui.skill.skill-creator.description": "Create, review, and improve agent skills",
+  "tui.skill.research-paper-writing.description": "Draft, polish, and reviewer-style critique for academic papers",
+  "tui.skill.design-blueprint.description":
+    "Produce a design blueprint (DESIGN.md + Decision Trace) before mocking up any visual",
+  "tui.skill.super-research.description":
+    "Autonomous research — experiments, surveys, quantitative analysis, benchmarks, RCA, ablation, paper reproduction & writing",
+  "tui.skill.deep-research.description":
+    "Deep multi-source investigation with cross-checked, cited reports",
+  "tui.skill.modern-python-toolchain.description":
+    "Modern Python project setup with uv, ruff, and pyright",
+  "tui.skill.compose:ask.description": "Ask the user for decisions or clarifications",
+  "tui.skill.compose:brainstorm.description": "Explore requirements and design before implementation",
+  "tui.skill.compose:debug.description": "Systematic debugging before proposing fixes",
+  "tui.skill.compose:execute.description": "Execute an implementation plan with review checkpoints",
+  "tui.skill.compose:feedback.description": "Handle code review feedback with technical rigor",
+  "tui.skill.compose:merge.description": "Integrate completed work — merge, PR, or cleanup",
+  "tui.skill.compose:parallel.description": "Run independent tasks concurrently",
+  "tui.skill.compose:plan.description": "Create a step-by-step implementation plan from spec",
+  "tui.skill.compose:report.description": "Consolidate implementation into a final-state report",
+  "tui.skill.compose:review.description": "Verify work meets requirements before merging",
+  "tui.skill.compose:subagent.description": "Dispatch independent tasks to fresh sub-agents",
+  "tui.skill.compose:tdd.description": "Test-driven development — write tests before code",
+  "tui.skill.compose:verify.description": "Run verification and confirm passing output",
+  "tui.skill.compose:worktree.description": "Create an isolated workspace for feature work",
+
   // Language switching
   "tui.command.language.switch.title": "Switch language",
   "tui.command.language.switch.description": "Change the display language",
@@ -212,12 +249,23 @@ export const dict: Record<string, string> = {
   "tui.command.model.cycle_favorite.title": "Favorite cycle",
   "tui.command.model.cycle_favorite_reverse.title": "Favorite cycle reverse",
   "tui.command.agent.list.title": "Switch agent",
+  "tui.command.modalities.title": "Configure input modalities",
+  "tui.modalities.title": "Input modalities — {{model}}",
+  "tui.modalities.saved": "Input modalities updated: {{modalities}}",
+  "tui.modalities.no_model": "No model selected",
+  "tui.modalities.hint.toggle": "toggle",
+  "tui.modalities.hint.save": "save",
   "tui.command.mcp.list.title": "Toggle MCPs",
   "tui.command.never_ask.title_on": "Never-ask: ON (auto-decide, permissions excluded) — click to turn off",
   "tui.command.never_ask.title_off": "Never-ask: OFF — click to turn on (auto-decide, permissions excluded)",
   "tui.command.never_ask.toast_on":
     "Never-ask ON — I won't prompt you; I'll pick the best option myself until you turn it off (/never-ask). Permission requests still need your approval.",
   "tui.command.never_ask.toast_off": "Never-ask OFF — I'll ask you at decision points again.",
+  "tui.command.skip_permissions.title_on": "Skip-permissions: ON (auto-allow permission asks) — click to turn off",
+  "tui.command.skip_permissions.title_off": "Skip-permissions: OFF — click to turn on (auto-allow permission asks)",
+  "tui.command.skip_permissions.toast_on":
+    "Skip-permissions ON — asks auto-allowed (subagents too). Destructive commands still prompt but auto-reject after 60s if unanswered.",
+  "tui.command.skip_permissions.toast_off": "Skip-permissions OFF — asks need your approval again.",
   "tui.command.agent.cycle.title": "Agent cycle",
   "tui.command.variant.cycle.title": "Variant cycle",
   "tui.command.variant.list.title": "Switch model variant",
@@ -295,6 +343,7 @@ export const dict: Record<string, string> = {
   "tui.toast.update_available.success": "Successfully updated to MiMoCode v{{version}}. Please restart the application.",
   "tui.toast.updated.title": "Auto-updated",
   "tui.toast.updated.message": "Patch update applied: v{{version}}. Restart to use the new version. Disable via autoupdate: false in config.",
+  "tui.toast.native_installer_tip": "Tip: native installer (curl/PowerShell) is recommended for a better experience.",
   "tui.sidebar.instructions": "Instructions",
   "tui.sidebar.cwd": "Working Directory",
   "tui.toast.unknown_error": "An unknown error has occurred",
@@ -319,6 +368,9 @@ export const dict: Record<string, string> = {
   "tui.command.session.timeline.title": "Jump to message",
   "tui.command.session.fork.title": "Fork session",
   "tui.command.session.compact.title": "Compact session",
+  "tui.command.session.ask.title": "Ask a side question",
+  "tui.command.session.ask.description": "Ask the current session a question without disrupting it",
+  "tui.command.session.ask.placeholder": "Ask a side question…",
   "tui.command.session.unshare.title": "Unshare session",
   "tui.command.session.undo.title": "Undo previous message",
   "tui.command.session.redo.title": "Redo",
@@ -462,4 +514,13 @@ export const dict: Record<string, string> = {
   "trust.dangerous.advice_root": "Unless you have a very specific reason, DO NOT trust the filesystem root.",
   "trust.dangerous.option.yes": "I understand the risks, trust for this session",
   "trust.dangerous.option.no": "Exit (recommended)",
+  "skip_permissions.title": "WARNING: Bypass Permissions mode",
+  "skip_permissions.body":
+    "You started with --dangerously-skip-permissions. MiMo Code will read, edit, and execute files and run shell commands WITHOUT asking for approval. Only rules you have explicitly denied in config are still enforced. You are solely responsible for anything it does.",
+  "skip_permissions.plugin_warn":
+    "In this mode a malicious prompt, file, or plugin can run arbitrary commands, and modify or exfiltrate your data without any confirmation.",
+  "skip_permissions.root_warn":
+    "You are running as root. Bypassing permissions as root gives the model unrestricted control over this machine.",
+  "skip_permissions.option.no": "No, exit (recommended)",
+  "skip_permissions.option.yes": "Yes, I accept the risks and want to skip permissions",
 }

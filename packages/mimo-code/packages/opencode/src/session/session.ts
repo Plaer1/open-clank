@@ -12,6 +12,7 @@ import { Database, NotFoundError, eq, and, gte, isNull, desc, like, inArray, lt 
 import { SyncEvent } from "../sync"
 import type { SQL } from "../storage"
 import { PartTable, SessionTable, MessageTable } from "./session.sql"
+import { ActorRegistryTable } from "../actor/actor.sql"
 import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage"
 import { Log } from "../util"
@@ -388,7 +389,7 @@ export interface Interface {
      */
     agentID?: string
   }) => Effect.Effect<MessageV2.WithParts[]>
-  readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  readonly children: (parentID: SessionID, options?: { visible?: boolean }) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -496,7 +497,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       return fromRow(row)
     })
 
-    const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+    const children = Effect.fn("Session.children")(function* (parentID: SessionID, options?: { visible?: boolean }) {
       const rows = yield* db((d) =>
         d
           .select()
@@ -504,7 +505,22 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
           .where(and(eq(SessionTable.parent_id, parentID)))
           .all(),
       )
-      return rows.map(fromRow)
+      if (!options?.visible) return rows.map(fromRow)
+      if (!rows.length) return []
+      // visible: only children a user should see in session lists. Peer actors
+      // register under the child session with actor_id === session id; internal
+      // machinery children (checkpoint-writer hosts, ask-tool forks, workflow
+      // subagent sessions) register as mode "subagent" or have no actor row at
+      // all — both are filtered out.
+      const peerRows = yield* db((d) =>
+        d
+          .select({ session_id: ActorRegistryTable.session_id })
+          .from(ActorRegistryTable)
+          .where(and(inArray(ActorRegistryTable.session_id, rows.map((r) => r.id)), eq(ActorRegistryTable.mode, "peer")))
+          .all(),
+      )
+      const peers = new Set(peerRows.map((r) => r.session_id))
+      return rows.filter((r) => peers.has(r.id)).map(fromRow)
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -579,10 +595,15 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       contextFrom?: SessionID
       contextWatermark?: MessageID
       title?: string
+      // In-process only (deliberately NOT on the public CreateInput / HTTP body,
+      // where it would collide with the route's `directory` query selector). Set
+      // once at creation by an in-process caller — e.g. spawnPeer placing a child
+      // session in its own worktree dir. Defaults to the current instance dir.
+      directory?: string
       permission?: Permission.Ruleset
       workspaceID?: WorkspaceID
     }) {
-      const directory = yield* InstanceState.directory
+      const directory = input?.directory ?? (yield* InstanceState.directory)
       const workspace = yield* InstanceState.workspaceID
       return yield* createNext({
         parentID: input?.parentID,

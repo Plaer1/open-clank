@@ -1,0 +1,21 @@
+views:
+  - type: table
+    name: Table
+columns:
+  - file.name
+  - status
+  - tags
+filters:
+  - file.hasProperty("status")
+  - status == "unwatched"
+    filters:
+      and:
+        - file.hasProperty("status")
+        - status == "unwatched"
+    order:
+      - file.name
+      - file.tags
+      - status
+    sort:
+      - property: file.tags
+        direction: ASC

@@ -333,6 +333,22 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         endpoint_api_key = ""
         endpoint_base_url = ""
         _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
+        if endpoint_id.strip() == "mimo":
+            # Virtual endpoint: models served by the mimo agent brain over
+            # ACP, not an HTTP endpoint row. Validate against mimo's own
+            # catalog and skip the /v1/models probe entirely.
+            _sup = getattr(request.app.state, "mimo_supervisor", None)
+            _catalog = _sup.available_models() if _sup else []
+            if not _catalog:
+                raise HTTPException(503, "mimo is not running (no model catalog)")
+            _ids = [m.get("modelId", "") for m in _catalog]
+            if not model:
+                raise HTTPException(400, "model is required for the mimo endpoint")
+            if model not in _ids:
+                raise HTTPException(400, f"Model not in mimo catalog ({len(_ids)} models). Pick from /api/models.")
+            endpoint_url = "mimo://acp"
+            endpoint_id = ""
+            skip_val = True
         if endpoint_id and endpoint_id.strip():
             from core.database import ModelEndpoint
             from src.auth_helpers import owner_filter
@@ -487,6 +503,17 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
             endpoint_api_key = ""
             endpoint_base_url = ""
+            if endpoint_id == "mimo":
+                # Virtual endpoint served by the mimo agent brain over ACP —
+                # no ModelEndpoint row. Validate against mimo's catalog.
+                _sup = getattr(request.app.state, "mimo_supervisor", None)
+                _catalog = _sup.available_models() if _sup else []
+                if not _catalog:
+                    raise HTTPException(503, "mimo is not running (no model catalog)")
+                if model not in [m.get("modelId", "") for m in _catalog]:
+                    raise HTTPException(400, f"Model not in mimo catalog ({len(_catalog)} models). Pick from /api/models.")
+                endpoint_url = "mimo://acp"
+                endpoint_id = ""
             if endpoint_id:
                 from core.database import ModelEndpoint
                 from src.auth_helpers import owner_filter

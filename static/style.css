@@ -5095,7 +5095,8 @@ body.bg-pattern-sparkles {
       #research-overlay,
       #theme-modal,
       #settings-modal,
-      #email-lib-modal {
+      #email-lib-modal,
+      .copal-tool-modal {
         left: calc(var(--icon-rail-w, 48px) + var(--sidebar-w, 0px));
         width: calc(100% - (var(--icon-rail-w, 48px) + var(--sidebar-w, 0px)));
         box-sizing: border-box;
@@ -38318,4 +38319,562 @@ body.theme-frosted .modal {
 }
 .log-line-default {
   color: var(--fg, #9cdef2);
+}
+
+/* Copal is a native Odysseus workspace. Its old top tab strip is represented
+   by this one expandable sidebar tree. */
+.copal-sidebar-submenu { padding: 0 0 3px 20px; }
+.copal-sidebar-link { color: var(--fg); text-decoration: none; font-size: 11px; min-height: 25px; }
+.copal-sidebar-link.active { color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); }
+.copal-modal-content { flex: 0 1 auto; width: min(1180px, calc(100% - 32px)); height: min(780px, calc(100dvh - 48px)); max-width: calc(100% - 32px); max-height: calc(100dvh - 24px); margin: auto; padding: 0; position: relative; overflow: hidden; }
+.copal-workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); color: var(--fg); }
+.copal-workspace.hidden { display: none; }
+.copal-workspace-header { height: 48px; flex: 0 0 48px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.copal-window-actions { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; }
+.copal-window-actions .copal-search { min-width: 110px; }
+.copal-workspace-title { min-width: 115px; font-size: 15px; font-weight: 650; color: var(--accent, var(--red)); }
+.copal-workspace-title small { display: block; color: var(--fg); opacity: .5; font-size: 9px; font-weight: 400; }
+.copal-search { flex: 1; min-width: 80px; max-width: 460px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--fg); padding: 7px 9px; font: inherit; }
+.copal-btn { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 6px 9px; font: inherit; font-size: 11px; cursor: pointer; }
+.copal-btn:hover, .copal-btn:focus-visible { border-color: var(--accent, var(--red)); }
+.copal-btn.primary { color: var(--accent, var(--red)); border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border)); }
+.copal-btn.danger { color: var(--color-error, #e06c75); }
+.copal-workspace-status { margin-left: auto; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; opacity: .65; }
+.copal-view { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.copal-empty { margin: auto; max-width: 520px; padding: 50px 20px; text-align: center; opacity: .64; }
+.copal-layout { display: grid; grid-template-columns: minmax(170px, 240px) minmax(300px, 1fr) minmax(180px, 260px); gap: 10px; min-height: 100%; }
+.copal-pane { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
+.copal-pane-header { min-height: 36px; display: flex; align-items: center; gap: 6px; padding: 7px 9px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 650; }
+.copal-pane-header > span:first-child { flex: 1; }
+.copal-pane-header .copal-btn { height: 24px; padding: 3px 7px; }
+.copal-scroll { max-height: calc(100vh - 124px); overflow: auto; }
+.copal-doc-row { width: 100%; height: auto; display: block; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); background: transparent; color: var(--fg); padding: 8px 9px; text-align: left; overflow-wrap: anywhere; line-height: 1.25; cursor: pointer; font: inherit; }
+.copal-doc-row:hover, .copal-doc-row.active { background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+.copal-doc-row small { display: block; margin-top: 2px; opacity: .48; font-size: 9px; }
+.copal-editor-wrap { display: flex; flex-direction: column; min-height: calc(100vh - 96px); }
+.copal-editor-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border-bottom: 1px solid var(--border); }
+.copal-editor-name { flex: 1; font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-editor { flex: 1; width: 100%; min-height: 360px; resize: none; border: 0; outline: 0; background: var(--bg); color: var(--fg); padding: 14px; font: 12px/1.65 var(--font-family, ui-monospace, monospace); tab-size: 2; }
+.copal-inspector-section { padding: 9px; border-bottom: 1px solid var(--border); font-size: 10px; }
+.copal-inspector-section h3 { margin: 0 0 7px; font-size: 10px; color: var(--accent, var(--red)); }
+.copal-chip { display: inline-flex; align-items: center; gap: 4px; margin: 2px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--fg); font: inherit; font-size: 9px; cursor: pointer; }
+.copal-chip:hover { border-color: var(--accent, var(--red)); }
+.copal-story { display: flex; align-items: flex-start; gap: 10px; overflow-x: auto; min-height: calc(100vh - 96px); padding-bottom: 12px; }
+.copal-tiddler { flex: 0 0 min(520px, 86vw); border: 1px solid var(--border); border-radius: 9px; background: var(--panel); overflow: hidden; }
+.copal-tiddler.pinned { border-color: color-mix(in srgb, var(--accent, var(--red)) 58%, var(--border)); }
+.copal-tiddler-head { display: flex; align-items: center; gap: 5px; padding: 8px 9px; border-bottom: 1px solid var(--border); }
+.copal-tiddler-head strong { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-tiddler-body { padding: 12px; max-height: calc(100vh - 170px); overflow: auto; line-height: 1.55; }
+.copal-tiddler-body h1, .copal-tiddler-body h2, .copal-tiddler-body h3 { color: var(--accent, var(--red)); }
+.copal-tiddler-body pre { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.copal-wiki-editor { min-height: calc(100vh - 230px); }
+.copal-tiddler-links { border-top: 1px solid var(--border); border-bottom: 0; }
+.copal-transclusion { margin: 8px 0; padding: 8px; border-left: 3px solid var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 5%, transparent); }
+.copal-attachment { display: block; max-width: 100%; max-height: 70vh; margin: 8px 0; border: 1px solid var(--border); border-radius: 7px; object-fit: contain; }
+.copal-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.copal-card { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 10px; min-width: 0; }
+.copal-card h2, .copal-card h3 { margin: 0 0 8px; font-size: 12px; color: var(--accent, var(--red)); }
+.copal-card p { font-size: 10px; opacity: .72; }
+.copal-progress { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--fg) 12%, transparent); }
+.copal-progress > span { display: block; height: 100%; background: var(--accent, var(--red)); }
+.copal-lesson-player { margin: 10px 0; max-height: 52vh; overflow: auto; }
+.copal-treehouse-workspace { min-height: 100%; }
+.copal-treehouse-rolebar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 42px; margin: -12px -12px 10px; padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.copal-treehouse-rolebar > strong { color: var(--accent, var(--red)); }
+.copal-treehouse-rolebar select { min-width: 180px; max-width: min(360px, 55vw); border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--fg); padding: 5px; }
+.copal-treehouse-rolebar > span { margin-left: auto; font-size: 9px; opacity: .55; }
+.copal-treehouse-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 8px; }
+.copal-treehouse-summary .copal-card { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 3px 8px; }
+.copal-treehouse-summary h3 { grid-column: 1 / -1; }
+.copal-treehouse-summary strong { font-size: 19px; color: var(--accent, var(--red)); }
+.copal-treehouse-summary small { opacity: .48; text-align: right; }
+.copal-treehouse-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
+.copal-treehouse-content { min-width: 0; }
+.copal-treehouse-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0 10px; }
+.copal-treehouse-section-head h2 { margin: 0; color: var(--accent, var(--red)); font-size: 15px; }
+.copal-treehouse-section-head p { margin: 3px 0 0; }
+.copal-treehouse-course > header, .copal-treehouse-module > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.copal-treehouse-state { border: 1px solid var(--border); border-radius: 999px; padding: 2px 6px; font-size: 8px; text-transform: uppercase; letter-spacing: .04em; }
+.copal-treehouse-state.published { border-color: #3d9b72; color: #60c99a; }
+.copal-treehouse-state.archived { opacity: .55; }
+.copal-treehouse-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.copal-treehouse-detail { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+.copal-treehouse-detail > h2 { color: var(--accent, var(--red)); }
+.copal-treehouse-module { margin-bottom: 9px; }
+.copal-treehouse-activity { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; margin: 7px 0; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+.copal-treehouse-activity.complete { border-color: #3d9b72; }
+.copal-treehouse-activity small { display: block; margin-top: 2px; opacity: .52; }
+.copal-treehouse-activity details { grid-column: 1 / -1; }
+.copal-treehouse-activity summary { cursor: pointer; color: var(--accent, var(--red)); font-size: 10px; }
+.copal-treehouse-activity .copal-tiddler-body { max-height: 45vh; margin-top: 5px; border-top: 1px solid var(--border); }
+.copal-treehouse-skill.locked { opacity: .62; border-style: dashed; }
+.copal-treehouse-skill-map { margin-bottom: 10px; }
+.copal-treehouse-skill-map ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.copal-treehouse-skill-map li { border-left: 3px solid var(--accent, var(--red)); background: var(--bg); padding: 6px 8px; font-size: 9px; }
+.copal-treehouse-skill-map li span { opacity: .62; }
+.copal-treehouse-order { display: inline-flex; gap: 3px; }
+.copal-treehouse-order .copal-btn { min-width: 26px; padding-inline: 5px; }
+.copal-treehouse-evidence, .copal-treehouse-grading, .copal-treehouse-events { margin-top: 10px; }
+.copal-treehouse-events { max-height: 55vh; overflow: auto; }
+.copal-treehouse-dialog { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.copal-treehouse-field { display: block; margin: 8px 0; }
+.copal-treehouse-field > span { display: block; margin-bottom: 3px; font-size: 10px; }
+.copal-treehouse-field input, .copal-treehouse-field textarea, .copal-treehouse-field select { width: 100%; box-sizing: border-box; }
+.copal-treehouse-field input[type="checkbox"] { width: auto; }
+.copal-treehouse-feedback.error { color: var(--color-error, #e06c75); }
+.copal-timeline-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.copal-track-filter { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; }
+.copal-timeline-scroll { overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); cursor: grab; }
+.copal-timeline-window .copal-view { display: flex; flex-direction: column; overflow: hidden; }
+.copal-timeline-window .copal-timeline-toolbar { flex: 0 0 auto; }
+.copal-timeline-window .copal-timeline-scroll { flex: 1; min-height: 0; }
+.copal-timeline-scroll.dragging { cursor: grabbing; user-select: none; }
+.copal-timeline { position: relative; min-width: 1200px; padding: 28px 0 8px; }
+.copal-timeline-axis { position: absolute; inset: 0 0 auto 150px; height: 26px; border-bottom: 1px solid var(--border); }
+.copal-timeline-tick { position: absolute; top: 5px; font-size: 8px; opacity: .5; transform: translateX(-50%); }
+.copal-timeline-today { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent, var(--red)); z-index: 1; }
+.copal-track { position: relative; height: 56px; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+.copal-track-label { position: sticky; left: 0; z-index: 8; width: 142px; height: 100%; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: var(--panel); border-right: 1px solid var(--border); font-size: 10px; }
+.copal-track-label > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-track-overlap { flex: 0 0 auto; min-width: 31px; height: 23px; border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--panel)); color: var(--accent, var(--red)); padding: 0 5px; font: inherit; font-size: 9px; cursor: pointer; }
+.copal-track-overlap:hover, .copal-track-overlap:focus-visible { border-color: var(--accent, var(--red)); outline: none; }
+.copal-event { position: absolute; top: 10px; height: 34px; min-width: 22px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid color-mix(in srgb, var(--event-color, var(--accent)) 68%, white); border-radius: 6px; background: color-mix(in srgb, var(--event-color, var(--accent)) 30%, var(--bg)); color: var(--fg); padding: 5px 7px; font: inherit; font-size: 9px; cursor: pointer; z-index: calc(2 + var(--stack-index, 0)); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); }
+.copal-track:not(.expanded)[data-lanes]:not([data-lanes="1"]) .copal-event { opacity: .92; }
+.copal-track.expanded { background: color-mix(in srgb, var(--accent, var(--red)) 2.5%, var(--panel)); }
+.copal-track.expanded .copal-event { z-index: 2; opacity: 1; }
+.copal-event.fuzzy { border-style: dashed; mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
+.copal-event.done { opacity: .42; text-decoration: line-through; }
+.copal-calendar { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 6px; min-width: 850px; }
+.copal-day { min-height: 130px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 6px; }
+.copal-day > strong { font-size: 10px; }
+.copal-day-event { display: block; margin-top: 5px; padding: 4px; border-left: 2px solid var(--accent, var(--red)); background: var(--bg); font-size: 8px; }
+.copal-graph { width: 100%; min-height: 620px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.copal-graph line { stroke: color-mix(in srgb, var(--fg) 28%, transparent); stroke-width: 1; }
+.copal-graph circle { fill: color-mix(in srgb, var(--accent, var(--red)) 35%, var(--panel)); stroke: var(--accent, var(--red)); cursor: pointer; }
+.copal-graph text { fill: var(--fg); font: 9px var(--font-family, sans-serif); pointer-events: none; }
+.copal-mind-tree ul { list-style: none; border-left: 1px solid var(--border); margin: 4px 0 4px 10px; padding-left: 12px; }
+.copal-mind-tree li { margin: 5px 0; font-size: 10px; }
+.copal-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.copal-table th, .copal-table td { border: 1px solid var(--border); padding: 6px; text-align: left; vertical-align: top; }
+.copal-table th { color: var(--accent, var(--red)); background: var(--panel); position: sticky; top: 0; }
+.copal-bases-workspace { display: grid; grid-template-columns: minmax(155px, 210px) minmax(0, 1fr); gap: 10px; min-height: 100%; }
+.copal-base-browser { min-height: 0; }
+.copal-base-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.copal-base-toolbar { min-height: 42px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 9px; border-bottom: 1px solid var(--border); }
+.copal-base-toolbar > strong { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-base-toolbar select { min-width: 110px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 5px; }
+.copal-base-count { margin-left: auto; font-size: 9px; opacity: .62; }
+.copal-base-table-wrap { flex: 1; min-height: 0; overflow: auto; }
+.copal-base-table { min-width: 680px; }
+.copal-base-table th { overflow: hidden; min-width: 80px; z-index: 2; }
+.copal-base-sort { width: 100%; min-height: 30px; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.copal-base-resize { position: absolute; inset: 0 0 0 auto; width: 8px; cursor: col-resize; touch-action: none; border-right: 2px solid transparent; }
+.copal-base-resize:hover, .copal-base-resize:focus-visible { border-right-color: var(--accent, var(--red)); outline: 0; }
+.copal-base-sort:focus-visible, .copal-base-cell:focus-visible { outline: 2px solid var(--accent, var(--red)); outline-offset: -2px; }
+.copal-base-cell { width: 100%; min-height: 30px; border: 0; background: transparent; color: inherit; padding: 4px; text-align: left; overflow-wrap: anywhere; font: inherit; cursor: pointer; }
+.copal-base-cell:hover { background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); }
+.copal-base-group th { top: 31px; color: var(--fg); background: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--panel)); }
+.copal-base-table tfoot td { position: sticky; bottom: 0; background: var(--panel); color: var(--accent, var(--red)); font-weight: 650; }
+.copal-base-pagination { min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 5px; border-top: 1px solid var(--border); font-size: 10px; }
+.copal-base-diagnostic { margin: 5px 9px; padding: 6px 8px; border-left: 3px solid var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 6%, transparent); font-size: 9px; }
+.copal-base-diagnostic.error, .copal-base-feedback.error { color: var(--color-error, #e06c75); }
+.copal-base-field { display: block; margin: 8px 0; }
+.copal-base-field > span { display: block; margin-bottom: 3px; font-size: 10px; }
+.copal-base-designer { width: min(720px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.copal-base-designer textarea { resize: vertical; font-family: ui-monospace, monospace; }
+.copal-task-row { display: flex; align-items: flex-start; gap: 7px; border-bottom: 1px solid var(--border); padding: 8px; font-size: 10px; }
+.copal-task-row.done span { opacity: .5; text-decoration: line-through; }
+.copal-task-row small { margin-left: auto; opacity: .45; }
+.copal-dialog { width: min(520px, calc(100vw - 24px)); border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--fg); padding: 14px; }
+.copal-dialog::backdrop { background: rgba(0,0,0,.58); }
+.copal-dialog label { display: block; margin: 8px 0 3px; font-size: 10px; }
+.copal-dialog input, .copal-dialog textarea, .copal-dialog select { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 7px; font: inherit; }
+.copal-dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 12px; }
+
+/* Clean-room Notes workspace: Obsidian-like information architecture expressed
+   entirely with Odysseus tokens and the installed upstream CodeMirror editor. */
+.copal-notes-window .copal-view { overflow: hidden; padding: 0; }
+.copal-notes-workspace { height: 100%; min-height: 0; display: grid; grid-template-columns: 42px minmax(170px, 225px) minmax(320px, 1fr) minmax(190px, 250px); background: var(--bg); }
+.copal-notes-ribbon { grid-column: 1; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 9px 5px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 88%, var(--bg)); }
+.copal-notes-ribbon button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: color-mix(in srgb, var(--fg) 66%, transparent); font: 16px/1 var(--font-family, sans-serif); cursor: pointer; }
+.copal-notes-ribbon button:hover, .copal-notes-ribbon button:focus-visible { color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent); }
+.copal-notes-explorer { grid-column: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 72%, var(--bg)); }
+.copal-notes-explorer > header { height: 38px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-bottom: 1px solid var(--border); }
+.copal-notes-explorer > header strong { flex: 1; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; opacity: .72; }
+.copal-notes-explorer > header .copal-btn { padding: 3px 5px; }
+.copal-file-tree { flex: 1; min-height: 0; overflow: auto; padding: 6px 4px 18px; font-size: 11px; }
+.copal-folder-row, .copal-file-row { width: 100%; min-height: 27px; display: flex; align-items: center; gap: 4px; border: 0; border-radius: 5px; background: transparent; color: var(--fg); padding: 3px 6px; text-align: left; font: inherit; cursor: pointer; }
+.copal-folder-row:hover, .copal-file-row:hover, .copal-file-row.active { background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+.copal-file-row.active { color: var(--accent, var(--red)); }
+.copal-tree-toggle { width: 17px; border: 0; background: transparent; color: inherit; padding: 0; }
+.copal-tree-children { margin-left: 11px; border-left: 1px solid color-mix(in srgb, var(--border) 65%, transparent); padding-left: 3px; }
+.copal-notes-main { grid-column: 3; min-width: 0; min-height: 0; display: grid; grid-template-rows: 36px minmax(0, 1fr) 24px; background: var(--bg); }
+.copal-note-tabs { min-width: 0; display: flex; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--panel); }
+.copal-note-tab { flex: 0 1 190px; min-width: 90px; display: flex; align-items: center; border-right: 1px solid var(--border); border-top: 2px solid transparent; }
+.copal-note-tab.active { border-top-color: var(--accent, var(--red)); background: var(--bg); }
+.copal-note-tab button { min-width: 0; border: 0; background: transparent; color: var(--fg); padding: 7px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; font-size: 10px; cursor: pointer; }
+.copal-note-tab button:first-child { flex: 1; text-align: left; }
+.copal-note-tab .copal-note-tab-pin, .copal-note-tab .copal-note-tab-close { flex: 0 0 auto; width: 24px; padding-inline: 4px; opacity: .42; }
+.copal-note-tab.pinned .copal-note-tab-pin { color: var(--accent, var(--red)); opacity: 1; }
+.copal-note-tab .copal-note-tab-close:disabled { cursor: not-allowed; opacity: .18; }
+.copal-note-leaves { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.copal-note-leaves.has-split { grid-template-columns: repeat(2, minmax(260px, 1fr)); }
+.copal-note-leaf { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.copal-note-leaf.split { border-left: 1px solid var(--border); }
+.copal-note-toolbar { min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 5px; padding: 5px 9px; border-bottom: 1px solid var(--border); }
+.copal-inline-title { flex: 1; min-width: 100px; border: 0; background: transparent; color: var(--fg); padding: 4px; font: 600 13px var(--font-family, sans-serif); }
+.copal-inline-title:focus { outline: 0; box-shadow: inset 0 -1px var(--accent, var(--red)); }
+.copal-segmented { display: inline-flex; gap: 2px; }
+.copal-segmented .copal-btn { padding: 4px 6px; opacity: .65; }
+.copal-segmented .copal-btn.active, .copal-btn.active { opacity: 1; color: var(--accent, var(--red)); background: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--bg)); border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border)); }
+.copal-note-editing-surface { min-width: 0; min-height: 0; display: grid; overflow: hidden; background: color-mix(in srgb, var(--bg) 96%, var(--panel)); }
+.copal-note-editing-surface.mode-live { grid-template-columns: minmax(260px, 1fr) minmax(240px, .82fr); }
+.copal-codemirror-host { min-width: 0; min-height: 0; overflow: hidden; }
+.copal-codemirror-host .cm-editor { height: 100%; }
+.copal-note-live-preview, .copal-note-reading { min-width: 0; overflow: auto; padding: 24px clamp(18px, 5vw, 72px); line-height: 1.7; font-size: 13px; }
+.copal-note-live-preview { border-left: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 38%, var(--bg)); }
+.copal-note-reading { max-width: 900px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+.copal-note-live-preview pre, .copal-note-reading pre { white-space: pre-wrap; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 9px; }
+.copal-note-live-preview code, .copal-note-reading code { border-radius: 4px; background: var(--panel); padding: 1px 4px; font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-note-live-preview blockquote, .copal-note-reading blockquote { margin-inline: 0; border-left: 3px solid var(--border); padding-left: 12px; opacity: .82; }
+.copal-callout { margin: 12px 0; border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 38%, var(--border)); border-left: 4px solid var(--accent, var(--red)); border-radius: 7px; background: color-mix(in srgb, var(--accent, var(--red)) 7%, var(--panel)); padding: 10px 12px; }
+.copal-callout p:last-child { margin-bottom: 0; }
+.copal-markdown-table { width: 100%; margin: 12px 0; border-collapse: collapse; font-size: .92em; }
+.copal-markdown-table th, .copal-markdown-table td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+.copal-markdown-table th { background: var(--panel); }
+.copal-markdown-task, .copal-markdown-bullet { padding-left: calc(8px + var(--indent, 0) * .55em); }
+.copal-markdown-task { display: flex; align-items: baseline; gap: 7px; }
+.copal-markdown-task input { accent-color: var(--accent, var(--red)); }
+.copal-markdown-tag { display: inline-block; border-radius: 999px; background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--panel)); padding: 0 5px; color: var(--accent, var(--red)); }
+.copal-inline-math { border-radius: 4px; background: color-mix(in srgb, #d946ef 16%, transparent); padding: 1px 4px; font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-code-block { position: relative; margin: 12px 0; }
+.copal-code-block figcaption { position: absolute; top: 7px; right: 54px; z-index: 1; font: 8px var(--font-mono, ui-monospace, monospace); opacity: .45; }
+.copal-code-copy { position: absolute; top: 4px; right: 4px; z-index: 2; padding: 3px 6px; }
+.copal-footnote { display: flex; gap: 7px; margin: 8px 0; border-top: 1px solid var(--border); padding-top: 7px; font-size: .9em; }
+.copal-footnote sup { color: var(--accent, var(--red)); }
+.copal-math-block { text-align: center; }
+.copal-note-status { display: flex; justify-content: flex-end; gap: 12px; padding: 4px 9px; border-top: 1px solid var(--border); font-size: 9px; opacity: .55; }
+.copal-notes-sidebar { grid-column: 4; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 72%, var(--bg)); }
+.copal-inspector-tabs { display: flex; gap: 3px; padding: 6px; border-bottom: 1px solid var(--border); }
+.copal-inspector-tabs .copal-btn { flex: 1; padding: 4px; }
+.copal-inspector-body { flex: 1; max-height: none; padding: 7px; }
+.copal-inspector-body h3 { margin: 10px 4px 4px; color: var(--accent, var(--red)); font-size: 10px; }
+.copal-property-row, .copal-outline-row { width: 100%; display: grid; grid-template-columns: minmax(70px, .7fr) minmax(0, 1fr); gap: 7px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: transparent; color: var(--fg); padding: 7px 5px; text-align: left; font: inherit; font-size: 9px; cursor: pointer; }
+.copal-property-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .6; }
+.copal-outline-row { display: block; padding-left: calc(5px + (var(--depth) - 1) * 10px); }
+.copal-switcher-results { max-height: 55vh; overflow: auto; margin-top: 8px; }
+.copal-notes-workspace.explorer-closed { grid-template-columns: 42px minmax(320px, 1fr) minmax(190px, 250px); }
+.copal-notes-workspace.explorer-closed .copal-notes-explorer { display: none; }
+.copal-notes-workspace.explorer-closed .copal-notes-main { grid-column: 2; }
+.copal-notes-workspace.explorer-closed .copal-notes-sidebar { grid-column: 3; }
+.copal-notes-workspace.sidebar-closed { grid-template-columns: 42px minmax(170px, 225px) minmax(320px, 1fr); }
+.copal-notes-workspace.sidebar-closed .copal-notes-sidebar { display: none; }
+.copal-notes-workspace.sidebar-closed .copal-notes-main { grid-column: 3; }
+.copal-notes-workspace.explorer-closed.sidebar-closed { grid-template-columns: 42px minmax(320px, 1fr); }
+.copal-notes-workspace.explorer-closed.sidebar-closed .copal-notes-main { grid-column: 2; }
+.copal-conflict-dialog { width: min(900px, calc(100vw - 32px)); }
+.copal-conflict-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.copal-conflict-comparison pre { max-height: 48vh; overflow: auto; white-space: pre-wrap; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 9px; }
+
+/* Timeline v2 shares one local-date coordinate system for headers, events,
+   today, range extension, and manipulation guides. */
+.copal-timeline-controls { position: relative; z-index: 3; }
+.copal-resolution { min-width: 46px; text-align: center; font: 9px ui-monospace, monospace; opacity: .65; }
+.copal-control-select { border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 5px; font: inherit; font-size: 10px; }
+.copal-track-filters { position: relative; font-size: 10px; }
+.copal-track-filters summary { border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+.copal-track-filters[open] { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.copal-timeline-v2 { min-width: 0; padding: 74px 0 8px; background-image: repeating-linear-gradient(90deg, transparent, transparent calc(var(--copal-day-width) - 1px), color-mix(in srgb, var(--border) 25%, transparent) calc(var(--copal-day-width) - 1px), color-mix(in srgb, var(--border) 25%, transparent) var(--copal-day-width)); background-position: var(--copal-label-width) 0; }
+.copal-date-header { position: absolute; inset: 0 0 auto 0; height: 74px; z-index: 10; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 96%, transparent); backdrop-filter: blur(8px); }
+.copal-timeline-corner { position: sticky; left: 0; z-index: 13; width: var(--copal-label-width); height: 74px; display: flex; align-items: center; box-sizing: border-box; border-right: 1px solid var(--border); padding: 10px; color: var(--accent, var(--red)); font-size: 12px; font-weight: 650; background: var(--panel); }
+.copal-month-row, .copal-day-row { position: absolute; top: 0; height: 38px; overflow: hidden; }
+.copal-day-row { top: 38px; height: 36px; border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+.copal-month-row span, .copal-day-row span { position: absolute; box-sizing: border-box; height: 100%; display: flex; align-items: center; border-left: 1px solid color-mix(in srgb, var(--border) 55%, transparent); padding: 0 7px; color: color-mix(in srgb, var(--fg) 70%, transparent); font-size: 10px; white-space: nowrap; }
+.copal-day-row span { justify-content: center; padding: 0; font-size: 9px; opacity: .65; }
+.copal-day-row span.weekend { background: color-mix(in srgb, var(--fg) 3%, transparent); opacity: .45; }
+.copal-day-row span.today { color: var(--accent, var(--red)); opacity: 1; font-weight: 700; }
+.copal-timeline-v2 .copal-timeline-today { top: 0; bottom: 8px; z-index: 9; background: var(--accent, var(--red)); box-shadow: 0 0 8px color-mix(in srgb, var(--accent, var(--red)) 60%, transparent); }
+.copal-timeline-today > span { position: sticky; top: 2px; margin-left: 3px; border-radius: 3px; background: var(--accent, var(--red)); color: var(--bg); padding: 1px 3px; font-size: 7px; font-weight: 700; }
+.copal-timeline-v2 .copal-track-label { width: var(--copal-label-width); box-sizing: border-box; z-index: 12; background: color-mix(in srgb, var(--panel) 96%, transparent); backdrop-filter: blur(8px); }
+.copal-track-dot { flex: 0 0 9px !important; width: 9px; height: 9px; border-radius: 50%; background: var(--track-color); }
+.copal-track-glyph { flex: 0 0 auto !important; font-size: 14px; }
+.copal-track-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.copal-track-edit { flex: 0 0 auto; border: 0; background: transparent; color: var(--fg); opacity: .45; cursor: pointer; }
+.copal-track-edit:hover, .copal-track-edit:focus-visible { opacity: 1; color: var(--accent, var(--red)); }
+.copal-timeline-v2 .copal-event { touch-action: none; user-select: none; padding: 5px 13px; box-sizing: border-box; }
+.copal-event.dragging { z-index: 40; cursor: grabbing; opacity: .96 !important; box-shadow: 0 0 0 2px var(--fg), 0 8px 22px rgba(0,0,0,.45); }
+.copal-event.saving { pointer-events: none; opacity: .55; }
+.copal-event-label { display: block; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.copal-resize-handle { position: absolute; inset-block: 0; width: 10px; cursor: ew-resize; opacity: .65; }
+.copal-resize-handle::after { content: ''; position: absolute; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: color-mix(in srgb, var(--fg) 78%, transparent); }
+.copal-resize-left { left: 0; } .copal-resize-left::after { left: 3px; }
+.copal-resize-right { right: 0; } .copal-resize-right::after { right: 3px; }
+.copal-resize-guide { position: absolute; top: 74px; bottom: 8px; z-index: 35; width: 2px; background: var(--accent, var(--red)); box-shadow: 0 0 9px color-mix(in srgb, var(--accent, var(--red)) 82%, transparent); pointer-events: none; }
+.copal-resize-guide[hidden] { display: none; }
+.copal-resize-guide span { position: sticky; top: 78px; display: inline-block; margin-left: 5px; border-radius: 4px; background: var(--accent, var(--red)); color: var(--bg); padding: 2px 5px; font: 700 9px ui-monospace, monospace; white-space: nowrap; }
+.copal-event-progress { position: absolute; inset: auto 0 0 0; height: 2px; background: linear-gradient(90deg, var(--accent, #22d3ee) var(--progress), transparent var(--progress)); pointer-events: none; }
+.copal-track.condensed.dots .copal-event { height: 18px; border-radius: 999px; padding-block: 2px; }
+.copal-track.condensed.waves .copal-event { border-style: dashed; border-radius: 50%; }
+.copal-track.condensed.tree .copal-event { border-left-width: 4px; border-radius: 2px 8px 8px 2px; }
+
+/* Rich event and track editors are native movable Odysseus windows. */
+.copal-event-editor-window .copal-modal-content { width: min(720px, calc(100% - 32px)); height: min(820px, calc(100dvh - 36px)); }
+.copal-track-editor-window .copal-modal-content { width: min(520px, calc(100% - 32px)); height: min(650px, calc(100dvh - 36px)); }
+.copal-event-editor-window .copal-view, .copal-track-editor-window .copal-view { overflow: auto; padding: 16px; }
+.copal-event-form, .copal-track-form { max-width: 760px; margin: 0 auto; }
+.copal-form-field { display: block; margin: 10px 0; font-size: 10px; }
+.copal-form-field > span { display: block; margin-bottom: 4px; color: color-mix(in srgb, var(--fg) 78%, transparent); }
+.copal-form-field > small, .copal-form-help { display: block; margin-top: 4px; opacity: .55; font-size: 9px; }
+.copal-form-field input, .copal-form-field textarea, .copal-form-field select { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--fg); padding: 8px; font: inherit; }
+.copal-form-field textarea { resize: vertical; }
+.copal-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.copal-check { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 10px; }
+.copal-event-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.copal-badge { border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; font-size: 9px; }
+.copal-badge.shared { border-color: #d946ef; color: #f0abfc; }
+.copal-badge.fuzzy { border-style: dashed; border-color: #a855f7; color: #c4b5fd; }
+.copal-badge.priority-high, .copal-badge.priority-critical { border-color: #ef4444; color: #fca5a5; }
+.copal-track-chip-list { max-height: 120px; display: flex; flex-wrap: wrap; gap: 5px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; padding: 7px; }
+.copal-track-chip { border: 1px solid var(--track-color, var(--border)); border-radius: 999px; background: transparent; color: var(--fg); padding: 3px 7px; font: inherit; font-size: 9px; cursor: pointer; opacity: .58; }
+.copal-track-chip.active { opacity: 1; background: color-mix(in srgb, var(--track-color) 18%, transparent); }
+.copal-stage-editor { margin-top: 13px; border-top: 1px solid var(--border); padding-top: 10px; }
+.copal-stage-editor > header { display: flex; align-items: center; justify-content: space-between; }
+.copal-stage-row { display: grid; grid-template-columns: auto minmax(100px, 1fr) minmax(115px, .45fr) repeat(3, auto); gap: 5px; align-items: center; margin-top: 6px; }
+.copal-stage-row input { min-width: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 6px; }
+.copal-event-advanced { margin-top: 12px; border: 1px solid var(--border); border-radius: 7px; padding: 8px; }
+.copal-event-advanced summary { cursor: pointer; font-size: 10px; }
+.copal-event-actions .danger { margin-right: auto; }
+.copal-color-palette, .copal-emoji-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.copal-color { width: 26px; height: 26px; border: 2px solid transparent; border-radius: 50%; background: var(--track-color); cursor: pointer; }
+.copal-color.active { border-color: var(--fg); transform: scale(1.08); }
+.copal-emoji-picker button { min-width: 32px; height: 30px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; }
+.copal-emoji-field { display: flex; align-items: center; gap: 7px; }
+.copal-emoji-preview { flex: 0 0 34px; text-align: center; font-size: 22px; }
+.copal-task-title { border: 0; background: transparent; color: inherit; padding: 0; text-align: left; font: inherit; cursor: pointer; }
+.copal-task-title:hover, .copal-task-title:focus-visible { color: var(--accent, var(--red)); }
+.copal-workspace-status.error { color: var(--color-error, #e06c75); opacity: 1; }
+
+@media (max-width: 1100px) {
+  .copal-notes-workspace { grid-template-columns: 42px minmax(160px, 210px) minmax(300px, 1fr); }
+  .copal-notes-sidebar { display: none; }
+  .copal-notes-workspace.explorer-closed, .copal-notes-workspace.explorer-closed.sidebar-closed { grid-template-columns: 42px minmax(300px, 1fr); }
+  .copal-notes-workspace.explorer-closed .copal-notes-main { grid-column: 2; }
+  .copal-note-editing-surface.mode-live { grid-template-columns: minmax(0, 1fr); }
+  .copal-note-live-preview { display: none; }
+}
+@media (max-width: 900px) {
+  .copal-workspace-header { height: auto; min-height: 48px; flex: 0 0 auto; flex-wrap: wrap; padding: 7px; }
+  .copal-workspace-title { min-width: 90px; }
+  .copal-workspace-status { order: 3; width: 100%; max-width: none; }
+  .copal-layout { grid-template-columns: minmax(130px, 35%) minmax(240px, 1fr); }
+  .copal-layout > .copal-pane:last-child { grid-column: 1 / -1; }
+  .copal-scroll { max-height: 35vh; }
+}
+@media (max-width: 600px) {
+  .copal-tool-modal { inset: 0; width: 100%; }
+  .copal-modal-content { position: relative !important; inset: auto !important; width: 100vw !important; height: 100dvh !important; max-width: none !important; max-height: none !important; margin: 0 !important; border-radius: 0; }
+  .copal-workspace-header .copal-btn span { display: none; }
+  .copal-layout { display: block; }
+  .copal-layout > .copal-pane { margin-bottom: 8px; }
+  .copal-editor-wrap { min-height: 60vh; }
+  .copal-story { min-height: 70vh; }
+  .copal-bases-workspace { display: block; }
+  .copal-base-browser { max-height: 150px; margin-bottom: 8px; }
+  .copal-treehouse-summary { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .copal-treehouse-rolebar > span { width: 100%; margin-left: 0; }
+  .copal-treehouse-section-head { align-items: flex-start; flex-direction: column; }
+  .copal-treehouse-activity { grid-template-columns: minmax(0, 1fr); }
+  .copal-window-actions { flex-wrap: wrap; }
+  .copal-window-actions .copal-search { flex-basis: 100%; max-width: none; }
+  .copal-header-secondary { display: none; }
+  .copal-notes-workspace { grid-template-columns: 38px minmax(0, 1fr); }
+  .copal-notes-explorer { display: none; }
+  .copal-notes-main { grid-column: 2; }
+  .copal-note-leaves.has-split { grid-template-columns: minmax(0, 1fr); }
+  .copal-note-leaf.split { display: none; }
+  .copal-conflict-comparison { grid-template-columns: minmax(0, 1fr); }
+  .copal-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .copal-stage-row { grid-template-columns: auto minmax(100px, 1fr) auto; }
+  .copal-stage-row input[type="date"], .copal-stage-row .copal-btn:nth-last-child(2), .copal-stage-row .copal-btn:nth-last-child(3) { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copal-tool-modal *, .copal-tool-modal *::before, .copal-tool-modal *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+
+/* Copal Notes workspace v2. This clean-room layer follows Odysseus tokens and
+   owns the recursive split/tab/leaf layout. Earlier selectors remain as safe
+   migration fallbacks for a saved v1 workspace. */
+.copal-notes-window .copal-workspace-header { height: 38px; min-height: 38px; flex-basis: 38px; padding-block: 3px; }
+.copal-notes-window .copal-workspace-title { min-width: 0; flex: 1; }
+.copal-notes-window .copal-workspace-title small { display: inline; margin-left: 7px; }
+.copal-notes-window .copal-window-actions { flex: 0 0 auto; justify-content: flex-end; }
+.copal-notes-window .copal-view { position: relative; }
+.copal-notes-workspace { position: relative; isolation: isolate; display: flex; grid-template-columns: none; height: 100%; min-width: 0; min-height: 0; overflow: hidden; --copal-left-width: 224px; --copal-right-width: 280px; }
+.copal-notes-ribbon { position: relative; z-index: 8; flex: 0 0 40px; width: 40px; grid-column: auto; padding: 7px 4px; }
+.copal-notes-explorer { position: relative; z-index: 7; flex: 0 0 var(--copal-left-width); width: var(--copal-left-width); grid-column: auto; overflow: visible; }
+.copal-notes-sidebar { position: relative; z-index: 7; flex: 0 0 var(--copal-right-width); width: var(--copal-right-width); grid-column: auto; overflow: visible; }
+.copal-sidebar-resize { position: absolute; inset-block: 0; z-index: 9; width: 7px; cursor: ew-resize; touch-action: none; }
+.copal-sidebar-resize.left { right: -4px; }
+.copal-sidebar-resize.right { left: -4px; }
+.copal-sidebar-resize::after { content: ''; position: absolute; inset-block: 0; left: 3px; width: 1px; background: transparent; }
+.copal-sidebar-resize:hover::after, .copal-sidebar-resize:focus-visible::after { background: var(--accent, var(--red)); }
+.copal-side-tabs { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+.copal-side-tabs button, .copal-inspector-tabs button { min-width: 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg); padding: 8px 3px 6px; font: inherit; font-size: 9px; cursor: pointer; opacity: .58; }
+.copal-side-tabs button.active, .copal-inspector-tabs button.active { border-bottom-color: var(--accent, var(--red)); color: var(--accent, var(--red)); opacity: 1; }
+.copal-side-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.copal-side-body > header { min-height: 34px; display: flex; align-items: center; gap: 5px; padding: 4px 7px; border-bottom: 1px solid var(--border); }
+.copal-side-body > header strong { flex: 1; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; opacity: .68; }
+.copal-file-sort { min-width: 62px; max-width: 82px; border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 8px; }
+.copal-file-selection { display: flex; align-items: center; gap: 4px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--panel)); font-size: 9px; }
+.copal-file-selection > span { flex: 1; }
+.copal-note-search-input { margin: 7px; width: calc(100% - 14px); box-sizing: border-box; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 7px 8px; font: inherit; }
+.copal-search-results { min-height: 0; overflow: auto; }
+.copal-file-entry { position: relative; display: flex; min-width: 0; border-radius: 5px; }
+.copal-file-entry.active { background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); }
+.copal-file-entry.selected { outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 66%, transparent); outline-offset: -1px; }
+.copal-file-entry .copal-file-row { flex: 1; min-width: 0; }
+.copal-file-entry .copal-file-row span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-file-kind { flex: 0 0 16px; width: 16px; text-align: center; opacity: .5; }
+.copal-file-menu, .copal-leaf-menu { position: relative; flex: 0 0 auto; }
+.copal-file-menu > summary, .copal-leaf-menu > summary { display: grid; place-items: center; min-width: 26px; height: 100%; list-style: none; cursor: pointer; opacity: .55; }
+.copal-file-menu > summary::-webkit-details-marker, .copal-leaf-menu > summary::-webkit-details-marker { display: none; }
+.copal-file-menu > summary::marker, .copal-leaf-menu > summary::marker { content: ''; }
+.copal-file-menu { width: 26px; }
+.copal-file-menu > summary { width: 26px; padding: 0; }
+.copal-popover-menu { position: absolute; top: calc(100% + 3px); right: 0; z-index: 50; min-width: 180px; display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 5px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.copal-popover-menu .copal-btn { width: 100%; border-color: transparent; text-align: left; }
+.copal-notes-main { position: relative; flex: 1 1 auto; grid-column: auto; display: flex; grid-template-rows: none; min-width: 0; min-height: 0; overflow: hidden; }
+.copal-note-split { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
+.copal-note-split.vertical { flex-direction: column; }
+.copal-note-split-child { min-width: 0; min-height: 0; display: flex; flex: 1 1 50%; overflow: hidden; }
+.copal-note-splitter { position: relative; z-index: 5; flex: 0 0 5px; background: var(--border); opacity: .55; touch-action: none; }
+.copal-note-split.horizontal > .copal-note-splitter { cursor: col-resize; }
+.copal-note-split.vertical > .copal-note-splitter { cursor: row-resize; }
+.copal-note-splitter:hover, .copal-note-splitter:focus-visible { background: var(--accent, var(--red)); opacity: 1; }
+.copal-note-group { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+.copal-note-group + .copal-note-group { border-left: 1px solid var(--border); }
+.copal-note-group-body { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
+.copal-note-tabs { flex: 0 0 34px; min-height: 34px; align-items: stretch; }
+.copal-note-tab { flex-basis: 170px; }
+.copal-note-tab-label { flex: 1; }
+.copal-tab-group-controls { margin-left: auto; display: flex; align-items: center; border-left: 1px solid var(--border); background: var(--panel); }
+.copal-tab-group-controls .copal-btn { min-width: 26px; border: 0; border-radius: 0; padding: 4px; }
+.copal-group-menu { min-width: 27px; height: 100%; }
+.copal-note-leaf { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) 24px; overflow: hidden; }
+.copal-note-view-header { min-width: 0; min-height: 58px; display: grid; grid-template-columns: minmax(120px, 1fr) auto auto; grid-template-rows: auto auto; align-items: center; gap: 0 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 62%, var(--bg)); }
+.copal-note-breadcrumb { grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--fg) 46%, transparent); font-size: 9px; }
+.copal-note-view-header .copal-inline-title { grid-column: 1; min-height: 30px; padding: 1px 2px; font-size: clamp(17px, 2vw, 25px); font-weight: 650; }
+.copal-leaf-mode { grid-column: 2; border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; font-size: 8px; opacity: .58; white-space: nowrap; }
+.copal-leaf-menu { grid-column: 3; height: 28px; }
+.copal-note-leaf-content { min-width: 0; min-height: 0; overflow: hidden; }
+.copal-note-editing-surface { width: 100%; height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+.copal-note-editing-surface.side-by-side { grid-template-columns: minmax(260px, 1fr) minmax(240px, .82fr); }
+.copal-note-editing-surface.side-by-side .copal-note-live-preview { display: block; }
+.copal-note-live-preview[hidden] { display: none !important; }
+.copal-codemirror-host { height: 100%; }
+.copal-codemirror-host[data-mode="source"] .cm-scroller { font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-note-status { min-width: 0; justify-content: flex-end; align-items: center; overflow: hidden; white-space: nowrap; opacity: .62; }
+.copal-note-status span { overflow: hidden; text-overflow: ellipsis; }
+.copal-save-state.unsaved { color: var(--color-warning, #f59e0b); }
+.copal-save-state.saving { color: var(--accent, var(--red)); }
+.copal-save-state.conflict { color: var(--color-error, #e06c75); font-weight: 700; }
+.copal-notes-sidebar > header { flex: 0 0 auto; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+.copal-notes-sidebar > header .copal-inspector-tabs { flex: 1; border: 0; }
+.copal-notes-sidebar > header > .copal-btn { margin-right: 5px; padding: 3px 6px; }
+.copal-inspector-body { min-height: 0; overflow: auto; }
+.copal-property-editor { display: grid; grid-template-columns: minmax(64px, .7fr) minmax(58px, .5fr) minmax(72px, 1fr) repeat(3, auto); gap: 4px; align-items: center; padding: 5px 2px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.copal-property-editor code { overflow: hidden; text-overflow: ellipsis; color: color-mix(in srgb, var(--fg) 70%, transparent); font-size: 9px; }
+.copal-property-editor input, .copal-property-editor select, .copal-property-add input, .copal-property-add select { min-width: 0; width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); padding: 5px; font: inherit; font-size: 9px; }
+.copal-property-key { font-family: var(--font-mono, ui-monospace, monospace) !important; color: color-mix(in srgb, var(--fg) 76%, transparent) !important; }
+.copal-property-editor input[type="checkbox"] { width: auto; justify-self: start; }
+.copal-property-editor .copal-btn { padding: 3px 6px; }
+.copal-property-add { display: grid; grid-template-columns: minmax(70px, .7fr) minmax(65px, .55fr) minmax(80px, 1fr) auto; gap: 4px; margin-top: 8px; }
+.copal-links-pane section { margin-bottom: 12px; }
+.copal-links-controls { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; padding: 6px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.copal-links-filter, .copal-links-sort { min-width: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); padding: 5px; font: inherit; font-size: 9px; }
+.copal-mention-row { width: 100%; display: grid; gap: 3px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--fg); padding: 7px 5px; text-align: left; font: inherit; cursor: pointer; }
+.copal-mention-row span { font-size: 9px; opacity: .58; }
+.copal-outline-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; padding-left: calc((var(--depth) - 1) * 10px); }
+.copal-outline-entry .copal-outline-row { min-width: 0; border-bottom: 0; }
+.copal-outline-entry .copal-btn { border: 0; padding: 3px 5px; opacity: .35; }
+.copal-outline-entry:hover .copal-btn, .copal-outline-entry .copal-btn:focus-visible { opacity: 1; }
+.copal-inspector-error { border: 1px solid color-mix(in srgb, var(--color-error, #e06c75) 55%, var(--border)); border-radius: 7px; padding: 8px; color: var(--color-error, #e06c75); }
+.copal-empty-inline, .copal-dialog-hint { margin: 8px; font-size: 9px; opacity: .55; }
+.copal-command-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; border: 0; border-radius: 5px; background: transparent; color: var(--fg); padding: 8px; text-align: left; font: inherit; cursor: pointer; }
+.copal-command-row:hover, .copal-command-row.active, .copal-doc-row.active { background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); }
+.copal-command-row kbd { opacity: .45; font: 9px var(--font-mono, ui-monospace, monospace); }
+.copal-notes-settings > label:not(.copal-check) { display: grid; gap: 4px; }
+
+/* First-party Copal inline Markdown decorations, rebased onto the active CM6
+   bundle. Syntax remains in the document and is revealed on active lines. */
+.copal-codemirror-host .cm-md-heading { color: var(--fg); font-weight: 650; }
+.copal-codemirror-host .cm-md-h1 { font-size: 1.85rem; line-height: 2.35rem; }
+.copal-codemirror-host .cm-md-h2 { font-size: 1.45rem; line-height: 2rem; }
+.copal-codemirror-host .cm-md-h3, .copal-codemirror-host .cm-md-h4, .copal-codemirror-host .cm-md-h5, .copal-codemirror-host .cm-md-h6 { font-size: 1.15rem; line-height: 1.75rem; }
+.copal-codemirror-host .cm-md-syntax-hidden { font-size: 0; opacity: 0; letter-spacing: 0; }
+.copal-codemirror-host .cm-md-strong { font-weight: 700; }
+.copal-codemirror-host .cm-md-emphasis { font-style: italic; }
+.copal-codemirror-host .cm-md-strike { text-decoration: line-through; opacity: .7; }
+.copal-codemirror-host .cm-md-highlight { border-radius: 2px; background: color-mix(in srgb, var(--color-warning, #f59e0b) 28%, transparent); }
+.copal-codemirror-host .cm-md-inline-code { border-radius: 4px; background: var(--panel); padding: 1px 4px; color: var(--accent, var(--red)); font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-codemirror-host .cm-md-inline-math { border-radius: 4px; background: color-mix(in srgb, #d946ef 18%, transparent); color: color-mix(in srgb, #d946ef 70%, var(--fg)); font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-codemirror-host .cm-md-wikilink { color: var(--accent, var(--red)); text-decoration: underline; text-underline-offset: 2px; }
+.copal-codemirror-host .cm-md-link { color: var(--accent, var(--red)); text-decoration: underline; text-underline-offset: 2px; }
+.copal-codemirror-host .cm-md-list-marker { color: var(--accent, var(--red)); font-weight: 700; }
+.copal-codemirror-host .cm-md-fence-marker { font-size: 0; opacity: 0; }
+.copal-codemirror-host .cm-md-tag { border-radius: 999px; background: color-mix(in srgb, var(--accent, var(--red)) 12%, var(--panel)); padding: 1px 5px; color: var(--accent, var(--red)); }
+.copal-codemirror-host .cm-md-task-checkbox { width: 14px; height: 14px; margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--accent, var(--red)); }
+.copal-codemirror-host .cm-md-quote-line { border-left: 3px solid var(--border); padding-left: 12px; color: color-mix(in srgb, var(--fg) 78%, transparent); }
+.copal-codemirror-host .cm-md-code-line { background: color-mix(in srgb, var(--panel) 58%, var(--bg)); font-family: var(--font-mono, ui-monospace, monospace); }
+.copal-codemirror-host .cm-md-frontmatter-card, .copal-codemirror-host .cm-md-table-widget, .copal-codemirror-host .cm-md-callout-widget, .copal-codemirror-host .cm-md-math-widget, .copal-codemirror-host .cm-md-footnote-widget, .copal-codemirror-host .cm-md-embed-widget, .copal-codemirror-host .cm-md-hr-widget { display: block; margin: 8px 0; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--panel) 68%, var(--bg)); padding: 9px; color: var(--fg); }
+.copal-codemirror-host .cm-md-hr-widget { border: 0; background: transparent; padding: 6px 0; }
+.copal-codemirror-host .cm-md-hr-widget hr { border: 0; border-top: 1px solid var(--border); }
+.copal-codemirror-host .cm-md-frontmatter-title { display: block; margin-bottom: 6px; color: color-mix(in srgb, var(--fg) 55%, transparent); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+.copal-codemirror-host .cm-md-frontmatter-list { display: grid; gap: 4px; }
+.copal-codemirror-host .cm-md-frontmatter-row { display: grid; grid-template-columns: minmax(90px, .55fr) minmax(120px, 1fr); gap: 7px; align-items: center; }
+.copal-codemirror-host .cm-md-frontmatter-key { overflow: hidden; text-overflow: ellipsis; font: 10px var(--font-mono, ui-monospace, monospace); opacity: .58; }
+.copal-codemirror-host .cm-md-frontmatter-input { min-width: 0; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); padding: 5px 7px; font: inherit; }
+.copal-codemirror-host .cm-md-table-widget { overflow-x: auto; }
+.copal-codemirror-host .cm-md-table-widget table { width: 100%; border-collapse: collapse; }
+.copal-codemirror-host .cm-md-table-widget th, .copal-codemirror-host .cm-md-table-widget td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; }
+.copal-codemirror-host .cm-md-callout-widget { border-left: 4px solid var(--accent, var(--red)); }
+.copal-codemirror-host .cm-md-callout-widget strong { display: block; margin-bottom: 5px; color: var(--accent, var(--red)); }
+.copal-codemirror-host .cm-md-callout-widget div { white-space: pre-wrap; }
+.copal-codemirror-host .cm-md-math-widget pre { margin: 0; white-space: pre-wrap; }
+.copal-codemirror-host .cm-md-footnote-widget { display: flex; gap: 7px; }
+.copal-codemirror-host .cm-md-footnote-marker, .copal-codemirror-host .cm-md-embed-kind { color: var(--accent, var(--red)); font: 9px var(--font-mono, ui-monospace, monospace); }
+.copal-codemirror-host .cm-md-embed-widget { display: inline-flex; align-items: center; gap: 7px; }
+.copal-codemirror-host .cm-md-embed-label { color: var(--accent, var(--red)); }
+
+.copal-canvas-view, .copal-base-leaf, .copal-asset-view { width: 100%; height: 100%; overflow: auto; }
+.copal-canvas-view { background-image: radial-gradient(color-mix(in srgb, var(--fg) 12%, transparent) 1px, transparent 1px); background-size: 18px 18px; }
+.copal-canvas-board { position: relative; min-width: 100%; min-height: 100%; }
+.copal-canvas-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.copal-canvas-edges line { stroke: color-mix(in srgb, var(--accent, var(--red)) 52%, var(--border)); stroke-width: 2; }
+.copal-canvas-node { position: absolute; box-sizing: border-box; overflow: auto; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--panel) 92%, var(--bg)); padding: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.28); }
+.copal-canvas-node small { color: var(--accent, var(--red)); font-size: 8px; text-transform: uppercase; }
+.copal-canvas-node p { white-space: pre-wrap; }
+.copal-base-leaf-toolbar { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--border); }
+.copal-base-leaf-toolbar strong { flex: 1; }
+.copal-base-leaf-toolbar span { opacity: .55; font-size: 9px; }
+.copal-asset-view { display: grid; place-items: center; padding: 18px; box-sizing: border-box; }
+.copal-asset-view img, .copal-asset-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
+.copal-asset-view audio { width: min(620px, 90%); }
+.copal-asset-view iframe { width: 100%; height: 100%; border: 0; }
+
+@media (max-width: 1100px) {
+  .copal-notes-workspace { grid-template-columns: none; }
+  .copal-notes-sidebar { position: absolute; inset: 0 0 0 auto; z-index: 20; max-width: min(82vw, var(--copal-right-width)); box-shadow: -12px 0 28px rgba(0,0,0,.42); }
+}
+@media (max-width: 760px) {
+  .copal-notes-window .copal-workspace-header { min-height: 38px; flex-wrap: nowrap; }
+  .copal-notes-window .copal-workspace-title small { display: none; }
+  .copal-notes-explorer { position: absolute; inset: 0 auto 0 0; z-index: 21; max-width: min(86vw, var(--copal-left-width)); box-shadow: 12px 0 28px rgba(0,0,0,.42); }
+  .copal-note-editing-surface.side-by-side { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(220px, 1fr)); }
+  .copal-note-live-preview { border-left: 0; border-top: 1px solid var(--border); }
+  .copal-note-view-header { grid-template-columns: minmax(100px, 1fr) auto; }
+  .copal-leaf-mode { display: none; }
+  .copal-leaf-menu { grid-column: 2; }
+  .copal-note-status span:nth-of-type(2), .copal-note-status span:nth-of-type(3) { display: none; }
 }

@@ -26,6 +26,7 @@ export const dict = {
   "tui.prompt.placeholder.normal": 'Posez votre question... "{{example}}"',
   "tui.prompt.placeholder.shell": 'Exécuter une commande... "{{example}}"',
   "tui.prompt.ghost": "{{prediction}}  (Tab pour accepter)",
+  "tui.paste.image.fallback_path": "Le modèle ne prend pas en charge la vision — chemin de l'image inséré. Utilisez /modalities pour l'activer",
   "tui.home.placeholder.example.todo": "Corriger un TODO dans le code",
   "tui.home.placeholder.example.stack": "Quelle est la stack technique de ce projet ?",
   "tui.home.placeholder.example.tests": "Réparer les tests cassés",
@@ -50,7 +51,7 @@ export const dict = {
   "tui.tips.shell_prefix":
     "Commencez un message par {highlight}!{/highlight} pour exécuter directement des commandes shell (ex. {highlight}!ls -la{/highlight})",
   "tui.tips.tab_agent":
-    "Appuyez sur {highlight}Tab{/highlight} ou {highlight}Shift+Tab{/highlight} pour basculer entre les agents Build, Plan et Compose",
+    "Appuyez sur {highlight}Tab{/highlight} ou {highlight}Shift+Tab{/highlight} pour basculer entre les agents Build, Plan, Compose et Orchestrator",
   "tui.tips.theme_mode":
     "Exécutez {highlight}/dark{/highlight} pour le mode sombre ou {highlight}/light{/highlight} pour le mode clair",
   "tui.tips.doc": "Exécutez {highlight}/doc{/highlight} pour ouvrir la documentation utilisateur",
@@ -63,7 +64,7 @@ export const dict = {
     "Exécutez {highlight}/share{/highlight} pour créer un lien public vers votre conversation sur opencode.ai",
   "tui.tips.drag_drop": "Glissez-déposez des images ou PDF dans le terminal pour les ajouter au contexte",
   "tui.tips.paste_image":
-    "Appuyez sur {highlight}Ctrl+V{/highlight} pour coller des images du presse-papiers dans l'invite",
+    "Appuyez sur {highlight}Ctrl+V{/highlight} pour coller des images du presse-papiers (sur macOS, utilisez Ctrl+V et non Cmd+V — le terminal intercepte Cmd+V)",
   "tui.tips.editor":
     "Appuyez sur {highlight}Ctrl+X E{/highlight} ou {highlight}/editor{/highlight} pour rédiger des messages dans votre éditeur externe",
   "tui.tips.init":
@@ -259,6 +260,42 @@ export const dict = {
   "tui.slash.deep-research.description":
     "rapport de recherche approfondi multi-sources et vérifié (exécute le workflow deep-research)",
 
+  // Built-in bundled skill descriptions (user-facing, decoupled from SKILL.md description which targets the LLM)
+  "tui.skill.docx-official.description": "Créer, modifier et lire des fichiers Microsoft Word (.docx)",
+  "tui.skill.xlsx-official.description": "Créer, modifier et lire des classeurs Microsoft Excel (.xlsx)",
+  "tui.skill.pdf-official.description": "Créer, modifier, transformer et lire des fichiers PDF",
+  "tui.skill.pptx-official.description": "Créer, modifier et lire des présentations Microsoft PowerPoint (.pptx)",
+  "tui.skill.mimocode.description": "Documentation intégrée des fonctionnalités, config et commandes MiMoCode",
+  "tui.skill.evolve.description": "Réécrivez chaque couche de vous-même — outils, hooks, connaissances, workflows, même l'UI",
+  "tui.skill.frontend-design.description": "Conseils pour un design d'interface visuel distinctif et intentionnel",
+  "tui.skill.loop.description": "Planifier l'exécution récurrente d'un prompt",
+  "tui.skill.html-to-video-pipeline.description": "L'arme ultime pour vidéos courtes — créez des vidéos courtes avec du HTML",
+  "tui.skill.arxiv.description": "Rechercher, citer, télécharger et suivre des articles arXiv",
+  "tui.skill.skill-creator.description": "Créer, réviser et améliorer des skills d'agent",
+  "tui.skill.research-paper-writing.description": "Rédiger, polir et critiquer des articles académiques avec l'œil d'un relecteur",
+  "tui.skill.design-blueprint.description":
+    "Produire un plan de design (DESIGN.md + Decision Trace) avant tout mockup",
+  "tui.skill.super-research.description":
+    "Recherche autonome — expériences, revues, analyse quantitative, benchmarks, RCA, ablation, reproduction & rédaction d'articles",
+  "tui.skill.deep-research.description":
+    "Investigation multi-sources approfondie avec rapport cité et vérifié",
+  "tui.skill.modern-python-toolchain.description":
+    "Configuration de projet Python moderne avec uv, ruff et pyright",
+  "tui.skill.compose:ask.description": "Demander une décision ou clarification à l'utilisateur",
+  "tui.skill.compose:brainstorm.description": "Explorer les besoins et la conception avant l'implémentation",
+  "tui.skill.compose:debug.description": "Débogage systématique avant de proposer un correctif",
+  "tui.skill.compose:execute.description": "Exécuter un plan d'implémentation avec points de revue",
+  "tui.skill.compose:feedback.description": "Traiter les retours de revue de code avec rigueur technique",
+  "tui.skill.compose:merge.description": "Intégrer le travail terminé — merge, PR ou nettoyage",
+  "tui.skill.compose:parallel.description": "Exécuter des tâches indépendantes en parallèle",
+  "tui.skill.compose:plan.description": "Créer un plan d'implémentation étape par étape",
+  "tui.skill.compose:report.description": "Consolider l'implémentation en rapport final",
+  "tui.skill.compose:review.description": "Vérifier la conformité aux exigences avant merge",
+  "tui.skill.compose:subagent.description": "Déléguer des tâches indépendantes à des sous-agents",
+  "tui.skill.compose:tdd.description": "Développement piloté par les tests — tests avant le code",
+  "tui.skill.compose:verify.description": "Lancer la vérification et confirmer la réussite",
+  "tui.skill.compose:worktree.description": "Créer un espace de travail isolé pour le développement",
+
   // Language switching
   "tui.command.language.switch.title": "Changer de langue",
   "tui.command.language.switch.description": "Modifier la langue d'affichage",
@@ -276,12 +313,23 @@ export const dict = {
   "tui.command.model.cycle_favorite.title": "Favoris",
   "tui.command.model.cycle_favorite_reverse.title": "Favoris (inverse)",
   "tui.command.agent.list.title": "Changer d'agent",
+  "tui.command.modalities.title": "Configurer les modalités d'entrée",
+  "tui.modalities.title": "Modalités d'entrée — {{model}}",
+  "tui.modalities.saved": "Modalités d'entrée mises à jour : {{modalities}}",
+  "tui.modalities.no_model": "Aucun modèle sélectionné",
+  "tui.modalities.hint.toggle": "basculer",
+  "tui.modalities.hint.save": "enregistrer",
   "tui.command.mcp.list.title": "Activer/désactiver MCP",
   "tui.command.never_ask.title_on": "Sans questions : ACTIVÉ (auto-décider, autorisations exclues) — cliquer pour désactiver",
   "tui.command.never_ask.title_off": "Sans questions : DÉSACTIVÉ — cliquer pour activer (auto-décider, autorisations exclues)",
   "tui.command.never_ask.toast_on":
     "Sans questions ACTIVÉ — je ne te demanderai rien ; je choisirai moi-même la meilleure option jusqu'à ce que tu le désactives (/never-ask). Les demandes d'autorisation nécessitent toujours ton approbation.",
   "tui.command.never_ask.toast_off": "Sans questions DÉSACTIVÉ — je te redemanderai aux points de décision.",
+  "tui.command.skip_permissions.title_on": "Ignorer les autorisations : ACTIVÉ (auto-approuver les demandes) — cliquer pour désactiver",
+  "tui.command.skip_permissions.title_off": "Ignorer les autorisations : DÉSACTIVÉ — cliquer pour activer (auto-approuver les demandes)",
+  "tui.command.skip_permissions.toast_on":
+    "Ignorer les autorisations ACTIVÉ — demandes auto-approuvées (sous-agents inclus). Les commandes destructrices demandent encore, mais sont auto-rejetées après 60s sans réponse.",
+  "tui.command.skip_permissions.toast_off": "Ignorer les autorisations DÉSACTIVÉ — les demandes nécessitent à nouveau ton approbation.",
   "tui.command.agent.cycle.title": "Cycle d'agents",
   "tui.command.variant.cycle.title": "Cycle de variantes",
   "tui.command.variant.list.title": "Changer de variante de modèle",
@@ -351,6 +399,7 @@ export const dict = {
   "tui.toast.update_available.success": "Mis à jour vers MiMoCode v{{version}}. Veuillez redémarrer l'application.",
   "tui.toast.updated.title": "Mis à jour automatiquement",
   "tui.toast.updated.message": "Correctif appliqué automatiquement : v{{version}}. Redémarrez pour utiliser la nouvelle version. Désactivez avec autoupdate: false dans la configuration.",
+  "tui.toast.native_installer_tip": "Conseil : l'installateur natif (curl/PowerShell) est recommandé pour une meilleure expérience.",
   "tui.sidebar.instructions": "Instructions",
   "tui.sidebar.cwd": "Répertoire de travail",
   "tui.toast.unknown_error": "Une erreur inconnue s'est produite",
@@ -375,6 +424,9 @@ export const dict = {
   "tui.command.session.timeline.title": "Aller à un message",
   "tui.command.session.fork.title": "Dupliquer la session",
   "tui.command.session.compact.title": "Compacter la session",
+  "tui.command.session.ask.title": "Poser une question annexe",
+  "tui.command.session.ask.description": "Posez une question à la session actuelle sans la perturber",
+  "tui.command.session.ask.placeholder": "Poser une question annexe…",
   "tui.command.session.unshare.title": "Annuler le partage",
   "tui.command.session.undo.title": "Annuler le message précédent",
   "tui.command.session.redo.title": "Rétablir",
@@ -512,4 +564,13 @@ export const dict = {
   "trust.dangerous.advice_root": "Sauf raison très spécifique, NE faites PAS confiance à la racine du système de fichiers.",
   "trust.dangerous.option.yes": "Je comprends les risques, faire confiance pour cette session",
   "trust.dangerous.option.no": "Quitter (recommandé)",
+  "skip_permissions.title": "AVERTISSEMENT : mode contournement des permissions",
+  "skip_permissions.body":
+    "Vous avez démarré avec --dangerously-skip-permissions. MiMo Code va lire, modifier et exécuter des fichiers et lancer des commandes shell SANS demander d'approbation. Seules les règles que vous avez explicitement refusées (deny) dans la configuration restent appliquées. Vous êtes seul responsable de tout ce qu'il fait.",
+  "skip_permissions.plugin_warn":
+    "Dans ce mode, une invite, un fichier ou un plugin malveillant peut exécuter des commandes arbitraires et modifier ou exfiltrer vos données sans aucune confirmation.",
+  "skip_permissions.root_warn":
+    "Vous êtes en root. Contourner les permissions en root donne au modèle un contrôle illimité sur cette machine.",
+  "skip_permissions.option.no": "Non, quitter (recommandé)",
+  "skip_permissions.option.yes": "Oui, j'accepte les risques et veux ignorer les permissions",
 } satisfies Partial<Record<Keys, string>>

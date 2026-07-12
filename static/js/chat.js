@@ -2326,6 +2326,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _removeThinkingSpinner();
                 chatRenderer.renderAskUserCard(json.data || {});
 
+              } else if (json.type === 'permission_request') {
+                if (_isBg) continue;
+                // C1: the agent's turn is blocked server-side until the card
+                // answers (no timeout) — keep the stream open and render it.
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                chatRenderer.renderPermissionCard(json.data || {}, streamSessionId);
+
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
                 // Agent wrote back to the plan (ticked a step / revised). Update

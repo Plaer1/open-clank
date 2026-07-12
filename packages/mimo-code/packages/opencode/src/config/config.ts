@@ -98,6 +98,10 @@ const InfoSchema = Schema.Struct({
     description: "JSON schema reference for configuration validation",
   }),
   logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
+  env: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+    description:
+      "Environment variables to inject into the mimocode process and its child processes (e.g. the bash tool). A variable already set in the real environment takes precedence — config values only apply when the variable is not already set. Supports {env:VAR} and {file:path} substitution.",
+  }),
   server: Schema.optional(ConfigServer.Server).annotate({
     description: "Server configuration for mimo serve and web commands",
   }),
@@ -139,6 +143,10 @@ const InfoSchema = Schema.Struct({
   }),
   small_model: Schema.optional(ConfigModelID).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
+  }),
+  vision_model: Schema.optional(ConfigModelID).annotate({
+    description:
+      "Model to use for image/vision subagent tasks in the format of provider/model. If unset, a vision-capable model is chosen automatically (in-house models preferred, then cheapest).",
   }),
   model_groups: Schema.optional(
     Schema.Record(
@@ -338,6 +346,26 @@ const InfoSchema = Schema.Struct({
         description:
           "Memory search provider. 'native' uses the built-in FTS5 markdown index (default). 'frankenmemory' delegates to the fm-mcp Rust engine over MCP stdio.",
       }),
+      graph: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description:
+              "Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in frankenmemory. Requires memory.provider = 'frankenmemory'. Default: true.",
+          }),
+          model: Schema.optional(Schema.String).annotate({
+            description:
+              "Model for graph extraction as 'provider/model'. Default: the cheapest configured model (by input cost), falling back to the session default.",
+          }),
+          every_n_turns: Schema.optional(PositiveInt).annotate({
+            description:
+              "Extract from every Nth captured turn per session. Default: 1 (every turn). Raise to trade graph freshness for token spend.",
+          }),
+          min_interval_seconds: Schema.optional(NonNegativeInt).annotate({
+            description:
+              "Minimum seconds between extractions per session, applied on top of every_n_turns. Default: 0.",
+          }),
+        }),
+      ),
     }),
   ),
   history: Schema.optional(ConfigHistory.Info).annotate({
@@ -535,6 +563,14 @@ export const layer = Layer.effect(
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
 
+    // Keys injected by config `env`, mapped to the process.env value that
+    // existed before we first touched them (undefined = was unset). Lives in
+    // the layer closure so it survives instance disposal / config reload,
+    // matching process.env's lifetime. Lets a reload distinguish "set by the
+    // real environment" (defer) from "set by our own prior injection"
+    // (re-apply edits, restore on removal).
+    const injectedEnv = new Map<string, string | undefined>()
+
     const readConfigFile = Effect.fnUntraced(function* (filepath: string) {
       return yield* fs.readFileString(filepath).pipe(
         Effect.catchIf(
@@ -560,10 +596,16 @@ export const layer = Layer.effect(
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
-      if (!data.$schema) {
-        data.$schema = "https://opencode.ai/config.json"
-        const updated = text.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
-        yield* fs.writeFileString(options.path, updated).pipe(Effect.catch(() => Effect.void))
+      if (!data.$schema || data.$schema === "https://opencode.ai/config.json") {
+        data.$schema = "https://mimo.xiaomi.com/mimocode/config.json"
+        const edits = modify(text, ["$schema"], "https://mimo.xiaomi.com/mimocode/config.json", {
+          formattingOptions: { insertSpaces: true, tabSize: 2 },
+          isArrayInsertion: false,
+        })
+        if (edits.length) {
+          const updated = applyEdits(text, edits)
+          yield* fs.writeFileString(options.path, updated).pipe(Effect.catch(() => Effect.void))
+        }
       }
       return data
     })
@@ -590,13 +632,24 @@ export const layer = Layer.effect(
             .then(async (mod) => {
               const { provider, model, ...rest } = mod.default
               if (provider && model) result.model = `${provider}/${model}`
-              result["$schema"] = "https://opencode.ai/config.json"
+              result["$schema"] = "https://mimo.xiaomi.com/mimocode/config.json"
               result = mergeDeep(result, rest)
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
             })
             .catch(() => {}),
         )
+      }
+
+      // Seed a starter config when no global config file exists yet
+      const globalConfigFile = path.join(Global.Path.config, "mimocode.jsonc")
+      if (
+        !existsSync(path.join(Global.Path.config, "config.json")) &&
+        !existsSync(path.join(Global.Path.config, "mimocode.json")) &&
+        !existsSync(globalConfigFile)
+      ) {
+        const starter = '{\n  "$schema": "https://mimo.xiaomi.com/mimocode/config.json"\n}\n'
+        yield* fs.writeFileString(globalConfigFile, starter).pipe(Effect.catch(() => Effect.void))
       }
 
       return result
@@ -623,7 +676,7 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore"].join("\n"),
+            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore", ".cron-lock"].join("\n"),
           )
           .pipe(
             Effect.catchIf(
@@ -740,7 +793,7 @@ export const layer = Layer.effect(
             }
             const wellknown = (yield* Effect.promise(() => response.json())) as { config?: Record<string, unknown> }
             const remoteConfig = wellknown.config ?? {}
-            if (!remoteConfig.$schema) remoteConfig.$schema = "https://opencode.ai/config.json"
+            if (!remoteConfig.$schema) remoteConfig.$schema = "https://mimo.xiaomi.com/mimocode/config.json"
             const source = `${url}/.well-known/opencode`
             const next = yield* loadConfig(JSON.stringify(remoteConfig), {
               dir: path.dirname(source),
@@ -910,6 +963,13 @@ export const layer = Layer.effect(
           })
         }
 
+        if (Flag.MIMOCODE_DANGEROUSLY_SKIP_PERMISSIONS) {
+          // Allow-all base, merged UNDER user config so an explicit deny still
+          // wins. Matches `mimo run --dangerously-skip-permissions`: auto-approve
+          // everything not explicitly denied.
+          result.permission = mergeDeep({ "*": "allow" } as ConfigPermission.Info, result.permission ?? {})
+        }
+
         if (Flag.MIMOCODE_PERMISSION) {
           result.permission = mergeDeep(result.permission ?? {}, JSON.parse(Flag.MIMOCODE_PERMISSION))
         }
@@ -938,6 +998,34 @@ export const layer = Layer.effect(
         }
         if (Flag.MIMOCODE_DISABLE_PRUNE) {
           result.compaction = { ...result.compaction, prune: false }
+        }
+
+        const nextEnv = result.env ?? {}
+        // Reconcile keys we injected on a previous load that are no longer in
+        // config (removed/renamed): restore their original value so a config
+        // edit + reload takes effect without a process restart.
+        for (const [key, original] of injectedEnv) {
+          if (key in nextEnv) continue
+          if (original === undefined) {
+            delete process.env[key]
+            yield* env.remove(key)
+          } else {
+            process.env[key] = original
+            yield* env.set(key, original)
+          }
+          injectedEnv.delete(key)
+        }
+        for (const [key, value] of Object.entries(nextEnv)) {
+          // Defer to the real environment: only inject when the variable is
+          // not already set by something other than our own prior injection.
+          // A caller's runtime env (CI, container, `FOO=bar mimo`) is more
+          // specific than a persisted config default and must win. Matches
+          // Claude Code, where the settings field applies only when the env
+          // var is not set.
+          if (!injectedEnv.has(key) && process.env[key] !== undefined) continue
+          if (!injectedEnv.has(key)) injectedEnv.set(key, process.env[key])
+          process.env[key] = value
+          yield* env.set(key, value)
         }
 
         return {

@@ -107,6 +107,10 @@ def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
     """Clear a session model if its endpoint was deleted from ModelEndpoint."""
     if not getattr(sess, "endpoint_url", ""):
         return False
+    # mimo:// sessions are served by the agent brain over ACP — they have no
+    # ModelEndpoint row and are never orphaned.
+    if sess.endpoint_url.startswith("mimo://"):
+        return False
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
@@ -1279,6 +1283,7 @@ def setup_chat_routes(
                             _chunk_source = _mimo_sup.bridge.run_turn(
                                 session, messages, model=sess.model,
                                 cwd=workspace or None,
+                                owner=_user,
                             )
                         else:
                             async def _mimo_unavailable():
@@ -1331,6 +1336,7 @@ def setup_chat_routes(
                                     "rounds_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "permission_request",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
@@ -1468,6 +1474,30 @@ def setup_chat_routes(
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
         return {"stopped": stopped}
+
+    # ------------------------------------------------------------------ #
+    # POST /api/session/{session_id}/permission — resolve a pending mimo
+    # permission prompt (C1). The prompt waits forever server-side; this is
+    # the only way a blocked turn proceeds. option_id: once|always|reject
+    # ('always' also writes a durable grant in app.db, handler-side).
+    # ------------------------------------------------------------------ #
+    @router.post("/api/session/{session_id}/permission")
+    async def resolve_permission(
+        request: Request,
+        session_id: str,
+        request_id: str = Form(...),
+        option_id: str = Form(...),
+    ) -> Dict[str, Any]:
+        _verify_session_owner(request, session_id)
+        if option_id not in ("once", "always", "reject"):
+            raise HTTPException(400, "option_id must be once|always|reject")
+        sup = getattr(request.app.state, "mimo_supervisor", None)
+        handler = getattr(sup, "permission_handler", None) if sup else None
+        if handler is None:
+            raise HTTPException(503, "permission handler not available")
+        if not handler.resolve(request_id, option_id):
+            raise HTTPException(404, "no pending permission request with that id")
+        return {"ok": True}
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session

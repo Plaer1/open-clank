@@ -12,8 +12,63 @@ const log = Log.create({ service: "plugin.codex" })
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+
+type CodexModelCatalogEntry = {
+  slug?: unknown
+  visibility?: unknown
+}
+
+/**
+ * Return the account-entitled model slugs from the live Codex catalog.
+ * There is intentionally no source-code model allowlist here: the account
+ * endpoint is the authority for both newly-added models and plan visibility.
+ */
+export async function fetchCodexModelCatalog(
+  accessToken: string,
+  accountId?: string,
+): Promise<Set<string> | undefined> {
+  if (!accessToken) return undefined
+  try {
+    const headers = new Headers({
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      Origin: "https://chatgpt.com",
+      Referer: "https://chatgpt.com/codex",
+      "User-Agent": `mimo-code/${InstallationVersion}`,
+    })
+    if (accountId) headers.set("ChatGPT-Account-Id", accountId)
+    const response = await fetch(CODEX_MODELS_ENDPOINT, { headers })
+    if (!response.ok) {
+      log.warn("codex model catalog request failed", { status: response.status })
+      return undefined
+    }
+    const payload = (await response.json()) as { models?: unknown }
+    if (!Array.isArray(payload.models)) return undefined
+    const models = new Set<string>()
+    for (const entry of payload.models as CodexModelCatalogEntry[]) {
+      if (typeof entry?.slug !== "string" || !entry.slug.trim()) continue
+      const visibility = typeof entry.visibility === "string" ? entry.visibility.trim().toLowerCase() : ""
+      if (visibility === "hide" || visibility === "hidden") continue
+      models.add(entry.slug.trim())
+    }
+    return models
+  } catch (error) {
+    log.warn("codex model catalog request failed", { error: String(error) })
+    return undefined
+  }
+}
+
+export function modelMatchesCodexEntitlement(
+  modelId: string,
+  apiId: string,
+  entitledModels: Set<string>,
+): boolean {
+  const candidates = new Set([modelId, apiId, modelId.split("/").pop() ?? "", apiId.split("/").pop() ?? ""])
+  return [...candidates].some((candidate) => candidate.length > 0 && entitledModels.has(candidate))
+}
 
 interface PkceCodes {
   verifier: string
@@ -368,21 +423,16 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
-        // Filter models to only allowed Codex models for OAuth
-        const allowedModels = new Set([
-          "gpt-5.1-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.1-codex-mini",
-          "gpt-5.2",
-          "gpt-5.2-codex",
-          "gpt-5.3-codex",
-          "gpt-5.4",
-          "gpt-5.4-mini",
-        ])
+        // The account's live Codex catalog is the entitlement authority.
+        // Never replace it with a source-code allowlist or a model-name
+        // substring escape hatch: both hide new entitled models and expose
+        // API-only models unpredictably.
+        const authWithAccount = auth as typeof auth & { accountId?: string }
+        const entitledModels = await fetchCodexModelCatalog(auth.access, authWithAccount.accountId)
         for (const [modelId, model] of Object.entries(provider.models)) {
-          if (modelId.includes("codex")) continue
-          if (allowedModels.has(model.api.id)) continue
-          delete provider.models[modelId]
+          if (!entitledModels || !modelMatchesCodexEntitlement(modelId, model.api.id, entitledModels)) {
+            delete provider.models[modelId]
+          }
         }
 
         // Zero out costs for Codex (included with ChatGPT subscription)

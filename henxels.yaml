@@ -1,0 +1,34 @@
+# henxels.yaml — open-clank's repo contract.
+# Encodes the house rules management otherwise enforces by hand.
+# To disobey a rule, edit this file — that is the only sanctioned escape.
+# yaml-language-server: $schema=./.henxels/henxels.schema.json
+
+settings:
+  confirm_before_deleting:
+    over_lines: 50
+
+henxels:
+  - henxel: "Plans live in .futures/ and are markdown"
+    in: ./.futures/*
+    allowed_filetypes: .md
+
+  - henxel: "Clanker sidecar notes (test instructions, run records, audits) live in robonotes/ and are markdown — never in .claude/"
+    in: ./.robonotes/*
+    allowed_filetypes: .md
+
+  - henxel: "Reference clones stay out of git (.references/ is study material, not product)"
+    run_before_commit: 'test -z "$(git ls-files .references)"'
+
+  - henxel: "Claude is never attributed in commits — no Co-Authored-By, no 'Generated with' (project attribution happens later in one human pass)"
+    run_before_push: '! git log --format=%B | grep -qiE "co-authored-by:.*claude|generated with.*\[?claude"'
+
+  - henxel: "No credentials in first-party code"
+    in: [./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*]
+    no_secrets: true
+    level: warn
+
+  - henxel: "Glue/memory code changes update plans or robonotes (write it down as you go)"
+    changed_with:
+      when: [src/openclank/**, mcp_servers/**]
+      expect: [.futures/**, .robonotes/**]
+    level: warn

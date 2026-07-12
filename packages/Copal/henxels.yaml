@@ -1,0 +1,76 @@
+# henxels.yaml — repo-level contract for Copal.
+# Change a rule here to change the rules; that is the only sanctioned escape.
+# yaml-language-server: $schema=./.henxels/henxels.schema.json
+
+settings:
+  ask_me_before_staging: true
+  confirm_before_push: true
+  confirm_before_deleting:
+    over_lines: 5
+  warn_about_similar_files:
+    above: 0.86
+    ignore:
+      - "**/__init__.py"
+      - ".references/**"
+      - "treehouse/**"
+      - "servo-shell/target/**"
+      - "rust/**/target/**"
+      - "out/**"
+      - ".next/**"
+
+henxels:
+  - henxel: "Copal henxels are insular and must not import OpenClank/OpenClaw rules"
+    in: ./
+    why: "This repository owns its own contract. Do not copy, inherit, or synchronize rules from OpenClank, OpenClaw, or any other repo; reference repos stay evidence only."
+    forbidden_files:
+      - "./openclank*"
+      - "./openclaw*"
+      - "./.openclank/**"
+      - "./.openclaw/**"
+
+  - henxel: "Copal repo contract and launch surface stay present"
+    in: ./
+    why: "Copal must remain locally launchable and self-describing without borrowing another repo's rules."
+    required_files:
+      - AGENTS.md
+      - app.py
+      - henxels.yaml
+      - henxels.cant-stop-dont-stop-wont-stop.yaml
+      - open.sh
+      - package.json
+      - README.md
+
+  - henxel: "Copal source tree contains only app source filetypes"
+    in: ./src/*
+    why: "Application source lives under src/; vendored references and research imports must not drift into runtime source."
+    allowed_filetypes:
+      - .ts
+      - .tsx
+      - .css
+
+  - henxel: "Scripts are shell scripts"
+    in: ./scripts/*
+    why: "Repo automation here is small, reviewable shell glue."
+    allowed_filetypes: .sh
+
+  - henxel: "Plans live in .futures/ and are markdown"
+    in: ./.futures/*
+    allowed_filetypes: .md
+
+  - henxel: "Clanker sidecar notes (test instructions, run records, audits) live in robonotes/ and are markdown — never in .claude/"
+    in: ./robonotes/*
+    allowed_filetypes: .md
+
+  - henxel: "Reference clones stay out of git (references/ is study material, not product)"
+    run_before_commit: 'test -z "$(git ls-files references .references)"'
+
+  - henxel: "Claude is never attributed in commits — no Co-Authored-By, no 'Generated with' (project attribution happens later in one human pass)"
+    run_before_push: '! git log --format=%B | grep -qiE "co-authored-by:.*claude|generated with.*\[?claude"'
+
+  - henxel: "Reference imports remain isolated from Copal source"
+    why: "External projects and audits are references only; Copal code must not become a hidden fork of them."
+    forbidden_files:
+      - "./src/**/.references/**"
+      - "./src/**/treehouse/**"
+      - "./src/**/openclank/**"
+      - "./src/**/openclaw/**"

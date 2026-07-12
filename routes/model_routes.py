@@ -28,6 +28,8 @@ from src.endpoint_resolver import (
     build_models_url,
     build_headers,
 )
+from src.model_catalog import build_model_catalog
+from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,17 @@ _ENDPOINT_FALLBACK_FIELDS = {
     "utility_model_fallbacks": "Utility Model Fallbacks",
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
+
+
+def _catalog_entitlement(base_url: str, model_ids: list[str]) -> Optional[bool]:
+    """Mark live ChatGPT subscription discovery as entitled, not universal.
+
+    Other OpenAI-compatible endpoints do not expose subscription entitlement
+    semantics through this route, so their value remains unknown (``None``).
+    """
+    if is_chatgpt_subscription_base(base_url):
+        return bool(model_ids)
+    return None
 
 
 def _speech_settings_using_endpoint(settings: dict, ep_id: str) -> list:
@@ -507,8 +520,8 @@ _NON_CHAT_PREFIXES = (
     "snowflake/arctic-embed", "nvidia/nv-embed", "embed",
 )
 _NON_CHAT_CONTAINS = (
-    "-realtime", "-transcribe", "-tts", "-codex",
-    "codex-", "content-safety", "-safety", "-reward", "nvclip",
+    "-realtime", "-transcribe", "-tts", "content-safety", "-safety",
+    "-reward", "nvclip",
     "kosmos", "fuyu", "deplot", "vila", "neva",
     "gliner", "riva", "-parse", "-embedqa", "-nemoretriever",
     "topic-control", "calibration",
@@ -540,6 +553,33 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
+def _mimo_catalog(supervisor):
+    """Return one filtered Mimo catalog for every model-list consumer."""
+    if supervisor is None:
+        return [], [], [], 0
+    try:
+        models = [m.get("modelId", "") for m in supervisor.available_models() if m.get("modelId")]
+    except Exception:
+        return [], [], [], 0
+    original_count = len(models)
+    hidden = {item.strip() for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",") if item.strip()}
+    if hidden:
+        models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]
+    model_set = set(models)
+    base = [m for m in models if m.rsplit("/", 1)[0] not in model_set]
+    variants = [m for m in models if m.rsplit("/", 1)[0] in model_set]
+    return models, base, variants, original_count - len(models)
+
+
+def _mimo_display_names(base: list[str], variants: list[str]) -> dict[str, str]:
+    """Keep MiMo model names intact when ACP encodes reasoning effort in IDs."""
+    displays = {model_id: model_id.split("/", 1)[-1] for model_id in base}
+    for model_id in variants:
+        model, _, effort = model_id.rpartition("/")
+        displays[model_id] = f"{model.split('/', 1)[-1]} ({effort})"
+    return displays
+
+
 def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Optional[str] = None) -> bool:
     """Delete a ProviderAuthSession once no endpoint still references it."""
     if not auth_id:
@@ -565,6 +605,15 @@ def _safe_detect_provider(base_url: str) -> str:
     except Exception as exc:
         logger.debug("Provider detection failed for %s: %s", base_url, exc)
         return ""
+
+
+def _is_shadowed_model_item(item: dict, shadowed: set[str]) -> bool:
+    """Recognize a shadowed provider even when generic OpenAI detection wins."""
+    url = item.get("url", "")
+    if _safe_detect_provider(url).lower() in shadowed:
+        return True
+    host = (urlparse(url).hostname or "").lower()
+    return any(provider and provider in host for provider in shadowed)
 
 
 def _safe_build_models_url(base_url: str) -> str:
@@ -1307,6 +1356,21 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "catalog": build_model_catalog(
+                        endpoint_id=ep.id,
+                        endpoint_url=chat_url,
+                        model_ids=model_ids,
+                        primary_ids=curated,
+                        extra_ids=extra,
+                        discovered=True,
+                        entitled=_catalog_entitlement(base, model_ids),
+                        stale=False,
+                        capabilities={
+                            "chat": ep_model_type == "llm",
+                            "tools": getattr(ep, "supports_tools", None),
+                            "vision": None,
+                        },
+                    ),
                 })
             else:
                 # Endpoint unreachable but still show it greyed out
@@ -1323,6 +1387,7 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "catalog": [],
                     "offline": True,
                 })
 
@@ -1370,6 +1435,57 @@ def setup_model_routes(model_discovery):
         if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
             return cache_entry["data"]
         result = _fetch_models(owner=owner, is_admin=_is_admin)
+        # mimo reports up its own provider catalog (model authority lives in
+        # mimo's config, not the endpoint DB) — surface it as its own group.
+        _sup = getattr(request.app.state, "mimo_supervisor", None)
+        _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup)
+        if _mimo_models:
+            # A direct endpoint row can expose the same provider's public
+            # API catalog (notably DeepSeek) beside Mimo's subscription
+            # catalog. Suppress that duplicate picker group at the
+            # catalog boundary; the admin endpoint remains editable in
+            # Settings. Operators can opt out with an empty setting.
+            shadowed = {
+                provider.strip().lower()
+                for provider in os.environ.get("MIMO_SHADOW_ENDPOINT_PROVIDERS", "deepseek").split(",")
+                if provider.strip()
+            }
+            if shadowed:
+                result["items"] = [
+                    item for item in result["items"]
+                    if item.get("endpoint_id") == "mimo"
+                    or not _is_shadowed_model_item(item, shadowed)
+                ]
+
+            _mimo_displays = _mimo_display_names(_base, _variants)
+
+            result["items"].append({
+                "host": "custom",
+                "port": 0,
+                "url": "mimo://acp",
+                "models": _base,
+                # strip only the provider prefix: "anthropic/claude-x/low"
+                # must display as "claude-x/low", not "low"
+                "models_display": [_mimo_displays[mid] for mid in _base],
+                "models_extra": _variants,
+                "models_extra_display": [_mimo_displays[mid] for mid in _variants],
+                "catalog": build_model_catalog(
+                    endpoint_id="mimo",
+                    endpoint_url="mimo://acp",
+                    model_ids=_mimo_models,
+                    primary_ids=_base,
+                    extra_ids=_variants,
+                    display_names=_mimo_displays,
+                    discovered=True,
+                    entitled=True,
+                    capabilities={"chat": True, "tools": True, "vision": None},
+                ),
+                "endpoint_id": "mimo",
+                "endpoint_name": "MiMo (agent)",
+                "category": "local",
+                "endpoint_kind": "local",
+                "model_type": "llm",
+            })
         _models_cache[_cache_key] = {"data": result, "time": now}
         # Kick off background refresh to update caches from live endpoints
         _refresh_caches_bg(force=refresh)
@@ -1659,6 +1775,9 @@ def setup_model_routes(model_discovery):
                         if ping.get("loading"):
                             base = _normalize_base(r.base_url)
                             kind = _effective_endpoint_kind(r, base)
+                            catalog_primary, catalog_extra = _curate_models(
+                                visible, _match_provider_curated(base, _safe_detect_provider(base))
+                            )
                             results.append({
                                 "id": r.id,
                                 "name": r.name,
@@ -1673,6 +1792,21 @@ def setup_model_routes(model_discovery):
                                 "status": status,
                                 "ping_error": (ping or {}).get("error") if ping else None,
                                 "model_type": getattr(r, "model_type", None) or "llm",
+                                "catalog": build_model_catalog(
+                                    endpoint_id=r.id,
+                                    endpoint_url=build_chat_url(base),
+                                    model_ids=visible,
+                                    primary_ids=catalog_primary,
+                                    extra_ids=catalog_extra,
+                                    discovered=bool(all_models),
+                                    entitled=_catalog_entitlement(base, visible),
+                                    stale=status != "online",
+                                    capabilities={
+                                        "chat": (getattr(r, "model_type", None) or "llm") == "llm",
+                                        "tools": getattr(r, "supports_tools", None),
+                                        "vision": None,
+                                    },
+                                ),
                                 "supports_tools": getattr(r, "supports_tools", None),
                                 "endpoint_kind": kind,
                                 "category": _classify_endpoint(base, kind),
@@ -1699,6 +1833,9 @@ def setup_model_routes(model_discovery):
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
+                catalog_primary, catalog_extra = _curate_models(
+                    visible, _match_provider_curated(base, _safe_detect_provider(base))
+                )
                 results.append({
                     "id": r.id,
                     "name": r.name,
@@ -1713,12 +1850,70 @@ def setup_model_routes(model_discovery):
                     "status": status,
                     "ping_error": (ping or {}).get("error") if ping else None,
                     "model_type": getattr(r, "model_type", None) or "llm",
+                    "catalog": build_model_catalog(
+                        endpoint_id=r.id,
+                        endpoint_url=build_chat_url(base),
+                        model_ids=visible,
+                        primary_ids=catalog_primary,
+                        extra_ids=catalog_extra,
+                        discovered=bool(all_models),
+                        entitled=_catalog_entitlement(base, visible),
+                        stale=status != "online",
+                        capabilities={
+                            "chat": (getattr(r, "model_type", None) or "llm") == "llm",
+                            "tools": getattr(r, "supports_tools", None),
+                            "vision": None,
+                        },
+                    ),
                     "supports_tools": getattr(r, "supports_tools", None),
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
+                })
+
+            # Keep the settings catalog aligned with /api/models. MiMo is a
+            # virtual ACP endpoint, so it has no ModelEndpoint row to appear
+            # in the original admin list. Expose the same handshake catalog
+            # here so Default/Utility/Research settings can select it.
+            _sup = getattr(getattr(getattr(request, "app", None), "state", None), "mimo_supervisor", None)
+            _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup)
+            if _mimo_models:
+                _mimo_displays = _mimo_display_names(_base, _variants)
+                results.append({
+                    "id": "mimo",
+                    "name": "MiMo (agent)",
+                    "base_url": "mimo://acp",
+                    "has_key": False,
+                    "api_key_fingerprint": None,
+                    "is_enabled": True,
+                    "models": _mimo_models,
+                    "models_primary": _base,
+                    "models_extra": _variants,
+                    "catalog": build_model_catalog(
+                        endpoint_id="mimo",
+                        endpoint_url="mimo://acp",
+                        model_ids=_mimo_models,
+                        primary_ids=_base,
+                        extra_ids=_variants,
+                        display_names=_mimo_displays,
+                        discovered=True,
+                        entitled=True,
+                        capabilities={"chat": True, "tools": True, "vision": None},
+                    ),
+                    "pinned_models": [],
+                    "hidden_count": _hidden_count,
+                    "online": True,
+                    "status": "online",
+                    "ping_error": None,
+                    "model_type": "llm",
+                    "supports_tools": True,
+                    "endpoint_kind": "local",
+                    "category": "local",
+                    "model_refresh_mode": "manual",
+                    "model_refresh_interval": None,
+                    "model_refresh_timeout": None,
                 })
             return results
         finally:
@@ -2154,6 +2349,21 @@ def setup_model_routes(model_discovery):
             ep_id = settings.get("default_endpoint_id", "")
             model = settings.get("default_model", "")
             _fallbacks = settings.get("default_model_fallbacks") or []
+
+        if ep_id == "mimo":
+            _sup = getattr(request.app.state, "mimo_supervisor", None)
+            _catalog = []
+            if _sup is not None:
+                try:
+                    _catalog = [m.get("modelId", "") for m in _sup.available_models() if m.get("modelId")]
+                except Exception:
+                    _catalog = []
+            if not _catalog:
+                return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
+            if not model or model not in _catalog:
+                model = _catalog[0]
+            return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
+
         db = SessionLocal()
         try:
             ep = None

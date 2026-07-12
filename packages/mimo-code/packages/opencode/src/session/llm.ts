@@ -253,17 +253,19 @@ const live: Layer.Layer<
           .join("\n"),
       )
 
-      // v5: memory-instructions section. Teaches the main agent how/where/when
-      // to maintain `MEMORY.md` and `checkpoint.md` directly via Edit. Project
-      // ID is resolved from the ALS-bound Instance with a safe fallback to
+      // v5: memory-instructions section. Teaches the agent how/where/when to
+      // maintain `MEMORY.md` and `checkpoint.md` directly via Edit. Project ID is
+      // resolved from the ALS-bound Instance with a safe fallback to
       // `ProjectID.global` (mirrors the pattern in session/checkpoint.ts so the
       // path the prompt advertises matches the path the writer actually writes).
-      // Skip for system-spawned actors (e.g. checkpoint-writer): they shouldn't
-      // see the user-facing memory instructions.
-      const isSystemActor = input.agentID
-        ? yield* actorReg.isSystemSpawned(SessionID.make(input.sessionID), input.agentID)
-        : false
-      if (!isSystemActor) {
+      // Injected only for actors whose context the checkpoint flow serves —
+      // main + peer. Subagents (explore/general/compose) use per-actor compaction
+      // and have no checkpoint duty; system-spawned actors (checkpoint-writer et al.)
+      // are the writers themselves. Shares the exact `servesCheckpoint` judgement
+      // with SessionPrune.fireCheckpoints so the "who owns a checkpoint" and "who is
+      // taught about it" sets can never drift apart.
+      const servesCheckpoint = yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID)
+      if (servesCheckpoint) {
         const projectID =
           (yield* Effect.try({
             try: () => Instance.current?.project?.id as ProjectID | undefined,
@@ -279,20 +281,23 @@ const live: Layer.Layer<
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
       }
 
-      const header = system[0]
+      // Plugins still see the multi-part array (base prompt as [0], memory as a
+      // trailing element) so hooks that index or append parts keep working.
       yield* plugin.trigger(
         "experimental.chat.system.transform",
         { sessionID: input.sessionID, model: input.model },
         { system },
       )
-      // rejoin to maintain 2-part structure for caching if header unchanged
-      if (system.length > 2 && system[0] === header) {
-        const rest = system.slice(1)
-        system.length = 0
-        system.push(header, rest.join("\n"))
-      }
 
-      return system
+      // Collapse to a single system message. The historical 2-part split existed
+      // only to keep a byte-stable cache prefix separate from the memory block's
+      // per-session paths — but within a session those paths are fixed, so the
+      // whole thing is stable and one block caches just as well. One message also
+      // keeps the fork-prefix parity invariant trivial (nothing to misalign) and
+      // spares subagents/providers a stray extra system turn. Join with a blank
+      // line (\n\n) so adjacent markdown sections (base prompt, "# Memory system")
+      // don't run together into one heading.
+      return system.length <= 1 ? system : [system.filter((x) => x).join("\n\n")]
     })
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {

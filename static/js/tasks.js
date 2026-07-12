@@ -2458,7 +2458,7 @@ function _renderMainView() {
   body.innerHTML = `
     <div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;top:-2px;">
       <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
-        <h2 style="margin:0;padding:0;line-height:1;position:relative;top:-4px;">Ongoing Tasks <span id="tasks-head-count" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
+        <h2 style="margin:0;padding:0;line-height:1;position:relative;top:-4px;">Clanker Tasks <span id="tasks-head-count" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
         <button class="memory-toolbar-btn" id="tasks-pause-all-btn" title="Pause all active tasks" style="margin-left:auto;">Pause all</button>
       </div>
       <p class="memory-desc" style="position:relative;top:-4px;">Scheduled prompts and actions that run automatically. Results appear in a dedicated session.</p>
@@ -2539,14 +2539,14 @@ export function openTasks(focusId, opts) {
   modal.innerHTML = `
     <div class="modal-content tasks-modal-content">
       <div class="modal-header">
-        <h4 style="position:relative;top:-2px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>Tasks</h4>
+        <h4 style="position:relative;top:-2px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>Clanker Tasks</h4>
         <span style="flex:1"></span>
         <button class="close-btn" id="tasks-close">✖</button>
       </div>
       <div class="memory-tabs tasks-tabs" role="tablist">
         <button class="memory-tab tasks-tab active" data-tab="tasks" role="tab" aria-selected="true">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-          Tasks <span id="tasks-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
+          Clanker Tasks <span id="tasks-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
         </button>
         <button class="memory-tab tasks-tab" data-tab="activity" role="tab" aria-selected="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>

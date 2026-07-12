@@ -53,7 +53,8 @@ class _SessionStore:
         return self._store.get(key, default)
 
 
-def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
     import routes.compare_routes as cr
 
     monkeypatch.setattr(cr, "SessionLocal", lambda: _FakeDB())
@@ -64,7 +65,7 @@ def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
         SimpleNamespace(create_session=lambda **_: None, sessions={})
     )
     with pytest.raises(HTTPException) as exc:
-        start(
+        await start(
             _compare_request(),
             prompt="p",
             model_a="a",
@@ -76,7 +77,8 @@ def test_compare_start_rejects_unregistered_endpoint_for_non_admin(monkeypatch):
     assert exc.value.status_code == 403
 
 
-def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatch):
     # Regression: the followup must not blanket-reject non-admins. Compare
     # resolves endpoints by URL (no endpoint_id), so a caller comparing a
     # registered endpoint they own has to be allowed — only truly raw,
@@ -96,7 +98,7 @@ def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatc
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     # Must complete without raising 403.
-    start(
+    await start(
         _compare_request(),
         prompt="p",
         model_a="a",
@@ -111,7 +113,8 @@ def test_compare_start_allows_owned_registered_endpoint_for_non_admin(monkeypatc
         assert s.headers
 
 
-def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
     # bob owns the endpoint at this URL; alice supplying the same URL gets no
     # match from the owner-scoped lookup (owner_filter drops bob's private row),
     # so compare treats it exactly like a raw unregistered URL → 403. She can
@@ -137,7 +140,7 @@ def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     with pytest.raises(HTTPException) as exc:
-        start(
+        await start(
             _compare_request(user="alice"),
             prompt="p",
             model_a="a",
@@ -151,7 +154,8 @@ def test_compare_start_rejects_another_users_private_endpoint(monkeypatch):
     assert created == {}
 
 
-def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(monkeypatch):
     # Mixed request: endpoint A is a registered endpoint the caller owns,
     # endpoint B is a raw/unregistered URL. Both endpoints are resolved and
     # validated up front, so the unregistered B makes the WHOLE request 403 with
@@ -180,7 +184,7 @@ def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(mo
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     with pytest.raises(HTTPException) as exc:
-        start(
+        await start(
             _compare_request(),
             prompt="p",
             model_a="a",
@@ -194,7 +198,8 @@ def test_compare_start_rejects_before_creating_any_session_on_mixed_endpoints(mo
     assert created == {}
 
 
-def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
     # The session must dial the registered endpoint's OWN normalized base URL,
     # never the raw caller-supplied string. Mint the owned row with a base URL
     # that differs from the messy raw input so a regression to `endpoint_url=
@@ -217,7 +222,7 @@ def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     raw_url = "http://127.0.0.1:8000/v1/"  # trailing slash → not byte-identical
-    start(
+    await start(
         _compare_request(),
         prompt="p",
         model_a="a",
@@ -233,7 +238,8 @@ def test_compare_start_binds_session_to_registered_endpoint_url(monkeypatch):
         assert s.headers
 
 
-def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
     # Explicit admin/raw-endpoint behavior: an admin may pass a raw URL that
     # matches no registered endpoint. It is allowed (the reject helper is a
     # no-op for admins), the session keeps the raw URL, and — because nothing
@@ -254,7 +260,7 @@ def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     raw_url = "http://198.51.100.7:1234/v1"
-    start(
+    await start(
         _compare_request(user="root", is_admin=True),
         prompt="p",
         model_a="a",
@@ -270,7 +276,8 @@ def test_compare_start_admin_raw_endpoint_carries_no_borrowed_key(monkeypatch):
         assert s.headers == {}  # no borrowed key/headers
 
 
-def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
     # Two endpoints visible to the caller share a base_url but hold DIFFERENT
     # api_keys (e.g. two accounts on one provider). A base_url-only match returns
     # whichever row sorts first, so it can copy the WRONG key. Passing the
@@ -300,7 +307,7 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
     start = _compare_start_route(
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
-    start(
+    await start(
         _compare_request(),
         prompt="p",
         model_a="a",
@@ -319,7 +326,8 @@ def test_compare_start_prefers_endpoint_id_over_url(monkeypatch):
         assert s.headers == expected_headers
 
 
-def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
+@pytest.mark.asyncio
+async def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
     # An id the caller can't see (wrong owner / deleted) must 404 and must NOT
     # silently fall back to a same-URL row with a different key.
     import routes.compare_routes as cr
@@ -342,7 +350,7 @@ def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
         SimpleNamespace(create_session=_create_session, sessions=_SessionStore(created))
     )
     with pytest.raises(HTTPException) as exc:
-        start(
+        await start(
             _compare_request(),
             prompt="p",
             model_a="a",

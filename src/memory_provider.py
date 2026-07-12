@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -19,6 +20,7 @@ class MemoryRecord:
     owner: Optional[str] = None
     session_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    pinned: bool = False
 
 
 @dataclass
@@ -80,9 +82,44 @@ class MemoryProvider(ABC):
     ) -> List[MemoryRecord]:
         """List memories visible to the owner."""
 
+    async def get(
+        self,
+        memory_id: str,
+        *,
+        owner: Optional[str] = None,
+    ) -> Optional[MemoryRecord]:
+        """Return one memory visible to the owner."""
+        raise NotImplementedError(f"Provider {self.provider_id} does not support memory reads")
+
     @abstractmethod
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
         """Delete a memory by ID when allowed by the provider."""
+
+    async def update(
+        self,
+        memory_id: str,
+        *,
+        text: Optional[str] = None,
+        category: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> Optional[MemoryRecord]:
+        """Update a memory when the provider supports mutation."""
+        raise NotImplementedError(f"Provider {self.provider_id} does not support memory updates")
+
+    async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
+        """Set pinned state when the provider supports it."""
+        raise NotImplementedError(f"Provider {self.provider_id} does not support pinning")
+
+    async def groom(
+        self,
+        op: str,
+        *,
+        owner: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Run provider-native maintenance when supported."""
+        raise NotImplementedError(f"Provider {self.provider_id} does not support grooming")
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return provider-defined tool schemas when this provider is enabled."""
@@ -134,6 +171,7 @@ class NativeMemoryProvider(MemoryProvider):
             owner=entry.get("owner"),
             session_id=entry.get("session_id"),
             metadata=metadata,
+            pinned=bool(entry.get("pinned", metadata.get("pinned", False))),
         )
 
     async def remember(
@@ -222,6 +260,12 @@ class NativeMemoryProvider(MemoryProvider):
             for entry in self.memory_manager.load(owner=owner)[:limit]
         ]
 
+    async def get(self, memory_id: str, *, owner: Optional[str] = None) -> Optional[MemoryRecord]:
+        for entry in self.memory_manager.load(owner=owner):
+            if entry.get("id") == memory_id:
+                return self._to_record(entry)
+        return None
+
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
         memories = self.memory_manager.load_all()
         remaining = []
@@ -243,6 +287,44 @@ class NativeMemoryProvider(MemoryProvider):
         if self._vector_available():
             self.memory_vector.remove(deleted_id)
         return True
+
+    async def update(
+        self,
+        memory_id: str,
+        *,
+        text: Optional[str] = None,
+        category: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> Optional[MemoryRecord]:
+        memories = self.memory_manager.load_all()
+        for entry in memories:
+            if entry.get("id") != memory_id:
+                continue
+            if owner is not None and entry.get("owner") != owner:
+                return None
+            if text is not None:
+                entry["text"] = text.strip()
+            if category:
+                entry["category"] = category
+            entry["timestamp"] = int(time.time())
+            self.memory_manager.save(memories)
+            if self._vector_available() and text is not None:
+                self.memory_vector.remove(memory_id)
+                self.memory_vector.add(memory_id, entry["text"])
+            return self._to_record(entry)
+        return None
+
+    async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
+        memories = self.memory_manager.load_all()
+        for entry in memories:
+            if entry.get("id") != memory_id:
+                continue
+            if owner is not None and entry.get("owner") != owner:
+                return False
+            entry["pinned"] = bool(pinned)
+            self.memory_manager.save(memories)
+            return True
+        return False
 
     def _vector_available(self) -> bool:
         return bool(self.memory_vector and getattr(self.memory_vector, "healthy", True))

@@ -1337,7 +1337,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -4194,7 +4194,7 @@ async function _runTaskTour(steps, doneText, opts) {
 
   const modal = await _openTasksForTour();
   if (!modal) {
-    slashReply('Could not open Tasks. Try clicking the Tasks tool first.');
+    slashReply('Could not open Clanker Tasks. Try clicking the Clanker Tasks tool first.');
     return true;
   }
 
@@ -4349,12 +4349,12 @@ async function _runTaskTour(steps, doneText, opts) {
 async function _cmdTourTask1(args, ctx) {
   const result = await _runTaskTour([
     { sel: '#tasks-modal .modal-content',
-      text: '<b>Welcome to Tasks.</b> Manage all your AI background work here.' },
+      text: '<b>Welcome to Clanker Tasks.</b> Manage all your AI background work here.' },
     { sel: '#tasks-pause-all-btn',
       text: 'Tasks are <b>paused by default</b> — resume whichever ones make sense for you. (Or pause anything that\'s running.)' },
     { sel: '#tasks-modal .modal-body',
       text: 'When enabled, Tasks use the <b>utility model configured in Settings</b> for cleanup and organization jobs.' },
-  ], 'Use Tasks when you want Odysseus to handle background housekeeping.', {
+  ], 'Use Clanker Tasks when you want Odysseus to handle background housekeeping.', {
     continueLabel: 'continue →',
     continueText: '<b>Part 1 done.</b> Want to keep going into <b>adding & managing tasks</b>?',
   });
@@ -4381,7 +4381,7 @@ async function _cmdTourTask2(args, ctx) {
       text: 'You can also <b>just ask in chat</b> — say "every weekday at 9am check for urgent emails" and Odysseus will create the task for you.',
       before: () => document.getElementById('tasks-modal')?.classList.add('hidden'),
       after:  () => document.getElementById('tasks-modal')?.classList.remove('hidden') },
-  ], 'That\'s Tasks. Have it run the background bits so you can stay in chat.');
+  ], 'That\'s Clanker Tasks. Have it run the background bits so you can stay in chat.');
 }
 
 // ── Tour: Deep Research ──
@@ -6005,7 +6005,7 @@ const COMMANDS = {
   tasks: {
     alias: [],
     category: 'Tools',
-    help: 'Open Tasks',
+    help: 'Open Clanker Tasks',
     handler: (args, ctx) => _cmdToolPanel('tasks', args, ctx),
     usage: '/tasks'
   },

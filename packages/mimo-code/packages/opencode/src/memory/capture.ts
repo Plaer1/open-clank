@@ -2,12 +2,19 @@ import { Context, Effect, Layer } from "effect"
 import { Bus } from "../bus"
 import { Config } from "../config"
 import { MessageV2 } from "../session/message-v2"
-import { makeResolver } from "../history/resolve"
 import { Session } from "../session"
+import { Provider } from "../provider"
 import { Log } from "../util"
 import { getSharedMcpClient } from "./mcp-client"
+import { memorySessionScope } from "./session-scope"
 
 const log = Log.create({ service: "memory.capture" })
+
+// Messages produced by these agents never enter memory from this path:
+// compaction summaries are owned by compaction-capture.ts (capturing them
+// here too would double-store every summary), and any future utility agent
+// that streams session parts belongs on this list as well.
+const NON_CHAT_AGENTS = new Set(["compaction"])
 
 export interface Interface {
   readonly init: () => Effect.Effect<void>
@@ -21,6 +28,9 @@ async function captureTurn(
   sessionID: string,
   workspaceId: string,
   workspacePath: string,
+  owner: string,
+  userMessageID: string,
+  assistantMessageID: string,
 ) {
   if (!userText.trim()) return
   try {
@@ -28,88 +38,110 @@ async function captureTurn(
     await client.callTool({
       name: "capture",
       arguments: {
-        content: userText,
+        user_text: userText,
+        assistant_text: assistantText,
+        capture_mode: "raw_only",
         session_key: sessionID,
         session_id: sessionID,
         workspace_id: workspaceId,
         workspace_path: workspacePath,
+        owner,
+        source_event_id: `${sessionID}:${userMessageID}:${assistantMessageID}`,
+        source_message_ids: [userMessageID, assistantMessageID],
         source: "mimo",
       },
     })
-    if (assistantText.trim()) {
-      await client.callTool({
-        name: "capture",
-        arguments: {
-          content: assistantText,
-          session_key: sessionID,
-          session_id: sessionID,
-          workspace_id: workspaceId,
-          workspace_path: workspacePath,
-          source: "mimo_assistant",
-        },
-      })
-    }
   } catch (err) {
     log.warn("fm-mcp capture failed", { error: String(err) })
   }
 }
 
-export const layer: Layer.Layer<CaptureService, never, Bus.Service | Session.Service | Config.Service> = Layer.effect(
+export const layer: Layer.Layer<CaptureService, never, Bus.Service | Session.Service | Config.Service | Provider.Service> = Layer.effect(
   CaptureService,
   Effect.gen(function* () {
     const config = yield* Config.Service
-    const cfg = yield* config.get()
-    if (cfg.memory?.provider !== "frankenmemory") {
-      return CaptureService.of({ init: () => Effect.succeed(undefined) })
-    }
-
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
+    const providerSvc = yield* Provider.Service
 
-    const resolver = makeResolver()
+    // Everything instance-dependent happens inside init(), NOT at layer
+    // construction: the layer is memoized once per process, but Config and
+    // Bus subscriptions are InstanceState-scoped — subscribing here would
+    // register on whichever instance happened to be current at first demand
+    // and every other instance's sessions would capture nothing. init() runs
+    // once per instance from InstanceBootstrap (same idiom as
+    // Metrics.subscribe), and its subscriptions die with the instance state.
+    const init = () =>
+      Effect.gen(function* () {
+        const cfg = yield* config.get()
+        if (cfg.memory?.provider !== "frankenmemory") {
+          log.info("capture disabled", { provider: cfg.memory?.provider ?? "unset" })
+          return
+        }
+        log.info("capture subscriber registering")
 
-    const lastCaptured = new Map<string, string>()
+        const lastCaptured = new Map<string, string>()
 
-    yield* bus.subscribeCallback(MessageV2.Event.PartUpdated, (evt) => {
-      const part = evt.properties.part
-      if (part.type !== "text") return
-      if (part.synthetic) return
-      if (!part.time?.end) return
+        yield* bus.subscribeCallback(MessageV2.Event.PartUpdated, (evt) => {
+          const part = evt.properties.part
+          if (part.type !== "text") return
+          if (part.synthetic) return
+          if (!part.time?.end) return
 
-      const sessionID = evt.properties.sessionID
-      const messageID = part.messageID
+          const sessionID = evt.properties.sessionID
+          const messageID = part.messageID
 
-      Effect.runPromise(
-        Effect.gen(function* () {
-          const role = yield* resolver.role(messageID)
-          if (role !== "assistant") return
+          Effect.runPromise(
+            Effect.gen(function* () {
+              const msgs = yield* sessions.messages({ sessionID, agentID: "*" })
+              const self = msgs.find((m) => m.info.id === messageID)
+              if (!self || self.info.role !== "assistant") return
+              const agent = (self.info as { agent?: string }).agent
+              if (agent && NON_CHAT_AGENTS.has(agent)) return
 
-          const text = part.text ?? ""
-          if (!text.trim()) return
+              const text = part.text ?? ""
+              if (!text.trim()) return
 
-          const key = `${sessionID}:${text.slice(0, 100)}`
-          if (lastCaptured.get(sessionID) === key) return
-          lastCaptured.set(sessionID, key)
+              const key = `${sessionID}:${text.slice(0, 100)}`
+              if (lastCaptured.get(sessionID) === key) return
+              lastCaptured.set(sessionID, key)
 
-          const msgs = yield* sessions.messages({ sessionID, agentID: "*" })
-          const lastUser = msgs.findLast((m) => m.info.role === "user")
-          const userText = lastUser?.parts
-            .filter((p) => p.type === "text" && !p.synthetic)
-            .map((p) => (p as MessageV2.TextPart).text ?? "")
-            .join("\n") ?? ""
+              const lastUser = msgs.findLast((m) => m.info.role === "user")
+              const userText = lastUser?.parts
+                .filter((p) => p.type === "text" && !p.synthetic)
+                .map((p) => (p as MessageV2.TextPart).text ?? "")
+                .join("\n") ?? ""
 
-          const sessionInfo = yield* sessions.get(sessionID)
-          const workspacePath = sessionInfo.directory
-          const workspaceId = sessionInfo.projectID ?? sessionInfo.directory
-          yield* Effect.promise(() =>
-            captureTurn(userText, text, sessionID, workspaceId, workspacePath),
-          )
-        }),
-      ).catch((err) => log.warn("capture wire error", { error: String(err) }))
-    })
+              const sessionInfo = yield* sessions.get(sessionID)
+              const scope = memorySessionScope(sessionID)
+              if (!scope?.owner) {
+                log.warn("capture skipped: ACP session has no Odysseus owner", { sessionID })
+                return
+              }
+              const workspacePath = scope.workspacePath || sessionInfo.directory
+              const workspaceId = scope.workspaceId || sessionInfo.projectID || sessionInfo.directory
+              yield* Effect.promise(() =>
+                captureTurn(
+                  userText,
+                  text,
+                  sessionID,
+                  workspaceId,
+                  workspacePath,
+                  scope.owner,
+                  lastUser?.info.id ?? "",
+                  messageID,
+                ),
+              )
+            }).pipe(
+              Effect.provideService(Config.Service, config),
+              Effect.provideService(Provider.Service, providerSvc),
+            ),
+          ).catch((err) => log.warn("capture wire error", { error: String(err) }))
+        })
+      })
 
     return CaptureService.of({
-      init: () => Effect.succeed(undefined),
+      init: () => init(),
     })
   }),
 )
@@ -118,4 +150,5 @@ export const defaultLayer = layer.pipe(
   Layer.provide(Bus.defaultLayer),
   Layer.provide(Session.defaultLayer),
   Layer.provide(Config.defaultLayer),
+  Layer.provide(Provider.defaultLayer),
 )

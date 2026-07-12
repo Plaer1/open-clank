@@ -12,6 +12,7 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
+import { catalogEntries } from './modelCatalog.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -219,25 +220,14 @@ export async function refreshModels(force = false) {
         const isOffline = !!item.offline;
         if (!groups[cat][epName]) groups[cat][epName] = [];
         if (!extraGroups[cat][epName]) extraGroups[cat][epName] = [];
-        const displayNames = item.models_display || item.models || [];
         const epModelType = item.model_type || 'llm';
-        (item.models || []).forEach((mid, i) => {
-          groups[cat][epName].push({
-            mid, url: item.url,
-            displayName: displayNames[i] || mid,
+        catalogEntries(item).forEach(entry => {
+          const target = entry.extra ? extraGroups : groups;
+          target[cat][epName].push({
+            mid: entry.mid, url: item.url,
+            displayName: entry.displayName,
             endpointId: item.endpoint_id || null,
-            offline: isOffline,
-            modelType: epModelType,
-          });
-        });
-        // Extra (non-curated) models from server
-        const extraDisplayNames = item.models_extra_display || item.models_extra || [];
-        (item.models_extra || []).forEach((mid, i) => {
-          extraGroups[cat][epName].push({
-            mid, url: item.url,
-            displayName: extraDisplayNames[i] || mid,
-            endpointId: item.endpoint_id || null,
-            offline: isOffline,
+            offline: isOffline || entry.stale,
             modelType: epModelType,
           });
         });
@@ -500,7 +490,7 @@ export async function refreshModels(force = false) {
     // ── Search box (shown when >= 5 total models, including hidden overflow) ──
     const totalModelCount = (_cachedItems || []).reduce((n, item) => {
       if (item.offline) return n;
-      return n + (item.models || []).length + (item.models_extra || []).length;
+      return n + catalogEntries(item).length;
     }, 0);
     if (totalModelCount >= 10) {
       const searchBox = document.createElement('input');
@@ -535,10 +525,9 @@ export async function refreshModels(force = false) {
         // Build flat results from all cached models
         (_cachedItems || []).forEach(item => {
           if (item.offline) return;
-          const allModels = (item.models || []).concat(item.models_extra || []);
-          const allDisplay = (item.models_display || []).concat(item.models_extra_display || item.models_extra || []);
-          allModels.forEach((mid, i) => {
-            const display = allDisplay[i] || mid;
+          catalogEntries(item).forEach(entry => {
+            const mid = entry.mid;
+            const display = entry.displayName || mid;
             if (!mid.toLowerCase().includes(q) && !display.toLowerCase().includes(q)) return;
             searchResults.appendChild(
               _buildModelRow(mid, item.url, display, item.endpoint_id || null, false, item.model_type || 'llm')

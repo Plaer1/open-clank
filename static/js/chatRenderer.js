@@ -2148,6 +2148,93 @@ export function renderAskUserCard(payload, options) {
 }
 
 /**
+ * Inline permission prompt (C1). The agent's turn is blocked server-side
+ * until one of the three buttons answers the request — there is no timeout.
+ * 'Always allow' persists a durable grant (subtree for file requests).
+ */
+export function renderPermissionCard(payload, sessionId) {
+  const pq = payload || {};
+  const chatBox = document.getElementById('chat-history');
+  if (!chatBox || !pq.request_id) return null;
+
+  const card = document.createElement('div');
+  card.className = 'ask-user-card permission-card';
+  card.setAttribute('role', 'group');
+
+  const title = document.createElement('div');
+  title.className = 'ask-user-question';
+  title.textContent = `Agent requests permission: ${pq.permission_type || 'unknown'}`;
+  card.appendChild(title);
+
+  const d = pq.detail || {};
+  const detailText = d.filepath || d.command || (Object.keys(d).length ? JSON.stringify(d) : '');
+  if (detailText) {
+    const detail = document.createElement('div');
+    detail.className = 'permission-detail';
+    detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;margin:2px 0 8px;font-family:inherit;';
+    detail.textContent = detailText;
+    card.appendChild(detail);
+  }
+
+  const list = document.createElement('div');
+  list.className = 'ask-user-options';
+  card.appendChild(list);
+
+  const finish = (label, ok) => {
+    list.remove();
+    const done = document.createElement('div');
+    done.style.cssText = 'font-size:12px;opacity:0.7;font-style:italic;';
+    done.textContent = ok ? `→ ${label}` : `Failed to send answer (${label}) — request may have expired.`;
+    card.appendChild(done);
+  };
+
+  const answer = async (optionId, label) => {
+    list.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    const body = new FormData();
+    body.append('request_id', pq.request_id);
+    body.append('option_id', optionId);
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/permission`, {
+        method: 'POST', body, credentials: 'same-origin',
+      });
+      finish(label, res.ok);
+    } catch (e) {
+      console.warn('permission resolve failed:', e);
+      finish(label, false);
+    }
+  };
+
+  const alwaysDesc = pq.always_pattern && pq.always_pattern !== '*'
+    ? `${pq.always_pattern}/**`
+    : `all “${pq.permission_type || 'unknown'}” requests`;
+  [
+    { id: 'once', label: 'Allow once', desc: '' },
+    { id: 'always', label: 'Always allow', desc: alwaysDesc },
+    { id: 'reject', label: 'Reject', desc: '' },
+  ].forEach((b) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'ask-user-option';
+    const labelText = document.createElement('span');
+    labelText.className = 'ask-user-option-label';
+    labelText.textContent = b.label;
+    row.appendChild(labelText);
+    if (b.desc) {
+      const descEl = document.createElement('span');
+      descEl.className = 'ask-user-option-desc';
+      descEl.textContent = b.desc;
+      row.appendChild(descEl);
+    }
+    row.addEventListener('click', () => answer(b.id, b.label));
+    list.appendChild(row);
+  });
+
+  chatBox.appendChild(card);
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return card;
+}
+
+/**
  * Add a message to the chat history.
  */
 export function addMessage(role, content, modelName, metadata) {
@@ -2649,6 +2736,7 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,
+  renderPermissionCard,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,

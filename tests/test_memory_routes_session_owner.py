@@ -72,15 +72,49 @@ def test_by_session_rejects_other_users_session(monkeypatch):
     router = _router(monkeypatch, caller="bob")
     gbs = _route(router, "/api/memory/by-session/{session_id}", "GET")
     with pytest.raises(HTTPException) as exc:
-        gbs(request=None, session_id="alice-sess")
+        asyncio.run(gbs(request=None, session_id="alice-sess"))
     assert exc.value.status_code == 404
 
 
 def test_owner_can_access_own_session(monkeypatch):
     router = _router(monkeypatch, caller="alice")
     gbs = _route(router, "/api/memory/by-session/{session_id}", "GET")
-    out = gbs(request=None, session_id="alice-sess")
+    out = asyncio.run(gbs(request=None, session_id="alice-sess"))
     assert out["session_name"] == "Secret project"
+
+
+def test_provider_memory_list_stays_on_request_event_loop(monkeypatch):
+    expected_loop = None
+
+    class Provider:
+        provider_id = "frankenmemory"
+
+        async def list_memories(self, *, owner=None, limit=1000):
+            assert asyncio.get_running_loop() is expected_loop
+            return [SimpleNamespace(
+                id="m_1",
+                text="Alice note",
+                timestamp=1,
+                category="fact",
+                source="user",
+                owner=owner,
+                session_id=None,
+                pinned=False,
+                metadata={},
+            )]
+
+    monkeypatch.setattr(mr, "get_current_user", lambda request: "alice")
+    router = mr.setup_memory_routes(MagicMock(), MagicMock(), memory_provider=Provider())
+    get_memory = _route(router, "/api/memory", "GET")
+
+    async def invoke():
+        nonlocal expected_loop
+        expected_loop = asyncio.get_running_loop()
+        return await get_memory(request=None)
+
+    out = asyncio.run(invoke())
+    assert out["provider"] == "frankenmemory"
+    assert out["memory"][0]["id"] == "m_1"
 
 
 def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch):
@@ -208,7 +242,7 @@ def test_timeline_does_not_expose_other_users_session_name():
     router = mr.setup_memory_routes(memory_manager, session_manager)
     timeline = _route(router, "/api/memory/timeline", "GET")
 
-    out = timeline(request=_request("alice"))
+    out = asyncio.run(timeline(request=_request("alice")))
 
     assert out["timeline"][0]["session_name"] == "Unknown"
 

@@ -17,8 +17,44 @@ pub async fn hybrid_recall(
     workspace_boost: f32,
     collapse_config: &CollapseConfig,
 ) -> Vec<ScoredRecord> {
-    // 4-level fallback cascade
-    let results = try_hybrid(store, query_text, query_embedding, top_k).await;
+    hybrid_recall_scoped(
+        store,
+        _embed,
+        query_text,
+        query_embedding,
+        top_k,
+        workspace_id,
+        workspace_boost,
+        collapse_config,
+        None,
+        None,
+    )
+    .await
+}
+
+pub async fn hybrid_recall_scoped(
+    store: &dyn MemoryStore,
+    _embed: &dyn EmbeddingClient,
+    query_text: &str,
+    query_embedding: Option<&[f32]>,
+    top_k: usize,
+    workspace_id: &str,
+    workspace_boost: f32,
+    collapse_config: &CollapseConfig,
+    owner: Option<&str>,
+    requested_workspace: Option<&str>,
+) -> Vec<ScoredRecord> {
+    // 4-level fallback cascade. Scope is applied inside the store before
+    // ranking/limit, so another tenant cannot crowd a user's top-k results.
+    let results = try_hybrid_scoped(
+        store,
+        query_text,
+        query_embedding,
+        top_k,
+        owner,
+        requested_workspace,
+    )
+    .await;
     if !results.is_empty() {
         return apply_collapse_and_rank(
             results,
@@ -31,7 +67,9 @@ pub async fn hybrid_recall(
 
     // Fallback: dense-only
     if let Some(emb) = query_embedding {
-        let results = store.search_curated_vector(emb, top_k).await;
+        let results = store
+            .search_curated_vector_scoped(emb, top_k, owner, requested_workspace)
+            .await;
         if !results.is_empty() {
             return apply_collapse_and_rank(
                 results,
@@ -44,7 +82,9 @@ pub async fn hybrid_recall(
     }
 
     // Fallback: FTS
-    let results = store.search_curated_fts(query_text, top_k).await;
+    let results = store
+        .search_curated_fts_scoped(query_text, top_k, owner, requested_workspace)
+        .await;
     if !results.is_empty() {
         return apply_collapse_and_rank(
             results,
@@ -56,7 +96,9 @@ pub async fn hybrid_recall(
     }
 
     // Fallback: keyword (substring match via FTS with individual words)
-    let results = store.search_curated_fts(query_text, top_k).await;
+    let results = store
+        .search_curated_fts_scoped(query_text, top_k, owner, requested_workspace)
+        .await;
     if !results.is_empty() {
         return results;
     }
@@ -65,20 +107,22 @@ pub async fn hybrid_recall(
     Vec::new()
 }
 
-async fn try_hybrid(
+async fn try_hybrid_scoped(
     store: &dyn MemoryStore,
     query_text: &str,
     query_embedding: Option<&[f32]>,
     top_k: usize,
+    owner: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Vec<ScoredRecord> {
     store
-        .search_curated_hybrid(crate::store::HybridQuery {
+        .search_curated_hybrid_scoped(crate::store::HybridQuery {
             query_text: Some(query_text.to_string()),
             query_embedding: query_embedding.map(|e| e.to_vec()),
             sparse_vector: None,
             top_k,
             workspace_id: None,
-        })
+        }, owner, workspace_id)
         .await
 }
 

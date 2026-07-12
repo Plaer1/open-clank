@@ -134,8 +134,8 @@ DEFAULT_SETTINGS = {
     "tool_path_extra_roots": [],
     "task_endpoint_id": "",
     "task_model": "",
-    "default_endpoint_id": "",
-    "default_model": "",
+    "default_endpoint_id": "mimo",
+    "default_model": "xiaomi/mimo-v2.5-pro-ultraspeed",
     # Ordered fallback chain for the default chat model. Each entry is
     # {"endpoint_id": "...", "model": "..."}. If the primary model fails
     # before producing output (endpoint offline / errors), the chat

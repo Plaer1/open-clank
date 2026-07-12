@@ -5,6 +5,7 @@ import { Session } from "../session"
 import { SessionCompaction } from "../session/compaction"
 import { Log } from "../util"
 import { getSharedMcpClient } from "./mcp-client"
+import { memorySessionScope } from "./session-scope"
 
 const log = Log.create({ service: "memory.compaction-capture" })
 
@@ -21,15 +22,20 @@ export const layer: Layer.Layer<CompactionCaptureService, never, Bus.Service | S
     CompactionCaptureService,
     Effect.gen(function* () {
       const config = yield* Config.Service
-      const cfg = yield* config.get()
-      if (cfg.memory?.provider !== "frankenmemory") {
-        return CompactionCaptureService.of({ init: () => Effect.succeed(undefined) })
-      }
-
       const bus = yield* Bus.Service
       const sessions = yield* Session.Service
 
-      yield* bus.subscribeCallback(SessionCompaction.Event.Compacted, (evt) => {
+      // Same shape as MemoryCapture: the layer is process-memoized while
+      // Config and Bus subscriptions are InstanceState-scoped, so all
+      // instance work waits for init(), which InstanceBootstrap runs once
+      // per instance.
+      const init = Effect.fn("CompactionCapture.init")(function* () {
+        const cfg = yield* config.get()
+        if (cfg.memory?.provider !== "frankenmemory") {
+          return
+        }
+
+        yield* bus.subscribeCallback(SessionCompaction.Event.Compacted, (evt) => {
         const sessionID = evt.properties.sessionID
         const agentID = evt.properties.agentID
 
@@ -53,33 +59,45 @@ export const layer: Layer.Layer<CompactionCaptureService, never, Bus.Service | S
               .map((p) => p.text ?? "")
               .join("\n")
             if (!text.trim()) return
+            const scope = memorySessionScope(sessionID)
+            if (!scope?.owner) {
+              log.warn("compaction capture skipped: session has no Odysseus owner", { sessionID })
+              return
+            }
 
             const c = yield* Effect.promise(() => getSharedMcpClient())
             yield* Effect.promise(() =>
               c.callTool({
                 name: "capture",
                 arguments: {
-                  content: text,
+                  user_text: "",
+                  assistant_text: text,
+                  capture_mode: "raw_only",
                   session_key: sessionID,
                   session_id: sessionID,
+                  owner: scope.owner,
+                  workspace_id: scope.workspaceId,
+                  workspace_path: scope.workspacePath,
+                  source_event_id: `${sessionID}:compaction:${summary.info.id}`,
+                  source_message_ids: [summary.info.id],
                   source: "mimo",
                   category: "compaction",
-                  kind: "episodic",
-                  metadata: JSON.stringify({
+                  metadata: {
                     event: "compaction",
                     parent_message_id: "parentID" in summary.info ? summary.info.parentID : undefined,
                     agent_id: summary.info.agentID,
-                  }),
+                  },
                 },
               }),
             )
             log.info("captured compaction summary", { sessionID, agentID })
           }),
         ).catch((err) => log.warn("compaction capture failed", { error: String(err) }))
+        })
       })
 
       return CompactionCaptureService.of({
-        init: () => Effect.succeed(undefined),
+        init: () => init(),
       })
     }),
   )

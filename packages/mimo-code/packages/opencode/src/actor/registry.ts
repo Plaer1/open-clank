@@ -66,6 +66,7 @@ export interface Interface {
     },
   ) => Effect.Effect<void>
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
+  readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
   readonly get: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
   readonly listBySession: (sessionID: SessionID) => Effect.Effect<Actor[]>
   readonly listActive: () => Effect.Effect<Actor[]>
@@ -73,6 +74,7 @@ export interface Interface {
   readonly renderForAgent: (sessionID: SessionID) => Effect.Effect<string>
   readonly agentTypeFor: (sessionID: SessionID, actorID: string) => Effect.Effect<string>
   readonly isSystemSpawned: (sessionID: SessionID, actorID: string) => Effect.Effect<boolean>
+  readonly servesCheckpoint: (sessionID: SessionID, actorID: string | undefined) => Effect.Effect<boolean>
   readonly allocateActorID: (sessionID: SessionID, agentType: string) => Effect.Effect<string>
 }
 
@@ -208,6 +210,24 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       )
     })
 
+    const updateAgent = Effect.fn("ActorRegistry.updateAgent")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      agent: string,
+    ) {
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({ agent, time_updated: Date.now() })
+            .where(
+              and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)),
+            )
+            .run(),
+        ),
+      )
+    })
+
     const get = Effect.fn("ActorRegistry.get")(function* (sessionID: SessionID, actorID: string) {
       const row = yield* Effect.sync(() =>
         Database.use((db) =>
@@ -311,6 +331,29 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)
     })
 
+    // Whether this actor's context is maintained by the session checkpoint flow.
+    // Checkpoint serves main + peer only; subagents use per-actor compaction, and
+    // system-spawned agents (checkpoint-writer/dream/distill) maintain nothing.
+    // Single source of truth for both the memory-instructions gate (LLM.buildSystemArray)
+    // and the checkpoint self-trigger gate (SessionPrune.fireCheckpoints). Two
+    // orthogonal exclusions kept explicit (agent TYPE vs MODE) so a future system
+    // agent spawned as mode:"peer" can't silently slip back in — see prune.ts.
+    const servesCheckpoint = Effect.fn("ActorRegistry.servesCheckpoint")(function* (
+      sessionID: SessionID,
+      actorID: string | undefined,
+    ) {
+      // No agentID (or literal "main") → main runLoop. Fail open: main and peer
+      // must never silently lose checkpoints / memory instructions. "main" has no
+      // registry row, so short-circuit before the read.
+      if (!actorID || actorID === "main") return true
+      // Single read, two orthogonal exclusions derived from it: agent TYPE
+      // (system-spawned) and actor MODE (subagent). Unregistered/race → fail open.
+      const actor = yield* get(sessionID, actorID)
+      if (!actor) return true
+      if (SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)) return false
+      return actor.mode !== "subagent"
+    })
+
     const allocateActorID = Effect.fn("ActorRegistry.allocateActorID")(function* (
       sessionID: SessionID,
       agentType: string,
@@ -395,6 +438,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       register,
       updateStatus,
       updateTurn,
+      updateAgent,
       get,
       listBySession,
       listActive,
@@ -402,6 +446,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       renderForAgent,
       agentTypeFor,
       isSystemSpawned,
+      servesCheckpoint,
       allocateActorID,
     })
   }),

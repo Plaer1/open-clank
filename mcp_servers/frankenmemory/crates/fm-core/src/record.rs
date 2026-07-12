@@ -118,7 +118,7 @@ impl MemoryRecord {
             kind: MemoryKind::default(),
             priority: 50,
             trust_score: 0.50,
-            confidence_score: 1.0,
+            confidence_score: 0.6,
             importance_score: 0.5,
             scene_name: None,
             source: String::new(),
@@ -150,6 +150,7 @@ pub struct RawTurn {
     pub session_key: String,
     pub session_id: String,
     pub workspace_id: String,
+    pub owner: Option<String>,
     pub workspace_path: Option<String>,
     pub recorded_at: String,
     pub metadata: serde_json::Value,
@@ -164,6 +165,7 @@ impl RawTurn {
             session_key: String::new(),
             session_id: String::new(),
             workspace_id: "global".into(),
+            owner: None,
             workspace_path: None,
             recorded_at: Utc::now().to_rfc3339(),
             metadata: serde_json::Value::Null,
@@ -181,6 +183,41 @@ pub struct CompletedTurn {
     pub workspace_path: Option<String>,
     pub source: String,
     pub owner: Option<String>,
+    pub category: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateStatus {
+    Pending,
+    Accepted,
+    Rejected,
+    Quarantined,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateRecord {
+    pub id: String,
+    pub content: String,
+    pub kind: MemoryKind,
+    pub confidence_score: f32,
+    pub importance_score: f32,
+    pub owner: String,
+    pub workspace_id: String,
+    pub workspace_path: Option<String>,
+    pub session_id: String,
+    pub turn_id: String,
+    pub raw_evidence_ids: Vec<String>,
+    pub evidence_role: String,
+    pub source: String,
+    pub source_event_id: String,
+    pub dedup_key: String,
+    pub status: CandidateStatus,
+    pub reason: String,
+    pub accepted_curated_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,11 +255,14 @@ pub struct SearchParams {
     pub tier: Tier,
     pub limit: usize,
     pub workspace_id: Option<String>,
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureResult {
     pub records_captured: usize,
+    #[serde(default)]
+    pub record_ids: Vec<String>,
     pub vectors_written: usize,
     pub providers_succeeded: usize,
     pub providers_failed: usize,
@@ -262,6 +302,10 @@ pub enum GroomOp {
     Decay,
     Dedup,
     Reflect,
+    /// Graph tier: decay edge weights by age (traversal-boosted), prune dead edges.
+    EdgeDecay,
+    /// Graph tier: merge near-duplicate edge tags into the canonical vocabulary.
+    TagNormalize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,7 +362,7 @@ mod tests {
         assert_eq!(r.kind, MemoryKind::Episodic);
         assert_eq!(r.source_type, SourceType::AutoExtracted);
         assert_eq!(r.trust_score, 0.50);
-        assert_eq!(r.confidence_score, 1.0);
+        assert_eq!(r.confidence_score, 0.6);
         assert_eq!(r.importance_score, 0.5);
         assert!(!r.archived);
         assert_eq!(r.workspace_id, "global");

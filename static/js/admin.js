@@ -1803,7 +1803,7 @@ const TOOL_META = {
   manage_session:    { name: 'Manage Session',   desc: 'Rename, archive, configure',      cat: 'Sessions',   ctx: '~100' },
   list_models:       { name: 'List Models',      desc: 'Show available models',           cat: 'System',     ctx: '~100' },
   ui_control:        { name: 'UI Control',       desc: 'Change theme, layout, settings',  cat: 'System',     ctx: '~150' },
-  manage_tasks:      { name: 'Tasks',            desc: 'Schedule automated tasks',        cat: 'System',     ctx: '~150' },
+  manage_tasks:      { name: 'Clanker Tasks',    desc: 'Schedule automated tasks',        cat: 'System',     ctx: '~150' },
   api_call:          { name: 'API Call',         desc: 'Make HTTP requests',              cat: 'System',     ctx: '~200' },
   manage_endpoints:  { name: 'Endpoints',        desc: 'Add/remove model endpoints',      cat: 'System',     ctx: '~100' },
   manage_mcp:        { name: 'MCP Servers',      desc: 'Manage MCP connections',          cat: 'System',     ctx: '~100' },

@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional
 
-from src.openclank.acp_client import ACPClient, TransportError
+from src.openclank.acp_client import ACPClient, RPCError, TransportError
+from src.openclank.permission_grants import derive_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ def lifetools_mcp_descriptor(
 
 def frankenmemory_mcp_descriptor(
     workspace: str = "global",
+    owner: str = "",
 ) -> dict:
     """Build the MCP server descriptor for the frankenmemory engine.
 
@@ -62,6 +64,7 @@ def frankenmemory_mcp_descriptor(
     """
     env_entries = [
         {"name": "FM_WORKSPACE_ID", "value": workspace},
+        {"name": "FM_OWNER", "value": owner},
     ]
     # Phase 5: pass FM_DB_PATH explicitly so the bridged MCP server
     # converges on the same db even if the env gets stripped by a proxy.
@@ -192,13 +195,38 @@ class ACPBridge:
         self._queues: Dict[str, asyncio.Queue] = {}
         # Per-session available models from mimo's handshake (modelId → {modelId, name})
         self._session_models: Dict[str, list] = {}
-        # Permission request queue (for C4 real handler)
-        self._permission_queue: asyncio.Queue = asyncio.Queue()
-        self._pending_permissions: Dict[str, asyncio.Future] = {}
+        # Latest full catalog from any handshake — mimo is the model
+        # authority; /api/models reports this list up to the picker.
+        self.available_models: list = []
+        # Odysseus-session → mimo-session remap for sessions whose mimo-side
+        # state is gone (e.g. created before the MIMOCODE_HOME isolation).
+        # Persisted so the remap survives server restarts.
+        self._session_map_path = Path(
+            os.environ.get("ODYSSEUS_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data"))
+        ) / "mimocode" / "session-map.json"
+        try:
+            self._session_map: Dict[str, str] = json.loads(self._session_map_path.read_text())
+        except Exception:
+            self._session_map = {}
 
         # Register callbacks with the real permission handler
         register_client_callbacks(client, permission_handler=permission_handler)
         client.on_session_update(self._handle_session_update)
+
+        # C1: surface permission prompts through the active turn's SSE stream
+        if permission_handler is not None and hasattr(permission_handler, "on_request"):
+            permission_handler.on_request(self._surface_permission)
+
+    async def _surface_permission(self, req: "PermissionRequest") -> None:
+        """Route a pending permission request into its session's update queue.
+
+        Raises when the session has no active turn — the handler then fails
+        safe to reject instead of waiting on a prompt nobody can see.
+        """
+        q = self._queues.get(req.session_id)
+        if q is None:
+            raise RuntimeError(f"no active turn for session {req.session_id!r}")
+        await q.put({"sessionUpdate": "_permission_request", "request": req})
 
     async def _handle_session_update(self, mimo_session_id: str, update: dict) -> None:
         """Route a session/update notification to the right session's queue."""
@@ -206,7 +234,7 @@ class ACPBridge:
         if q is not None:
             await q.put(update)
 
-    async def open_session(self, cwd: Optional[str] = None) -> str:
+    async def open_session(self, cwd: Optional[str] = None, owner: Optional[str] = None) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
         Also stores the available models from mimo's handshake so the bridge
@@ -215,12 +243,13 @@ class ACPBridge:
         target_cwd = cwd or self._cwd
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=self._owner,
+                owner=owner if owner is not None else self._owner,
                 session_id="",  # filled later when ensure_session is called
                 workspace=target_cwd,
             ),
             frankenmemory_mcp_descriptor(
                 workspace=target_cwd,
+                owner=owner if owner is not None else self._owner,
             ),
         ]
         result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
@@ -231,11 +260,17 @@ class ACPBridge:
         available = models.get("availableModels", [])
         if available:
             self._session_models[session_id] = available
+            self.available_models = available
             logger.info("mimo session %s: %d models available", session_id, len(available))
 
         return session_id
 
-    async def ensure_session(self, odysseus_session: str, cwd: Optional[str] = None) -> str:
+    async def ensure_session(
+        self,
+        odysseus_session: str,
+        cwd: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> str:
         """Load the mimo session into the ACP agent's memory.
 
         odysseus_session IS the mimo session id. Calls resume_session to
@@ -245,25 +280,45 @@ class ACPBridge:
         Also refreshes the available models from mimo so the bridge always
         has the latest model list (covers session reconnect after restart).
         """
+        target = self._session_map.get(odysseus_session, odysseus_session)
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=self._owner,
+                owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
                 workspace=cwd or self._cwd,
             ),
             frankenmemory_mcp_descriptor(
                 workspace=cwd or self._cwd,
+                owner=owner if owner is not None else self._owner,
             ),
         ]
-        result = await self._client.resume_session(odysseus_session, cwd or self._cwd, mcp_servers=mcp_servers)
+        try:
+            result = await self._client.resume_session(target, cwd or self._cwd, mcp_servers=mcp_servers)
+        except RPCError as e:
+            # mimo doesn't know this session (state predates the isolated
+            # MIMOCODE_HOME, or its store was wiped). The full chat history
+            # rides in every prompt, so a fresh mimo session continues the
+            # conversation seamlessly — remap and persist.
+            logger.warning(
+                "mimo resume failed for %s (%s) — opening a fresh mimo session", target, e
+            )
+            new_id = await self.open_session(cwd=cwd, owner=owner)
+            self._session_map[odysseus_session] = new_id
+            try:
+                self._session_map_path.parent.mkdir(parents=True, exist_ok=True)
+                self._session_map_path.write_text(json.dumps(self._session_map, indent=1))
+            except Exception as we:
+                logger.warning("failed to persist session map: %s", we)
+            return new_id
 
         # Refresh available models from mimo (handles reconnect after restart)
         models = result.get("models", {})
         available = models.get("availableModels", [])
         if available:
-            self._session_models[odysseus_session] = available
+            self._session_models[target] = available
+            self.available_models = available
 
-        return odysseus_session
+        return target
 
     async def resume_session(self, odysseus_session: str, mimo_session_id: str) -> None:
         """Re-establish a session after a crash/restart.
@@ -279,6 +334,7 @@ class ACPBridge:
             ),
             frankenmemory_mcp_descriptor(
                 workspace=self._cwd,
+                owner=self._owner,
             ),
         ]
         await self._client.resume_session(mimo_session_id, self._cwd, mcp_servers=mcp_servers)
@@ -330,13 +386,14 @@ class ACPBridge:
         messages: list,
         model: Optional[str] = None,
         cwd: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """Run a prompt turn via ACP, yielding SSE strings identical to stream_agent_loop.
 
         This is the drop-in replacement for the agent branch in chat_routes.py.
         cwd: per-chat workspace override (else the bridge's global default).
         """
-        mimo_session = await self.ensure_session(odysseus_session, cwd=cwd)
+        mimo_session = await self.ensure_session(odysseus_session, cwd=cwd, owner=owner)
         state = _TurnState()
         self._turns[mimo_session] = state
 
@@ -372,7 +429,11 @@ class ACPBridge:
             user_text = _extract_user_text(messages)
             if user_text:
                 try:
-                    hits = await self._memory_provider.recall(user_text, owner=self._owner, top_k=5)
+                    hits = await self._memory_provider.recall(
+                        user_text,
+                        owner=owner if owner is not None else self._owner,
+                        top_k=5,
+                    )
                     if hits:
                         gt_block = _format_gt_recall(hits)
                         prompt_parts.append({
@@ -519,6 +580,21 @@ class ACPBridge:
             if cost:
                 state.metrics["cost"] = cost
 
+        elif update_type == "_permission_request":
+            # C1: synthetic update injected by _surface_permission — ride the
+            # turn's SSE stream so the UI can render an inline approval card.
+            req = update.get("request")
+            if req is not None:
+                detail = req.raw_input if isinstance(req.raw_input, dict) else {}
+                payload = {
+                    "request_id": req.request_id,
+                    "permission_type": req.title,
+                    "detail": detail,
+                    "options": req.options,
+                    "always_pattern": derive_pattern(detail),
+                }
+                sses.append(f'data: {json.dumps({"type": "permission_request", "data": payload})}\n\n')
+
         # Other update types (plan, available_commands_update, etc.) are silently consumed
 
         return sses
@@ -591,25 +667,33 @@ def _stop_reason_notice(reason: str) -> Optional[str]:
 class PermissionRequest:
     """A pending permission request surfaced to the UI."""
 
-    __slots__ = ("request_id", "tool_call", "raw_input", "options", "title", "_future")
+    __slots__ = ("request_id", "tool_call", "raw_input", "options", "title", "session_id", "_future")
 
     def __init__(
         self,
         request_id: str,
         tool_call: dict,
         raw_input: Any,
-        options: list[str],
+        options: list,
         title: str,
+        session_id: str = "",
     ) -> None:
         self.request_id = request_id
         self.tool_call = tool_call
         self.raw_input = raw_input
         self.options = options
         self.title = title
+        self.session_id = session_id
         self._future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
 
-    async def wait(self, timeout: float = 300.0) -> str:
-        """Wait for the human's choice. Returns 'once', 'always', or 'reject'."""
+    async def wait(self, timeout: Optional[float] = None) -> str:
+        """Wait for the human's choice. Returns 'once', 'always', or 'reject'.
+
+        C1 (e's ruling): no timeout by default — the prompt waits forever
+        and the turn blocks until answered.
+        """
+        if timeout is None:
+            return await self._future
         try:
             return await asyncio.wait_for(self._future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -622,26 +706,26 @@ class PermissionRequest:
 
 
 class PermissionHandler:
-    """C4: Real permission handler for ACP session/request_permission.
+    """C4/C1: Real permission handler for ACP session/request_permission.
 
-    Surfaces permission requests to the odysseus UI and awaits human choice.
-    On disconnect/timeout, replies 'reject' (fail safe).
-
-    If ``safe_dirs`` is provided, any ``external_directory`` request whose
-    target filepath starts with one of the safe directory prefixes is
-    auto-approved (``"always"``) without blocking for human input.
+    Check order (e's rulings 2026-07-09): safe-dirs -> stored durable
+    grants -> surface a prompt to the UI and wait forever. 'Always allow'
+    answers persist a grant in the odysseus DB so they survive restarts
+    (mimo's own permission memory resets per launch). Requests that cannot
+    be surfaced to any UI fail safe to reject instead of hanging invisibly.
 
     Usage:
-        handler = PermissionHandler(safe_dirs=["/home/e/sauce", "/home/e/entities"])
+        handler = PermissionHandler(safe_dirs=[...], grant_store=GrantStore(db))
         # Pass handler.handle to register_client_callbacks or ACPBridge
         # When a permission request arrives, handler.pending_requests gets a new entry
         # Call handler.resolve(request_id, option_id) when the human responds
     """
 
-    def __init__(self, safe_dirs: Optional[List[str]] = None) -> None:
+    def __init__(self, safe_dirs: Optional[List[str]] = None, grant_store: Any = None) -> None:
         self.pending_requests: Dict[str, PermissionRequest] = {}
         self._on_request: Optional[Callable[[PermissionRequest], Coroutine[Any, Any, None]]] = None
         self._safe_dirs: List[str] = [os.path.expanduser(d) for d in (safe_dirs or [])]
+        self._grant_store = grant_store
 
     def on_request(self, callback: Callable[[PermissionRequest], Coroutine[Any, Any, None]]) -> None:
         """Register a callback invoked when a new permission request arrives.
@@ -649,6 +733,10 @@ class PermissionHandler:
         The callback receives a PermissionRequest and should surface it to the UI.
         """
         self._on_request = callback
+
+    @staticmethod
+    def _approve(option_id: str = "always") -> dict:
+        return {"outcome": {"outcome": "selected", "optionId": option_id}}
 
     async def handle(self, params: dict) -> dict:
         """Handle a session/request_permission call from mimo.
@@ -659,42 +747,56 @@ class PermissionHandler:
         title = tool_call.get("title", "unknown tool")
         raw_input = tool_call.get("rawInput", {})
         options = params.get("options", ["once", "always", "reject"])
+        session_id = params.get("sessionId", "")
+        filepath = raw_input.get("filepath", "") if isinstance(raw_input, dict) else ""
 
         # ── safe-dirs auto-approve ──
-        # external_directory requests carry {filepath, parentDir} in
-        # metadata; if the target is inside a configured safe dir, approve
-        # immediately so the always-on assistant doesn't block on known
-        # workspaces.
-        if title == "external_directory" and self._safe_dirs:
-            filepath = raw_input.get("filepath", "") if isinstance(raw_input, dict) else ""
-            if filepath and any(filepath.startswith(d) for d in self._safe_dirs):
-                logger.info(
-                    "auto-approved external_directory: %s (safe-dirs match)",
-                    filepath,
-                )
-                return {"outcome": {"outcome": "selected", "optionId": "always"}}
+        # Any request whose target file is inside a configured safe dir is
+        # approved immediately so the always-on assistant doesn't block on
+        # known workspaces.
+        if filepath and self._safe_dirs and any(
+            filepath == d or filepath.startswith(d + "/") for d in self._safe_dirs
+        ):
+            logger.info("auto-approved %s: %s (safe-dirs match)", title, filepath)
+            return self._approve()
 
-        # Generate a request ID
+        # ── stored durable grants ──
+        if self._grant_store is not None and self._grant_store.match(title, filepath=filepath or None):
+            logger.info("auto-approved %s: %s (stored grant)", title, filepath or "*")
+            return self._approve()
+
+        # ── surface to the UI and wait (forever) for the human ──
+        if self._on_request is None:
+            logger.warning("permission request for %s has no UI to surface to — rejecting", title)
+            return self._approve("reject")
+
         request_id = f"perm_{id(params)}_{time.time_ns()}"
-
         req = PermissionRequest(
             request_id=request_id,
             tool_call=tool_call,
             raw_input=raw_input,
             options=options,
             title=title,
+            session_id=session_id,
         )
         self.pending_requests[request_id] = req
 
         try:
-            # Notify the UI if a callback is registered
-            if self._on_request:
+            try:
                 await self._on_request(req)
+            except Exception as e:
+                logger.warning("failed to surface permission request (%s) — rejecting: %s", title, e)
+                return self._approve("reject")
 
-            # Wait for the human's choice (fail-safe: reject on timeout)
-            option_id = await req.wait(timeout=300.0)
+            option_id = await req.wait()
 
-            return {"outcome": {"outcome": "selected", "optionId": option_id}}
+            if option_id == "always" and self._grant_store is not None:
+                from src.openclank.permission_grants import derive_pattern
+                pattern = derive_pattern(raw_input)
+                self._grant_store.add(title, pattern)
+                logger.info("stored durable grant: (%s, %s)", title, pattern)
+
+            return self._approve(option_id)
         finally:
             self.pending_requests.pop(request_id, None)
 

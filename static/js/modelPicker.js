@@ -5,6 +5,7 @@ import { providerLogo } from './providers.js';
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
+import { catalogEntries, catalogModelIds } from './modelCatalog.js';
 
 const API_BASE = window.location.origin;
 
@@ -87,8 +88,7 @@ function _modelExists(modelId, url) {
   return items.some(item => {
     if (item.offline) return false;
     const itemUrl = (item.url || '').replace(/\/+$/, '');
-    const models = (item.models || []).concat(item.models_extra || []);
-    return models.includes(modelId) && (!targetUrl || itemUrl === targetUrl);
+    return catalogModelIds(item).includes(modelId) && (!targetUrl || itemUrl === targetUrl);
   });
 }
 
@@ -117,10 +117,9 @@ async function _ensureDefaultPendingChat() {
     // No configured default: preserve the old convenience fallback.
     if (window.modelsModule && window.modelsModule.getCachedItems) {
       const items = window.modelsModule.getCachedItems();
-      const first = items.find(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
+      const first = items.find(item => !item.offline && catalogEntries(item).length);
       if (first) {
-        const models = (first.models || []).concat(first.models_extra || []);
-        _deps.setPendingChat({ url: first.url, modelId: models[0], endpointId: first.endpoint_id });
+        _deps.setPendingChat({ url: first.url, modelId: catalogEntries(first)[0].mid, endpointId: first.endpoint_id });
         updateModelPicker();
       }
     }
@@ -226,12 +225,12 @@ function _initModelPickerDropdown() {
       // pill. The user can still click and try anyway (matches the
       // existing "local server appears offline" path on line 301).
       const epOffline = !!item.offline;
-      const allModels = (item.models || []).concat(item.models_extra || []);
-      const allDisplay = (item.models_display || []).concat(item.models_extra_display || []);
+      const entries = catalogEntries(item);
       // Mark local endpoints whose live probe failed.
       const probeResult = item.endpoint_id ? _localProbe[item.endpoint_id] : null;
       const isLocalDead = !!(probeResult && probeResult.alive === false);
-      allModels.forEach((mid, i) => {
+      entries.forEach(entry => {
+        const mid = entry.mid;
         // Deduplicate by model ID — prefer ONLINE endpoint entries over
         // offline duplicates so the user gets a working endpoint first
         // when the same model is exposed by both.
@@ -239,7 +238,7 @@ function _initModelPickerDropdown() {
         seen.add(mid);
         result.push({
           mid,
-          display: (allDisplay[i] || mid).split('/').pop(),
+          display: (entry.displayName || mid).split('/').pop(),
           url: item.url,
           endpointId: item.endpoint_id,
           epName: item.endpoint_name || '',
@@ -249,10 +248,12 @@ function _initModelPickerDropdown() {
             item.host || '',
             item.url || '',
           ].filter(Boolean).join(' '),
-          stale: isLocalDead || epOffline,
-          staleReason: epOffline
-            ? (item.ping_error || 'endpoint offline')
-            : (isLocalDead ? (probeResult.error || 'not responding') : ''),
+          stale: entry.stale || isLocalDead || epOffline,
+          staleReason: entry.stale
+            ? 'catalog entry is stale'
+            : (epOffline
+              ? (item.ping_error || 'endpoint offline')
+              : (isLocalDead ? (probeResult.error || 'not responding') : '')),
           offline: epOffline,
         });
       });
@@ -590,13 +591,12 @@ function _initModelPickerDropdown() {
     for (const item of items) {
       if (item.offline) continue;
       if (targetEndpointId && String(item.endpoint_id || '') !== targetEndpointId) continue;
-      const models = (item.models || []).concat(item.models_extra || []);
-      const displays = (item.models_display || []).concat(item.models_extra_display || []);
-      const idx = targetModel ? models.indexOf(targetModel) : (models.length ? 0 : -1);
+      const entries = catalogEntries(item);
+      const idx = targetModel ? entries.findIndex(entry => entry.mid === targetModel) : (entries.length ? 0 : -1);
       if (idx >= 0) {
         match = {
-          mid: models[idx],
-          display: (displays[idx] || models[idx]).split('/').pop(),
+          mid: entries[idx].mid,
+          display: (entries[idx].displayName || entries[idx].mid).split('/').pop(),
           url: item.url || detail.url || '',
           endpointId: item.endpoint_id || detail.endpointId || '',
           epName: item.endpoint_name || detail.endpointName || '',
@@ -736,13 +736,13 @@ export function updateModelPicker() {
     const allAvailable = [];
     items.forEach(item => {
       if (item.offline) return;
-      (item.models || []).concat(item.models_extra || []).forEach(m => allAvailable.push(m));
+      catalogModelIds(item).forEach(m => allAvailable.push(m));
     });
     if (allAvailable.length > 0 && !allAvailable.includes(modelId)) {
       // Model no longer available — switch to first available
-      const fallback = items.find(item => !item.offline && (item.models || []).length > 0);
+      const fallback = items.find(item => !item.offline && catalogEntries(item).length > 0);
       if (fallback) {
-        modelId = fallback.models[0];
+        modelId = catalogEntries(fallback)[0].mid;
         _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id });
       }
     }

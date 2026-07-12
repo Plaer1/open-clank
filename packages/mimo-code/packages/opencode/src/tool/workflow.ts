@@ -3,11 +3,24 @@ import DESCRIPTION from "./workflow.txt"
 import z from "zod"
 import { Effect, Fiber } from "effect"
 import { Config } from "../config"
+import { ConfigCompose } from "../config"
+import { InstanceState } from "@/effect"
 import { workflowRef } from "@/workflow/runtime-ref"
 import { BuiltinWorkflow } from "@/workflow/builtin"
 import type { SessionID } from "../session/schema"
 
 const id = "workflow"
+
+// Mirror compose.js arg normalization: a bare task string OR a JSON string both
+// collapse to an object. Used so host-side docs-dir injection can merge into args
+// regardless of how the caller serialized them.
+function parseComposeArgString(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw)
+    if (typeof parsed === "object" && parsed !== null) return parsed as Record<string, unknown>
+  } catch {}
+  return { task: raw }
+}
 
 const runSchema = z.strictObject({
   operation: z.literal("run"),
@@ -57,7 +70,17 @@ export const parameters = z.discriminatedUnion("operation", [
 ])
 
 type TranscriptEntry = { kind: "phase" | "log"; text: string }
-type Metadata = { runID?: string; status?: string; transcript?: TranscriptEntry[] }
+// `counters` and `currentPhase` are streamed in each flush so the inline
+// conversation panel shows live progress without polling: the bus run row only
+// carries counters via loadWorkflows (which only the /workflows dialog polls), so
+// without this the in-conversation panel would sit at 0✓ 0✗ 0⟳ for the whole run.
+type Metadata = {
+  runID?: string
+  status?: string
+  transcript?: TranscriptEntry[]
+  counters?: { running: number; succeeded: number; failed: number }
+  currentPhase?: string
+}
 
 // Bound the transcript that gets surfaced to the model (tool output) AND persisted
 // to part-state metadata AND streamed in each flush. A chatty workflow
@@ -101,6 +124,25 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
       return Effect.succeed(runtime)
     }
 
+    // Thread the operator-configured compose docs dir into the `compose` built-in's
+    // args, mirroring the `<compose_docs_dir>` block prompt.ts injects for the
+    // interactive compose agent. The compose guest reads `args._composeDocsDir` and
+    // tells its plan/report subagents where to write specs/plans/reports. We
+    // normalize args the same way compose.js does (object | JSON-string | bare task
+    // string) so the injection survives the AI-SDK string-serialization boundary.
+    const enrichComposeArgs = (raw: unknown) =>
+      Effect.gen(function* () {
+        const ctx = yield* InstanceState.context
+        const docs = ConfigCompose.resolveDocsDir(ctx.worktree, (yield* config.get()).compose)
+        const base =
+          typeof raw === "object" && raw !== null
+            ? (raw as Record<string, unknown>)
+            : typeof raw === "string"
+              ? parseComposeArgString(raw)
+              : {}
+        return { ...base, _composeDocsDir: docs }
+      })
+
     const run = Effect.fn("WorkflowTool.execute")(function* (
       input: z.infer<typeof parameters>,
       ctx: Tool.Context<Metadata>,
@@ -135,7 +177,7 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
           script,
           sessionID: ctx.sessionID as SessionID,
           parentActorID: ctx.agent ?? "main",
-          args: input.args,
+          args: input.name === "compose" ? yield* enrichComposeArgs(input.args) : input.args,
           workspace: input.workspace,
           maxConcurrentAgents: cfg.workflow?.maxConcurrentAgents,
           scriptDeadlineMs: cfg.workflow?.scriptDeadlineMs,
@@ -172,21 +214,35 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
           metadata: { runID, status: "running", transcript: [] } satisfies Metadata,
         })
 
-        // A 250ms flush loop reads the runtime's transcript and pushes a CAPPED
-        // snapshot through ctx.metadata (reusing the per-part-state delta channel,
-        // so TUI consumers need no new subscription). The cap keeps each delta
-        // bounded regardless of event count. forkScoped binds the fiber to the
-        // execute scope below, so it is interrupted on completion OR interrupt.
+        // A 250ms flush loop reads the runtime's transcript + live counters and
+        // pushes a CAPPED snapshot through ctx.metadata (reusing the per-part-state
+        // delta channel, so TUI consumers need no new subscription). The cap keeps
+        // each delta bounded regardless of event count. forkScoped binds the fiber to
+        // the execute scope below, so it is interrupted on completion OR interrupt.
+        // Counters are flushed alongside the transcript so the inline panel shows live
+        // ✓/✗/⟳ progress (they can change without a new transcript line — an agent can
+        // settle without a log() — so we flush on EITHER changing).
         let lastLen = 0
+        let lastCounters = ""
         const flushFiber = yield* Effect.forkScoped(
           Effect.gen(function* () {
             while (true) {
               yield* Effect.sleep("250 millis")
               const t = yield* runtime.transcript({ runID })
-              if (t.length === lastLen) continue
+              const s = yield* runtime.status({ runID })
+              const counters = { running: s.running, succeeded: s.succeeded, failed: s.failed }
+              const countersKey = `${counters.running}/${counters.succeeded}/${counters.failed}`
+              if (t.length === lastLen && countersKey === lastCounters) continue
               lastLen = t.length
+              lastCounters = countersKey
               yield* ctx.metadata({
-                metadata: { runID, status: "running", transcript: capTranscript(t) } satisfies Metadata,
+                metadata: {
+                  runID,
+                  status: "running",
+                  transcript: capTranscript(t),
+                  counters,
+                  ...(s.currentPhase !== undefined ? { currentPhase: s.currentPhase } : {}),
+                } satisfies Metadata,
               })
             }
           }),
@@ -194,6 +250,16 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
 
         const outcome = yield* runtime.wait({ runID })
         yield* Fiber.interrupt(flushFiber)
+
+        // Final counters/phase for the terminal metadata so the inline panel keeps
+        // showing the true ✓/✗/⟳ after the run ends (not the last mid-flush value).
+        const finalStatus = yield* runtime.status({ runID })
+        const finalCounters = {
+          running: finalStatus.running,
+          succeeded: finalStatus.succeeded,
+          failed: finalStatus.failed,
+        }
+        const finalPhase = finalStatus.currentPhase
 
         // The guest hooks append synchronously and complete before the script
         // returns (which resolves wait()), so this snapshot is the full, ordered
@@ -208,7 +274,13 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
             output:
               (lines.length ? lines.join("\n") + "\n\n" : "") +
               `Result: ${truncated}\nrun_id: ${runID}`,
-            metadata: { runID, status: "completed", transcript: finalTranscript } satisfies Metadata,
+            metadata: {
+              runID,
+              status: "completed",
+              transcript: finalTranscript,
+              counters: finalCounters,
+              ...(finalPhase !== undefined ? { currentPhase: finalPhase } : {}),
+            } satisfies Metadata,
           }
         }
         if (outcome.status === "failed") {
@@ -217,14 +289,26 @@ export const WorkflowTool = Tool.define<typeof parameters, Metadata, Config.Serv
             output:
               (lines.length ? lines.join("\n") + "\n\n" : "") +
               `Error: ${outcome.error}\nrun_id: ${runID}`,
-            metadata: { runID, status: "failed", transcript: finalTranscript } satisfies Metadata,
+            metadata: {
+              runID,
+              status: "failed",
+              transcript: finalTranscript,
+              counters: finalCounters,
+              ...(finalPhase !== undefined ? { currentPhase: finalPhase } : {}),
+            } satisfies Metadata,
           }
         }
         return {
           title: `workflow ${label} cancelled`,
           output:
             (lines.length ? lines.join("\n") + "\n\n" : "") + `Cancelled.\nrun_id: ${runID}`,
-          metadata: { runID, status: "cancelled", transcript: finalTranscript } satisfies Metadata,
+          metadata: {
+            runID,
+            status: "cancelled",
+            transcript: finalTranscript,
+            counters: finalCounters,
+            ...(finalPhase !== undefined ? { currentPhase: finalPhase } : {}),
+          } satisfies Metadata,
         }
       }
       if (input.operation === "status") {

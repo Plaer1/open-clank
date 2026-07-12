@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect"
 import { getSharedMcpClient } from "./mcp-client"
-import { Service } from "./service"
+import { Service, type Interface } from "./service"
 
 const FLOOR_RATIO = 0.15
 
@@ -73,9 +73,7 @@ async function callSearch(
   return rows
 }
 
-export const frankenmemoryLayer: Layer.Layer<Service> = Layer.effect(
-  Service,
-  Effect.gen(function* () {
+export const make: Effect.Effect<Interface> = Effect.gen(function* () {
     const root = Effect.fn("Frankenmemory.root")(function* () {
       const { Global } = yield* Effect.promise(() => import("../global"))
       const path = yield* Effect.promise(() => import("path"))
@@ -106,5 +104,6 @@ export const frankenmemoryLayer: Layer.Layer<Service> = Layer.effect(
       reconcile,
       search,
     })
-  }),
-)
+  })
+
+export const frankenmemoryLayer: Layer.Layer<Service> = Layer.effect(Service, make)

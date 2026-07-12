@@ -319,7 +319,7 @@ Done!
 
 **Important: Passing skills to subagents**
 
-Compose skills do NOT appear in subagents' `available_skills` list. When a subagent needs to use a skill, pass the relevant `<compose_skills>` block (or subset) directly in the subagent's prompt. Include this note alongside the block: "The skills listed in <compose_skills> are NOT in your available_skills — this is by design. You can invoke them by name using the skill tool, or read the SKILL.md at the location path."
+Compose skills do NOT appear in subagents' `available_skills` list by default. When a subagent needs to use a compose skill, pass the relevant `<available_skills>` block (or subset) directly in the subagent's prompt so it can invoke them by name via the skill tool.
 
 **Alternative workflow:**
 - **compose:execute** - Use for parallel session instead of same-session execution

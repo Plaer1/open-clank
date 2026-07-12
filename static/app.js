@@ -27,6 +27,7 @@ import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
+import copalModule from './js/copal.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -3380,6 +3381,7 @@ function startOdysseusApp() {
   chatModule.init(API_BASE);
   chatModule.initListeners();
   groupModule.init(API_BASE);
+  copalModule.init(API_BASE);
   // Initialize compare module
   if (compareModule) {
     compareModule.init(API_BASE);
@@ -3939,11 +3941,6 @@ function startOdysseusApp() {
   modelsModule.refreshProviders();
   ragModule.loadPersonalDocs();
   memoryModule.loadMemories(); // Ensure memories are loaded on page load
-  
-  // Ensure the memory list is rendered after loading
-  setTimeout(async () => {
-    await memoryModule.loadMemories();
-  }, 1000);
   
   // Ensure proper initial state
   voiceRecorderModule.init();

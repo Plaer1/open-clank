@@ -2,6 +2,7 @@ import { RequestError, type McpServer } from "@agentclientprotocol/sdk"
 import type { ACPSessionState } from "./types"
 import { Log } from "@/util"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
+import { registerMemorySessionScope } from "@/memory/session-scope"
 
 const log = Log.create({ service: "acp-session-manager" })
 
@@ -40,6 +41,7 @@ export class ACPSessionManager {
     log.info("creating_session", { state })
 
     this.sessions.set(sessionId, state)
+    registerMemorySessionScope(sessionId, mcpServers, cwd)
     return state
   }
 
@@ -71,6 +73,7 @@ export class ACPSessionManager {
     log.info("loading_session", { state })
 
     this.sessions.set(sessionId, state)
+    registerMemorySessionScope(sessionId, mcpServers, cwd)
     return state
   }
 

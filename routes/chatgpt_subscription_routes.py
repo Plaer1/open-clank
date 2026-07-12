@@ -29,7 +29,8 @@ def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
         raise ValueError("ChatGPT token response was missing access_token or refresh_token")
 
     base = chatgpt_subscription.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL
-    models = chatgpt_subscription.fetch_available_models(access_token)
+    account_id = chatgpt_subscription.extract_account_id(tokens)
+    models = chatgpt_subscription.fetch_available_models(access_token, account_id=account_id)
     if not models:
         raise ValueError("ChatGPT Subscription connected, but no usable Codex models were discovered for this account.")
     db = SessionLocal()
@@ -57,6 +58,7 @@ def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
         auth.refresh_token = refresh_token
         auth.last_refresh = utcnow_naive()
         auth.auth_mode = "chatgpt"
+        auth.account_id = account_id
 
         ep = (
             db.query(ModelEndpoint)

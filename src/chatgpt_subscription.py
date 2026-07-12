@@ -75,7 +75,7 @@ def is_chatgpt_subscription_base(url: str) -> bool:
     )
 
 
-def chatgpt_headers(access_token: Optional[str]) -> Dict[str, str]:
+def chatgpt_headers(access_token: Optional[str], account_id: Optional[str] = None) -> Dict[str, str]:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Origin": "https://chatgpt.com",
@@ -84,16 +84,24 @@ def chatgpt_headers(access_token: Optional[str]) -> Dict[str, str]:
     }
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
+    if not account_id and access_token:
+        account_id = extract_account_id({"access_token": access_token})
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
     return headers
 
 
-def fetch_available_models(access_token: str, timeout: float = 10.0) -> list[str]:
+def fetch_available_models(
+    access_token: str,
+    timeout: float = 10.0,
+    account_id: Optional[str] = None,
+) -> list[str]:
     if not access_token:
         return []
     try:
         response = httpx.get(
             "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
-            headers=chatgpt_headers(access_token),
+            headers=chatgpt_headers(access_token, account_id),
             timeout=timeout,
         )
         if response.status_code != 200:
@@ -243,6 +251,29 @@ def _decode_jwt_payload(token: str) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def extract_account_id(tokens: Dict[str, Any]) -> Optional[str]:
+    """Extract the organization account ID used by Codex backend requests."""
+    for token_key in ("id_token", "access_token"):
+        token = tokens.get(token_key)
+        if not token:
+            continue
+        try:
+            claims = _decode_jwt_payload(token)
+        except Exception:
+            continue
+        account_id = (
+            claims.get("chatgpt_account_id")
+            or (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
+        )
+        if account_id:
+            return str(account_id)
+        organizations = claims.get("organizations")
+        if isinstance(organizations, list) and organizations and isinstance(organizations[0], dict):
+            if organizations[0].get("id"):
+                return str(organizations[0]["id"])
+    return None
+
+
 def access_token_is_expiring(access_token: str, skew_seconds: int = CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS) -> bool:
     try:
         exp = int(_decode_jwt_payload(access_token).get("exp") or 0)
@@ -276,6 +307,9 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
                     row.access_token = refreshed["access_token"]
                     if refreshed.get("refresh_token"):
                         row.refresh_token = refreshed["refresh_token"]
+                    refreshed_account_id = extract_account_id(refreshed)
+                    if refreshed_account_id:
+                        row.account_id = refreshed_account_id
                     row.last_refresh = utcnow_naive()
                     db.commit()
                     db.refresh(row)
@@ -286,6 +320,7 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
             "base_url": (row.base_url or DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL).rstrip("/"),
             "api_key": access_token,
             "auth_mode": row.auth_mode or "chatgpt",
+            "account_id": row.account_id,
         }
     finally:
         db.close()

@@ -45,3 +45,8 @@ experiment/last-outcome.json
 
 /mimoapi/
 /packages/opencode/src/ext
+
+# temp
+temp/
+__pycache__
+Thumbs.db

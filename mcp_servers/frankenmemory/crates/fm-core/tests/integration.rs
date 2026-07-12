@@ -31,6 +31,8 @@ async fn exit_1_dual_record() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
 
     let result = provider.capture(&turn).await;
@@ -55,6 +57,8 @@ async fn exit_2_recall_toggle() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
     provider.capture(&turn).await;
 
@@ -166,6 +170,8 @@ async fn exit_5_two_tier() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
     provider.capture(&turn).await;
 
@@ -178,6 +184,7 @@ async fn exit_5_two_tier() {
             tier: Tier::Curated,
             limit: 10,
             workspace_id: None,
+            owner: None,
         })
         .await;
 
@@ -190,6 +197,7 @@ async fn exit_5_two_tier() {
             tier: Tier::Raw,
             limit: 10,
             workspace_id: None,
+            owner: None,
         })
         .await;
 
@@ -213,6 +221,8 @@ async fn exit_8_workspace_scoped_recall() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
     provider.capture(&turn_a).await;
 
@@ -226,6 +236,8 @@ async fn exit_8_workspace_scoped_recall() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
     provider.capture(&turn_b).await;
 
@@ -288,6 +300,8 @@ async fn exit_9_standalone_no_external_services() {
         workspace_path: None,
         source: "test".into(),
         owner: None,
+        category: None,
+        metadata: Default::default(),
     };
 
     let result = provider.capture(&turn).await;
