@@ -130,6 +130,7 @@ export const extractAndUpsert = Effect.fn("MemoryGraph.extract")(function* (inpu
   userText: string
   assistantText: string
   sessionID: string
+  owner: string
   workspaceId: string
   workspacePath: string
 }) {
@@ -206,6 +207,8 @@ export const extractAndUpsert = Effect.fn("MemoryGraph.extract")(function* (inpu
     client.callTool({
       name: "graph_upsert",
       arguments: {
+        owner: input.owner,
+        workspace_id: input.workspaceId,
         nodes: entities,
         edges,
         cues: anchor ? cues.map((cue) => ({ cue, node: anchor })) : [],

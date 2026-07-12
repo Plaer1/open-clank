@@ -27,9 +27,11 @@ class ACPClient:
         self._callbacks: Dict[str, Callback] = {}
         self._session_update_handler: Optional[Callable[[str, dict], Coroutine[Any, Any, None]]] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._callback_tasks: set[asyncio.Task] = set()
         self._closed = False
         self._close_event = asyncio.Event()
         self.agent_info: Optional[dict] = None
+        self.initialize_result: dict = {}
 
     # ── public API ──────────────────────────────────────────────
 
@@ -50,12 +52,14 @@ class ACPClient:
                     "readTextFile": True,
                     "writeTextFile": True,
                 },
+                "terminal": True,
             },
             "clientInfo": {
                 "name": "openthesius",
                 "version": "0.1.0",
             },
         })
+        self.initialize_result = result
         self.agent_info = result.get("agentInfo")
         return result
 
@@ -74,11 +78,19 @@ class ACPClient:
             "mcpServers": mcp_servers or [],
         })
 
-    async def prompt(self, session_id: str, parts: List[dict]) -> dict:
-        return await self._send_request("session/prompt", {
+    async def prompt(
+        self,
+        session_id: str,
+        parts: List[dict],
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        params = {
             "sessionId": session_id,
             "prompt": parts,
-        })
+        }
+        if metadata:
+            params["_meta"] = metadata
+        return await self._send_request("session/prompt", params)
 
     async def set_session_config_option(self, session_id: str, config_id: str, value: str) -> dict:
         """Set a session config option (model or mode) in mimo.
@@ -95,6 +107,12 @@ class ACPClient:
     async def cancel(self, session_id: str) -> None:
         self._send_notification("session/cancel", {"sessionId": session_id})
 
+    async def release_session(self, session_id: str) -> None:
+        await self._send_request(
+            "_odysseus/session/release",
+            {"sessionId": session_id},
+        )
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -110,6 +128,12 @@ class ACPClient:
                 await self._reader_task
             except asyncio.CancelledError:
                 pass
+        callback_tasks = list(self._callback_tasks)
+        self._callback_tasks.clear()
+        for task in callback_tasks:
+            task.cancel()
+        if callback_tasks:
+            await asyncio.gather(*callback_tasks, return_exceptions=True)
         try:
             self._writer.close()
         except Exception:
@@ -194,21 +218,11 @@ class ACPClient:
                     fut.set_result(msg.get("result", {}))
 
         elif has_id and has_method:
-            # Inbound request from agent — dispatch to callback, reply
-            method = msg["method"]
-            params = msg.get("params", {})
-            rid = msg["id"]
-            handler = self._callbacks.get(method)
-            if handler:
-                try:
-                    result = await handler(params)
-                    await self._write({"jsonrpc": "2.0", "id": rid, "result": result})
-                except Exception as e:
-                    logger.error("ACP callback %s error: %s", method, e, exc_info=True)
-                    await self._write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}})
-            else:
-                logger.warning("ACP: no callback for method %s", method)
-                await self._write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}})
+            # A permission/question callback may wait on a human. Never await
+            # it on the only reader loop or responses and updates deadlock.
+            task = asyncio.create_task(self._dispatch_callback(msg))
+            self._callback_tasks.add(task)
+            task.add_done_callback(self._callback_tasks.discard)
 
         elif not has_id and has_method:
             # Notification from agent
@@ -219,10 +233,36 @@ class ACPClient:
                 session_id = params.get("sessionId", "")
                 try:
                     await self._session_update_handler(session_id, update)
-                except Exception as e:
-                    logger.error("ACP session/update handler error: %s", e, exc_info=True)
+                except Exception as exc:
+                    logger.error("ACP session/update handler error: %s", exc, exc_info=True)
             else:
                 logger.debug("ACP: unhandled notification %s", method)
+
+    async def _dispatch_callback(self, msg: dict) -> None:
+        method = msg["method"]
+        params = msg.get("params", {})
+        rid = msg["id"]
+        handler = self._callbacks.get(method)
+        if handler is None:
+            logger.warning("ACP: no callback for method %s", method)
+            await self._write({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+            })
+            return
+        try:
+            result = await handler(params)
+            await self._write({"jsonrpc": "2.0", "id": rid, "result": result})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("ACP callback %s error: %s", method, exc, exc_info=True)
+            await self._write({
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32000, "message": str(exc)},
+            })
 
 
 class TransportError(Exception):

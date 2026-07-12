@@ -220,8 +220,20 @@ class ChatProcessor:
                                 f"about these topics.\n{ext_text}"
                             ),
                         ))
+                        used_ids = []
                         for h in hits:
-                            self._last_used_memories.append({"text": h.memory.text, "category": h.memory.category, "type": "recalled"})
+                            self._last_used_memories.append({
+                                "text": h.memory.text,
+                                "category": h.memory.category,
+                                "type": "pinned" if h.memory.pinned else "recalled",
+                            })
+                            if h.memory.id:
+                                used_ids.append(h.memory.id)
+                        if used_ids:
+                            try:
+                                await self.memory_provider.record_access(used_ids, owner=owner)
+                            except Exception as access_error:
+                                logger.warning("Provider access accounting failed: %s", access_error)
                 except Exception as e:
                     logger.warning("Provider recall failed: %s", e)
             else:

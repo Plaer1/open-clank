@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect"
 import { getSharedMcpClient } from "./mcp-client"
 import { Service, type Interface } from "./service"
+import { memorySessionScope } from "./session-scope"
 
 const FLOOR_RATIO = 0.15
 
@@ -26,17 +27,30 @@ function mapKindToType(kind: string): string {
 async function callSearch(
   query: string,
   limit: number,
-  scope?: string,
-  scope_id?: string,
+  sessionID?: string,
   type?: string,
-): Promise<Array<{ path: string; snippet: string; score: number; scope: string; scope_id: string; type: string }>> {
+): Promise<
+  Array<{
+    path: string
+    snippet: string
+    score: number
+    scope: string
+    scope_id: string
+    type: string
+    source?: string
+    trust?: string
+  }>
+> {
   const args: Record<string, unknown> = {
     query,
     tier: "curated",
     limit,
   }
-  if (scope) args.kind = scope
-  if (scope_id) args.scene = scope_id
+  if (!sessionID) throw new Error("frankenmemory search requires an active session")
+  const scope = memorySessionScope(sessionID)
+  if (!scope) throw new Error(`frankenmemory scope missing for session ${sessionID}`)
+  args.owner = scope.owner
+  args.workspace_id = scope.workspaceId
 
   const client = await getSharedMcpClient()
   const result = await client.callTool({ name: "search", arguments: args })
@@ -49,7 +63,16 @@ async function callSearch(
     return []
   }
 
-  const rows: Array<{ path: string; snippet: string; score: number; scope: string; scope_id: string; type: string }> = []
+  const rows: Array<{
+    path: string
+    snippet: string
+    score: number
+    scope: string
+    scope_id: string
+    type: string
+    source?: string
+    trust?: string
+  }> = []
   for (const r of parsed.results ?? []) {
     const rec = r.record ?? {}
     const row = {
@@ -59,6 +82,8 @@ async function callSearch(
       scope: (rec.workspace_id as string) ?? "global",
       scope_id: (rec.session_id as string) ?? "",
       type: mapKindToType((rec.kind as string) ?? "episodic"),
+      source: r.source_label || ((rec.source as string) ?? "unknown"),
+      trust: (rec.source_type as string) ?? "unknown",
     }
     if (type && row.type !== type) continue
     rows.push(row)
@@ -86,6 +111,7 @@ export const make: Effect.Effect<Interface> = Effect.gen(function* () {
 
     const search = Effect.fn("Frankenmemory.search")(function* (input: {
       query: string
+      sessionID?: string
       scope?: string
       scope_id?: string
       type?: string
@@ -95,7 +121,7 @@ export const make: Effect.Effect<Interface> = Effect.gen(function* () {
       if (!input.query) return []
 
       return yield* Effect.promise(() =>
-        callSearch(input.query, limit, input.scope, input.scope_id, input.type),
+        callSearch(input.query, limit, input.sessionID, input.type),
       )
     })
 

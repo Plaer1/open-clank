@@ -522,11 +522,6 @@ def setup_cookbook_routes() -> APIRouter:
         _validate_token(req.hf_token)
         TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
         session_id = f"cookbook-{uuid.uuid4().hex[:8]}"
-        if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            if supervisor and supervisor.is_alive() and supervisor.bridge:
-                cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                session_id = await supervisor.bridge.open_session(cwd or None)
         wrapper_script = TMUX_LOG_DIR / f"{session_id}.sh"
 
         # Custom download dir: point the HF cache at <dir>/hub via env vars

@@ -74,6 +74,40 @@ def test_derive_pattern():
     assert derive_pattern(None) == "*"
 
 
+def test_grants_are_owner_scoped_expirable_and_revocable(tmp_path):
+    store = GrantStore(str(tmp_path / "app.db"))
+    store.add("bash", "*", owner="alice", workspace="/work")
+    assert store.match("bash", owner="alice", workspace="/work")
+    assert not store.match("bash", owner="bob", workspace="/work")
+    record = store.list_records(owner="alice")[0]
+    assert store.revoke(record["id"], owner="alice")
+    assert not store.match("bash", owner="alice", workspace="/work")
+
+    store.add(
+        "edit",
+        "*",
+        owner="alice",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    assert not store.match("edit", owner="alice")
+
+
+async def test_incognito_and_foreign_owner_permissions_fail_closed(tmp_path):
+    store = GrantStore(str(tmp_path / "app.db"))
+    store.add("bash", "*", owner="alice", workspace="/work")
+    handler = PermissionHandler(grant_store=store)
+    contexts = {
+        "incog": {"owner": "alice", "workspace": "/work", "incognito": True, "is_admin": True},
+        "bob": {"owner": "bob", "workspace": "/work", "incognito": False, "is_admin": False},
+    }
+    handler.set_context_resolver(lambda session_id: contexts[session_id])
+
+    incognito = await handler.handle(_params(title="bash", session_id="incog"))
+    foreign = await handler.handle(_params(title="bash", session_id="bob"))
+    assert incognito["outcome"]["optionId"] == "reject"
+    assert foreign["outcome"]["optionId"] == "reject"
+
+
 # ── PermissionHandler flow ──
 
 

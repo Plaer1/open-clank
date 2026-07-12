@@ -144,6 +144,7 @@ export class Agent implements ACPAgent {
   private bashSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
   private permissionQueues = new Map<string, Promise<void>>()
+  private questionQueues = new Map<string, Promise<void>>()
   private permissionOptions: PermissionOption[] = [
     { optionId: "once", kind: "allow_once", name: "Allow once" },
     { optionId: "always", kind: "allow_always", name: "Always allow" },
@@ -156,6 +157,16 @@ export class Agent implements ACPAgent {
     this.sdk = config.sdk
     this.sessionManager = new ACPSessionManager(this.sdk)
     this.startEventSubscription()
+  }
+
+  async extMethod(method: string, params: Record<string, unknown>) {
+    if (method !== "_odysseus/session/release") {
+      throw new Error(`Unsupported ACP extension method: ${method}`)
+    }
+    const sessionId = String(params.sessionId ?? "")
+    if (!sessionId) throw RequestError.invalidParams("sessionId is required")
+    await this.sessionManager.release(sessionId)
+    return {}
   }
 
   private startEventSubscription() {
@@ -186,6 +197,50 @@ export class Agent implements ACPAgent {
 
   private async handleEvent(event: Event) {
     switch (event.type) {
+      case "question.asked": {
+        const question = event.properties
+        const session = this.sessionManager.tryGet(question.sessionID)
+        if (!session) return
+        const previous = this.questionQueues.get(question.sessionID) ?? Promise.resolve()
+        const next = previous
+          .then(async () => {
+            const response = await this.connection.extMethod("_odysseus/question", {
+              requestId: question.id,
+              sessionId: question.sessionID,
+              questions: question.questions,
+              tool: question.tool,
+            })
+            if (response.rejected === true) {
+              await this.sdk.question.reject(
+                { requestID: question.id, directory: session.cwd },
+                { throwOnError: true },
+              )
+              return
+            }
+            const answers = Array.isArray(response.answers) ? response.answers : []
+            await this.sdk.question.reply(
+              { requestID: question.id, directory: session.cwd, answers: answers as string[][] },
+              { throwOnError: true },
+            )
+          })
+          .catch(async (error) => {
+            log.error("failed to handle ACP question", { error, questionID: question.id })
+            await this.sdk.question
+              .reject(
+                { requestID: question.id, directory: session.cwd },
+                { throwOnError: true },
+              )
+              .catch(() => undefined)
+          })
+          .finally(() => {
+            if (this.questionQueues.get(question.sessionID) === next) {
+              this.questionQueues.delete(question.sessionID)
+            }
+          })
+        this.questionQueues.set(question.sessionID, next)
+        return
+      }
+
       case "permission.asked": {
         const permission = event.properties
         const session = this.sessionManager.tryGet(permission.sessionID)
@@ -1282,6 +1337,9 @@ export class Agent implements ACPAgent {
   }
 
   async prompt(params: PromptRequest) {
+    const odysseus = (params as PromptRequest & {
+      _meta?: { odysseus?: { tools?: Record<string, boolean> } }
+    })._meta?.odysseus
     const sessionID = params.sessionId
     const session = this.sessionManager.get(sessionID)
     const directory = session.cwd
@@ -1320,7 +1378,7 @@ export class Agent implements ACPAgent {
               filename,
               mime: part.mimeType,
             })
-          } else if (part.uri && part.uri.startsWith("http:")) {
+          } else if (part.uri && (part.uri.startsWith("http:") || part.uri.startsWith("https:"))) {
             parts.push({
               type: "file",
               url: part.uri,
@@ -1371,12 +1429,14 @@ export class Agent implements ACPAgent {
 
     const cmd = (() => {
       const text = parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text)
-        .join("")
-        .trim()
+        .findLast(
+          (p): p is { type: "text"; text: string; synthetic?: boolean; ignored?: boolean } =>
+            p.type === "text" && !p.synthetic && !p.ignored,
+        )
+        ?.text.trim()
+        .replace(/^\[turn_source_id=[^\]]+\]\s*/, "")
 
-      if (!text.startsWith("/")) return
+      if (!text?.startsWith("/")) return
 
       const [name, ...rest] = text.slice(1).split(/\s+/)
       return { name, args: rest.join(" ").trim() }
@@ -1407,6 +1467,7 @@ export class Agent implements ACPAgent {
         parts,
         agent,
         directory,
+        tools: odysseus?.tools,
       })
       const msg = response.data?.info
 

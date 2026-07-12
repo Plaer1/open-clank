@@ -331,6 +331,7 @@ function slashReply(text) {
 }
 
 let _skillCatalogCache = { at: 0, items: [] };
+let _mimoStateCache = { sid: '', at: 0, state: { available: false } };
 
 async function _loadSkillSlashCatalog(force = false) {
   const now = Date.now();
@@ -345,6 +346,81 @@ async function _loadSkillSlashCatalog(force = false) {
   } catch {
     return _skillCatalogCache.items || [];
   }
+}
+
+export async function loadMimoControlState(force = false) {
+  const sid = sessionModule.getCurrentSessionId();
+  if (!sid) return { available: false };
+  const now = Date.now();
+  if (!force && _mimoStateCache.sid === sid && now - _mimoStateCache.at < 5000) {
+    return _mimoStateCache.state;
+  }
+  try {
+    const suffix = force ? '?refresh=true' : '';
+    const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/mimo-state${suffix}`, {
+      credentials: 'same-origin'
+    });
+    const state = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(state.detail || 'MiMo state is unavailable');
+    _mimoStateCache = { sid, at: now, state };
+    return state;
+  } catch {
+    const state = { available: false };
+    _mimoStateCache = { sid, at: now, state };
+    return state;
+  }
+}
+
+async function _setMimoConfig(configId, value) {
+  const sid = sessionModule.getCurrentSessionId();
+  if (!sid) throw new Error('No active session');
+  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/mimo-config`, {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config_id: configId, value })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `MiMo rejected ${configId}`);
+  const state = { available: true, ...data };
+  _mimoStateCache = { sid, at: Date.now(), state };
+  return state;
+}
+
+export async function refreshMimoModeControl(force = false) {
+  const select = document.getElementById('mimo-mode-select');
+  if (!select) return;
+  const state = await loadMimoControlState(force);
+  const modes = state.modes?.availableModes || [];
+  if (!state.available || !modes.length) {
+    select.classList.add('hidden');
+    select.replaceChildren();
+    return;
+  }
+  const selected = state.desired?.mode || state.current?.mode || state.modes?.currentModeId;
+  select.replaceChildren(...modes.map(mode => {
+    const option = document.createElement('option');
+    option.value = mode.id;
+    option.textContent = mode.name || mode.id;
+    option.title = mode.description || '';
+    option.selected = mode.id === selected;
+    return option;
+  }));
+  select.classList.remove('hidden');
+  select.onchange = async () => {
+    const previous = selected;
+    select.disabled = true;
+    try {
+      await _setMimoConfig('mode', select.value);
+      uiModule.showToast(`MiMo mode: ${select.options[select.selectedIndex]?.textContent || select.value}`);
+      document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
+    } catch (error) {
+      select.value = previous;
+      uiModule.showError(error.message);
+    } finally {
+      select.disabled = false;
+    }
+  };
 }
 
 function _submitComposedMessage(text) {
@@ -6374,6 +6450,40 @@ async function handleSlashCommand(input) {
     // --- 4. Skill invocation: /<skill-name> [request] ---
     // If `rawCmd` matches a published skill, the backend records usage and
     // returns a skill-pinned message to submit as the next agent turn.
+    if (rawCmd.startsWith('mimo:')) {
+      const state = await loadMimoControlState(false);
+      const name = rawCmd.slice('mimo:'.length);
+      const commands = state.commands || [];
+      if (!state.available || !commands.some(command => command.name === name)) {
+        _showUser();
+        slashReply(`MiMo command <b>/${ctx.esc(name)}</b> is not available in this session.`);
+        return true;
+      }
+      return false;
+    }
+
+    const mimoState = await loadMimoControlState(false);
+    if (mimoState.available) {
+      const mode = (mimoState.modes?.availableModes || []).find(item => item.id === rawCmd);
+      if (mode) {
+        _showUser();
+        try {
+          await _setMimoConfig('mode', mode.id);
+        } catch (error) {
+          slashReply(`MiMo rejected mode <b>${ctx.esc(mode.id)}</b>: ${ctx.esc(error.message)}`);
+          return true;
+        }
+        const prompt = args.join(' ').trim();
+        if (prompt) _submitComposedMessage(prompt);
+        else slashReply(`MiMo mode is now <b>${ctx.esc(mode.name || mode.id)}</b>.`);
+        document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
+        return true;
+      }
+      if ((mimoState.commands || []).some(command => command.name === rawCmd)) {
+        return false;
+      }
+    }
+
     try {
       const catalog = await _loadSkillSlashCatalog(false);
       if (catalog.some(s => s.name === rawCmd)) {
@@ -6411,6 +6521,14 @@ async function handleSlashCommand(input) {
 export function initSlashCommands(deps) {
   API_BASE = deps.apiBase || '';
   if (deps.isStreaming) _isStreamingFn = deps.isStreaming;
+
+  document.addEventListener('odysseus:session-selected', () => {
+    _mimoStateCache = { sid: '', at: 0, state: { available: false } };
+    refreshMimoModeControl(false);
+  });
+  document.addEventListener('odysseus:mimo-state-changed', () => {
+    refreshMimoModeControl(false);
+  });
 
   // Global delegation for onboarding and setup clicks
   document.addEventListener('click', (e) => {

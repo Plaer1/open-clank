@@ -13,6 +13,7 @@ import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import * as MemoryCapture from "../../src/memory/capture"
 import { memoMap } from "../../src/effect/memo-map"
+import { registerMemorySessionScope } from "../../src/memory/session-scope"
 
 export const FM_BIN = "/home/e/sauce/ai/open-clank/mcp_servers/frankenmemory/target/release/fm-mcp"
 
@@ -103,6 +104,21 @@ export function realTurn(input: { agent: string; marker: string; settleMs: numbe
     const sessions = yield* Session.Service
     const prompt = yield* SessionPrompt.Service
     const session = yield* sessions.create({})
+    registerMemorySessionScope(
+      session.id,
+      [
+        {
+          name: "frankenmemory",
+          command: FM_BIN,
+          args: [],
+          env: [
+            { name: "FM_OWNER", value: "memory-test" },
+            { name: "FM_WORKSPACE_ID", value: session.directory },
+          ],
+        },
+      ],
+      session.directory,
+    )
     yield* prompt.prompt({
       sessionID: session.id,
       agent: input.agent,

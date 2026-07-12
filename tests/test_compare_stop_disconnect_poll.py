@@ -165,6 +165,25 @@ async def test_normal_completion_saves_exactly_once_not_partial():
     assert sink.saves == []
 
 
+@pytest.mark.asyncio
+async def test_detached_replay_has_monotonic_ids_and_cursor_resume():
+    session_id = "sess-detached-sequence"
+    agent_runs._RUNS.pop(session_id, None)
+
+    async def events():
+        yield 'data: {"delta":"one"}\n\n'
+        yield 'data: {"delta":"two"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    run = agent_runs.start(session_id, events())
+    await run.task
+    all_frames = [frame async for frame in agent_runs.subscribe(session_id)]
+    resumed = [frame async for frame in agent_runs.subscribe(session_id, after_seq=1)]
+
+    assert [frame.splitlines()[0] for frame in all_frames] == ["id: 1", "id: 2", "id: 3"]
+    assert resumed == all_frames[1:]
+
+
 # --------------------------------------------------------------------------- #
 # chat_stream: Compare panes must NOT be detached, so the Stop button (closing
 # the SSE) cancels the upstream generator promptly — exercising the same

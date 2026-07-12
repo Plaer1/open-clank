@@ -186,9 +186,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     Reads current settings flags."""
     import asyncio
     import sqlite3 as _sql3
-    import requests as _req
     from src.endpoint_resolver import resolve_endpoint
-    from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
 
     settings = _load_settings()
     auto_sum = settings.get("email_auto_summarize", False)
@@ -406,48 +404,34 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     req_headers.update(headers)
 
                 if need_sum:
-                    tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                    payload = {
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
-                            {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
-                        ],
-                        tok_key: 16384,
-                        "temperature": 0.3,
-                        "stream": False,
-                    }
-                    # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.
-                    if _restricts_temperature(model):
-                        payload.pop("temperature", None)
                     try:
-                        # Use to_thread so this sync HTTP call doesn't freeze
-                        # the entire event loop while the LLM thinks (240s).
-                        resp = await asyncio.to_thread(
-                            _req.post, url, json=payload, headers=req_headers, timeout=240
+                        summary = await llm_call_async(
+                            url=url,
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
+                                {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
+                            ],
+                            temperature=0.3,
+                            max_tokens=16384,
+                            headers=req_headers,
+                            timeout=240,
+                            owner=account_owner,
                         )
-                        if resp.ok:
-                            rdata = resp.json()
-                            m = (rdata.get("choices") or [{}])[0].get("message", {})
-                            summary = (m.get("content") or "").strip()
-                            summary = _extract_reply(summary)
-                            if not summary:
-                                rc = (m.get("reasoning_content") or "").strip()
-                                bullets = [ln.strip() for ln in rc.split("\n") if re.match(r"^[-•*]\s+|^\d+[.)]\s+", ln.strip())]
-                                summary = "\n".join(bullets) if bullets else ""
-                            if summary:
-                                _c = _sql3.connect(SCHEDULED_DB)
-                                _c.execute("""
-                                    INSERT OR REPLACE INTO email_summaries
-                                    (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
-                                _c.commit()
-                                _c.close()
-                                _sum_existing.add(message_id)
-                                _summaries_created += 1
-                                _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
-                                _detail_lines.append(f"summary · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
+                        summary = _extract_reply((summary or "").strip())
+                        if summary:
+                            _c = _sql3.connect(SCHEDULED_DB)
+                            _c.execute("""
+                                INSERT OR REPLACE INTO email_summaries
+                                (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
+                            _c.commit()
+                            _c.close()
+                            _sum_existing.add(message_id)
+                            _summaries_created += 1
+                            _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                            _detail_lines.append(f"summary · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
                     except Exception as e:
                         _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
                         _detail_lines.append(f"summary failed · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
@@ -476,6 +460,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             temperature=0.7, max_tokens=1024,
                             headers=req_headers, timeout=90,
+                            owner=account_owner,
                         )
                         reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
                         if reply:
@@ -564,6 +549,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             ],
                             temperature=0.1, max_tokens=16384,
                             headers=req_headers, timeout=180,
+                            owner=account_owner,
                         )
                         _raw_original = cal_extract or ""
                         cal_extract = _strip_think(_raw_original)
@@ -729,22 +715,17 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "and phishing-style fake urgency. Real urgency comes from people the user "
                             "actually does business with. Be strict — only mark critical/high when genuinely needed."
                         )
-                        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                        payload = {
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": urg_sys},
-                                {"role": "user", "content": (
-                                    f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date','')}\n\n"
-                                    f"{body[:3000]}"
-                                )},
-                            ],
-                            "temperature": 0,
-                            tok_key: 200,
-                        }
+                        urg_messages = [
+                            {"role": "system", "content": urg_sys},
+                            {"role": "user", "content": (
+                                f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date','')}\n\n"
+                                f"{body[:3000]}"
+                            )},
+                        ]
                         urg_raw = await llm_call_async(
-                            url=url, model=model, messages=payload["messages"],
+                            url=url, model=model, messages=urg_messages,
                             temperature=0, max_tokens=200, headers=req_headers, timeout=60,
+                            owner=account_owner,
                         )
                         urg_raw = _strip_think(urg_raw or "")
                         urg_raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", urg_raw, flags=re.MULTILINE).strip()
@@ -863,30 +844,21 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "If it's a mass-mailed generic update with no personal CTA, mark spam=true even if from a legitimate service. "
                             "Reason should be 5-10 words."
                         )
-                        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                        payload = {
-                            "model": model,
-                            "messages": [
+                        raw_out = await llm_call_async(
+                            url=url,
+                            model=model,
+                            messages=[
                                 {"role": "system", "content": class_sys},
                                 {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:4000]}"},
                             ],
-                            tok_key: 512,
-                            "temperature": 0.1,
-                            "stream": False,
-                        }
-                        # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.
-                        if _restricts_temperature(model):
-                            payload.pop("temperature", None)
-                        # to_thread keeps the event loop responsive during the LLM call
-                        resp = await asyncio.to_thread(
-                            _req.post, url, json=payload, headers=req_headers, timeout=120
+                            max_tokens=512,
+                            temperature=0.1,
+                            headers=req_headers,
+                            timeout=120,
+                            owner=account_owner,
                         )
-                        if not resp.ok:
-                            logger.warning(f"Auto-classify {uid.decode() if isinstance(uid, bytes) else str(uid)} HTTP {resp.status_code}: {resp.text[:200]}")
-                        else:
-                            rdata = resp.json()
-                            m = (rdata.get("choices") or [{}])[0].get("message", {})
-                            raw_out = (m.get("content") or "").strip()
+                        if raw_out:
+                            raw_out = raw_out.strip()
                             raw_out = _strip_think(raw_out)
                             raw_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_out, flags=re.MULTILINE).strip()
                             jm = re.search(r'\{.*\}', raw_out, re.DOTALL)

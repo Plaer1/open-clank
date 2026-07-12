@@ -3,11 +3,11 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
-from sqlalchemy.orm import relationship, sessionmaker, backref
+from sqlalchemy.orm import Session as ORMSession, relationship, sessionmaker, backref
 
 from src.runtime_paths import get_app_root
 
@@ -150,6 +150,8 @@ class Session(TimestampMixin, Base):
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
     mimo_session_id = Column(String, nullable=True)  # durable lazy-cache for pre-migration uuid4 rows
+    transcript_revision = Column(Integer, nullable=False, default=0)
+    mimo_state = Column(JSON, nullable=False, default=dict)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -207,6 +209,54 @@ class ChatMessage(Base):
     # Indexes - optimized composite
     __table_args__ = (
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
+    )
+
+
+class MimoProjection(TimestampMixin, Base):
+    """Active MiMo execution projection of one canonical Odysseus transcript."""
+
+    __tablename__ = "mimo_projections"
+
+    odysseus_session_id = Column(
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    mimo_session_id = Column(String, nullable=False, unique=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    workspace = Column(String, nullable=False)
+    endpoint_url = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    transcript_revision = Column(Integer, nullable=False, default=0)
+    covered_message_ids = Column(Text, nullable=False, default="[]")
+    canonical_digest = Column(String, nullable=False)
+    mode_config_revision = Column(Integer, nullable=False, default=0)
+    lifecycle_state = Column(String, nullable=False, default="active", index=True)
+    active_turn_id = Column(String, nullable=False, index=True)
+
+
+@event.listens_for(ORMSession, "before_flush")
+def _collect_transcript_revision_changes(session, _flush_context, _instances):
+    changed = session.info.setdefault("_transcript_revision_ids", set())
+    for obj in session.new.union(session.dirty).union(session.deleted):
+        if isinstance(obj, ChatMessage) and obj.session_id:
+            changed.add(obj.session_id)
+        elif isinstance(obj, Session) and obj.id and obj in session.dirty:
+            state = inspect(obj)
+            if state.attrs.endpoint_url.history.has_changes() or state.attrs.model.history.has_changes():
+                changed.add(obj.id)
+
+
+@event.listens_for(ORMSession, "after_flush_postexec")
+def _bump_transcript_revisions(session, _flush_context):
+    changed = session.info.pop("_transcript_revision_ids", set())
+    if not changed:
+        return
+    session.execute(
+        update(Session)
+        .where(Session.id.in_(changed))
+        .values(transcript_revision=func.coalesce(Session.transcript_revision, 0) + 1)
+        .execution_options(synchronize_session=False)
     )
 
 class Document(TimestampMixin, Base):
@@ -1175,6 +1225,50 @@ def _migrate_add_mimo_session_id_column():
         except Exception:
             pass
 
+
+def _migrate_add_transcript_revision_column():
+    """Add the canonical transcript revision used by MiMo projections."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "transcript_revision" not in columns:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN transcript_revision INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.commit()
+            logger.info("Migrated: added 'transcript_revision' column to sessions")
+    except Exception as exc:
+        logger.warning("Migration check for transcript_revision failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _migrate_add_mimo_state_column():
+    """Add the negotiated MiMo control-plane snapshot to existing sessions."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "mimo_state" not in columns:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN mimo_state JSON NOT NULL DEFAULT '{}'"
+            )
+            conn.commit()
+            logger.info("Migrated: added 'mimo_state' column to sessions")
+    except Exception as exc:
+        logger.warning("Migration check for mimo_state failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
 def _migrate_add_token_columns():
     """Add cumulative token tracking columns to sessions table."""
     import sqlite3
@@ -1865,6 +1959,8 @@ def init_db():
     _migrate_add_token_columns()
     _migrate_add_mode_column()
     _migrate_add_mimo_session_id_column()
+    _migrate_add_transcript_revision_column()
+    _migrate_add_mimo_state_column()
     _migrate_add_multiuser_owner_columns()
     _migrate_add_api_token_scopes_column()
     _migrate_backfill_document_owner_from_session()

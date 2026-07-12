@@ -8,13 +8,103 @@ import json
 import logging
 import socket
 import subprocess
-from typing import Optional, Tuple, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResolvedModelTarget:
+    """A dispatch-ready model selection independent of URL conventions."""
+
+    transport: Literal["http", "acp"]
+    endpoint_url: str
+    model_id: str
+    endpoint_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    headers: Mapping[str, str] = field(default_factory=dict)
+    capabilities: Mapping[str, Optional[bool]] = field(default_factory=dict)
+    owner_eligible: bool = True
+    supports_stream: bool = True
+    lifecycle: Literal["persistent", "ephemeral"] = "persistent"
+
+    def require(self, capability: str) -> None:
+        if self.capabilities.get(capability) is not True:
+            raise ValueError(
+                f"Model {self.model_id!r} does not advertise the {capability!r} capability"
+            )
+
+
+def resolve_model_target(
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Mapping[str, str]] = None,
+    *,
+    endpoint_id: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    variant_id: Optional[str] = None,
+    capabilities: Optional[Mapping[str, Optional[bool]]] = None,
+    owner_eligible: bool = True,
+    lifecycle: Literal["persistent", "ephemeral"] = "persistent",
+) -> ResolvedModelTarget:
+    """Resolve a wire endpoint into the only transport types callers may dispatch."""
+    url = (endpoint_url or "").strip()
+    model_id = (model or "").strip()
+    if not url:
+        raise ValueError("No model endpoint is configured")
+    if not model_id:
+        raise ValueError("No model is selected")
+    if not owner_eligible:
+        raise PermissionError(f"Model {model_id!r} is not available to this account")
+
+    scheme = urlparse(url).scheme.lower()
+    if scheme == "mimo":
+        if url.rstrip("/") != "mimo://acp":
+            raise ValueError(f"Unsupported MiMo target: {url!r}")
+        transport: Literal["http", "acp"] = "acp"
+        defaults: Dict[str, Optional[bool]] = {
+            "chat": True,
+            "tools": True,
+            "stream": True,
+            "auxiliary": True,
+            "vision": None,
+        }
+        resolved_endpoint_id = endpoint_id or "mimo"
+        resolved_provider_id = provider_id or "mimo"
+    elif scheme in {"http", "https"}:
+        transport = "http"
+        defaults = {
+            "chat": True,
+            "tools": None,
+            "stream": True,
+            "auxiliary": True,
+            "vision": None,
+        }
+        resolved_endpoint_id = endpoint_id
+        resolved_provider_id = provider_id or _detect_provider(url)
+    else:
+        raise ValueError(f"Unsupported model transport scheme: {scheme or '(missing)'}")
+
+    defaults.update(dict(capabilities or {}))
+    return ResolvedModelTarget(
+        transport=transport,
+        endpoint_url=url,
+        model_id=model_id,
+        endpoint_id=resolved_endpoint_id,
+        provider_id=resolved_provider_id,
+        variant_id=variant_id,
+        headers=dict(headers or {}),
+        capabilities=defaults,
+        owner_eligible=True,
+        supports_stream=defaults.get("stream") is True,
+        lifecycle=lifecycle,
+    )
 
 # Model-name substrings that are NOT chat/generation models. When an endpoint
 # has no explicit model configured we pick the first CHAT model from its list —
@@ -166,7 +256,10 @@ def _validated_endpoint_base(url: str) -> str:
     base = (url or "").strip().rstrip("/")
     if "?" in base or "#" in base:
         raise ValueError("Endpoint base URL must not include query or fragment")
-    return urlunparse(urlparse(base)._replace(query="", fragment="")).rstrip("/")
+    parsed = urlparse(base)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("HTTP endpoint base must use http or https")
+    return urlunparse(parsed._replace(query="", fragment="")).rstrip("/")
 
 
 def _prepare_endpoint_base(base: str) -> str:
@@ -376,6 +469,27 @@ def resolve_endpoint_by_id(
         return None
     if ep_id == "mimo":
         selected = (model or "").strip()
+        try:
+            from src.model_dispatch import get_mimo_supervisor
+
+            supervisor = get_mimo_supervisor()
+            try:
+                catalog = supervisor.available_models(owner=owner) if supervisor else []
+            except TypeError:
+                catalog = supervisor.available_models() if supervisor else []
+            available = [
+                item.get("modelId")
+                for item in catalog
+                if item.get("modelId")
+            ]
+            if available:
+                if selected and selected not in available:
+                    return None
+                selected = selected or available[0]
+        except Exception:
+            pass
+        if not selected:
+            return None
         return "mimo://acp", selected, {}
     db = SessionLocal()
     try:

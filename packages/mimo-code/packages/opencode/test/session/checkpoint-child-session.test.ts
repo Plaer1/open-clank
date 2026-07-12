@@ -346,7 +346,7 @@ describe("checkpoint writer child-session isolation", () => {
       Effect.gen(function* () {
         yield* resetSpawnLog
         const svc = yield* SessionCheckpoint.Service
-        const { info, endMessageID } = yield* seedParentSession()
+        const { info } = yield* seedParentSession()
 
         // Start a writer; outcome is collected in pendingOutcomes for explicit
         // settlement after we've confirmed the lock is held.
@@ -388,16 +388,14 @@ describe("checkpoint writer child-session isolation", () => {
         expect(r2).toBe("started")
         expect(spawnLog.count).toBe(2)
 
-        // Sanity: the parent's last_checkpoint_message_id was advanced by the
-        // settle watcher even on failure (current behavior — bookkeeping is
-        // unconditional in checkpoint.ts:801-808). Asserted here so a future
-        // change to gate the update on success would surface as a test diff.
+        // A failed writer must leave the watermark untouched so the same
+        // uncovered range remains eligible for the retry above.
         const parentRow = yield* Effect.sync(() =>
           Database.use((d) =>
             d.select().from(SessionTable).where(eq(SessionTable.id, info.id)).get(),
           ),
         )
-        expect(parentRow?.last_checkpoint_message_id).toBe(endMessageID)
+        expect(parentRow?.last_checkpoint_message_id ?? null).toBeNull()
       }),
       { config: { checkpoint: { fork: true } } },
     ),

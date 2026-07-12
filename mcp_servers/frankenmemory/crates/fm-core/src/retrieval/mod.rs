@@ -116,13 +116,17 @@ async fn try_hybrid_scoped(
     workspace_id: Option<&str>,
 ) -> Vec<ScoredRecord> {
     store
-        .search_curated_hybrid_scoped(crate::store::HybridQuery {
-            query_text: Some(query_text.to_string()),
-            query_embedding: query_embedding.map(|e| e.to_vec()),
-            sparse_vector: None,
-            top_k,
-            workspace_id: None,
-        }, owner, workspace_id)
+        .search_curated_hybrid_scoped(
+            crate::store::HybridQuery {
+                query_text: Some(query_text.to_string()),
+                query_embedding: query_embedding.map(|e| e.to_vec()),
+                sparse_vector: None,
+                top_k,
+                workspace_id: None,
+            },
+            owner,
+            workspace_id,
+        )
         .await
 }
 
@@ -149,6 +153,10 @@ fn apply_collapse_and_rank(
         })
         .collect();
 
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     ranked
 }

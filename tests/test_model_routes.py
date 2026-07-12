@@ -1469,6 +1469,85 @@ def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
     assert admin_checks == ["alice"]
 
 
+def test_api_models_filters_http_and_mimo_catalog_by_user_allowlist(monkeypatch):
+    rows = [
+        _route_ep(
+            "http",
+            "https://models.example/v1",
+            cached_models=["http-allowed", "http-blocked"],
+            owner="alice",
+        ),
+    ]
+    db = _RouteDb(rows)
+    router = model_routes.setup_model_routes(model_discovery=None)
+    supervisor = SimpleNamespace(
+        available_models=lambda: [
+            {"modelId": "mimo-allowed"},
+            {"modelId": "mimo-blocked"},
+        ]
+    )
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+        get_privileges=lambda _user: {
+            "allowed_models": ["http-allowed", "mimo-allowed"],
+            "allowed_models_restricted": True,
+        },
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth, mimo_supervisor=supervisor)),
+    )
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+
+    result = _route_endpoint(router, "/api/models")(request)
+
+    by_id = {item["endpoint_id"]: item for item in result["items"]}
+    assert by_id["http"]["models"] == ["http-allowed"]
+    assert by_id["mimo"]["models"] == ["mimo-allowed"]
+    assert by_id["mimo"]["read_only"] is True
+    assert by_id["mimo"]["actions"] == ["configure_providers"]
+
+
+def test_virtual_mimo_endpoint_only_exposes_read_actions(monkeypatch):
+    router = model_routes.setup_model_routes(model_discovery=None)
+    supervisor = SimpleNamespace(
+        available_models=lambda: [{"modelId": "xiaomi/mimo-v2"}]
+    )
+    request = SimpleNamespace(
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace(mimo_supervisor=supervisor)),
+    )
+    monkeypatch.setattr(model_routes, "require_admin", lambda _request: None)
+
+    listed = _route_endpoint(router, "/api/model-endpoints/{ep_id}/models")(
+        "mimo", request, SimpleNamespace(headers={})
+    )
+    assert listed == [{
+        "id": "xiaomi/mimo-v2",
+        "display": "mimo-v2",
+        "is_hidden": False,
+        "is_pinned": False,
+        "read_only": True,
+    }]
+
+    for path, method in (
+        ("/api/model-endpoints/{ep_id}", "PATCH"),
+        ("/api/model-endpoints/{ep_id}", "DELETE"),
+        ("/api/model-endpoints/{ep_id}/probe", "GET"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            endpoint = _route_endpoint(router, path, method)
+            if method == "PATCH":
+                asyncio.run(endpoint("mimo", request))
+            else:
+                endpoint("mimo", request)
+        assert exc.value.status_code == 409
+
+
 def test_api_models_returns_cached_proxy_models_without_refresh_probe(monkeypatch):
     row = _route_ep(
         "proxy",

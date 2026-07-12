@@ -386,6 +386,8 @@ async def maybe_compact(
             max_tokens=SUMMARY_MAX_TOKENS,
             headers=compact_headers,
             timeout=30,
+            owner=owner,
+            session_id=getattr(session, "id", None),
         )
     except Exception as e:
         logger.error(f"Compaction summary failed: {e}")

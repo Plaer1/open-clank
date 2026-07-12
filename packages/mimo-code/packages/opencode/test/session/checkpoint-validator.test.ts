@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { validateSnapshot, TOPIC_MAX_CHARS, validateLearning, validateMemory, validateProgress, validateBudget, validateBudgetSections } from "../../src/session/checkpoint-validator"
-import { CHECKPOINT_SECTION_BUDGETS } from "../../src/session/checkpoint-templates"
+import { CHECKPOINT_SECTION_BUDGETS, CHECKPOINT_TEMPLATE } from "../../src/session/checkpoint-templates"
 
 describe("validateSnapshot", () => {
   const valid = `Topic: parseDecl handles forward declarations in unifier
@@ -17,6 +17,11 @@ describe("validateSnapshot", () => {
 
   test("valid snapshot passes", () => {
     expect(validateSnapshot(valid, "snapshot-001.md")).toEqual([])
+  })
+
+  test("current 11-section checkpoint template passes production validators", () => {
+    expect(validateSnapshot(CHECKPOINT_TEMPLATE, "checkpoint.md")).toEqual([])
+    expect(validateLearning(CHECKPOINT_TEMPLATE, "checkpoint.md", new Set())).toEqual([])
   })
 
   test("missing Topic line errors", () => {
@@ -186,4 +191,3 @@ describe("validateBudgetSections", () => {
     expect(violations.some((v) => v.detail.includes("§7"))).toBe(true)
   })
 })
-

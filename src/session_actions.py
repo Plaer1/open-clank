@@ -42,7 +42,12 @@ def _as_naive_utc(value):
 def is_session_recently_active(row, now=None, grace=_FRESH_SESSION_GRACE) -> bool:
     """Return True while a new or active session is too fresh to auto-delete."""
     now = _as_naive_utc(now) or _utcnow_naive()
-    for attr in ("last_message_at", "last_accessed", "updated_at", "created_at"):
+    # Database bookkeeping can bump updated_at without human activity, so
+    # prefer the explicit message/access clocks.
+    attrs = ("last_message_at",) if getattr(row, "last_message_at", None) else (
+        "last_accessed", "created_at"
+    )
+    for attr in attrs:
         value = _as_naive_utc(getattr(row, attr, None))
         if not value:
             continue
@@ -184,7 +189,8 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             # 16384 (was 4096): large folder JSON + reasoning-model thinking
             # overflowed 4096 and truncated the JSON, so it never parsed.
             raw = await llm_call_async(url, model, [{"role": "user", "content": prompt}],
-                                       temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
+                                       temperature=0.3, max_tokens=16384, headers=headers, timeout=120,
+                                       owner=owner or None)
         except Exception as e:
             logger.warning(f"Auto-sort LLM call failed: {e}")
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."

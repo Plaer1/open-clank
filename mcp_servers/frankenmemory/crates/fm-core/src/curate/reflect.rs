@@ -17,18 +17,15 @@ pub async fn run_reflect(store: &dyn MemoryStore) -> GroomResult {
 
         // Search for similar records to check consistency
         let similar = store.search_curated_fts(&r.content, 5).await;
-        let similar: Vec<&ScoredRecord> = similar
-            .iter()
-            .filter(|s| s.record.id != r.id)
-            .collect();
+        let similar: Vec<&ScoredRecord> = similar.iter().filter(|s| s.record.id != r.id).collect();
 
         if similar.len() < 2 {
             continue;
         }
 
         // Simple consistency check: if similar records have similar trust scores, boost confidence
-        let avg_trust: f32 = similar.iter().map(|s| s.record.trust_score).sum::<f32>()
-            / similar.len() as f32;
+        let avg_trust: f32 =
+            similar.iter().map(|s| s.record.trust_score).sum::<f32>() / similar.len() as f32;
         let trust_variance: f32 = similar
             .iter()
             .map(|s| (s.record.trust_score - avg_trust).powi(2))

@@ -99,6 +99,7 @@ class ChatHandler:
         sess,
         auto_opened_docs: Optional[List[Dict[str, Any]]] = None,
         allow_tool_preprocessing: bool = True,
+        structured_resources: bool = False,
     ) -> tuple:
         """
         Common preprocessing for both chat endpoints.
@@ -254,21 +255,21 @@ class ChatHandler:
             auto_opened_docs=auto_opened_docs,
             owner=owner,
             resolved_uploads=files_by_id,
+            structured_resources=structured_resources,
         )
 
         # Strip image_url entries for text-only models (VL description is already in the text)
-        if not vision_enabled and isinstance(user_content, list):
-            text_parts = [
-                item.get("text", "") for item in user_content
-                if isinstance(item, dict) and item.get("type") == "text"
+        if (not vision_enabled or not main_is_vision) and isinstance(user_content, list):
+            user_content = [
+                item for item in user_content
+                if not isinstance(item, dict) or item.get("type") != "image_url"
             ]
-            user_content = "\n".join(text_parts).strip() if text_parts else enhanced_message
-        elif not main_is_vision and isinstance(user_content, list):
-            text_parts = [
-                item.get("text", "") for item in user_content
-                if isinstance(item, dict) and item.get("type") == "text"
-            ]
-            user_content = "\n".join(text_parts).strip() if text_parts else enhanced_message
+            if all(
+                isinstance(item, dict) and item.get("type") == "text"
+                for item in user_content
+            ):
+                text_parts = [item.get("text", "") for item in user_content]
+                user_content = "\n".join(text_parts).strip() if text_parts else enhanced_message
 
         # Extract text portion for naming / context
         if isinstance(user_content, list):
@@ -294,26 +295,78 @@ class ChatHandler:
         if len(session.history) > MAX_CONTEXT_MESSAGES:
             session.history = session.history[-MAX_CONTEXT_MESSAGES:]
 
-    async def handle_memory_command(self, session, message: str) -> Optional[str]:
+    async def handle_memory_command(
+        self,
+        session,
+        message: str,
+        *,
+        owner: Optional[str] = None,
+        incognito: bool = False,
+    ) -> Optional[str]:
         """Process inline memory commands. Returns response string or None."""
         is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(
             message
         )
         if is_memory_cmd and memory_text:
-            mem = self.memory_manager.load()
-            if not self.memory_manager.find_duplicates(memory_text, mem):
-                new_entry = self.memory_manager.add_entry(memory_text)
-                mem.append(new_entry)
-                self.memory_manager.save(mem)
+            if incognito:
+                return "Memory is disabled in incognito mode."
+
+            provider = self.chat_processor.memory_provider
+            try:
+                if provider:
+                    records = []
+                    cursor = None
+                    while True:
+                        page, cursor = await provider.list_page(
+                            owner=owner, limit=1000, cursor=cursor
+                        )
+                        records.extend(page)
+                        if cursor is None:
+                            break
+                    duplicate = self.memory_manager.find_duplicates(
+                        memory_text,
+                        [{"text": record.text} for record in records],
+                    )
+                    if not duplicate:
+                        await provider.remember(
+                            memory_text,
+                            owner=owner,
+                            session_id=getattr(session, "id", None),
+                            source="user_created",
+                        )
+                else:
+                    mem = self.memory_manager.load(owner=owner)
+                    duplicate = self.memory_manager.find_duplicates(memory_text, mem)
+                    if not duplicate:
+                        new_entry = self.memory_manager.add_entry(
+                            memory_text, source="user_created", owner=owner
+                        )
+                        all_mem = self.memory_manager.load_all()
+                        all_mem.append(new_entry)
+                        self.memory_manager.save(all_mem)
+            except Exception as exc:
+                logger.warning("Inline memory save failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable") from exc
 
             session.add_message(ChatMessage("user", message))
+            response = (
+                f"Memory already exists: {memory_text}"
+                if duplicate
+                else f"Saved to memory: {memory_text}"
+            )
             session.add_message(
-                ChatMessage("assistant", f"Saved to memory: {memory_text}")
+                ChatMessage("assistant", response)
             )
 
             from src.database import update_session_last_accessed
 
             update_session_last_accessed(session.id)
             self.session_manager.save_sessions()
-            return f"Saved to memory: {memory_text}"
+            if not duplicate:
+                try:
+                    from src.event_bus import fire_event
+                    fire_event("memory_added", owner)
+                except Exception:
+                    logger.debug("memory_added event dispatch failed", exc_info=True)
+            return response
         return None

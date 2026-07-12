@@ -1426,6 +1426,18 @@ def list_model_ids(
     endpoint_id: Optional[str] = None,
 ) -> List[str]:
     """List available model IDs from an endpoint."""
+    if urlparse(base_chat_url or "").scheme.lower() == "mimo":
+        try:
+            from src.model_dispatch import get_mimo_supervisor
+
+            supervisor = get_mimo_supervisor()
+            return [
+                item.get("modelId")
+                for item in (supervisor.available_models(owner=owner) if supervisor else [])
+                if item.get("modelId")
+            ]
+        except Exception:
+            return []
     cached = _configured_cached_model_ids(base_chat_url, owner=owner, endpoint_id=endpoint_id)
     if cached:
         return cached
@@ -1489,6 +1501,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
+    if urlparse(url or "").scheme.lower() == "mimo":
+        raise HTTPException(400, "MiMo ACP requires the asynchronous model dispatcher")
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -1657,8 +1671,33 @@ async def llm_call_async(
     max_retries: int = LLMConfig.MAX_RETRIES,
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    cwd: Optional[str] = None,
+    _transport_checked: bool = False,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    if not _transport_checked and urlparse(url or "").scheme.lower() == "mimo":
+        from src.endpoint_resolver import resolve_model_target
+        from src.model_dispatch import call_model_target
+
+        target = resolve_model_target(
+            url,
+            model,
+            headers,
+            lifecycle="ephemeral",
+        )
+        return await call_model_target(
+            target,
+            messages,
+            session_id=session_id,
+            owner=owner,
+            cwd=cwd,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            max_retries=max_retries,
+            prompt_type=prompt_type,
+        )
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -1816,7 +1855,9 @@ async def llm_call_async(
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                     owner: Optional[str] = None, cwd: Optional[str] = None,
+                     supervisor=None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1825,6 +1866,26 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
+    if urlparse(url or "").scheme.lower() == "mimo":
+        from src.endpoint_resolver import resolve_model_target
+        from src.model_dispatch import stream_chat_target
+
+        target = resolve_model_target(url, model, headers, lifecycle="ephemeral")
+        async for chunk in stream_chat_target(
+            target,
+            messages,
+            session_id=session_id or f"aux-stream-{hashlib.sha256(os.urandom(16)).hexdigest()[:24]}",
+            owner=owner,
+            cwd=cwd,
+            supervisor=supervisor,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            prompt_type=prompt_type,
+            tools=tools,
+        ):
+            yield chunk
+        return
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 

@@ -6,10 +6,10 @@ from src.memory_maintenance import GROOM_OPS, groom_interval_hours, groom_once
 
 def test_groom_interval_defaults_and_zero_disable(monkeypatch):
     monkeypatch.delenv("FM_GROOM_INTERVAL_HOURS", raising=False)
-    assert groom_interval_hours() == 24.0
+    assert groom_interval_hours() == 0.0
     assert groom_interval_hours("0") == 0.0
     assert groom_interval_hours("-2") == 0.0
-    assert groom_interval_hours("not-a-number") == 24.0
+    assert groom_interval_hours("not-a-number") == 0.0
 
 
 def test_groom_once_runs_all_ops_and_continues_after_failure():

@@ -2017,6 +2017,125 @@ export function removeAskUserCards(root) {
   scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
 }
 
+function _renderMimoQuestionCard(aq, renderOptions) {
+  const chatBox = document.getElementById('chat-history');
+  const questions = Array.isArray(aq.questions) ? aq.questions : [];
+  if (!chatBox || !aq.request_id || !aq.session_id || !questions.length) return null;
+  removeAskUserCards(chatBox);
+
+  const card = document.createElement('form');
+  card.className = 'ask-user-card mimo-question-card';
+  card.setAttribute('aria-label', 'MiMo question');
+  const status = document.createElement('div');
+  status.className = 'settings-save-status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+
+  const send = async (payload) => {
+    const response = await fetch(
+      `${window.API_BASE || ''}/api/session/${encodeURIComponent(aq.session_id)}/question`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request_id: aq.request_id, ...payload }) },
+    );
+    let data = {};
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 409) {
+        document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
+          detail: { sessionId: aq.session_id, kind: 'question' },
+        }));
+      }
+      throw new Error(data.detail || data.error || `Question reply failed (${response.status})`);
+    }
+    card.remove();
+    document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
+      detail: { sessionId: aq.session_id, kind: 'question' },
+    }));
+  };
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'modal-close ask-user-close';
+  close.setAttribute('aria-label', 'Reject question');
+  close.textContent = '×';
+  close.addEventListener('click', async () => {
+    close.disabled = true;
+    try { await send({ rejected: true }); }
+    catch (error) { status.textContent = error.message; close.disabled = false; }
+  });
+  card.appendChild(close);
+
+  questions.forEach((question, questionIndex) => {
+    const group = document.createElement('fieldset');
+    group.className = 'ask-user-question-group';
+    const legend = document.createElement('legend');
+    legend.className = 'ask-user-question';
+    legend.textContent = question.question || question.header || `Question ${questionIndex + 1}`;
+    group.appendChild(legend);
+    const options = Array.isArray(question.options) ? question.options : [];
+    options.forEach((option, optionIndex) => {
+      const row = document.createElement('label');
+      row.className = 'ask-user-option';
+      const input = document.createElement('input');
+      input.type = question.multiple ? 'checkbox' : 'radio';
+      input.name = `mimo-question-${questionIndex}`;
+      input.value = String(option.label || option);
+      input.dataset.questionIndex = String(questionIndex);
+      input.dataset.optionIndex = String(optionIndex);
+      row.appendChild(input);
+      const label = document.createElement('span');
+      label.className = 'ask-user-option-label';
+      label.textContent = input.value;
+      row.appendChild(label);
+      if (option.description) {
+        const description = document.createElement('span');
+        description.className = 'ask-user-option-desc';
+        description.textContent = option.description;
+        row.appendChild(description);
+      }
+      group.appendChild(row);
+    });
+    if (question.custom !== false) {
+      const custom = document.createElement('input');
+      custom.type = 'text';
+      custom.className = 'styled-prompt-input ask-user-other-input';
+      custom.placeholder = 'Custom answer…';
+      custom.dataset.customQuestionIndex = String(questionIndex);
+      group.appendChild(custom);
+    }
+    card.appendChild(group);
+  });
+
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'confirm-btn confirm-btn-primary';
+  submit.textContent = 'Answer';
+  card.appendChild(submit);
+  card.appendChild(status);
+  card.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const answers = questions.map((question, index) => {
+      const selected = Array.from(card.querySelectorAll(`input[name="mimo-question-${index}"]:checked`)).map((input) => input.value);
+      const custom = card.querySelector(`[data-custom-question-index="${index}"]`);
+      const customValue = custom ? custom.value.trim() : '';
+      if (customValue) selected.push(customValue);
+      return selected;
+    });
+    if (answers.some((answer) => !answer.length)) {
+      status.textContent = 'Answer every question before continuing.';
+      return;
+    }
+    submit.disabled = true;
+    status.textContent = 'Sending…';
+    try { await send({ answers }); }
+    catch (error) { status.textContent = error.message; submit.disabled = false; }
+  });
+
+  chatBox.appendChild(card);
+  if (renderOptions.scroll !== false) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (renderOptions.focus !== false) card.focus();
+  return card;
+}
+
 /**
  * Render an ask_user payload as a durable choice card.
  *
@@ -2026,11 +2145,14 @@ export function removeAskUserCards(root) {
  */
 export function renderAskUserCard(payload, options) {
   const aq = payload || {};
+  const renderOptions = options || {};
+  if (aq.request_id && Array.isArray(aq.questions)) {
+    return _renderMimoQuestionCard(aq, renderOptions);
+  }
   const opts = Array.isArray(aq.options) ? aq.options : [];
   const chatBox = document.getElementById('chat-history');
   if (!chatBox || !aq.question || opts.length < 2) return null;
 
-  const renderOptions = options || {};
   removeAskUserCards(chatBox);
 
   const card = document.createElement('div');
@@ -2160,6 +2282,7 @@ export function renderPermissionCard(payload, sessionId) {
   const card = document.createElement('div');
   card.className = 'ask-user-card permission-card';
   card.setAttribute('role', 'group');
+  card.dataset.requestId = pq.request_id;
 
   const title = document.createElement('div');
   title.className = 'ask-user-question';
@@ -2198,6 +2321,11 @@ export function renderPermissionCard(payload, sessionId) {
         method: 'POST', body, credentials: 'same-origin',
       });
       finish(label, res.ok);
+      if (res.ok) {
+        document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
+          detail: { sessionId, kind: 'permission' },
+        }));
+      }
     } catch (e) {
       console.warn('permission resolve failed:', e);
       finish(label, false);

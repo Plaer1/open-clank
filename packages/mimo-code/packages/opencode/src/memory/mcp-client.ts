@@ -12,8 +12,15 @@ export async function getSharedMcpClient(): Promise<Client> {
     if (v !== undefined) env[k] = v
   }
   if (process.env.FM_WORKSPACE_ID) env.FM_WORKSPACE_ID = process.env.FM_WORKSPACE_ID
+  env.FM_SCOPE_AUTHORITY = "trusted-caller"
   sharedTransport = new StdioClientTransport({ command, args: [], env })
   sharedClient = new Client({ name: "mimocode", version: "0.1.0" })
   await sharedClient.connect(sharedTransport)
   return sharedClient
+}
+
+export async function closeSharedMcpClient() {
+  if (sharedClient) await sharedClient.close()
+  sharedClient = undefined
+  sharedTransport = undefined
 }

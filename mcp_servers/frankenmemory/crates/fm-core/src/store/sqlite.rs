@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
-use std::sync::Mutex;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::{sync::Mutex, time::Duration};
 use tracing::{info, warn};
 
 use crate::record::*;
@@ -15,7 +15,8 @@ use crate::store::*;
 /// v3 = opt-in code graph bookkeeping (code_files incremental index state).
 /// v4 = raw-turn owner scope for tenant-safe transcript retrieval.
 /// v5 = admission candidates, quarantine, quality metrics, and graph scope.
-pub const SCHEMA_VERSION: i64 = 5;
+/// v6 = fail-closed graph namespaces and durable database identity.
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub struct SqliteStore {
     pub(crate) conn: Mutex<Connection>,
@@ -26,6 +27,7 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn new(path: &str, embedding_dim: usize) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(30))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
 
         let store = Self {
@@ -60,19 +62,21 @@ impl SqliteStore {
 
     pub(crate) fn init_tables(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        conn.execute_batch("BEGIN EXCLUSIVE;")?;
+        let migration = (|| -> Result<(), rusqlite::Error> {
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
-        if version < 1 {
-            Self::baseline_schema(&conn)?;
-            conn.pragma_update(None, "user_version", 1)?;
-        }
-        if version < 2 {
-            Self::graph_schema(&conn)?;
-            conn.pragma_update(None, "user_version", 2)?;
-        }
-        if version < 3 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS code_files (
+            if version < 1 {
+                Self::baseline_schema(&conn)?;
+                conn.pragma_update(None, "user_version", 1)?;
+            }
+            if version < 2 {
+                Self::graph_schema(&conn)?;
+                conn.pragma_update(None, "user_version", 2)?;
+            }
+            if version < 3 {
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS code_files (
                     codebase TEXT NOT NULL,
                     rel_path TEXT NOT NULL,
                     blake3 TEXT NOT NULL,
@@ -82,23 +86,23 @@ impl SqliteStore {
                     indexed_at TEXT NOT NULL,
                     PRIMARY KEY (codebase, rel_path)
                 );",
-            )?;
-            conn.pragma_update(None, "user_version", 3)?;
-        }
-        if version < 4 {
-            let has_owner = conn
-                .prepare("PRAGMA table_info(raw)")?
-                .query_map([], |row| row.get::<_, String>(1))?
-                .filter_map(|name| name.ok())
-                .any(|name| name == "owner");
-            if !has_owner {
-                conn.execute_batch("ALTER TABLE raw ADD COLUMN owner TEXT;")?;
+                )?;
+                conn.pragma_update(None, "user_version", 3)?;
             }
-            conn.pragma_update(None, "user_version", 4)?;
-        }
-        if version < 5 {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS candidates (
+            if version < 4 {
+                let has_owner = conn
+                    .prepare("PRAGMA table_info(raw)")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(|name| name.ok())
+                    .any(|name| name == "owner");
+                if !has_owner {
+                    conn.execute_batch("ALTER TABLE raw ADD COLUMN owner TEXT;")?;
+                }
+                conn.pragma_update(None, "user_version", 4)?;
+            }
+            if version < 5 {
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS candidates (
                     id TEXT PRIMARY KEY,
                     content TEXT NOT NULL,
                     kind TEXT NOT NULL,
@@ -140,45 +144,79 @@ impl SqliteStore {
                     name TEXT PRIMARY KEY,
                     value INTEGER NOT NULL DEFAULT 0
                 );",
-            )?;
-            for (table, column, definition) in [
-                ("graph_nodes", "owner", "TEXT"),
-                (
-                    "graph_nodes",
-                    "workspace_id",
-                    "TEXT NOT NULL DEFAULT 'global'",
-                ),
-                ("graph_nodes", "candidate_id", "TEXT"),
-                ("graph_nodes", "status", "TEXT NOT NULL DEFAULT 'active'"),
-                ("graph_edges", "owner", "TEXT"),
-                (
-                    "graph_edges",
-                    "workspace_id",
-                    "TEXT NOT NULL DEFAULT 'global'",
-                ),
-                ("graph_edges", "candidate_id", "TEXT"),
-                ("graph_edges", "status", "TEXT NOT NULL DEFAULT 'active'"),
-                ("graph_cues", "owner", "TEXT"),
-                (
-                    "graph_cues",
-                    "workspace_id",
-                    "TEXT NOT NULL DEFAULT 'global'",
-                ),
-                ("graph_cues", "candidate_id", "TEXT"),
-                ("graph_cues", "status", "TEXT NOT NULL DEFAULT 'active'"),
-                ("facts", "owner", "TEXT"),
-                ("facts", "workspace_id", "TEXT NOT NULL DEFAULT 'global'"),
-                ("facts", "candidate_id", "TEXT"),
-                ("facts", "status", "TEXT NOT NULL DEFAULT 'active'"),
-            ] {
-                if !Self::has_column(&conn, table, column)? {
-                    conn.execute_batch(&format!(
-                        "ALTER TABLE {table} ADD COLUMN {column} {definition};"
-                    ))?;
+                )?;
+                for (table, column, definition) in [
+                    ("graph_nodes", "owner", "TEXT"),
+                    (
+                        "graph_nodes",
+                        "workspace_id",
+                        "TEXT NOT NULL DEFAULT 'global'",
+                    ),
+                    ("graph_nodes", "candidate_id", "TEXT"),
+                    ("graph_nodes", "status", "TEXT NOT NULL DEFAULT 'active'"),
+                    ("graph_edges", "owner", "TEXT"),
+                    (
+                        "graph_edges",
+                        "workspace_id",
+                        "TEXT NOT NULL DEFAULT 'global'",
+                    ),
+                    ("graph_edges", "candidate_id", "TEXT"),
+                    ("graph_edges", "status", "TEXT NOT NULL DEFAULT 'active'"),
+                    ("graph_cues", "owner", "TEXT"),
+                    (
+                        "graph_cues",
+                        "workspace_id",
+                        "TEXT NOT NULL DEFAULT 'global'",
+                    ),
+                    ("graph_cues", "candidate_id", "TEXT"),
+                    ("graph_cues", "status", "TEXT NOT NULL DEFAULT 'active'"),
+                    ("facts", "owner", "TEXT"),
+                    ("facts", "workspace_id", "TEXT NOT NULL DEFAULT 'global'"),
+                    ("facts", "candidate_id", "TEXT"),
+                    ("facts", "status", "TEXT NOT NULL DEFAULT 'active'"),
+                ] {
+                    if !Self::has_column(&conn, table, column)? {
+                        conn.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+                        ))?;
+                    }
                 }
+                conn.pragma_update(None, "user_version", 5)?;
             }
-            conn.pragma_update(None, "user_version", 5)?;
+            if version < 6 {
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS fm_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 );
+                 INSERT OR IGNORE INTO fm_meta(key,value)
+                    VALUES ('database_id', lower(hex(randomblob(16))));
+                 CREATE INDEX IF NOT EXISTS idx_graph_nodes_scope
+                    ON graph_nodes(owner,workspace_id,status);
+                 CREATE INDEX IF NOT EXISTS idx_graph_edges_scope
+                    ON graph_edges(owner,workspace_id,status);
+                 CREATE INDEX IF NOT EXISTS idx_graph_cues_scope
+                    ON graph_cues(owner,workspace_id,status);
+                 CREATE INDEX IF NOT EXISTS idx_facts_scope
+                    ON facts(owner,workspace_id,status);
+                 UPDATE graph_nodes SET status='quarantined'
+                    WHERE owner IS NULL OR trim(owner)='';
+                 UPDATE graph_edges SET status='quarantined'
+                    WHERE owner IS NULL OR trim(owner)='';
+                 UPDATE graph_cues SET status='quarantined'
+                    WHERE owner IS NULL OR trim(owner)='';
+                 UPDATE facts SET status='quarantined'
+                    WHERE owner IS NULL OR trim(owner)='';",
+                )?;
+                conn.pragma_update(None, "user_version", 6)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = migration {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(error);
         }
+        conn.execute_batch("COMMIT;")?;
 
         // FTS virtual tables stay OUTSIDE the version gate: creation is
         // tolerant (environments without FTS5 only warn), so it must retry
@@ -603,8 +641,7 @@ impl SqliteStore {
                     evidence_role,source,source_event_id,dedup_key,status,reason,
                     accepted_curated_id,created_at,updated_at
              FROM candidates
-             WHERE (?1 IS NULL OR owner = ?1)
-               AND (?2 IS NULL OR workspace_id = ?2)
+             WHERE owner = ?1 AND workspace_id = ?2
                AND (?3 IS NULL OR status = ?3)
              ORDER BY updated_at DESC LIMIT ?4",
         )?;
@@ -668,7 +705,15 @@ impl SqliteStore {
             let (name, value) = row?;
             metrics.insert(name, serde_json::Value::from(value));
         }
+        let database_id: String = conn.query_row(
+            "SELECT value FROM fm_meta WHERE key='database_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         Ok(serde_json::json!({
+            "database_id": database_id,
+            "schema_version": schema_version,
             "raw": count("SELECT count(*) FROM raw")?,
             "candidates": count("SELECT count(*) FROM candidates")?,
             "curated": count("SELECT count(*) FROM curated WHERE archived=0")?,
@@ -681,6 +726,305 @@ impl SqliteStore {
             },
             "metrics": metrics,
         }))
+    }
+
+    pub fn database_identity(&self) -> Result<(String, i64), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let id = conn.query_row(
+            "SELECT value FROM fm_meta WHERE key='database_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok((id, version))
+    }
+
+    pub fn owner_counts(&self, owner: &str) -> Result<serde_json::Value, String> {
+        if owner.trim().is_empty() {
+            return Err("owner is required".into());
+        }
+        let conn = self.conn.lock().unwrap();
+        let count = |table: &str| -> Result<i64, String> {
+            conn.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE owner = ?1"),
+                params![owner],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+        };
+        Ok(serde_json::json!({
+            "raw": count("raw")?,
+            "candidates": count("candidates")?,
+            "curated": count("curated")?,
+            "quarantine": count("memory_quarantine")?,
+            "facts": count("facts")?,
+            "graph_nodes": count("graph_nodes")?,
+            "graph_edges": count("graph_edges")?,
+            "graph_cues": count("graph_cues")?,
+        }))
+    }
+
+    pub fn purge_owner(&self, owner: &str) -> Result<serde_json::Value, String> {
+        let counts = self.owner_counts(owner)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM curated_fts WHERE rowid IN (SELECT rowid FROM curated WHERE owner=?1)",
+            params![owner],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM raw_fts WHERE rowid IN (SELECT rowid FROM raw WHERE owner=?1)",
+            params![owner],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM facts_fts WHERE rowid IN (SELECT rowid FROM facts WHERE owner=?1)",
+            params![owner],
+        )
+        .map_err(|error| error.to_string())?;
+        for table in [
+            "graph_cues",
+            "graph_edges",
+            "graph_nodes",
+            "facts",
+            "candidates",
+            "memory_quarantine",
+            "raw",
+            "curated",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE owner=?1"),
+                params![owner],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.execute(
+            "DELETE FROM code_files WHERE codebase LIKE (?1 || char(31) || '%')",
+            params![owner],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({"purged": true, "counts": counts}))
+    }
+
+    pub fn rename_owner(&self, owner: &str, new_owner: &str) -> Result<serde_json::Value, String> {
+        if owner.trim().is_empty() || new_owner.trim().is_empty() || owner == new_owner {
+            return Err("distinct non-empty owner names are required".into());
+        }
+        let before = self.owner_counts(owner)?;
+        let target = self.owner_counts(new_owner)?;
+        if target
+            .as_object()
+            .is_some_and(|counts| counts.values().any(|value| value.as_i64().unwrap_or(0) > 0))
+        {
+            return Err("target owner already has memory".into());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let nodes: Vec<(String, String, String, String)> = {
+            let mut statement = tx
+                .prepare("SELECT id,kind,name,workspace_id FROM graph_nodes WHERE owner=?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![owner], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        };
+        let mut node_ids = Vec::with_capacity(nodes.len());
+        for (old_id, kind, name, workspace_id) in nodes {
+            let temporary = format!("rename:{old_id}");
+            let scope = crate::graph::GraphScope::new(new_owner, workspace_id.clone())
+                .map_err(str::to_string)?;
+            let new_id = scope.node_id(&kind, &name);
+            tx.execute(
+                "UPDATE graph_nodes SET id=?1 WHERE id=?2",
+                params![temporary, old_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_edges SET src_id=?1 WHERE src_id=?2",
+                params![temporary, old_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_edges SET dst_id=?1 WHERE dst_id=?2",
+                params![temporary, old_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_cues SET node_id=?1 WHERE node_id=?2",
+                params![temporary, old_id],
+            )
+            .map_err(|error| error.to_string())?;
+            node_ids.push((temporary, new_id));
+        }
+        for (temporary, new_id) in &node_ids {
+            tx.execute(
+                "UPDATE graph_edges SET src_id=?1 WHERE src_id=?2",
+                params![new_id, temporary],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_edges SET dst_id=?1 WHERE dst_id=?2",
+                params![new_id, temporary],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_cues SET node_id=?1 WHERE node_id=?2",
+                params![new_id, temporary],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "UPDATE graph_nodes SET id=?1 WHERE id=?2",
+                params![new_id, temporary],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        for table in [
+            "raw",
+            "candidates",
+            "curated",
+            "memory_quarantine",
+            "facts",
+            "graph_nodes",
+            "graph_edges",
+            "graph_cues",
+        ] {
+            tx.execute(
+                &format!("UPDATE {table} SET owner=?1 WHERE owner=?2"),
+                params![new_owner, owner],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.execute(
+            "UPDATE code_files SET codebase=(?1 || substr(codebase, length(?2)+1))
+             WHERE codebase LIKE (?2 || char(31) || '%')",
+            params![new_owner, owner],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute("DELETE FROM graph_cues_fts", [])
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "INSERT INTO graph_cues_fts(cue,node_id)
+             SELECT cue,node_id FROM graph_cues WHERE status='active'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({"renamed": true, "from": owner, "to": new_owner, "counts": before}))
+    }
+
+    pub fn get_curated_record(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Option<MemoryRecord>, rusqlite::Error> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id,content,kind,priority,trust_score,confidence_score,
+                    importance_score,scene_name,source,source_type,owner,workspace_id,
+                    session_key,session_id,tags,source_message_ids,timestamps,created_at,
+                    updated_at,archived,last_accessed_at,exempt_from_decay,
+                    exempt_from_dedup,metadata,workspace_path
+             FROM curated WHERE id=?1 AND owner=?2 AND archived=0
+               AND (workspace_id=?3 OR workspace_id='global')",
+            params![id, owner, workspace_id],
+            Self::row_to_record,
+        )
+        .optional()
+    }
+
+    pub fn list_curated_records(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryRecord>, rusqlite::Error> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT id,content,kind,priority,trust_score,confidence_score,
+                    importance_score,scene_name,source,source_type,owner,workspace_id,
+                    session_key,session_id,tags,source_message_ids,timestamps,created_at,
+                    updated_at,archived,last_accessed_at,exempt_from_decay,
+                    exempt_from_dedup,metadata,workspace_path
+             FROM curated WHERE owner=?1 AND archived=0
+               AND (workspace_id=?2 OR workspace_id='global')
+             ORDER BY updated_at DESC,id LIMIT ?3 OFFSET ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![owner, workspace_id, limit as i64, offset as i64],
+                Self::row_to_record,
+            )?
+            .collect();
+        rows
+    }
+
+    pub fn list_pinned_curated(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<MemoryRecord>, rusqlite::Error> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT id,content,kind,priority,trust_score,confidence_score,
+                    importance_score,scene_name,source,source_type,owner,workspace_id,
+                    session_key,session_id,tags,source_message_ids,timestamps,created_at,
+                    updated_at,archived,last_accessed_at,exempt_from_decay,
+                    exempt_from_dedup,metadata,workspace_path
+             FROM curated WHERE owner=?1 AND archived=0
+               AND (workspace_id=?2 OR workspace_id='global')
+               AND json_extract(metadata,'$.pinned')=1
+             ORDER BY updated_at DESC,id",
+        )?;
+        let rows = statement
+            .query_map(params![owner, workspace_id], Self::row_to_record)?
+            .collect();
+        rows
+    }
+
+    pub fn record_curated_access(
+        &self,
+        ids: &[String],
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<usize, rusqlite::Error> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut updated = 0;
+        for id in ids {
+            updated += conn.execute(
+                "UPDATE curated SET last_accessed_at=?1,
+                   metadata=json_set(
+                     CASE WHEN json_valid(metadata) AND json_type(metadata)='object'
+                          THEN metadata ELSE '{}' END,
+                     '$.uses',COALESCE(json_extract(metadata,'$.uses'),0)+1)
+                 WHERE id=?2 AND owner=?3 AND archived=0
+                   AND (workspace_id=?4 OR workspace_id='global')",
+                params![now, id, owner, workspace_id],
+            )?;
+        }
+        Ok(updated)
     }
 
     pub fn rebuild_graph_cue_fts(&self) -> Result<serde_json::Value, rusqlite::Error> {
@@ -711,8 +1055,8 @@ impl SqliteStore {
         let mut statement = conn.prepare(
             "SELECT id,tier,original_id,content,payload,owner,workspace_id,reason,quarantined_at
              FROM memory_quarantine
-             WHERE (?1 IS NULL OR owner = ?1 OR owner IS NULL)
-               AND (?2 IS NULL OR workspace_id = ?2 OR workspace_id = 'global')
+             WHERE owner = ?1
+               AND (workspace_id = ?2 OR workspace_id = 'global')
              ORDER BY quarantined_at DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(params![owner, workspace_id, limit as i64], |row| {
@@ -936,6 +1280,8 @@ impl MemoryStore for SqliteStore {
         &self,
         id: &str,
         content: Option<&str>,
+        kind: Option<MemoryKind>,
+        category: Option<&str>,
         pinned: Option<bool>,
         owner: Option<&str>,
         workspace_id: Option<&str>,
@@ -957,33 +1303,51 @@ impl MemoryStore for SqliteStore {
         let Ok((rowid, old_content, stored_owner, stored_workspace, metadata_raw)) = row else {
             return false;
         };
-        let owner_ok = owner.map_or(true, |wanted| {
-            stored_owner
-                .as_deref()
-                .map_or(true, |actual| actual == wanted)
-        });
-        let workspace_ok = workspace_id.map_or(true, |wanted| {
-            stored_workspace == wanted || stored_workspace == "global"
-        });
+        let owner_ok = owner.is_some_and(|wanted| stored_owner.as_deref() == Some(wanted));
+        let workspace_ok = workspace_id
+            .is_some_and(|wanted| stored_workspace == wanted || stored_workspace == "global");
         if !owner_ok || !workspace_ok {
             return false;
         }
 
         let mut metadata: serde_json::Value =
             serde_json::from_str(&metadata_raw).unwrap_or_else(|_| serde_json::json!({}));
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
         if let Some(value) = pinned {
             if let Some(object) = metadata.as_object_mut() {
                 object.insert("pinned".into(), serde_json::Value::Bool(value));
             }
         }
+        if let Some(value) = category {
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("category".into(), serde_json::Value::String(value.into()));
+            }
+        }
         let next_content = content.unwrap_or(&old_content);
+        let next_kind = kind
+            .map(|value| format!("{value:?}").to_lowercase())
+            .unwrap_or_else(|| {
+                conn.query_row(
+                    "SELECT kind FROM curated WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "episodic".into())
+            });
         let now = chrono::Utc::now().to_rfc3339();
         if conn
             .execute(
-                "UPDATE curated SET content = ?1, metadata = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE curated SET content = ?1, kind = ?2, metadata = ?3,
+                     exempt_from_decay = CASE WHEN ?4 IS NULL THEN exempt_from_decay ELSE ?4 END,
+                     exempt_from_dedup = CASE WHEN ?4 IS NULL THEN exempt_from_dedup ELSE ?4 END,
+                     updated_at = ?5 WHERE id = ?6",
                 params![
                     next_content,
+                    next_kind,
                     serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into()),
+                    pinned.map(i64::from),
                     now,
                     id
                 ],
@@ -1022,14 +1386,9 @@ impl MemoryStore for SqliteStore {
         let Ok((rowid, stored_owner, stored_workspace)) = row else {
             return false;
         };
-        let owner_ok = owner.map_or(true, |wanted| {
-            stored_owner
-                .as_deref()
-                .map_or(true, |actual| actual == wanted)
-        });
-        let workspace_ok = workspace_id.map_or(true, |wanted| {
-            stored_workspace == wanted || stored_workspace == "global"
-        });
+        let owner_ok = owner.is_some_and(|wanted| stored_owner.as_deref() == Some(wanted));
+        let workspace_ok = workspace_id
+            .is_some_and(|wanted| stored_workspace == wanted || stored_workspace == "global");
         if !owner_ok || !workspace_ok {
             return false;
         }
@@ -1078,8 +1437,8 @@ impl MemoryStore for SqliteStore {
                     exempt_from_decay, exempt_from_dedup, metadata, workspace_path, embedding
              FROM curated
              WHERE archived = 0 AND embedding IS NOT NULL
-               AND (?1 IS NULL OR owner IS NULL OR owner = ?1)
-               AND (?2 IS NULL OR workspace_id = ?2 OR workspace_id = 'global')",
+               AND owner = ?1
+               AND (workspace_id = ?2 OR workspace_id = 'global')",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1139,8 +1498,8 @@ impl MemoryStore for SqliteStore {
                         0.0 as rank
                  FROM curated
                  WHERE archived = 0
-                   AND (?1 IS NULL OR owner IS NULL OR owner = ?1)
-                   AND (?2 IS NULL OR workspace_id = ?2 OR workspace_id = 'global')
+                   AND owner = ?1
+                   AND (workspace_id = ?2 OR workspace_id = 'global')
                  ORDER BY updated_at DESC LIMIT ?3",
             ) {
                 Ok(s) => s,
@@ -1180,8 +1539,8 @@ impl MemoryStore for SqliteStore {
                    FROM curated_fts
                    JOIN curated c ON c.rowid = curated_fts.rowid
                    WHERE curated_fts MATCH ?1 AND c.archived = 0
-                     AND (?2 IS NULL OR c.owner IS NULL OR c.owner = ?2)
-                     AND (?3 IS NULL OR c.workspace_id = ?3 OR c.workspace_id = 'global')
+                     AND c.owner = ?2
+                     AND (c.workspace_id = ?3 OR c.workspace_id = 'global')
                    ORDER BY rank
                    LIMIT ?4";
 
@@ -1347,8 +1706,8 @@ impl MemoryStore for SqliteStore {
                     recorded_at, metadata, workspace_path, embedding
              FROM raw
              WHERE embedding IS NOT NULL
-               AND (?1 IS NULL OR owner IS NULL OR owner = ?1)
-               AND (?2 IS NULL OR workspace_id = ?2 OR workspace_id = 'global')",
+               AND owner = ?1
+               AND (workspace_id = ?2 OR workspace_id = 'global')",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1396,8 +1755,8 @@ impl MemoryStore for SqliteStore {
                 "SELECT id, role, content, session_key, session_id, workspace_id,
                         owner, recorded_at, metadata, workspace_path
                  FROM raw
-                 WHERE (?1 IS NULL OR owner IS NULL OR owner = ?1)
-                   AND (?2 IS NULL OR workspace_id = ?2 OR workspace_id = 'global')
+                 WHERE owner = ?1
+                   AND (workspace_id = ?2 OR workspace_id = 'global')
                  ORDER BY recorded_at DESC LIMIT ?3",
             ) {
                 Ok(stmt) => stmt,
@@ -1432,8 +1791,8 @@ impl MemoryStore for SqliteStore {
                    FROM raw_fts
                    JOIN raw r ON r.rowid = raw_fts.rowid
                    WHERE raw_fts MATCH ?1
-                     AND (?2 IS NULL OR r.owner IS NULL OR r.owner = ?2)
-                     AND (?3 IS NULL OR r.workspace_id = ?3 OR r.workspace_id = 'global')
+                     AND r.owner = ?2
+                     AND (r.workspace_id = ?3 OR r.workspace_id = 'global')
                    ORDER BY rank
                    LIMIT ?4";
 
@@ -1631,6 +1990,8 @@ mod tests {
         let mut r = MemoryRecord::new(content);
         r.source = "test".into();
         r.tags = vec!["test".into()];
+        r.owner = Some("alice".into());
+        r.workspace_id = "global".into();
         r
     }
 
@@ -1678,7 +2039,9 @@ mod tests {
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(v, SCHEMA_VERSION);
-            let results = store.search_curated_fts("survives migration", 10).await;
+            let results = store
+                .search_curated_fts_scoped("survives migration", 10, Some("alice"), Some("global"))
+                .await;
             assert!(!results.is_empty(), "pre-migration data must survive");
         }
         let _ = std::fs::remove_file(&path);
@@ -1690,7 +2053,9 @@ mod tests {
         let r = test_record("rust is a systems programming language");
         store.upsert_curated(&r, None).await;
 
-        let results = store.search_curated_fts("rust programming", 10).await;
+        let results = store
+            .search_curated_fts_scoped("rust programming", 10, Some("alice"), Some("global"))
+            .await;
         assert!(!results.is_empty());
         assert!(results[0].record.content.contains("rust"));
     }
@@ -1704,7 +2069,9 @@ mod tests {
         store.upsert_curated(&r, Some(&emb)).await;
 
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
-        let results = store.search_curated_vector(&query_emb, 10).await;
+        let results = store
+            .search_curated_vector_scoped(&query_emb, 10, Some("alice"), Some("ws1"))
+            .await;
         assert!(!results.is_empty());
         assert!((results[0].score - 1.0).abs() < 0.001);
     }
@@ -1726,7 +2093,9 @@ mod tests {
             top_k: 5,
             workspace_id: None,
         };
-        let results = store.search_curated_hybrid(q).await;
+        let results = store
+            .search_curated_hybrid_scoped(q, Some("alice"), Some("global"))
+            .await;
         assert!(!results.is_empty());
         assert!(results[0].record.content.contains("rust"));
     }
@@ -1734,10 +2103,13 @@ mod tests {
     #[tokio::test]
     async fn raw_turn_fts() {
         let store = SqliteStore::memory(4).unwrap();
-        let t = RawTurn::new("user", "how do I configure the database?");
+        let mut t = RawTurn::new("user", "how do I configure the database?");
+        t.owner = Some("alice".into());
         store.upsert_raw(&t, None).await;
 
-        let results = store.search_raw_fts("configure database", 5).await;
+        let results = store
+            .search_raw_fts_scoped("configure database", 5, Some("alice"), Some("global"))
+            .await;
         assert!(!results.is_empty());
         assert!(results[0].turn.content.contains("configure"));
     }
@@ -1805,9 +2177,11 @@ mod tests {
         store.upsert_curated(&r1, None).await;
         store.upsert_curated(&r2, None).await;
 
-        let alpha_results = store.search_curated_fts("secret", 10).await;
-        // FTS doesn't filter by workspace in our impl, but both should be present
-        assert!(alpha_results.len() >= 2);
+        let alpha_results = store
+            .search_curated_fts_scoped("secret", 10, Some("alice"), Some("alpha"))
+            .await;
+        assert_eq!(alpha_results.len(), 1);
+        assert_eq!(alpha_results[0].record.workspace_id, "alpha");
     }
 
     #[tokio::test]
@@ -1875,6 +2249,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_quarantine_is_transactional_hidden_and_idempotent() {
         let store = SqliteStore::memory(4).unwrap();
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
         let mut record = test_record("temporary permission fixture");
         record.owner = Some("alice".into());
         store.upsert_curated(&record, None).await;
@@ -1885,35 +2260,55 @@ mod tests {
             })
             .await;
         store
-            .graph_upsert(&crate::graph::GraphUpsertInput {
-                nodes: vec![crate::graph::GraphNodeInput {
-                    kind: "project".into(),
-                    name: "temporary fixture".into(),
-                    label: None,
-                    layer: None,
-                    trust: None,
-                }],
-                edges: vec![],
-                cues: vec![crate::graph::GraphCueInput {
-                    cue: "temporary fixture".into(),
-                    node: crate::graph::NodeRef {
+            .graph_upsert(
+                &scope,
+                &crate::graph::GraphUpsertInput {
+                    nodes: vec![crate::graph::GraphNodeInput {
                         kind: "project".into(),
                         name: "temporary fixture".into(),
-                    },
-                    source: None,
-                }],
-            })
+                        label: None,
+                        layer: None,
+                        trust: None,
+                    }],
+                    edges: vec![],
+                    cues: vec![crate::graph::GraphCueInput {
+                        cue: "temporary fixture".into(),
+                        node: crate::graph::NodeRef {
+                            kind: "project".into(),
+                            name: "temporary fixture".into(),
+                        },
+                        source: None,
+                    }],
+                },
+            )
             .unwrap();
 
         let dry = store.quarantine_legacy_state(true, "test").unwrap();
         assert_eq!(dry["would_quarantine"]["curated"], 1);
-        assert!(!store.search_curated_fts("temporary", 10).await.is_empty());
+        assert!(!store
+            .search_curated_fts_scoped("temporary", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
 
         store.quarantine_legacy_state(false, "test").unwrap();
         store.quarantine_legacy_state(false, "test").unwrap();
-        assert!(store.search_curated_fts("temporary", 10).await.is_empty());
-        assert!(store.graph_cues("temporary", 10).unwrap().is_empty());
-        assert_eq!(store.list_quarantine(None, None, 100).unwrap().len(), 4);
+        assert!(store
+            .search_curated_fts_scoped("temporary", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
+        assert!(store
+            .graph_cues(&scope, "temporary", 10)
+            .unwrap()
+            .is_empty());
+        let quarantined: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM memory_quarantine", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(quarantined, 4);
         assert_eq!(
             store.quality_status().unwrap()["graph"]["integrity_ok"],
             true
@@ -1958,6 +2353,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count(), 0);
+    }
+
+    #[tokio::test]
+    async fn owner_rename_and_purge_are_scoped_and_graph_safe() {
+        let store = SqliteStore::memory(4).unwrap();
+        for owner in ["alice", "bob"] {
+            let mut record = test_record(&format!("{owner} private memory"));
+            record.id = format!("m_{owner}");
+            record.owner = Some(owner.into());
+            record.workspace_id = "workspace".into();
+            assert!(store.upsert_curated(&record, None).await);
+            let scope = crate::graph::GraphScope::new(owner, "workspace").unwrap();
+            store
+                .graph_upsert(
+                    &scope,
+                    &crate::graph::GraphUpsertInput {
+                        nodes: vec![],
+                        edges: vec![],
+                        cues: vec![crate::graph::GraphCueInput {
+                            cue: "private project".into(),
+                            node: crate::graph::NodeRef {
+                                kind: "project".into(),
+                                name: "private".into(),
+                            },
+                            source: None,
+                        }],
+                    },
+                )
+                .unwrap();
+        }
+
+        store.rename_owner("alice", "alicia").unwrap();
+        assert_eq!(store.owner_counts("alice").unwrap()["curated"], 0);
+        assert_eq!(store.owner_counts("alicia").unwrap()["curated"], 1);
+        let old_scope = crate::graph::GraphScope::new("alice", "workspace").unwrap();
+        let new_scope = crate::graph::GraphScope::new("alicia", "workspace").unwrap();
+        assert!(store
+            .graph_cues(&old_scope, "private", 10)
+            .unwrap()
+            .is_empty());
+        let renamed = store.graph_cues(&new_scope, "private", 10).unwrap();
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].node.id, new_scope.node_id("project", "private"));
+
+        store.purge_owner("alicia").unwrap();
+        assert_eq!(store.owner_counts("alicia").unwrap()["curated"], 0);
+        assert_eq!(store.owner_counts("bob").unwrap()["curated"], 1);
+        assert!(!store
+            .search_curated_fts_scoped("bob private", 10, Some("bob"), Some("workspace"))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]

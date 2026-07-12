@@ -2,7 +2,7 @@
 // Lightweight popup that surfaces the existing /command registry as users
 // type. Reads COMMANDS from slashCommands.js — no command logic lives here.
 
-import { COMMANDS, LEGACY_ALIASES } from './slashCommands.js';
+import { COMMANDS, LEGACY_ALIASES, loadMimoControlState } from './slashCommands.js';
 
 const POPUP_ID = 'slash-autocomplete';
 const MAX_VISIBLE = 14;
@@ -96,6 +96,40 @@ async function _loadSkillEntries() {
   } catch {
     return [];
   }
+}
+
+async function _loadMimoEntries(force = false) {
+  const state = await loadMimoControlState(force);
+  if (!state.available) return [];
+  const entries = [];
+  for (const mode of state.modes?.availableModes || []) {
+    entries.push({
+      token: `/${mode.id}`,
+      aliases: [],
+      category: 'MiMo modes',
+      help: mode.description || `Switch MiMo to ${mode.name || mode.id}`,
+      usage: `/${mode.id} [prompt]`,
+    });
+  }
+  for (const command of state.commands || []) {
+    const help = command.description || 'Run MiMo command';
+    entries.push({
+      token: `/mimo:${command.name}`,
+      aliases: [],
+      category: 'MiMo commands',
+      help,
+      usage: `/mimo:${command.name} [arguments]`,
+    });
+    entries.push({
+      token: `/${command.name}`,
+      aliases: [],
+      category: 'MiMo commands',
+      help,
+      usage: `/${command.name} [arguments]`,
+      mimoBare: true,
+    });
+  }
+  return entries;
 }
 
 function _scoreMatch(entry, query) {
@@ -192,7 +226,10 @@ export function initSlashAutocomplete(textarea) {
   if (!textarea || textarea._slashAcWired) return;
   textarea._slashAcWired = true;
 
-  let all = _flatten();
+  const baseEntries = _flatten();
+  let skillEntries = [];
+  let mimoEntries = [];
+  let all = baseEntries.slice();
   let popup = null;
   let visible = false;
   let items = [];
@@ -240,18 +277,30 @@ export function initSlashAutocomplete(textarea) {
     _render(popup, items, selectedIdx, query);
   };
 
-  _loadSkillEntries().then(skillEntries => {
-    if (!skillEntries.length) return;
-    const seen = new Set(all.map(e => e.token));
-    const merged = all.slice();
-    for (const entry of skillEntries) {
+  const rebuildCatalog = () => {
+    const seen = new Set();
+    const merged = [];
+    for (const entry of [...baseEntries, ...skillEntries, ...mimoEntries]) {
       if (seen.has(entry.token)) continue;
       seen.add(entry.token);
       merged.push(entry);
     }
     all = merged;
     if (visible) refresh();
+  };
+
+  _loadSkillEntries().then(entries => {
+    skillEntries = entries;
+    rebuildCatalog();
   });
+  const refreshMimoEntries = force => _loadMimoEntries(force).then(entries => {
+    const localTokens = new Set([...baseEntries, ...skillEntries].map(entry => entry.token));
+    mimoEntries = entries.filter(entry => !entry.mimoBare || !localTokens.has(entry.token));
+    rebuildCatalog();
+  });
+  refreshMimoEntries(false);
+  document.addEventListener('odysseus:session-selected', () => refreshMimoEntries(false));
+  document.addEventListener('odysseus:mimo-state-changed', () => refreshMimoEntries(false));
 
   const insert = (token) => {
     textarea.value = token + ' ';

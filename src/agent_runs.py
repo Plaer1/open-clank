@@ -23,14 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "next_seq")
 
     def __init__(self) -> None:
-        self.buffer: list = []          # ordered SSE event strings (replay log)
+        self.buffer: list[tuple[int, str]] = []  # monotonic id + SSE frame
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
         self.task: Optional[asyncio.Task] = None
         self.evict_task: Optional[asyncio.Task] = None
+        self.next_seq: int = 1
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -44,11 +45,13 @@ _EVICT_GRACE_S = 180
 
 def _publish(run: _Run, ev: str) -> None:
     """Append one SSE event and fan it out to every live subscriber."""
-    run.buffer.append(ev)
-    seq = len(run.buffer) - 1
+    seq = run.next_seq
+    run.next_seq += 1
+    frame = f"id: {seq}\n{ev}" if not ev.startswith(":") else ev
+    run.buffer.append((seq, frame))
     for q in list(run.subscribers):
         try:
-            q.put_nowait((seq, ev))
+            q.put_nowait((seq, frame))
         except Exception:
             pass
 
@@ -155,7 +158,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
     return run
 
 
-async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
+async def subscribe(session_id: str, after_seq: int = 0) -> AsyncGenerator[str, None]:
     """Replay the run's buffer from the start, then stream live until it ends.
     Safe to call repeatedly (reconnect) and from multiple clients at once."""
     run = _RUNS.get(session_id)
@@ -168,10 +171,11 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
     if run.evict_task and not run.evict_task.done():
         run.evict_task.cancel()
     try:
-        next_seq = 0
-        while next_seq < len(run.buffer):
-            yield run.buffer[next_seq]
-            next_seq += 1
+        next_seq = max(0, after_seq) + 1
+        for seq, ev in run.buffer:
+            if seq >= next_seq:
+                yield ev
+                next_seq = seq + 1
         if run.status != "running":
             return
         heartbeat_idx = 0
@@ -189,9 +193,10 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
                     continue
                 seq, ev = (None, None)
             if seq is None:            # end sentinel
-                while next_seq < len(run.buffer):   # flush any tail the sentinel raced
-                    yield run.buffer[next_seq]
-                    next_seq += 1
+                for tail_seq, tail_ev in run.buffer:  # flush tail raced by sentinel
+                    if tail_seq >= next_seq:
+                        yield tail_ev
+                        next_seq = tail_seq + 1
                 break
             if seq >= next_seq:        # skip events already replayed from the buffer
                 yield ev

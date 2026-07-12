@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     use_research: Optional[bool] = Field(default=False, description="Enable deep research")
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
+    incognito: bool = Field(default=False, description="Keep the session memory-only")
     
     @field_validator('message')
     @classmethod

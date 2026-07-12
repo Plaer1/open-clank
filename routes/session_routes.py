@@ -93,6 +93,23 @@ def _reject_compact_during_active_run(session_id: str) -> None:
         raise HTTPException(409, "Session has an active run; try compacting after it finishes")
 
 
+async def _prepare_context_mutation(request: Request, session_id: str) -> None:
+    """Reject live mutations and purge stale MiMo execution projections."""
+    _reject_compact_during_active_run(session_id)
+    from src.openclank.transcript_projection import purge_execution_projection
+
+    try:
+        await purge_execution_projection(
+            getattr(request.app.state, "mimo_supervisor", None),
+            session_id,
+            owner=effective_user(request) or None,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
     """Verify the current user owns the session, honoring single-user modes.
 
@@ -115,6 +132,14 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
             raise HTTPException(404, f"Session {session_id} not found")
         return
     # No DB row — allow the caller to act on an in-memory ghost they own.
+    # Incognito sessions deliberately exist only in this process, so route
+    # callers do not all need to thread the manager through manually.
+    if session_manager is None:
+        session_manager = getattr(
+            getattr(getattr(request, "app", None), "state", None),
+            "session_manager",
+            None,
+        )
     if session_manager is not None:
         ghost = getattr(session_manager, "sessions", {}).get(session_id)
         if ghost is not None and (not user or getattr(ghost, "owner", None) == user):
@@ -325,6 +350,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         model: str = Form(""),
         rag: str = Form(None),
         skip_validation: str = Form(None),
+        incognito: str = Form(None),
         api_key: str = Form(""),
         endpoint_id: str = Form(""),
     ):
@@ -338,7 +364,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             # ACP, not an HTTP endpoint row. Validate against mimo's own
             # catalog and skip the /v1/models probe entirely.
             _sup = getattr(request.app.state, "mimo_supervisor", None)
-            _catalog = _sup.available_models() if _sup else []
+            _catalog = _sup.available_models(owner=user) if _sup else []
             if not _catalog:
                 raise HTTPException(503, "mimo is not running (no model catalog)")
             _ids = [m.get("modelId", "") for m in _catalog]
@@ -428,22 +454,42 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                     raise HTTPException(400,
                                         f"Model not found at server. Available: {', '.join(avail)}")
                 model_to_use = found
+
+        auth_manager = getattr(request.app.state, "auth_manager", None)
+        get_privileges = getattr(auth_manager, "get_privileges", None)
+        privileges = get_privileges(user) if get_privileges and user else {}
+        allowed = set((privileges or {}).get("allowed_models") or [])
+        restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
+        if (privileges or {}).get("block_all_models") or (
+            restricted and model_to_use not in allowed
+        ):
+            raise HTTPException(403, f"Your account is not allowed to use model {model_to_use!r}")
         
         sid = str(uuid.uuid4())
-        if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            if supervisor and supervisor.is_alive() and supervisor.bridge:
-                cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                sid = await supervisor.bridge.open_session(cwd or None)
         user = effective_user(request)
-        session = session_manager.create_session(
-            session_id=sid,
-            name=name or "",
-            endpoint_url=endpoint_url or "",
-            model=model_to_use,
-            rag=str(rag).lower() == "true" if rag else False,
-            owner=user,
-        )
+        is_incognito = str(incognito).lower() == "true"
+        if is_incognito:
+            from core.models import Session
+
+            session = Session(
+                id=sid,
+                name=name or "Nobody",
+                endpoint_url=endpoint_url or "",
+                model=model_to_use,
+                rag=False,
+                owner=user,
+                incognito=True,
+            )
+            session_manager.sessions[sid] = session
+        else:
+            session = session_manager.create_session(
+                session_id=sid,
+                name=name or "",
+                endpoint_url=endpoint_url or "",
+                model=model_to_use,
+                rag=str(rag).lower() == "true" if rag else False,
+                owner=user,
+            )
         # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
         resolved_base = endpoint_url
@@ -453,24 +499,26 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         if resolved_key:
             from src.endpoint_resolver import build_headers
             session.headers = build_headers(resolved_key, resolved_base)
-            _persist_session_headers(sid, session.headers)
+            if not is_incognito:
+                _persist_session_headers(sid, session.headers)
         # Fire webhook (sync-safe)
-        if webhook_manager:
+        if webhook_manager and not is_incognito:
             webhook_manager.fire_and_forget("session.created", {
                 "session_id": sid, "name": session.name, "model": model_to_use,
             })
         # Fire event for automation tasks
-        from src.event_bus import fire_event
-        fire_event("session_created", user)
+        if not is_incognito:
+            from src.event_bus import fire_event
+            fire_event("session_created", user)
         return SessionResponse(
             id=sid,
             name=session.name,
             model=model_to_use,
-            rag=str(rag).lower() == "true" if rag else False,
+            rag=False if is_incognito else (str(rag).lower() == "true" if rag else False),
             archived=False
         )    
     @router.patch("/session/{sid}")
-    def rename_session(
+    async def rename_session(
         request: Request, sid: str,
         name: str = Form(None), folder: str = Form(None),
         model: str = Form(None), endpoint_url: str = Form(None),
@@ -507,7 +555,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 # Virtual endpoint served by the mimo agent brain over ACP —
                 # no ModelEndpoint row. Validate against mimo's catalog.
                 _sup = getattr(request.app.state, "mimo_supervisor", None)
-                _catalog = _sup.available_models() if _sup else []
+                _catalog = _sup.available_models(owner=user) if _sup else []
                 if not _catalog:
                     raise HTTPException(503, "mimo is not running (no model catalog)")
                 if model not in [m.get("modelId", "") for m in _catalog]:
@@ -534,6 +582,14 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                     endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
                 finally:
                     _db.close()
+            auth_manager = getattr(request.app.state, "auth_manager", None)
+            get_privileges = getattr(auth_manager, "get_privileges", None)
+            privileges = get_privileges(user) if get_privileges and user else {}
+            allowed = set((privileges or {}).get("allowed_models") or [])
+            restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
+            if (privileges or {}).get("block_all_models") or (restricted and model not in allowed):
+                raise HTTPException(403, f"Your account is not allowed to use model {model!r}")
+            await _prepare_context_mutation(request, sid)
             session.model = model
             session.endpoint_url = endpoint_url
             # Update auth headers from the endpoint's stored API key
@@ -557,11 +613,91 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             result["model"] = model
             result["endpoint_url"] = endpoint_url
         return result
+
+    @router.get("/session/{sid}/mimo-state")
+    async def get_mimo_state(request: Request, sid: str, refresh: bool = False):
+        """Return the owner-scoped negotiated MiMo control-plane snapshot."""
+        _verify_session_owner(request, sid)
+        try:
+            session = session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, f"Session {sid} not found")
+        if session.endpoint_url != "mimo://acp":
+            return {"available": False, "reason": "Session does not use MiMo"}
+
+        owner = effective_user(request) or getattr(session, "owner", None)
+        if not owner:
+            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+        from src.openclank.transcript_projection import get_mimo_state as _get_state
+
+        state = _get_state(sid, owner=owner)
+        if refresh or not state.get("config_options"):
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            if supervisor is None:
+                raise HTTPException(503, "mimo ACP is unavailable")
+            try:
+                state = await supervisor.negotiate_session(
+                    sid, owner=owner
+                )
+            except RuntimeError as exc:
+                raise HTTPException(503, str(exc)) from exc
+        return {"available": True, **state}
+
+    @router.patch("/session/{sid}/mimo-config")
+    async def set_mimo_config(request: Request, sid: str):
+        """Validate, acknowledge, and persist one negotiated MiMo option."""
+        _verify_session_owner(request, sid)
+        try:
+            session = session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, f"Session {sid} not found")
+        if session.endpoint_url != "mimo://acp":
+            raise HTTPException(409, "Session does not use MiMo")
+        owner = effective_user(request) or getattr(session, "owner", None)
+        if not owner:
+            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+        body = await request.json()
+        config_id = str(body.get("config_id") or "").strip()
+        value = body.get("value")
+        if not config_id or not isinstance(value, str):
+            raise HTTPException(400, "config_id and string value are required")
+        supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        if supervisor is None:
+            raise HTTPException(503, "mimo ACP is unavailable")
+        try:
+            state = await supervisor.set_session_config(
+                sid,
+                config_id,
+                value,
+                owner=owner,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except Exception as exc:
+            from src.openclank.acp_client import RPCError
+
+            if isinstance(exc, RPCError):
+                raise HTTPException(409, str(exc)) from exc
+            raise
+        if config_id == "model":
+            db = SessionLocal()
+            try:
+                row = db.query(DbSession).filter(DbSession.id == sid).first()
+                if row is not None:
+                    row.model = value
+                    db.commit()
+                session.model = value
+            finally:
+                db.close()
+        return {"status": "ok", **state}
     
     @router.post("/session/{sid}/inject_messages")
     async def inject_messages(request: Request, sid: str):
         """Bulk-inject messages into a session's history (for group chat sync)."""
         _verify_session_owner(request, sid)
+        await _prepare_context_mutation(request, sid)
         try:
             sess = session_manager.get_session(sid)
         except KeyError:
@@ -575,9 +711,9 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         return {"ok": True, "count": len(messages)}
 
     @router.post("/session/{sid}/delete")
-    def delete_session_beacon(request: Request, sid: str):
+    async def delete_session_beacon(request: Request, sid: str):
         """Delete session via POST (for navigator.sendBeacon on page close)."""
-        return delete_session(request, sid)
+        return await delete_session(request, sid)
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
@@ -602,14 +738,18 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 finally:
                     db.close()
 
+                await _prepare_context_mutation(request, sid)
                 if session_manager.delete_session(sid):
                     deleted_count += 1
+            except HTTPException:
+                raise
             except Exception:
-                pass
+                logger.exception("Bulk session delete failed for %s", sid)
+                raise HTTPException(500, f"Failed to delete session {sid}")
         return {"deleted": deleted_count}
 
     @router.delete("/session/{sid}")
-    def delete_session(request: Request, sid: str):
+    async def delete_session(request: Request, sid: str):
         """Permanently delete a session and all its messages."""
         _verify_session_owner(request, sid, session_manager)
         try:
@@ -625,12 +765,16 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             finally:
                 db.close()
 
+            await _prepare_context_mutation(request, sid)
             # Delete the session and all its messages
             if session_manager.delete_session(sid):
                 return {"status": "deleted"}
             else:
                 raise HTTPException(404, "Session not found")
         except HTTPException:
+            raise
+        except HTTPException:
+            db.rollback()
             raise
         except Exception as e:
             logger.error(f"Error deleting session {sid}: {e}")
@@ -643,7 +787,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             )
     
     @router.delete("/sessions/all")
-    def delete_all_sessions(request: Request):
+    async def delete_all_sessions(request: Request):
         """Admin only: permanently delete ALL sessions and their messages."""
         from core.middleware import require_admin
         require_admin(request)
@@ -651,6 +795,23 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         db = SessionLocal()
         try:
             from core.database import ChatMessage as DbChatMessage
+            session_ids = {row[0] for row in db.query(DbSession.id).all()}
+            from src.openclank.transcript_projection import (
+                list_projections,
+                purge_execution_projection,
+            )
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            session_ids.update(
+                row["odysseus_session_id"] for row in list_projections()
+            )
+            bridge = getattr(supervisor, "bridge", None) if supervisor else None
+            if bridge is not None:
+                session_ids.update(bridge.mapped_sessions())
+            for session_id in session_ids:
+                try:
+                    await purge_execution_projection(supervisor, session_id)
+                except RuntimeError as exc:
+                    raise HTTPException(503, str(exc)) from exc
             count = db.query(DbSession).count()
             db.query(DbChatMessage).delete()
             db.query(DbSession).delete()
@@ -666,12 +827,13 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             db.close()
 
     @router.post("/session/{sid}/archive")
-    def archive_session(request: Request, sid: str):
+    async def archive_session(request: Request, sid: str):
         """Archive a session, keeping its data but removing it from active sessions."""
         _verify_session_owner(request, sid)
         try:
             # First check if session exists
             session_manager.get_session(sid)
+            await _prepare_context_mutation(request, sid)
             
             # Archive the session
             db = SessionLocal()
@@ -894,11 +1056,6 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         if not OPENAI_API_KEY:
             raise HTTPException(400, "Server missing OPENAI_API_KEY")
         sid = str(uuid.uuid4())
-        if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            if supervisor and supervisor.is_alive() and supervisor.bridge:
-                cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                sid = await supervisor.bridge.open_session(cwd or None)
         user = effective_user(request)
         session = session_manager.create_session(
             session_id=sid,
@@ -959,7 +1116,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
-        _reject_compact_during_active_run(session_id)
+        await _prepare_context_mutation(request, session_id)
 
         history = list(session.history or [])
         if len(history) < 6:
@@ -1006,6 +1163,8 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 max_tokens=1024,
                 headers=headers,
                 timeout=60,
+                owner=owner,
+                session_id=session_id,
             )
         except Exception as e:
             logger.error("Manual compaction failed: %s", e)

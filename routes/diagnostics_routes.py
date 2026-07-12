@@ -27,7 +27,32 @@ def setup_diagnostics_routes(
         ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
         require_admin(request)
         from src.service_health import collect_service_health
-        return await collect_service_health(rag_manager, memory_vector)
+        report = await collect_service_health(rag_manager, memory_vector)
+        app_state = request.app.state
+        memory_declared = hasattr(app_state, "memory_provider")
+        mimo_declared = hasattr(app_state, "mimo_supervisor")
+        memory_provider = getattr(app_state, "memory_provider", None)
+        memory_alive = bool(memory_provider)
+        if getattr(memory_provider, "provider_id", "") == "frankenmemory":
+            owner_task = getattr(memory_provider, "_owner_task", None)
+            memory_alive = bool(owner_task and not owner_task.done())
+        supervisor = getattr(app_state, "mimo_supervisor", None)
+        mimo_alive = bool(supervisor and supervisor.is_alive())
+        report["services"].extend([
+            {
+                "name": "memory",
+                "status": "ok" if memory_alive else ("down" if memory_declared else "disabled"),
+                "detail": f"{getattr(memory_provider, 'provider_id', 'none')} provider; owner-scoped facade active" if memory_alive else "Memory provider unavailable",
+            },
+            {
+                "name": "mimo",
+                "status": "ok" if mimo_alive else ("down" if mimo_declared else "disabled"),
+                "detail": "Owner-partitioned ACP runtime; automatic dream/distill disabled by default" if mimo_alive else "MiMo ACP runtime unavailable",
+            },
+        ])
+        if (memory_declared and not memory_alive) or (mimo_declared and not mimo_alive):
+            report["overall"] = "down" if report["overall"] == "ok" else report["overall"]
+        return report
 
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:

@@ -5,12 +5,17 @@ and session reconciliation via session/resume.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import shutil
 import socket
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
+
+import httpx
 
 from src.openclank.acp_client import ACPClient, TransportError
 from src.openclank.acp_bridge import ACPBridge, PermissionHandler, register_client_callbacks
@@ -64,6 +69,9 @@ class MimoSupervisor:
         permission_handler=None,
         memory_provider=None,
         safe_dirs: list[str] | None = None,
+        runtime_home: Path | None = None,
+        partitioned: bool = False,
+        grant_store=None,
     ) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -77,11 +85,15 @@ class MimoSupervisor:
         self._permission_handler = permission_handler
         self._memory_provider = memory_provider
         self._safe_dirs = safe_dirs
-        self._grant_store = None
+        self._grant_store = grant_store
+        self._runtime_home = runtime_home
+        self._partitioned = partitioned
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Odysseus can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
-        self._http_port = _loopback_port(os.environ.get("ODYSSEUS_MIMO_PORT"))
+        self._http_port = _loopback_port(
+            None if partitioned else os.environ.get("ODYSSEUS_MIMO_PORT")
+        )
         # The live handler (caller-supplied or auto-built); chat_routes uses
         # this to resolve permission prompts from the UI.
         self.permission_handler = permission_handler
@@ -111,7 +123,7 @@ class MimoSupervisor:
         # be within its CWD. Change the child's CWD to /home/e so all user
         # workspaces (~/sauce, ~/entities, ~/open-clank) are reachable.
         # Also set MIMOCODE_HOME if THESIUS_AGENT_HOME is configured (Phase 4).
-        if os.path.isdir(_ODYSSEUS_SKILLS_DIR):
+        if os.path.isdir(_ODYSSEUS_SKILLS_DIR) and not self._partitioned:
             skills_config = json.dumps({
                 "skills": {"paths": [_ODYSSEUS_SKILLS_DIR]},
                 "memory": {"provider": "frankenmemory"},
@@ -132,13 +144,26 @@ class MimoSupervisor:
         # THESIUS_AGENT_HOME (Phase 4 agent home) > data/mimocode default.
         # Config + auth in that home are hand-managed (e's ruling 2026-07-09:
         # no automatic copying of credential files — boot once, edit config).
-        if "MIMOCODE_HOME" not in env:
+        if self._runtime_home is not None:
+            self._runtime_home.mkdir(parents=True, exist_ok=True)
+            private_home = self._runtime_home / "home"
+            private_home.mkdir(parents=True, exist_ok=True)
+            env["MIMOCODE_HOME"] = str(self._runtime_home / "mimocode")
+            env["HOME"] = str(private_home)
+            env["USERPROFILE"] = str(private_home)
+            env["ODYSSEUS_DATA_DIR"] = str(self._runtime_home / "odysseus")
+            env["MIMOCODE_CONFIG_CONTENT"] = json.dumps({
+                "memory": {"provider": "frankenmemory"},
+                "skills": {"paths": []},
+            })
+        elif "MIMOCODE_HOME" not in env:
             _agent_home = os.environ.get("THESIUS_AGENT_HOME")
             if _agent_home:
                 env["MIMOCODE_HOME"] = os.path.join(os.path.expanduser(_agent_home), ".mimocode")
             else:
                 _data_dir = os.environ.get("ODYSSEUS_DATA_DIR", str(REPO_ROOT / "data"))
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
+        env["MIMOCODE_ENABLE_QUESTION_TOOL"] = "1"
         logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
         try:
@@ -214,18 +239,33 @@ class MimoSupervisor:
             owner=self._owner,
             permission_handler=perm_handler,
             memory_provider=self._memory_provider,
+            session_map_path=(
+                self._runtime_home / "session-map.json"
+                if self._runtime_home is not None
+                else None
+            ),
         )
+        self._bridge.set_session_delete_callback(self.delete_session)
 
         # Warm the model catalog: mimo only reports availableModels in a
         # session handshake, so open one throwaway session at boot. Lives
         # only in the isolated mimo store; Odysseus never lists it.
+        catalog_session = None
         try:
-            await self._bridge.open_session()
+            catalog_session = await self._bridge.open_session()
             logger.info(
                 "mimo model catalog warmed: %d models", len(self._bridge.available_models)
             )
         except Exception as e:
             logger.warning("mimo model catalog warmup failed: %s", e)
+        finally:
+            if catalog_session:
+                try:
+                    await self.delete_session(catalog_session)
+                except Exception as e:
+                    logger.warning("mimo model catalog cleanup failed: %s", e)
+
+        await self._purge_stale_projections()
 
         # Start health monitor
         self._health_task = asyncio.create_task(self._health_monitor())
@@ -305,46 +345,37 @@ class MimoSupervisor:
         logger.error("mimo restart exhausted %d attempts — giving up", _MAX_RESTART_ATTEMPTS)
 
     async def _reconcile_sessions(self) -> None:
-        """Re-establish mimo sessions after a crash/restart.
+        """Discard interrupted projections; the next turn replays canonical history."""
+        await self._purge_stale_projections()
 
-        Queries the thesius DB for sessions whose id starts with 'ses_' and
-        were recently updated, then calls resume_session for each. The time
-        cutoff avoids re-resuming thousands of old sessions.
-        """
-        assert self._bridge
-        try:
-            from core.database import Session as DbSession, SessionLocal
-            from datetime import datetime, timezone, timedelta
-        except ImportError:
-            logger.error("cannot import database module for session reconciliation")
+    async def _purge_stale_projections(self) -> None:
+        if not self._bridge:
             return
-
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-        db = None
+        sessions = self._bridge.mapped_sessions()
         try:
-            db = SessionLocal()
-            rows = (
-                db.query(DbSession.id)
-                .filter(DbSession.id.like("ses_%"))
-                .filter(DbSession.updated_at > cutoff)
-                .all()
-            )
-        except Exception as e:
-            logger.error("DB query for session reconciliation failed: %s", e)
-            return
-        finally:
-            if db:
-                db.close()
+            from src.openclank.transcript_projection import list_projections
 
-        for (session_id,) in rows:
+            for row in list_projections(owner=self._owner or None):
+                sessions.setdefault(
+                    row["odysseus_session_id"], row["mimo_session_id"]
+                )
+        except Exception as exc:
+            logger.debug("projection table unavailable during cleanup: %s", exc)
+        for session_id, mimo_session_id in sessions.items():
             try:
-                await self._bridge.resume_session(session_id, session_id)
-                logger.info("reconciled session %s via resume", session_id)
-            except Exception as e:
-                logger.error("failed to reconcile session %s: %s", session_id, e)
+                await self.delete_session(
+                    session_id, mimo_session_id=mimo_session_id
+                )
+            except Exception as exc:
+                logger.warning("failed to purge stale MiMo projection %s: %s", session_id, exc)
 
     async def _teardown_child(self) -> None:
         """Clean up the child process and associated tasks."""
+        if self._bridge:
+            try:
+                await self._bridge.terminal_manager.close()
+            except Exception as exc:
+                logger.warning("MiMo terminal cleanup failed: %s", exc)
         if self._health_task and not self._health_task.done():
             self._health_task.cancel()
             try:
@@ -421,18 +452,100 @@ class MimoSupervisor:
             except asyncio.CancelledError:
                 pass
 
-    def available_models(self) -> list:
+    def available_models(self, owner: str | None = None) -> list:
         """mimo's model catalog ({modelId, name} dicts) from the last handshake."""
         return list(self._bridge.available_models) if self._bridge else []
 
-    async def refresh_model_catalog(self) -> list:
+    @property
+    def grant_store(self):
+        return self._grant_store
+
+    async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         """Refresh MiMo's authenticated provider/model catalog in-place."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
-        await self._bridge.open_session()
-        return self.available_models()
+        session_id = await self._bridge.open_session()
+        try:
+            return self.available_models()
+        finally:
+            await self.delete_session(session_id)
 
-    def is_alive(self) -> bool:
+    async def negotiate_session(
+        self,
+        session_id: str,
+        *,
+        owner: str,
+        cwd: str | None = None,
+    ) -> dict:
+        """Refresh one canonical session's negotiated MiMo control plane."""
+        if not self._bridge or not self.is_alive():
+            raise RuntimeError("mimo ACP is unavailable")
+        await self._bridge.ensure_session(session_id, cwd=cwd, owner=owner)
+        try:
+            for _ in range(10):
+                state = self._bridge.negotiated_state(session_id)
+                if state.get("commands"):
+                    break
+                await asyncio.sleep(0.01)
+            return dict(state)
+        finally:
+            await self.delete_session(session_id)
+
+    async def set_session_config(
+        self,
+        session_id: str,
+        config_id: str,
+        value: str,
+        *,
+        owner: str,
+        cwd: str | None = None,
+    ) -> dict:
+        """Acknowledge and persist a typed MiMo session config value."""
+        if not self._bridge or not self.is_alive():
+            raise RuntimeError("mimo ACP is unavailable")
+        try:
+            return await self._bridge.set_config_option(
+                session_id,
+                config_id,
+                value,
+                cwd=cwd,
+                owner=owner,
+            )
+        finally:
+            if session_id in self._bridge.mapped_sessions():
+                await self.delete_session(session_id)
+
+    async def delete_session(
+        self,
+        odysseus_session: str,
+        *,
+        owner: str | None = None,
+        mimo_session_id: str | None = None,
+    ) -> None:
+        """Delete a MiMo-side session and forget any Odysseus remap."""
+        if not self._bridge or not self.is_alive():
+            raise RuntimeError("mimo ACP is unavailable")
+        mimo_session = mimo_session_id or self._bridge.mapped_session_id(
+            odysseus_session
+        )
+        await self._bridge.cleanup_session(mimo_session)
+        if self._client and not self._client.is_closed:
+            try:
+                await self._client.release_session(mimo_session)
+            except Exception as exc:
+                logger.warning("failed to release MiMo session MCP clients %s: %s", mimo_session, exc)
+        async with httpx.AsyncClient(
+            base_url=self.http_base_url,
+            follow_redirects=False,
+            timeout=10.0,
+            trust_env=False,
+        ) as client:
+            response = await client.delete(f"/session/{quote(mimo_session, safe='')}")
+        if response.status_code != 404:
+            response.raise_for_status()
+        self._bridge.forget_session(odysseus_session)
+
+    def is_alive(self, owner: str | None = None) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
     @property
@@ -444,9 +557,226 @@ class MimoSupervisor:
         return self._bridge
 
     @property
+    def question_handler(self):
+        return self._bridge.question_handler if self._bridge else None
+
+    @property
     def http_port(self) -> int:
         return self._http_port
 
     @property
     def http_base_url(self) -> str:
         return f"http://127.0.0.1:{self._http_port}"
+
+
+class MimoSupervisorPool:
+    """Lazy owner-keyed MiMo runtimes; auth-disabled mode keeps one worker."""
+
+    def __init__(
+        self,
+        *,
+        memory_provider=None,
+        safe_dirs: list[str] | None = None,
+        auth_enabled: bool = True,
+        initial_owner: str = "",
+        data_dir: Path | None = None,
+        grant_store=None,
+    ) -> None:
+        self._memory_provider = memory_provider
+        self._safe_dirs = safe_dirs
+        self._auth_enabled = auth_enabled
+        self._initial_owner = self._key(initial_owner) if initial_owner else ""
+        self._workers: dict[str, MimoSupervisor] = {}
+        self._lock = asyncio.Lock()
+        from src.constants import DATA_DIR
+        from src.openclank.permission_grants import GrantStore
+
+        root = Path(data_dir) if data_dir is not None else Path(DATA_DIR)
+        self._owners_root = root / "mimocode" / "owners"
+        self._grant_store = grant_store or GrantStore(str(root / "app.db"))
+
+    @staticmethod
+    def _key(owner: str | None) -> str:
+        return str(owner or "").strip().lower()
+
+    def _runtime_home(self, owner: str) -> Path:
+        digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()
+        return self._owners_root / digest
+
+    async def start(self) -> None:
+        if not self._auth_enabled:
+            await self.for_owner("")
+        elif self._initial_owner:
+            await self.for_owner(self._initial_owner)
+
+    async def for_owner(self, owner: str | None) -> MimoSupervisor:
+        key = self._key(owner)
+        if self._auth_enabled and not key:
+            raise RuntimeError("authenticated MiMo execution requires an owner")
+        if not self._auth_enabled:
+            key = ""
+        existing = self._workers.get(key)
+        if existing and existing.is_alive():
+            return existing
+        async with self._lock:
+            existing = self._workers.get(key)
+            if existing and existing.is_alive():
+                return existing
+            worker = MimoSupervisor(
+                owner=key,
+                memory_provider=self._memory_provider,
+                safe_dirs=self._safe_dirs,
+                runtime_home=self._runtime_home(key) if self._auth_enabled else None,
+                partitioned=self._auth_enabled,
+                grant_store=self._grant_store,
+            )
+            self._workers[key] = worker
+            try:
+                await worker.start()
+            except Exception:
+                self._workers.pop(key, None)
+                raise
+            return worker
+
+    def worker_for_owner(self, owner: str | None) -> MimoSupervisor | None:
+        key = self._key(owner) if self._auth_enabled else ""
+        return self._workers.get(key)
+
+    def _default_worker(self) -> MimoSupervisor | None:
+        if self._initial_owner in self._workers:
+            return self._workers[self._initial_owner]
+        return next(iter(self._workers.values()), None)
+
+    def available_models(self, owner: str | None = None) -> list:
+        worker = self.worker_for_owner(owner) if owner else self._default_worker()
+        if worker:
+            return worker.available_models()
+        merged: dict[str, dict] = {}
+        for item in self._workers.values():
+            for model in item.available_models():
+                model_id = str(model.get("modelId") or "")
+                if model_id:
+                    merged[model_id] = model
+        return list(merged.values())
+
+    async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
+        return await (await self.for_owner(owner)).refresh_model_catalog()
+
+    async def negotiate_session(self, session_id: str, *, owner: str, cwd: str | None = None) -> dict:
+        return await (await self.for_owner(owner)).negotiate_session(
+            session_id, owner=owner, cwd=cwd
+        )
+
+    async def set_session_config(
+        self,
+        session_id: str,
+        config_id: str,
+        value: str,
+        *,
+        owner: str,
+        cwd: str | None = None,
+    ) -> dict:
+        return await (await self.for_owner(owner)).set_session_config(
+            session_id, config_id, value, owner=owner, cwd=cwd
+        )
+
+    async def delete_session(
+        self,
+        odysseus_session: str,
+        *,
+        owner: str | None = None,
+        mimo_session_id: str | None = None,
+    ) -> None:
+        worker = self.worker_for_owner(owner) if owner is not None else None
+        if worker is None:
+            for candidate in self._workers.values():
+                if (
+                    mimo_session_id
+                    or (
+                        candidate.bridge
+                        and odysseus_session in candidate.bridge.mapped_sessions()
+                    )
+                ):
+                    worker = candidate
+                    break
+        if worker is None:
+            raise RuntimeError("owner MiMo runtime is unavailable")
+        await worker.delete_session(
+            odysseus_session, mimo_session_id=mimo_session_id
+        )
+
+    def mapped_sessions(self, owner: str | None = None) -> dict[str, str]:
+        worker = self.worker_for_owner(owner) if owner is not None else None
+        if worker and worker.bridge:
+            return worker.bridge.mapped_sessions()
+        result: dict[str, str] = {}
+        for candidate in self._workers.values():
+            if candidate.bridge:
+                result.update(candidate.bridge.mapped_sessions())
+        return result
+
+    def permission_handler_for(self, owner: str | None):
+        worker = self.worker_for_owner(owner)
+        return worker.permission_handler if worker else None
+
+    def question_handler_for(self, owner: str | None):
+        worker = self.worker_for_owner(owner)
+        return worker.question_handler if worker else None
+
+    def grant_store_for(self, owner: str | None):
+        return self._grant_store
+
+    def is_alive(self, owner: str | None = None) -> bool:
+        worker = self.worker_for_owner(owner) if owner is not None else None
+        if worker:
+            return worker.is_alive()
+        return any(item.is_alive() for item in self._workers.values())
+
+    @property
+    def bridge(self):
+        worker = self._default_worker()
+        return worker.bridge if worker else None
+
+    @property
+    def permission_handler(self):
+        worker = self._default_worker()
+        return worker.permission_handler if worker else None
+
+    @property
+    def http_base_url(self) -> str:
+        worker = self._default_worker()
+        if worker is None:
+            raise RuntimeError("MiMo owner runtime is unavailable")
+        return worker.http_base_url
+
+    async def stop(self) -> None:
+        workers = list(self._workers.values())
+        self._workers.clear()
+        await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
+
+    async def rename_owner(self, old_owner: str, new_owner: str) -> None:
+        old_key = self._key(old_owner)
+        new_key = self._key(new_owner)
+        worker = self._workers.pop(old_key, None)
+        if worker:
+            await worker.stop()
+        self._grant_store.rename_owner(old_key, new_key)
+        old_path = self._runtime_home(old_key)
+        new_path = self._runtime_home(new_key)
+        if old_path.exists():
+            if new_path.exists():
+                raise RuntimeError("target MiMo owner partition already exists")
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.rename(new_path)
+        if self._initial_owner == old_key:
+            self._initial_owner = new_key
+
+    async def purge_owner(self, owner: str) -> None:
+        key = self._key(owner)
+        worker = self._workers.pop(key, None)
+        if worker:
+            await worker.stop()
+        self._grant_store.purge_owner(key)
+        path = self._runtime_home(key)
+        if path.exists():
+            shutil.rmtree(path)

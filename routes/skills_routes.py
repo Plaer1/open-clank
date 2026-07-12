@@ -98,7 +98,8 @@ def _skill_test_task(skill: dict) -> str:
 
 
 async def _eval_skill_run(skill_md: str, task: str, transcript: str,
-                          url: str, model: str, headers: Optional[dict]) -> dict:
+                          url: str, model: str, headers: Optional[dict],
+                          owner: Optional[str] = None) -> dict:
     """LLM-as-judge: grade a skill test run from its transcript. Advisory only.
 
     Robust against local reasoning models (strips <think>, lenient JSON,
@@ -234,6 +235,7 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
                 # this same cap; the server clamps to its own max).
                 url, model, msgs,
                 temperature=0.1, max_tokens=32768, headers=headers, timeout=180,
+                owner=owner,
             )
         except Exception as e:
             # Don't give up on a transient first-attempt error — let the second
@@ -252,7 +254,7 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
 
 
 async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: str,
-                                headers: Optional[dict]) -> Optional[dict]:
+                                headers: Optional[dict], owner: Optional[str] = None) -> Optional[dict]:
     """Advisory judge: is this skill worth keeping, or is it redundant / trivially
     unnecessary? Sees the OTHER skills' names+descriptions so it can spot
     duplicates. Returns {necessary, redundant_with, reason} or None. Never acts —
@@ -282,6 +284,7 @@ async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: st
             url, model,
             [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
             temperature=0.1, max_tokens=8192, headers=headers, timeout=120,
+            owner=owner,
         )
     except Exception as e:
         logger.warning(f"Necessity check failed: {e}")
@@ -333,7 +336,8 @@ def _should_check_retrieval_precision(skill: dict) -> bool:
 
 async def _eval_skill_retrieval_precision(skill_md: str, others: list,
                                           url: str, model: str,
-                                          headers: Optional[dict]) -> Optional[dict]:
+                                          headers: Optional[dict],
+                                          owner: Optional[str] = None) -> Optional[dict]:
     """Advisory judge: would this skill's metadata make retrieval over-select it?
 
     This is distinct from "does the procedure work?". It asks whether tags,
@@ -370,6 +374,7 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
             url, model,
             [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
             temperature=0.1, max_tokens=4096, headers=headers, timeout=90,
+            owner=owner,
         )
     except Exception as e:
         logger.warning(f"Retrieval precision check failed: {e}")
@@ -405,17 +410,9 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
     """Background coroutine: run the skill in an agent loop, capture a condensed
     log + transcript, then have the judge grade it. Writes into _skill_test_jobs."""
     import json as _json
-    import os as _os
-    from src.agent_loop import stream_agent_loop
-
-    # ── openthesius: skill testing must be re-pointed to ACP ──
-    if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-        logger.warning("[openthesius] _run_skill_test_job skipped — agent loop disabled under OPENTHESIUS_DRIVE=mimo")
-        job = _skill_test_jobs.get(key)
-        if job is not None:
-            job["log"].append({"type": "error", "text": "Skill testing not available under openthesius (ACP mode)"})
-            job["status"] = "error"
-        return
+    import uuid as _uuid
+    from src.endpoint_resolver import resolve_model_target
+    from src.model_dispatch import stream_agent_target
 
     job = _skill_test_jobs.get(key)
     if job is None:
@@ -438,9 +435,15 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
         {"role": "user", "content": task},
     ]
     try:
-        async for chunk in stream_agent_loop(
-            url, model, messages, headers=headers,
-            temperature=0.3, max_tokens=0, max_rounds=8, owner=owner,
+        target = resolve_model_target(url, model, headers, lifecycle="ephemeral")
+        async for chunk in stream_agent_target(
+            target,
+            messages,
+            session_id=f"skill-test-{_uuid.uuid4().hex}",
+            owner=owner,
+            temperature=0.3,
+            max_tokens=0,
+            max_rounds=8,
         ):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
@@ -473,7 +476,9 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
 
     log.append({"type": "evaluating"})
     try:
-        job["verdict"] = await _eval_skill_run(md, task, "".join(transcript), url, model, headers)
+        job["verdict"] = await _eval_skill_run(
+            md, task, "".join(transcript), url, model, headers, owner=owner
+        )
     except Exception as e:
         job["verdict"] = {"verdict": "unknown", "confidence": 0, "summary": f"Eval failed: {e}", "issues": []}
     # Record the result so the card shows a 'verified' check (a manual test
@@ -692,13 +697,9 @@ def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
 async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -> tuple:
     """Run the skill once in the agent loop; return (transcript, verdict)."""
     import json as _json
-    import os as _os
-    from src.agent_loop import stream_agent_loop
-
-    # ── openthesius: skill testing must be re-pointed to ACP ──
-    if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-        logger.warning("[openthesius] _run_skill_test_once skipped — agent loop disabled under OPENTHESIUS_DRIVE=mimo")
-        return "[run error] Skill testing not available under openthesius (ACP mode)", {"issues": ["ACP mode — skill test skipped"]}
+    import uuid as _uuid
+    from src.endpoint_resolver import resolve_model_target
+    from src.model_dispatch import stream_agent_target
 
     transcript = []
     messages = [
@@ -712,8 +713,16 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
         # OpenAI-compat) generate an empty completion, which manifested as
         # the skill test returning nothing while chat (which carries its
         # preset's max_tokens) worked. 4096 matches the chat default.
-        async for chunk in stream_agent_loop(url, model, messages, headers=headers,
-                                             temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner):
+        target = resolve_model_target(url, model, headers, lifecycle="ephemeral")
+        async for chunk in stream_agent_target(
+            target,
+            messages,
+            session_id=f"skill-audit-{_uuid.uuid4().hex}",
+            temperature=0.3,
+            max_tokens=4096,
+            max_rounds=8,
+            owner=owner,
+        ):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
             try:
@@ -731,11 +740,11 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
     except Exception as e:
         transcript.append(f"\n[run error] {e}\n")
     text = "".join(transcript)
-    verdict = await _eval_skill_run(md, task, text, url, model, headers)
+    verdict = await _eval_skill_run(md, task, text, url, model, headers, owner=owner)
     return text, verdict
 
 
-async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, model, headers):
+async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, model, headers, owner=None):
     """Have a model rewrite SKILL.md to fix the reviewer's issues. Returns the
     corrected markdown, or None if it couldn't produce a usable change."""
     import re as _re
@@ -764,7 +773,8 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
         raw = await llm_call_async(url, model,
                                    [{"role": "system", "content": sys_prompt},
                                     {"role": "user", "content": user_msg}],
-                                   temperature=0.2, max_tokens=16384, headers=headers, timeout=180)
+                                   temperature=0.2, max_tokens=16384, headers=headers, timeout=180,
+                                   owner=owner)
     except Exception as e:
         logger.warning(f"Audit: improve call failed: {e}")
         return None
@@ -817,7 +827,7 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
             if s.get("name") and s.get("name") != name
             and (not sk_owner or not s.get("owner") or s.get("owner") == sk_owner)
         ]
-        nec = await _eval_skill_necessity(md, others, url, model, headers)
+        nec = await _eval_skill_necessity(md, others, url, model, headers, owner=owner)
         if nec is not None:
             skills_manager.set_necessity(name, nec.get("necessary", True),
                                          nec.get("redundant_with"), nec.get("reason"),
@@ -847,7 +857,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     # narrow skill over-inject, fix only metadata before the functional test.
     try:
         if _should_check_retrieval_precision(skill):
-            rp = await _eval_skill_retrieval_precision(md, others, url, model, headers)
+            rp = await _eval_skill_retrieval_precision(
+                md, others, url, model, headers, owner=owner
+            )
             if rp and not rp.get("ok"):
                 issues = rp.get("issues") or ["metadata: retrieval: narrow tags and when_to_use to the intended trigger"]
                 log(f"{name}: narrowing retrieval metadata — {(rp.get('summary') or issues[0])[:80]}")
@@ -856,7 +868,7 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
                     "confidence": 1.0,
                     "summary": rp.get("summary") or "Retrieval metadata is too broad.",
                     "issues": issues,
-                }, "Retrieval audit only: the procedure may work, but matching metadata is too broad.", url, model, headers)
+                }, "Retrieval audit only: the procedure may work, but matching metadata is too broad.", url, model, headers, owner=owner)
                 if fixed and fixed.strip() != md.strip() and _apply_skill_md(skills_manager, name, fixed, owner):
                     md = fixed
                     refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
@@ -877,7 +889,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         meta_issues = [i for i in (verdict.get("issues") or []) if str(i).lower().lstrip().startswith("metadata:")]
         if meta_issues:
             log(f"{name}: pass, but fixing {len(meta_issues)} metadata issue(s)…")
-            fixed = await _improve_skill_md(md, verdict, transcript, url, model, headers)
+            fixed = await _improve_skill_md(
+                md, verdict, transcript, url, model, headers, owner=owner
+            )
             if fixed and fixed.strip() != md.strip():
                 _apply_skill_md(skills_manager, name, fixed, owner)
         _set_conf(0.95)
@@ -894,7 +908,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
 
     # Self-edit + retry.
     log(f"{name}: self-editing to fix issues…")
-    new_md = await _improve_skill_md(md, verdict, transcript, url, model, headers)
+    new_md = await _improve_skill_md(
+        md, verdict, transcript, url, model, headers, owner=owner
+    )
     if new_md and new_md.strip() != md.strip() and _apply_skill_md(skills_manager, name, new_md, owner):
         md = new_md
         transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
@@ -917,7 +933,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         teacher_ran = True
         t_url, t_model, t_headers = teacher
         log(f"{name}: teacher {t_model} rewriting the skill…")
-        t_md = await _improve_skill_md(md, verdict, transcript, t_url, t_model, t_headers)
+        t_md = await _improve_skill_md(
+            md, verdict, transcript, t_url, t_model, t_headers, owner=owner
+        )
         if t_md and t_md.strip() != md.strip() and _apply_skill_md(skills_manager, name, t_md, owner):
             md = t_md
         # Re-test with the STUDENT model (the model the skill runs under in use).

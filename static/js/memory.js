@@ -376,25 +376,32 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
   }
 }
 
+async function fetchMemoryPages() {
+  const memory = [];
+  let cursor = null;
+  let provider = 'native';
+  do {
+    const params = new URLSearchParams({ limit: '1000' });
+    if (cursor) params.set('cursor', cursor);
+    const response = await fetch(`${window.location.origin}/api/memory?${params}`);
+    if (!response.ok) {
+      const error = new Error(`Memory provider unavailable (HTTP ${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    const data = await response.json();
+    const page = Array.isArray(data) ? data : (data.memory || []);
+    memory.push(...page);
+    provider = data?.provider || provider;
+    cursor = data?.next_cursor || null;
+  } while (cursor);
+  return { memory, provider };
+}
+
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
   try {
-    const response = await fetch(`${window.location.origin}/api/memory`);
-
-    if (!response.ok) {
-      console.error('Memory fetch failed with status:', response.status);
-      memoryLoadError = `Memory provider unavailable (HTTP ${response.status})`;
-      memoryProviderStatus = 'unavailable';
-      _renderMemoryProviderStatus();
-      memories = [];
-      buildCategoryChips();
-      renderMemoryList();
-      updateMemoryCount();
-      syncToggles();
-      return;
-    }
-
-    const data = await response.json();
+    const data = await fetchMemoryPages();
     memoryLoadError = null;
     memoryProviderStatus = data?.provider || 'native';
     _renderMemoryProviderStatus();
@@ -665,8 +672,7 @@ export async function tidyMemories() {
     }
 
     // Fetch the new state
-    const freshRes = await fetch(`${window.location.origin}/api/memory`);
-    const freshData = await freshRes.json();
+    const freshData = await fetchMemoryPages();
     const afterList = freshData.memory || freshData || [];
     const afterMap = new Map(afterList.map(m => [m.id, m]));
 

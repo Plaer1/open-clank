@@ -122,7 +122,11 @@ mod tests {
         assert!((score - 0.5).abs() < 0.01);
     }
 
-    fn calculate_decay_score_from_days(age_days: i64, importance: f32, config: &DecayConfig) -> f64 {
+    fn calculate_decay_score_from_days(
+        age_days: i64,
+        importance: f32,
+        config: &DecayConfig,
+    ) -> f64 {
         let half_life = if importance >= config.importance_threshold {
             config.half_life_important_days
         } else {

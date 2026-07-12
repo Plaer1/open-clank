@@ -33,10 +33,7 @@ fn classify_record(record: &crate::record::MemoryRecord) -> GroundTruthRank {
     GroundTruthRank::Training
 }
 
-pub fn format_recall_output(
-    records: &[ScoredRecord],
-    query: &str,
-) -> (String, Option<String>) {
+pub fn format_recall_output(records: &[ScoredRecord], query: &str) -> (String, Option<String>) {
     if records.is_empty() {
         return (String::new(), None);
     }

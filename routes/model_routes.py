@@ -553,12 +553,16 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
-def _mimo_catalog(supervisor):
+def _mimo_catalog(supervisor, owner: str | None = None):
     """Return one filtered Mimo catalog for every model-list consumer."""
     if supervisor is None:
         return [], [], [], 0
     try:
-        models = [m.get("modelId", "") for m in supervisor.available_models() if m.get("modelId")]
+        try:
+            catalog = supervisor.available_models(owner=owner)
+        except TypeError:
+            catalog = supervisor.available_models()
+        models = [m.get("modelId", "") for m in catalog if m.get("modelId")]
     except Exception:
         return [], [], [], 0
     original_count = len(models)
@@ -566,8 +570,8 @@ def _mimo_catalog(supervisor):
     if hidden:
         models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]
     model_set = set(models)
-    base = [m for m in models if m.rsplit("/", 1)[0] not in model_set]
-    variants = [m for m in models if m.rsplit("/", 1)[0] in model_set]
+    base = [m for m in models if "/" not in m or m.rsplit("/", 1)[0] not in model_set]
+    variants = [m for m in models if "/" in m and m.rsplit("/", 1)[0] in model_set]
     return models, base, variants, original_count - len(models)
 
 
@@ -578,6 +582,48 @@ def _mimo_display_names(base: list[str], variants: list[str]) -> dict[str, str]:
         model, _, effort = model_id.rpartition("/")
         displays[model_id] = f"{model.split('/', 1)[-1]} ({effort})"
     return displays
+
+
+def _allowed_model_ids(request: Request, owner: str) -> Optional[frozenset[str]]:
+    """Return None for unrestricted access, otherwise the exact visible IDs."""
+    if not owner:
+        return None
+    auth_manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
+    get_privileges = getattr(auth_manager, "get_privileges", None)
+    if not get_privileges:
+        return None
+    privileges = get_privileges(owner) or {}
+    if privileges.get("block_all_models"):
+        return frozenset()
+    raw = privileges.get("allowed_models")
+    allowed = frozenset(str(item) for item in raw) if isinstance(raw, list) else frozenset()
+    if privileges.get("allowed_models_restricted") or allowed:
+        return allowed
+    return None
+
+
+def _filter_catalog_for_allowed_models(result: dict, allowed: Optional[frozenset[str]]) -> dict:
+    if allowed is None:
+        return result
+    visible_items = []
+    for item in result.get("items") or []:
+        for ids_key, names_key in (
+            ("models", "models_display"),
+            ("models_extra", "models_extra_display"),
+        ):
+            ids = item.get(ids_key) or []
+            names = item.get(names_key) or []
+            pairs = [(model_id, names[index] if index < len(names) else model_id) for index, model_id in enumerate(ids)]
+            item[ids_key] = [model_id for model_id, _ in pairs if model_id in allowed]
+            item[names_key] = [name for model_id, name in pairs if model_id in allowed]
+        item["catalog"] = [
+            record for record in (item.get("catalog") or [])
+            if record.get("model_id") in allowed
+        ]
+        if item["catalog"] or item.get("models") or item.get("models_extra"):
+            visible_items.append(item)
+    result["items"] = visible_items
+    return result
 
 
 def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Optional[str] = None) -> bool:
@@ -1427,10 +1473,15 @@ def setup_model_routes(model_discovery):
                 _is_admin = bool(auth_mgr.is_admin(owner))
         except Exception:
             _is_admin = False
+        _allowed_models = _allowed_model_ids(request, owner)
         now = _time.time()
         # Cache key includes the admin flag so a demotion / promotion doesn't
         # serve the wrong scoped view from cache.
-        _cache_key = (owner, _is_admin)
+        _cache_key = (
+            owner,
+            _is_admin,
+            None if _allowed_models is None else tuple(sorted(_allowed_models)),
+        )
         cache_entry = _models_cache.get(_cache_key)
         if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
             return cache_entry["data"]
@@ -1438,7 +1489,7 @@ def setup_model_routes(model_discovery):
         # mimo reports up its own provider catalog (model authority lives in
         # mimo's config, not the endpoint DB) — surface it as its own group.
         _sup = getattr(request.app.state, "mimo_supervisor", None)
-        _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup)
+        _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup, owner)
         if _mimo_models:
             # A direct endpoint row can expose the same provider's public
             # API catalog (notably DeepSeek) beside Mimo's subscription
@@ -1485,7 +1536,12 @@ def setup_model_routes(model_discovery):
                 "category": "local",
                 "endpoint_kind": "local",
                 "model_type": "llm",
+                "virtual": True,
+                "read_only": True,
+                "actions": ["configure_providers"],
+                "settings_tab": "mimo-providers",
             })
+        result = _filter_catalog_for_allowed_models(result, _allowed_models)
         _models_cache[_cache_key] = {"data": result, "time": now}
         # Kick off background refresh to update caches from live endpoints
         _refresh_caches_bg(force=refresh)
@@ -1878,7 +1934,9 @@ def setup_model_routes(model_discovery):
             # in the original admin list. Expose the same handshake catalog
             # here so Default/Utility/Research settings can select it.
             _sup = getattr(getattr(getattr(request, "app", None), "state", None), "mimo_supervisor", None)
-            _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup)
+            _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(
+                _sup, effective_user(request)
+            )
             if _mimo_models:
                 _mimo_displays = _mimo_display_names(_base, _variants)
                 results.append({
@@ -1914,6 +1972,10 @@ def setup_model_routes(model_discovery):
                     "model_refresh_mode": "manual",
                     "model_refresh_interval": None,
                     "model_refresh_timeout": None,
+                    "virtual": True,
+                    "read_only": True,
+                    "actions": ["configure_providers"],
+                    "settings_tab": "mimo-providers",
                 })
             return results
         finally:
@@ -2169,6 +2231,8 @@ def setup_model_routes(model_discovery):
     def probe_endpoint_models(ep_id: str, request: Request):
         """Re-probe all models on an endpoint. Updates hidden_models and streams SSE results."""
         require_admin(request)
+        if ep_id == "mimo":
+            raise HTTPException(409, "Refresh MiMo models from MiMo Providers")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2225,6 +2289,19 @@ def setup_model_routes(model_discovery):
     ):
         """List all discovered models for an endpoint with hidden/visible state."""
         require_admin(request)
+        if ep_id == "mimo":
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            models, _, _, _ = _mimo_catalog(supervisor, effective_user(request))
+            return [
+                {
+                    "id": model_id,
+                    "display": model_id.split("/", 1)[-1],
+                    "is_hidden": False,
+                    "is_pinned": False,
+                    "read_only": True,
+                }
+                for model_id in models
+            ]
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2276,6 +2353,8 @@ def setup_model_routes(model_discovery):
         without clobbering the other.
         """
         require_admin(request)
+        if ep_id == "mimo":
+            raise HTTPException(409, "MiMo model visibility is managed by MiMo Providers")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2355,11 +2434,23 @@ def setup_model_routes(model_discovery):
             _catalog = []
             if _sup is not None:
                 try:
-                    _catalog = [m.get("modelId", "") for m in _sup.available_models() if m.get("modelId")]
+                    _catalog = [
+                        m.get("modelId", "")
+                        for m in _sup.available_models(owner=_user)
+                        if m.get("modelId")
+                    ]
                 except Exception:
                     _catalog = []
+            _allowed = _allowed_model_ids(request, _user)
+            if _allowed is not None:
+                _catalog = [item for item in _catalog if item in _allowed]
             if not _catalog:
-                return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
+                eligible_configured = model if _allowed is None or model in _allowed else ""
+                return {
+                    "endpoint_id": "mimo",
+                    "endpoint_url": "mimo://acp",
+                    "model": eligible_configured,
+                }
             if not model or model not in _catalog:
                 model = _catalog[0]
             return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
@@ -2433,6 +2524,8 @@ def setup_model_routes(model_discovery):
     @router.patch("/model-endpoints/{ep_id}")
     async def toggle_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
+        if ep_id == "mimo":
+            raise HTTPException(409, "MiMo is a read-only virtual endpoint; use MiMo Providers")
         # Optional JSON body for field-targeted updates. No body → toggle is_enabled (legacy behaviour).
         body: Dict[str, Any] = {}
         try:
@@ -2590,6 +2683,8 @@ def setup_model_routes(model_discovery):
     @router.delete("/model-endpoints/{ep_id}")
     def delete_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
+        if ep_id == "mimo":
+            raise HTTPException(409, "MiMo is a read-only virtual endpoint; use MiMo Providers")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()

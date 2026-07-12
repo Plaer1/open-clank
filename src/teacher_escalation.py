@@ -248,6 +248,7 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
             ],
             headers=headers,
             timeout=120,
+            owner=owner,
         )
     except Exception as e:
         logger.warning(f"teacher call failed: {e}")
@@ -478,6 +479,8 @@ async def run_teacher_inline(
     student_tool_events: List[Dict[str, Any]],
     student_reply: str,
     owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workspace: Optional[str] = None,
 ):
     """Async generator. Yields SSE event strings.
 
@@ -559,28 +562,27 @@ async def run_teacher_inline(
     )
     teacher_messages = history + [{"role": "user", "content": note_content}]
 
-    # Recursively invoke the agent loop with the teacher's params.
-    # The _is_teacher_run flag prevents infinite recursion (the teacher
-    # run will skip its own escalation hook).
-    import os as _os
-    from src.agent_loop import stream_agent_loop
-
-    # ── openthesius: teacher escalation must be re-pointed to ACP ──
-    if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-        logger.warning("[openthesius] teacher escalation skipped — agent loop disabled under OPENTHESIUS_DRIVE=mimo")
-        yield 'data: ' + json.dumps({"type": "error", "error": "teacher escalation not available under openthesius/ACP"}) + '\n\n'
-        yield "data: [DONE]\n\n"
-        return
+    # Recursively invoke the dispatcher with the teacher's params. The
+    # _is_teacher_run flag prevents infinite recursion on HTTP agent loops.
+    import uuid as _uuid
+    from src.endpoint_resolver import resolve_model_target
+    from src.model_dispatch import stream_agent_target
 
     captured_tool_events: List[Dict[str, Any]] = []
     captured_text_parts: List[str] = []
 
-    async for evt_str in stream_agent_loop(
-        endpoint_url=teacher_url,
-        model=teacher_model,
-        messages=teacher_messages,
-        headers=teacher_headers,
+    teacher_target = resolve_model_target(
+        teacher_url,
+        teacher_model,
+        teacher_headers,
+        lifecycle="ephemeral",
+    )
+    async for evt_str in stream_agent_target(
+        teacher_target,
+        teacher_messages,
+        session_id=session_id or f"teacher-{_uuid.uuid4().hex}",
         owner=owner,
+        cwd=workspace,
         _is_teacher_run=True,
     ):
         # Swallow teacher's own [DONE] — outer loop emits the real one

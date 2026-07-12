@@ -10,6 +10,7 @@ use crate::record::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroomOpArgs {
     pub op: GroomOp,
+    pub owner: Option<String>,
     pub workspace_id: Option<String>,
     pub dry_run: bool,
 }

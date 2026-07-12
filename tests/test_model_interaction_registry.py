@@ -32,7 +32,7 @@ def test_chat_with_model_threads_owner_and_returns(monkeypatch):
         seen["owner"] = owner
         return ("http://x", "model-x", {})
 
-    async def fake_call(url, model, messages, headers=None, timeout=None):
+    async def fake_call(url, model, messages, headers=None, timeout=None, **kwargs):
         seen["message"] = messages[-1]["content"]
         return "hi back"
 
@@ -55,7 +55,7 @@ def test_ask_teacher_threads_owner_and_marks_teacher(monkeypatch):
         seen["owner"] = owner
         return ("http://x", "teacher-x", {})
 
-    async def fake_call(url, model, messages, headers=None, timeout=None):
+    async def fake_call(url, model, messages, headers=None, timeout=None, **kwargs):
         return "do this and that"
 
     monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve)

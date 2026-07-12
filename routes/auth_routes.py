@@ -9,6 +9,7 @@ import os
 
 import json
 import re
+import uuid
 from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
@@ -36,6 +37,61 @@ from src.integrations import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL_SETTING_PAIRS = (
+    ("default_endpoint_id", "default_model"),
+    ("utility_endpoint_id", "utility_model"),
+    ("research_endpoint_id", "research_model"),
+    ("task_endpoint_id", "task_model"),
+)
+
+
+def _validate_model_settings_update(body: dict, current: dict, request: Request, owner: str) -> None:
+    from src.endpoint_resolver import resolve_endpoint_by_id
+
+    for endpoint_key, model_key in _MODEL_SETTING_PAIRS:
+        if endpoint_key not in body and model_key not in body:
+            continue
+        endpoint_id = str(body.get(endpoint_key, current.get(endpoint_key, "")) or "").strip()
+        model_id = str(body.get(model_key, current.get(model_key, "")) or "").strip()
+        if endpoint_id and resolve_endpoint_by_id(endpoint_id, model_id, owner=owner) is None:
+            raise HTTPException(400, f"{model_key} is not available on {endpoint_key}")
+
+    for fallback_key in (
+        "default_model_fallbacks",
+        "utility_model_fallbacks",
+        "vision_model_fallbacks",
+    ):
+        if fallback_key not in body:
+            continue
+        fallbacks = body[fallback_key]
+        if not isinstance(fallbacks, list):
+            raise HTTPException(400, f"{fallback_key} must be a list")
+        for fallback in fallbacks:
+            if not isinstance(fallback, dict):
+                raise HTTPException(400, f"{fallback_key} entries must be objects")
+            endpoint_id = str(fallback.get("endpoint_id") or "").strip()
+            model_id = str(fallback.get("model") or "").strip()
+            if fallback_key == "vision_model_fallbacks" and endpoint_id == "mimo":
+                raise HTTPException(400, "MiMo does not advertise vision input")
+            if endpoint_id and resolve_endpoint_by_id(endpoint_id, model_id, owner=owner) is None:
+                raise HTTPException(400, f"Unavailable model in {fallback_key}")
+
+    for speech_key in ("tts_provider", "stt_provider"):
+        if body.get(speech_key) == "endpoint:mimo":
+            raise HTTPException(400, "MiMo ACP is not a speech endpoint")
+
+    if "vision_model" in body and body.get("vision_model"):
+        supervisor = getattr(getattr(request.app, "state", None), "mimo_supervisor", None)
+        try:
+            mimo_catalog = supervisor.available_models(owner=owner) if supervisor else []
+        except TypeError:
+            mimo_catalog = supervisor.available_models() if supervisor else []
+        mimo_models = {
+            item.get("modelId") for item in mimo_catalog if item.get("modelId")
+        }
+        if body["vision_model"] in mimo_models:
+            raise HTTPException(400, "MiMo does not advertise vision input")
 
 
 class LoginRequest(BaseModel):
@@ -340,6 +396,20 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 )
                 return False
 
+        memory_provider = getattr(request.app.state, "memory_provider", None)
+        provider_renamed = False
+        if memory_provider:
+            try:
+                await memory_provider.rename_owner(new_username, owner=old_username)
+                provider_renamed = True
+            except Exception as e:
+                logger.error(
+                    "Failed to rename active memory owner %s -> %s: %s",
+                    old_username, new_username, e,
+                )
+                _rollback_auth_rename()
+                raise HTTPException(500, "Failed to rename user memory")
+
         # Usernames are ownership keys for user data. Rename the common
         # owner-scoped DB rows so the account keeps access to its sessions,
         # docs, email accounts, tasks, etc.
@@ -365,6 +435,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 db.close()
         except Exception as e:
             logger.error("Failed to rename owner references %s -> %s: %s", old_username, new_username, e)
+            if provider_renamed:
+                try:
+                    await memory_provider.rename_owner(old_username, owner=new_username)
+                except Exception as rollback_error:
+                    logger.error("Failed to roll back memory owner rename: %s", rollback_error)
             if not _rollback_auth_rename():
                 logger.error(
                     "Auth rename %s -> %s could not be rolled back after owner migration failure",
@@ -516,6 +591,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 if str(getattr(sess, "owner", None) or "").strip().lower() == old_username:
                     sess.owner = new_username
 
+        mimo_supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        if mimo_supervisor is not None and hasattr(mimo_supervisor, "rename_owner"):
+            try:
+                await mimo_supervisor.rename_owner(old_username, new_username)
+            except Exception as exc:
+                raise HTTPException(500, f"Failed to rename user MiMo state: {exc}") from exc
+
         # The owner-rename loop above updated ApiToken.owner in the DB, but the
         # bearer-token cache still maps each token to the OLD owner. Without
         # refreshing it, the renamed user's API tokens resolve to the old (now
@@ -590,16 +672,46 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             except Exception:
                 pass
 
+        memory_provider = getattr(request.app.state, "memory_provider", None)
+        target_owner = (body.username or "").strip().lower()
+        tombstone_owner = f"deleted:{uuid.uuid4().hex}"
+        memory_tombstoned = False
+        if memory_provider:
+            try:
+                await memory_provider.rename_owner(tombstone_owner, owner=target_owner)
+                memory_tombstoned = True
+            except Exception as exc:
+                raise HTTPException(503, f"Cannot snapshot user memory for deletion: {exc}") from exc
+
         try:
             ok = auth_manager.delete_user(body.username, user)
         except Exception:
+            if memory_tombstoned:
+                try:
+                    await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
+                except Exception:
+                    logger.exception("Failed to restore tombstoned memory after user-delete failure")
             # delete_user can touch ApiToken rows before a later auth-store write
             # fails. Dirty the bearer cache anyway so a partial token purge does
             # not leave already-cached tokens authenticating until restart.
             _invalidate_api_token_cache()
             raise
         if not ok:
+            if memory_tombstoned:
+                await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
             raise HTTPException(400, "Cannot delete user")
+        if memory_tombstoned:
+            try:
+                await memory_provider.purge_owner(owner=tombstone_owner)
+            except Exception as exc:
+                logger.exception("Deleted user memory remains tombstoned and inaccessible")
+                raise HTTPException(500, f"User deleted; tombstoned memory purge failed: {exc}") from exc
+        mimo_supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        if mimo_supervisor is not None and hasattr(mimo_supervisor, "purge_owner"):
+            try:
+                await mimo_supervisor.purge_owner(target_owner)
+            except Exception as exc:
+                raise HTTPException(500, f"User deleted; MiMo state purge failed: {exc}") from exc
         # delete_user removes the user's ApiToken rows, but the bearer-auth
         # middleware serves from an in-memory prefix->token cache that only
         # rebuilds when flagged dirty. Without this, a deleted user's already
@@ -650,6 +762,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(403, "Admin only")
         body = await request.json()
         current = _load_settings()
+        _validate_model_settings_update(body, current, request, user)
         # Per-key validation for numeric settings: coerce to int and clamp to a
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {

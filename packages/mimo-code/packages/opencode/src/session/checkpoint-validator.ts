@@ -35,6 +35,46 @@ export const LEARNING_REQUIRED_SECTIONS = [
   "### Dead ends",
 ] as const
 
+export const CHECKPOINT_REQUIRED_SECTIONS = [
+  "## §1 Active intent",
+  "## §2 Next concrete action",
+  "## §3 Directives (this session)",
+  "## §4 Task tree",
+  "## §5 Current work",
+  "## §6 Files and code sections",
+  "## §7 Discovered knowledge (cross-task)",
+  "## §8 Errors and fixes",
+  "## §9 Live resources",
+  "## §10 Design decisions and discussion outcomes",
+  "## §11 Open notes",
+] as const
+
+function validateCurrentCheckpoint(body: string, filename: string): Violation[] {
+  const violations: Violation[] = []
+  let previous = -1
+  for (const section of CHECKPOINT_REQUIRED_SECTIONS) {
+    const index = body.indexOf(section)
+    if (index === -1) {
+      violations.push({
+        file: filename,
+        rule: "subsection-missing",
+        severity: "error",
+        detail: `Missing "${section}" section. Preserve the 11-section checkpoint template.`,
+      })
+    } else if (index < previous) {
+      violations.push({
+        file: filename,
+        rule: "subsection-out-of-order",
+        severity: "error",
+        detail: "Checkpoint sections must remain in §1 through §11 order.",
+      })
+      break
+    }
+    if (index !== -1) previous = index
+  }
+  return violations
+}
+
 function checkTopicAndSections(
   body: string,
   filename: string,
@@ -99,6 +139,7 @@ function checkTopicAndSections(
 }
 
 export function validateSnapshot(body: string, filename: string): Violation[] {
+  if (body.includes("## §1 Active intent")) return validateCurrentCheckpoint(body, filename)
   return checkTopicAndSections(body, filename, SNAPSHOT_REQUIRED_SECTIONS)
 }
 
@@ -138,6 +179,7 @@ export function validateLearning(
   filename: string,
   priorDiscoveredTitles: Set<string>,
 ): Violation[] {
+  if (body.includes("## §1 Active intent")) return []
   const violations = checkTopicAndSections(body, filename, LEARNING_REQUIRED_SECTIONS)
   const entries = extractDiscoveredEntries(body)
   for (const entry of entries) {

@@ -1,8 +1,9 @@
 import { Effect } from "effect"
-import { Database, eq, desc, asc, isNull } from "@/storage"
+import { Database, eq, desc, asc, isNull, and } from "@/storage"
 import { SessionTable } from "./session.sql"
 import { Log } from "@/util"
 import type { Config } from "@/config"
+import type { ProjectID } from "@/project/schema"
 
 const log = Log.create({ service: "auto-dream" })
 
@@ -20,8 +21,8 @@ export function isSystemSession(session: { title: string }): boolean {
   return SYSTEM_SESSION_TITLES.has(session.title)
 }
 
-let lastDreamSpawnTime = 0
-let lastDistillSpawnTime = 0
+const lastDreamSpawnTime = new Map<string, number>()
+const lastDistillSpawnTime = new Map<string, number>()
 
 export const DREAM_TASK = [
   "Run one automatic dream memory consolidation pass for the current project.",
@@ -46,6 +47,7 @@ function shouldAutoRun(input: {
   intervalDays: number
   title: string
   label: string
+  projectID: ProjectID
 }) {
   return Effect.gen(function* () {
     if (!input.enabled) return false
@@ -57,7 +59,7 @@ function shouldAutoRun(input: {
         db
           .select({ time_created: SessionTable.time_created })
           .from(SessionTable)
-          .where(eq(SessionTable.title, input.title))
+          .where(and(eq(SessionTable.title, input.title), eq(SessionTable.project_id, input.projectID)))
           .orderBy(desc(SessionTable.time_created))
           .limit(1)
           .get(),
@@ -75,7 +77,7 @@ function shouldAutoRun(input: {
           db
             .select({ time_created: SessionTable.time_created })
             .from(SessionTable)
-            .where(isNull(SessionTable.parent_id))
+            .where(and(isNull(SessionTable.parent_id), eq(SessionTable.project_id, input.projectID)))
             .orderBy(asc(SessionTable.time_created))
             .limit(1)
             .get(),
@@ -106,24 +108,24 @@ function shouldAutoRun(input: {
   })
 }
 
-export function shouldAutoDream(cfg: Config.Info) {
-  const enabled = cfg.dream?.auto !== false
+export function shouldAutoDream(cfg: Config.Info, projectID: ProjectID) {
+  const enabled = cfg.dream?.auto === true
   if (!enabled) return Effect.succeed(false)
   const now = Date.now()
-  if (now - lastDreamSpawnTime < MIN_SPAWN_GAP_MS) return Effect.succeed(false)
-  lastDreamSpawnTime = now
+  if (now - (lastDreamSpawnTime.get(projectID) ?? 0) < MIN_SPAWN_GAP_MS) return Effect.succeed(false)
+  lastDreamSpawnTime.set(projectID, now)
   const intervalDays = cfg.dream?.interval_days ?? DEFAULT_DREAM_INTERVAL_DAYS
-  return shouldAutoRun({ enabled, intervalDays, title: AUTO_DREAM_TITLE, label: "dream" })
+  return shouldAutoRun({ enabled, intervalDays, title: AUTO_DREAM_TITLE, label: "dream", projectID })
 }
 
-export function shouldAutoDistill(cfg: Config.Info) {
-  const enabled = cfg.distill?.auto !== false
+export function shouldAutoDistill(cfg: Config.Info, projectID: ProjectID) {
+  const enabled = cfg.distill?.auto === true
   if (!enabled) return Effect.succeed(false)
   const now = Date.now()
-  if (now - lastDistillSpawnTime < MIN_SPAWN_GAP_MS) return Effect.succeed(false)
-  lastDistillSpawnTime = now
+  if (now - (lastDistillSpawnTime.get(projectID) ?? 0) < MIN_SPAWN_GAP_MS) return Effect.succeed(false)
+  lastDistillSpawnTime.set(projectID, now)
   const intervalDays = cfg.distill?.interval_days ?? DEFAULT_DISTILL_INTERVAL_DAYS
-  return shouldAutoRun({ enabled, intervalDays, title: AUTO_DISTILL_TITLE, label: "distill" })
+  return shouldAutoRun({ enabled, intervalDays, title: AUTO_DISTILL_TITLE, label: "distill", projectID })
 }
 
 export * as AutoDream from "./auto-dream"

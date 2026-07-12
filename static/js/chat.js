@@ -110,6 +110,68 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
 
+  const _sessionStateKey = (kind, sessionId) => `odysseus-mimo-${kind}-${sessionId}`;
+  function _storeSessionState(kind, sessionId, value) {
+    if (!sessionId || !value) return;
+    try { sessionStorage.setItem(_sessionStateKey(kind, sessionId), JSON.stringify(value)); } catch (_) {}
+  }
+  function _clearSessionState(kind, sessionId) {
+    try { sessionStorage.removeItem(_sessionStateKey(kind, sessionId)); } catch (_) {}
+  }
+  function _readSessionState(kind, sessionId) {
+    try { return JSON.parse(sessionStorage.getItem(_sessionStateKey(kind, sessionId)) || 'null'); }
+    catch (_) { return null; }
+  }
+  function _renderPlanDock(planState) {
+    const dock = document.getElementById('mimo-plan-dock');
+    if (!dock) return;
+    const plan = planState && typeof planState.plan === 'string' ? planState.plan.trim() : '';
+    const todos = planState && Array.isArray(planState.todos) ? planState.todos : [];
+    dock.hidden = !plan && !todos.length;
+    if (dock.hidden) return;
+    const revision = dock.querySelector('[data-plan-revision]');
+    const text = dock.querySelector('[data-plan-text]');
+    const list = dock.querySelector('[data-plan-todos]');
+    if (revision) revision.textContent = `Revision ${Number(planState.revision || 0)}`;
+    if (text) { text.textContent = plan; text.hidden = !plan; }
+    if (list) {
+      list.replaceChildren(...todos.map((todo) => {
+        const item = document.createElement('li');
+        item.dataset.status = String(todo.status || 'pending');
+        item.textContent = String(todo.content || todo.title || todo.text || '');
+        return item;
+      }));
+    }
+  }
+  function _setStoredPlan(planState, sessionId) {
+    const sid = sessionId || sessionModule.getCurrentSessionId();
+    if (!sid || !planState) return;
+    const normalized = typeof planState === 'string' ? { plan: planState } : planState;
+    _storeSessionState('plan', sid, normalized);
+    if (sessionModule.getCurrentSessionId() === sid) _renderPlanDock(normalized);
+  }
+  async function restoreSessionState(sessionId) {
+    if (!sessionId) return;
+    _renderPlanDock(_readSessionState('plan', sessionId));
+    const question = _readSessionState('question', sessionId);
+    const permission = _readSessionState('permission', sessionId);
+    if (question) chatRenderer.renderAskUserCard(question, { scroll: false, focus: false });
+    if (permission) chatRenderer.renderPermissionCard(permission, sessionId);
+    try {
+      const response = await fetch(`${API_BASE}/session/${encodeURIComponent(sessionId)}/mimo-state`, {
+        credentials: 'same-origin',
+      });
+      if (!response.ok) return;
+      const state = await response.json();
+      if (sessionModule.getCurrentSessionId() !== sessionId) return;
+      if (state.plan_state) _setStoredPlan(state.plan_state, sessionId);
+      if (state.pending_question) {
+        _storeSessionState('question', sessionId, state.pending_question);
+        chatRenderer.renderAskUserCard(state.pending_question, { scroll: false, focus: false });
+      }
+    } catch (_) {}
+  }
+
   /** Check if an SSE reader is still actively connected for a session. */
   function hasActiveStream(sessionId) {
     return _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
@@ -181,6 +243,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     initSlashCommands({ apiBase, isStreaming: () => isStreaming });
     // Initialize email inbox
     emailInbox.init(documentModule);
+    document.addEventListener('odysseus:interactive-resolved', (event) => {
+      const detail = event.detail || {};
+      if (detail.sessionId && detail.kind) _clearSessionState(detail.kind, detail.sessionId);
+    });
     // Wire the slash-command autocomplete popup on the chat composer. The
     // dispatcher already handles the typed command — this just surfaces the
     // registry as a discoverable menu when the user starts a message with /.
@@ -2318,6 +2384,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 chatStream.handleUIControl(json.data || {});
 
               } else if (json.type === 'ask_user') {
+                const question = json.data || {};
+                if (question.request_id && Array.isArray(question.questions)) {
+                  _storeSessionState('question', streamSessionId, question);
+                }
                 if (_isBg) continue;
                 // The agent posed a multiple-choice question; the turn has ended.
                 // Use the shared history renderer so the live and restored
@@ -2327,6 +2397,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 chatRenderer.renderAskUserCard(json.data || {});
 
               } else if (json.type === 'permission_request') {
+                _storeSessionState('permission', streamSessionId, json.data || {});
                 if (_isBg) continue;
                 // C1: the agent's turn is blocked server-side until the card
                 // answers (no timeout) — keep the stream open and render it.
@@ -2335,11 +2406,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 chatRenderer.renderPermissionCard(json.data || {}, streamSessionId);
 
               } else if (json.type === 'plan_update') {
-                if (_isBg) continue;
                 // Agent wrote back to the plan (ticked a step / revised). Update
                 // the stored plan + live-refresh the docked plan window.
-                const _pu = (json.data && json.data.plan) ? json.data.plan : '';
-                if (_pu) _setStoredPlan(_pu);
+                if (json.data) _setStoredPlan(json.data, streamSessionId);
+                if (_isBg) continue;
+
+              } else if (json.type === 'protocol_error' || json.type === 'config_error') {
+                if (!_isBg) {
+                  const detail = json.data || json;
+                  uiModule.showError(detail.message || detail.error || 'MiMo protocol error');
+                }
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;
@@ -4859,6 +4935,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     detachCurrentStream,
     checkBackgroundStream,
     resumeStream,
+    restoreSessionState,
     hideWelcomeScreen: chatRenderer.hideWelcomeScreen,
     showWelcomeScreen: chatRenderer.showWelcomeScreen,
     checkPendingResearch,
