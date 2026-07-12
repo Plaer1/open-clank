@@ -15,6 +15,8 @@ import * as Effect from "effect/Effect"
 import { Config } from "@/config"
 import { Metrics } from "@/metrics"
 import { Memory } from "@/memory"
+import * as MemoryCapture from "@/memory/capture"
+import * as CompactionCapture from "@/memory/compaction-capture"
 import { WriterService, BackfillService } from "@/history"
 
 export const InstanceBootstrap = Effect.gen(function* () {
@@ -45,6 +47,19 @@ export const InstanceBootstrap = Effect.gen(function* () {
       Effect.sync(() => Log.Default.warn("memory reconcile failed", { error: String(err) })),
     ),
     Effect.forkDetach,
+  )
+
+  // The capture services are subscription-only side effects: nothing else
+  // demands them, and Effect layers are lazy — without this init() their
+  // PartUpdated/Compacted subscribers never register and memory capture
+  // silently does nothing.
+  yield* Effect.all([
+    MemoryCapture.CaptureService.use((s) => s.init()),
+    CompactionCapture.CompactionCaptureService.use((s) => s.init()),
+  ]).pipe(
+    Effect.catch((err: unknown) =>
+      Effect.sync(() => Log.Default.warn("memory capture init failed", { error: String(err) })),
+    ),
   )
 
   yield* Bus.Service.use((svc) =>

@@ -1,6 +1,7 @@
 """Shared helpers for chat routes — context building, post-response tasks, auth resolution."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -666,7 +667,10 @@ async def build_chat_context(
     )
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
-    preface, rag_sources, web_sources = await chat_processor.build_context_preface(**_preface_kwargs)
+    preface_result = chat_processor.build_context_preface(**_preface_kwargs)
+    if inspect.isawaitable(preface_result):
+        preface_result = await preface_result
+    preface, rag_sources, web_sources = preface_result
 
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])

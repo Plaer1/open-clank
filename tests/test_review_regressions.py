@@ -82,6 +82,8 @@ def _install_model_route_import_stubs(monkeypatch):
     db_mod.GalleryImage = MagicMock()
     middleware_mod = types.ModuleType("core.middleware")
     middleware_mod.require_admin = lambda request: None
+    log_safety_mod = types.ModuleType("core.log_safety")
+    log_safety_mod.redact_url = lambda url: url
     multipart_mod = types.ModuleType("python_multipart")
     multipart_mod.__version__ = "0.0.13"
     models_mod = types.ModuleType("core.models")
@@ -97,6 +99,7 @@ def _install_model_route_import_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "core", core_mod)
     monkeypatch.setitem(sys.modules, "core.database", db_mod)
     monkeypatch.setitem(sys.modules, "core.middleware", middleware_mod)
+    monkeypatch.setitem(sys.modules, "core.log_safety", log_safety_mod)
     monkeypatch.setitem(sys.modules, "python_multipart", multipart_mod)
     monkeypatch.setitem(sys.modules, "core.models", models_mod)
     monkeypatch.setitem(sys.modules, "core.exceptions", exceptions_mod)

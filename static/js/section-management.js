@@ -24,6 +24,12 @@ export function initSectionCollapse(Storage) {
     if (savedState[section.id]) {
       section.classList.add('collapsed');
     }
+    const collapseButton = header.querySelector('.section-collapse-btn');
+    if (collapseButton) {
+      const expanded = !section.classList.contains('collapsed');
+      collapseButton.setAttribute('aria-expanded', String(expanded));
+      collapseButton.setAttribute('aria-label', expanded ? 'Collapse section' : 'Expand section');
+    }
 
     function toggleCollapse() {
       const wasCollapsed = section.classList.contains('collapsed');
@@ -31,6 +37,10 @@ export function initSectionCollapse(Storage) {
       const state = Storage.getJSON('section-collapsed') || {};
       state[section.id] = willCollapse;
       Storage.setJSON('section-collapsed', state);
+      if (collapseButton) {
+        collapseButton.setAttribute('aria-expanded', String(!willCollapse));
+        collapseButton.setAttribute('aria-label', willCollapse ? 'Expand section' : 'Collapse section');
+      }
 
       // Always clear any in-flight animation classes from a previous toggle
       // so back-to-back clicks restart cleanly. Bump a generation token so

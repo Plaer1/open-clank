@@ -55,6 +55,9 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _clear_endpoint_settings_for_endpoint,
         _clear_user_pref_endpoint_refs,
         _default_endpoint_needs_assignment,
+        _mimo_catalog,
+        _mimo_display_names,
+        _is_shadowed_model_item,
         _PROVIDER_CURATED,
     )
     from src.llm_core import ANTHROPIC_MODELS
@@ -379,6 +382,7 @@ class TestIsChatModel:
         "llama-4-scout-17b-16e-instruct",
         "gemma-2b-it", "google/gemma-2b-it",
         "bigcode/starcoder2-15b-instruct",
+        "gpt-5.4-codex",
     ])
     def test_chat_models(self, model_id):
         assert _is_chat_model(model_id) is True
@@ -1080,6 +1084,40 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
     assert result[0]["api_key_fingerprint"] == _api_key_fingerprint("key-one")
     assert result[1]["has_key"] is False
     assert result[1]["api_key_fingerprint"] == ""
+
+
+def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
+    monkeypatch.setenv("MIMO_HIDDEN_MODELS", "openai/hidden")
+    supervisor = SimpleNamespace(available_models=lambda: [
+        {"modelId": "openai/gpt-5"},
+        {"modelId": "openai/gpt-5/low"},
+        {"modelId": "openai/hidden"},
+    ])
+
+    models, base, variants, hidden_count = _mimo_catalog(supervisor)
+
+    assert models == ["openai/gpt-5", "openai/gpt-5/low"]
+    assert base == ["openai/gpt-5"]
+    assert variants == ["openai/gpt-5/low"]
+    assert hidden_count == 1
+
+
+def test_mimo_display_names_keep_model_name_and_reasoning_effort():
+    displays = _mimo_display_names(
+        ["xiaomi/mimo-v2"],
+        ["xiaomi/mimo-v2/high"],
+    )
+
+    assert displays == {
+        "xiaomi/mimo-v2": "mimo-v2",
+        "xiaomi/mimo-v2/high": "mimo-v2 (high)",
+    }
+
+
+def test_shadowing_matches_provider_name_in_generic_openai_endpoint_host():
+    item = {"url": "https://api.deepseek.com/v1/chat/completions"}
+
+    assert _is_shadowed_model_item(item, {"deepseek"}) is True
 
 
 def test_post_creates_endpoint_with_pinned_models(monkeypatch):

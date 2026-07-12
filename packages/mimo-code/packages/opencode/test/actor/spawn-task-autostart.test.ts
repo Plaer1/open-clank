@@ -36,12 +36,14 @@ import { Truncate } from "../../src/tool"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { Actor } from "../../src/actor/spawn"
+import { Worktree } from "../../src/worktree"
 import { Memory } from "../../src/memory"
 import { History } from "../../src/history"
 import { Team } from "../../src/team"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
 import { SessionCompaction } from "../../src/session/compaction"
 import { TaskRegistry } from "../../src/task/registry"
+import { defaultLayer as SchedulerDefaultLayer } from "../../src/cron/scheduler"
 import { Created as TaskCreated, Updated as TaskUpdated } from "../../src/task/events"
 import { GlobalBus } from "../../src/bus/global"
 import { Auth } from "../../src/auth"
@@ -150,6 +152,7 @@ function makeLayer() {
     Layer.provide(Memory.defaultLayer),
     Layer.provide(History.defaultLayer),
     Layer.provide(TaskRegistry.defaultLayer),
+    Layer.provide(SchedulerDefaultLayer),
     Layer.provide(Auth.defaultLayer),
     Layer.provideMerge(todo),
     Layer.provideMerge(question),
@@ -181,6 +184,7 @@ function makeLayer() {
     TestLLMServer.layer,
     Actor.layer.pipe(
       Layer.provideMerge(prompt),
+      Layer.provide(Worktree.defaultLayer),
       Layer.provideMerge(taskRegistry),
       // provideMerge (not provide) so the test body can `yield* TaskRegistry.Service`
       // directly to assert on task status; the original spawn.test.ts never needed it.

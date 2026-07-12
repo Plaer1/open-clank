@@ -1,0 +1,16 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Move Timeline
+GenericName=Move Planner
+Comment=Ohio → Hawaii move-planning timeline (galaxy / timeline / calendar)
+# Resolves to the project directory where open.sh lives.
+Path=/home/e/Downloads/New Folder (1)
+Exec=/home/e/Downloads/New Folder (1)/open.sh
+# Stock icon (calendar) — change to an absolute path if you add a custom one.
+Icon=office-calendar
+Terminal=true
+Categories=Office;ProjectManagement;Utility;
+Keywords=move;timeline;planner;calendar;ohio;hawaii;
+StartupNotify=true

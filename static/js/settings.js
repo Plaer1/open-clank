@@ -7,8 +7,10 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { clearDockSide } from './modalSnap.js';
 import { sortModelIds } from './modelSort.js';
 import { providerLogo } from './providers.js';
+import { catalogEntries } from './modelCatalog.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import mimoProviders from './mimoProviders.js';
 
 let initialized = false;
 let modalEl = null;
@@ -41,6 +43,7 @@ function initTabs() {
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
       if (tab === 'ai') refreshAiModelEndpoints();
+      if (tab === 'mimo-providers') mimoProviders.load();
     });
   });
 }
@@ -207,7 +210,7 @@ const _aiEndpointRefreshers = new Set();
 let _aiEndpointRefreshInFlight = null;
 
 async function _fetchModelEndpoints() {
-  const epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+  const epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin', cache: 'no-store' });
   const endpoints = await epRes.json();
   return Array.isArray(endpoints) ? endpoints : [];
 }
@@ -291,10 +294,15 @@ function _fillModelSelect(selectEl, models, selected, keepBlank) {
     blank.textContent = blankText;
     selectEl.appendChild(blank);
   }
-  sortModelIds(models).forEach(function(m) {
+  const entries = new Map((models || []).map(function(m) {
+    const mid = typeof m === 'string' ? m : (m.mid || m.model_id);
+    const displayName = typeof m === 'string' ? m : (m.displayName || m.display_name || mid);
+    return [mid, displayName];
+  }).filter(function(entry) { return entry[0]; }));
+  sortModelIds(Array.from(entries.keys())).forEach(function(m) {
     const opt = document.createElement('option');
     opt.value = m;
-    opt.textContent = String(m).split('/').pop();
+    opt.textContent = entries.get(m) || String(m).split('/').pop();
     selectEl.appendChild(opt);
   });
   if (previous && Array.from(selectEl.options).some(function(o) { return o.value === previous; })) {
@@ -303,6 +311,10 @@ function _fillModelSelect(selectEl, models, selected, keepBlank) {
     selectEl.value = '';
   }
   _syncModelLogo(selectEl);
+}
+
+function _endpointCatalog(ep) {
+  return ep ? catalogEntries(ep) : [];
 }
 
 function _registerAiEndpointRefresh(fn) {
@@ -346,9 +358,10 @@ function _bindFallbackWidget(opts) {
   function fillModels(selectEl, epId, selected) {
     while (selectEl.options.length) selectEl.remove(0);
     var ep = (endpointsRef() || []).find(function(e) { return e.id === epId; });
-    if (ep && ep.models) {
-      sortModelIds(ep.models).forEach(function(m) {
-        if (!modelsFilter(m, ep)) return;
+    if (ep) {
+      _endpointCatalog(ep).forEach(function(entry) {
+        var m = entry.mid;
+        if (!modelsFilter(m, ep, entry)) return;
         var o = document.createElement('option');
         o.value = m;
         o.textContent = m.split('/').pop();
@@ -457,7 +470,7 @@ async function initDefaultChat() {
   // Fill any <select> with the models for a given endpoint id.
   function fillModels(selectEl, epId, selected) {
     var ep = _endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(selectEl, ep ? ep.models : [], selected, false);
+    _fillModelSelect(selectEl, _endpointCatalog(ep), selected, false);
   }
 
   try {
@@ -591,7 +604,7 @@ async function initUtilityModel() {
   function refreshModels(selectedModel) {
     var epId = epSel.value;
     var ep = _endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    _fillModelSelect(modelSel, _endpointCatalog(ep), selectedModel, true);
   }
 
   try {
@@ -661,7 +674,7 @@ async function initTeacherModel() {
   function refreshModels(selectedModel) {
     var epId = epSel.value;
     var ep = _endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    _fillModelSelect(modelSel, _endpointCatalog(ep), selectedModel, true);
   }
 
   // Disable / enable the endpoint+model dropdowns based on the
@@ -762,7 +775,8 @@ async function initImageSettings() {
     };
     const imageModels = [];
     (modelsData.items || []).forEach(item => {
-      (item.models || []).forEach(mid => {
+      catalogEntries(item).forEach(entry => {
+        const mid = entry.mid;
         if (_isInpaintModel(mid)) imageModels.push(mid);
       });
     });
@@ -820,7 +834,8 @@ async function initVisionSettings() {
     const visionModels = [];
     (modelsData.items || []).forEach(item => {
       if (item.offline) return;
-      (item.models || []).forEach(mid => {
+      catalogEntries(item).forEach(entry => {
+        const mid = entry.mid;
         if (_isVisionModel(mid)) {
           visionModels.push(mid);
         }
@@ -920,7 +935,7 @@ async function initTtsSettings() {
     var endpoints = await epRes.json();
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled) return;
-      var hasTTS = (ep.models || []).some(m => ttsKeywords.some(kw => m.toLowerCase().includes(kw)));
+      var hasTTS = _endpointCatalog(ep).some(entry => ttsKeywords.some(kw => entry.mid.toLowerCase().includes(kw)));
       if (!hasTTS) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
     });
@@ -1523,7 +1538,7 @@ async function initResearchSettings() {
   function refreshModels(selectedModel) {
     var epId = epSel.value;
     var ep = endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+    _fillModelSelect(modelSel, _endpointCatalog(ep), selectedModel, true);
   }
 
   try {
@@ -1907,7 +1922,7 @@ const SHORTCUT_LABELS = {
   open_library:   'Open Library',
   open_memory:    'Open Memory',
   open_notes:     'Open Notes',
-  open_tasks:     'Open Tasks',
+  open_tasks:     'Open Clanker Tasks',
   open_theme:     'Open Theme',
 };
 
@@ -2335,6 +2350,12 @@ function initAccount() {
 function initAll() {
   modalEl = el('settings-modal');
   initTabs();
+  mimoProviders.init({
+    onCatalogChanged: async () => {
+      if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+      await refreshAiModelEndpoints();
+    },
+  });
   initDrag();
   initClose();
   initOpenPromptModalLink();
@@ -5728,6 +5749,7 @@ export function open(tab) {
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
   if (activeTab === 'ai') refreshAiModelEndpoints();
+  if (activeTab === 'mimo-providers') mimoProviders.load();
   if (ADMIN_TABS.has(activeTab) && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }

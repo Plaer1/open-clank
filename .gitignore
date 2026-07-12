@@ -1,5 +1,12 @@
 .archive/
 .references/
+references/
+# Plans + clanker sidecar notes stay local (e's ruling 2026-07-08).
+# NOTE: .futures/ files from commit 9ee395a are still tracked — run
+# `git rm -r --cached .futures robonotes` at the saga-end commit.
+.futures/
+robonotes/
+.robonotes/
 apps/mimo/node_modules/
 apps/mimo/packages/opencode/node_modules/
 apps/mimo/packages/opencode/dist/
@@ -110,3 +117,12 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Local source mirrors and generated workspace snapshots
+/packages/henxels/
+/packages/Copal/treehouse/
+/packages/Copal/.codebase-memory/
+/packages/Copal/.mimocode/
+/packages/Copal/*.tsbuildinfo
+/integrations.zip
+/packages/mimo-code/packages/opencode/src.zip

@@ -23,7 +23,7 @@ def _mem_db(monkeypatch):
 
 def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
     TestSessionLocal = _mem_db(monkeypatch)
-    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: ["gpt-5.5", "o4-mini"])
+    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token, **kwargs: ["gpt-5.5", "o4-mini"])
 
     res = csr._provision_endpoint({"access_token": "AT", "refresh_token": "RT"}, "alice")
 
@@ -55,7 +55,7 @@ def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
 
 def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch):
     TestSessionLocal = _mem_db(monkeypatch)
-    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: ["gpt-5.5"])
+    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token, **kwargs: ["gpt-5.5"])
 
     first = csr._provision_endpoint({"access_token": "OLD", "refresh_token": "OLD-RT"}, "bob")
     second = csr._provision_endpoint({"access_token": "NEW", "refresh_token": "NEW-RT"}, "bob")
@@ -82,7 +82,7 @@ def test_provision_rejects_missing_tokens(monkeypatch):
 
 def test_provision_rejects_accounts_without_usable_models(monkeypatch):
     _mem_db(monkeypatch)
-    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: [])
+    monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token, **kwargs: [])
 
     with pytest.raises(ValueError, match="no usable Codex models"):
         csr._provision_endpoint({"access_token": "AT", "refresh_token": "RT"}, "alice")

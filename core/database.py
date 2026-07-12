@@ -407,6 +407,7 @@ class ProviderAuthSession(TimestampMixin, Base):
     refresh_token = Column(EncryptedText, nullable=True)
     last_refresh = Column(DateTime, nullable=True)
     auth_mode = Column(String, nullable=True)
+    account_id = Column(String, nullable=True, index=True)
 
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
@@ -895,6 +896,30 @@ def _migrate_add_provider_auth_id_column():
             logging.getLogger(__name__).info("Migrated: added 'provider_auth_id' column + index to model_endpoints")
     except Exception as e:
         logging.getLogger(__name__).warning(f"model_endpoints.provider_auth_id migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_add_provider_auth_account_id_column():
+    """Add the subscription account ID used for organization-scoped requests."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(provider_auth_sessions)").fetchall()]
+        if columns and "account_id" not in columns:
+            conn.execute("ALTER TABLE provider_auth_sessions ADD COLUMN account_id VARCHAR")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_provider_auth_sessions_account_id ON provider_auth_sessions(account_id)")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added provider auth account_id")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"provider_auth_sessions.account_id migration failed: {e}")
     finally:
         try:
             conn.close()
@@ -1830,6 +1855,7 @@ def init_db():
     _migrate_add_model_endpoint_refresh_columns()
     _migrate_add_model_endpoint_owner_column()
     _migrate_add_provider_auth_id_column()
+    _migrate_add_provider_auth_account_id_column()
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()

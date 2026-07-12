@@ -556,33 +556,9 @@ async def audit_memories(
 
         # Parse the JSON list, tolerating reasoning-model noise: <think> blocks,
         # markdown fences, leading prose, and trailing commas.
-        import re as _re
-        text = (raw or "").strip()
-        text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=_re.I).strip()
-
-        def _loads_list(s):
-            if not s:
-                return None
-            for cand in (s, _re.sub(r',(\s*[}\]])', r'\1', s)):
-                try:
-                    v = json.loads(cand)
-                    if isinstance(v, list):
-                        return v
-                except Exception:
-                    continue
-            return None
-
-        cleaned = _loads_list(text)
+        cleaned = _parse_audit_json(raw)
         if cleaned is None:
-            _m = _re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
-            if _m:
-                cleaned = _loads_list(_m.group(1).strip())
-        if cleaned is None:
-            _a, _b = text.find('['), text.rfind(']')
-            if _a >= 0 and _b > _a:
-                cleaned = _loads_list(text[_a:_b + 1])
-        if cleaned is None:
-            logger.error(f"Memory audit returned non-JSON: {text[:300]}")
+            logger.error(f"Memory audit returned non-JSON: {(raw or '')[:300]}")
             return {"before": before_count, "after": before_count, "error": "bad_json"}
 
         # Build lookup of original entries by ID so we can preserve metadata
@@ -656,4 +632,123 @@ async def audit_memories(
 
     except Exception as e:
         logger.error(f"Memory audit failed: {e}")
+        return {"error": str(e)}
+
+
+def _parse_audit_json(raw: str):
+    """Return an audit list, or ``None`` when the model did not return one."""
+    text = (raw or "").strip()
+    text = re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", text, flags=re.I).strip()
+
+    def loads_list(value):
+        if not value:
+            return None
+        for candidate in (value, re.sub(r",(\s*[}\]])", r"\1", value)):
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, list):
+                return parsed
+        return None
+
+    parsed = loads_list(text)
+    if parsed is not None:
+        return parsed
+    fenced = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text, flags=re.I)
+    if fenced:
+        parsed = loads_list(fenced.group(1).strip())
+    if parsed is not None:
+        return parsed
+    start, end = text.find("["), text.rfind("]")
+    if start >= 0 and end > start:
+        return loads_list(text[start : end + 1])
+    return None
+
+
+async def audit_provider_memories(
+    memory_provider,
+    endpoint_url: str,
+    model: str,
+    headers: Optional[dict] = None,
+    owner: Optional[str] = None,
+):
+    """Audit records through the active provider's mutation interface.
+
+    The native audit above owns JSON/vector persistence. External providers
+    must be changed through their contract so the UI never reports a tidy that
+    only modified the unused ``memory.json`` store.
+    """
+    try:
+        from src.llm_core import llm_call_async
+
+        existing = await memory_provider.list_memories(owner=owner, limit=1000)
+        if not existing:
+            return {"before": 0, "after": 0}
+
+        before_count = len(existing)
+        payload = [
+            {"id": record.id, "text": record.text, "category": record.category}
+            for record in existing
+        ]
+        raw = await llm_call_async(
+            endpoint_url,
+            model,
+            [
+                {"role": "system", "content": AUDIT_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.1,
+            max_tokens=16384,
+            headers=headers,
+            timeout=120,
+        )
+        cleaned = _parse_audit_json(raw)
+        if cleaned is None:
+            logger.error("Provider memory audit returned non-JSON: %s", (raw or "")[:300])
+            return {"before": before_count, "after": before_count, "error": "bad_json"}
+
+        originals = {record.id: record for record in existing}
+        final = []
+        seen_ids = set()
+        for item in cleaned:
+            if not isinstance(item, dict):
+                continue
+            record_id = item.get("id", "")
+            record = originals.get(record_id)
+            text = str(item.get("text", "")).strip()
+            if record is None or not text or record_id in seen_ids:
+                continue
+            seen_ids.add(record_id)
+            final.append((record, text, item.get("category") or record.category))
+
+        after_count = len(final)
+        if before_count >= 8 and after_count < before_count * 0.5:
+            logger.warning(
+                "Provider memory audit would cut %s -> %s; refusing as unsafe",
+                before_count,
+                after_count,
+            )
+            return {"before": before_count, "after": before_count, "error": "unsafe_removal"}
+
+        for record, text, category in final:
+            if text != record.text or category != record.category:
+                updated = await memory_provider.update(
+                    record.id,
+                    text=text,
+                    category=category,
+                    owner=owner,
+                )
+                if updated is None:
+                    raise RuntimeError(f"provider refused update for memory {record.id}")
+
+        for record in existing:
+            if record.id not in seen_ids:
+                if not await memory_provider.delete(record.id, owner=owner):
+                    raise RuntimeError(f"provider refused delete for memory {record.id}")
+
+        logger.info("Provider memory audit complete: %s -> %s entries", before_count, after_count)
+        return {"before": before_count, "after": after_count}
+    except Exception as e:
+        logger.error("Provider memory audit failed: %s", e)
         return {"error": str(e)}

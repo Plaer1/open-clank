@@ -16,6 +16,7 @@ import {
 } from "solid-js"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { Flag } from "@/flag/flag"
+import { isSystemSession } from "@/session/auto-dream"
 import semver from "semver"
 import { DialogProvider, useDialog } from "@tui/ui/dialog"
 import { DialogMimoLogin } from "@tui/component/dialog-mimo-login"
@@ -52,6 +53,7 @@ import { DialogConfirm } from "./ui/dialog-confirm"
 import { ToastProvider, useToast } from "./ui/toast"
 import { ExitProvider, useExit } from "./context/exit"
 import { Session as SessionApi } from "@/session"
+import { orchestratorDir } from "@/global"
 import { TuiEvent } from "./event"
 import { KVProvider, useKV } from "./context/kv"
 import { LanguageProvider, UiI18nBridge, useLanguage } from "./context/language"
@@ -71,6 +73,7 @@ import { isPlainTerminal } from "./util/terminal"
 
 import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
+import { DialogModalities } from "./component/dialog-modalities"
 
 function rendererConfig(_config: TuiConfig.Info, plainTerminal: boolean): CliRendererConfig {
   const mouseEnabled = !plainTerminal && !Flag.MIMOCODE_DISABLE_MOUSE && (_config.mouse ?? true)
@@ -380,7 +383,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     if (continued || sync.status === "loading" || !args.continue) return
     const match = sync.data.session
       .toSorted((a, b) => b.time.updated - a.time.updated)
-      .find((x) => x.parentID === undefined)?.id
+      .find((x) => x.parentID === undefined && !isSystemSession(x))?.id
     if (match) {
       continued = true
       if (args.fork) {
@@ -412,6 +415,49 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       }
     })
   })
+
+  // Orchestrator mode is GLOBALLY UNIQUE: switching INTO it (from any launch
+  // directory) switches the working dir to a fixed global orchestrator workspace
+  // and lands on the single root session there (find-or-create). This guarantees
+  // there is exactly one orchestrator session regardless of where the user
+  // launched, so previously-created child sessions are always reachable. Mirrors
+  // dialog-worktree's switch sequence (dispose → switchDirectory → bootstrap).
+  let enteringOrchestrator = false
+  let lastAgentName: string | undefined = undefined
+  createEffect(() => {
+    const name = local.agent.current()?.name
+    const prev = lastAgentName
+    lastAgentName = name
+    // Only act on the transition INTO orchestrator, and never re-enter while a
+    // switch is already in flight. No-op entirely when the feature is off.
+    if (!Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR) return
+    if (name !== "orchestrator" || prev === "orchestrator" || enteringOrchestrator) return
+    enteringOrchestrator = true
+    void (async () => {
+      try {
+        const dir = await orchestratorDir()
+        if (sdk.directory !== dir) {
+          await sdk.client.instance.dispose().catch(() => {})
+          sdk.switchDirectory(dir)
+          await sync.bootstrap()
+        }
+        const existing = sync.data.session
+          .toSorted((a, b) => b.time.updated - a.time.updated)
+          .find((x) => x.parentID === undefined)?.id
+        if (existing) {
+          route.navigate({ type: "session", sessionID: existing })
+        } else {
+          const res = await sdk.client.session.create({})
+          if (res.data?.id) route.navigate({ type: "session", sessionID: res.data.id })
+        }
+      } catch (e) {
+        toast.show({ message: `Failed to enter Orchestrator: ${e}`, variant: "error" })
+      } finally {
+        enteringOrchestrator = false
+      }
+    })()
+  })
+
 
 
   const connected = useConnected()
@@ -535,6 +581,17 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
     },
     {
+      title: t("tui.command.modalities.title"),
+      value: "model.modalities",
+      category: "agent",
+      slash: {
+        name: "modalities",
+      },
+      onSelect: () => {
+        DialogModalities.show(dialog)
+      },
+    },
+    {
       title: local.neverAsk.current()
         ? t("tui.command.never_ask.title_on")
         : t("tui.command.never_ask.title_off"),
@@ -550,6 +607,24 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           variant: next ? "warning" : "info",
           message: next ? t("tui.command.never_ask.toast_on") : t("tui.command.never_ask.toast_off"),
           duration: 4000,
+        })
+      },
+    },
+    {
+      title: local.skipPermissions.current()
+        ? t("tui.command.skip_permissions.title_on")
+        : t("tui.command.skip_permissions.title_off"),
+      value: "permission.skip_all.toggle",
+      category: "agent",
+      slash: {
+        name: "skip-permissions",
+      },
+      onSelect: () => {
+        const next = local.skipPermissions.toggle()
+        toast.show({
+          variant: next ? "warning" : "info",
+          message: next ? t("tui.command.skip_permissions.toast_on") : t("tui.command.skip_permissions.toast_off"),
+          duration: 5000,
         })
       },
     },
@@ -959,14 +1034,20 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
 
   event.on("installation.update-available", async (evt) => {
     const version = evt.properties.version
+    const method = evt.properties.method
+    const isPkgManager = method === "npm" || method === "pnpm" || method === "bun"
 
     const skipped = kv.get("skipped_version")
     if (skipped && !semver.gt(version, skipped)) return
 
+    const confirmMsg = isPkgManager
+      ? t("tui.toast.update_available.confirm", { version }) + "\n" + t("tui.toast.native_installer_tip")
+      : t("tui.toast.update_available.confirm", { version })
+
     const choice = await DialogConfirm.show(
       dialog,
       t("tui.toast.update_available.title"),
-      t("tui.toast.update_available.confirm", { version }),
+      confirmMsg,
       "skip",
     )
 
@@ -1005,10 +1086,14 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
   })
 
   event.on("installation.updated", (evt) => {
+    const isPkgManager = evt.properties.method === "npm" || evt.properties.method === "pnpm" || evt.properties.method === "bun"
+    const msg = isPkgManager
+      ? t("tui.toast.updated.message", { version: evt.properties.version }) + " " + t("tui.toast.native_installer_tip")
+      : t("tui.toast.updated.message", { version: evt.properties.version })
     toast.show({
       variant: "success",
       title: t("tui.toast.updated.title"),
-      message: t("tui.toast.updated.message", { version: evt.properties.version }),
+      message: msg,
       duration: 10000,
     })
   })
@@ -1028,6 +1113,9 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     void (async () => {
       renderer.suspend()
       renderer.currentRenderBuffer.clear()
+      // Clear alternate screen buffer so child processes that enter alt screen
+      // (e.g. Go TUI tools like glab) don't see stale TUI content
+      process.stdout.write("\x1b[?1049h\x1b[2J\x1b[?1049l")
       let exitCode = 1
       let output = ""
       try {

@@ -1,5 +1,9 @@
 # MEATBAGS.md — Known issues and observations
 
+make brain menu look better-er.
+those two weird deepseek show up still; maybe need disabled in mimo-code somehow, lets trace them.
+
+
 ## Status: 2026-06-27
 
 ### Resolved

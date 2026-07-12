@@ -243,7 +243,7 @@ describe("Sandbox URL polyfill", () => {
     expect(result).toBe("threw")
   })
 
-  test("deep-research normURL dedup shape works end to end", async () => {
+  test("fact-check normURL dedup shape works end to end", async () => {
     const body = `
       const normURL = u => {
         try {

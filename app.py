@@ -658,6 +658,14 @@ app.include_router(setup_embedding_routes())
 from routes.model_routes import setup_model_routes
 app.include_router(setup_model_routes(model_discovery))
 
+# Native provider credentials for the supervised MiMo ACP child.
+from routes.mimo_provider_routes import setup_mimo_provider_routes
+app.include_router(setup_mimo_provider_routes())
+
+# Copal's first-party Redb workspace adapter.
+from routes.copal_routes import setup_copal_routes
+app.include_router(setup_copal_routes())
+
 # GitHub Copilot device-flow login
 from routes.copilot_routes import setup_copilot_routes
 app.include_router(setup_copilot_routes())
@@ -851,6 +859,13 @@ async def serve_tasks(request: Request):
 async def serve_library(request: Request):
     return await serve_index(request)
 
+@app.get("/copal")
+@app.get("/copal/{view}")
+async def serve_copal(request: Request, view: str = "notes"):
+    if view == "calendar":
+        return RedirectResponse(url="/calendar", status_code=302)
+    return await serve_index(request)
+
 @app.get("/backgrounds")
 async def serve_backgrounds(request: Request):
     """Sandbox page for prototyping background effects. No auth required."""
@@ -941,6 +956,16 @@ async def _startup_event():
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
     app.state._startup_tasks = _startup_tasks
+
+    # Copal is an owned stdio child, not a second public web server.
+    try:
+        from src.openclank.copal_bridge import CopalBridge
+
+        app.state.copal_bridge = CopalBridge()
+        await app.state.copal_bridge.start()
+    except Exception as e:
+        logger.error("Copal Redb bridge failed to start: %s", e, exc_info=True)
+        app.state.copal_bridge = None
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
     # Always-on monitor that auto-continues the agent when a background bash
@@ -1018,6 +1043,18 @@ async def _startup_event():
                 await asyncio.sleep(300)  # Back off on error
 
     _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
+
+    # Frankenmemory maintenance is deliberately one small task, not another
+    # scheduler framework. Zero disables it for deployments that groom
+    # externally; the default is one daily pass through all graph/tier ops.
+    from src.memory_maintenance import groom_interval_hours, groom_loop
+    _groom_hours = groom_interval_hours()
+    if memory_provider and getattr(memory_provider, "provider_id", "") == "frankenmemory":
+        if _groom_hours <= 0:
+            logger.info("Frankenmemory auto-groom disabled (FM_GROOM_INTERVAL_HOURS=0)")
+        else:
+            _startup_tasks.append(asyncio.create_task(groom_loop(memory_provider, _groom_hours)))
+            logger.info("Frankenmemory auto-groom scheduled every %.2fh", _groom_hours)
 
     async def _ensure_default_tasks():
         # Create/reconcile default automation tasks + personal assistant for every user.
@@ -1198,6 +1235,12 @@ async def _startup_event():
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    _copal_bridge = getattr(app.state, "copal_bridge", None)
+    if _copal_bridge:
+        try:
+            await _copal_bridge.stop()
+        except Exception as e:
+            logger.warning("Copal bridge shutdown error: %s", e)
     # ── openthesius mimo supervisor shutdown ──
     _mimo_sup = getattr(app.state, "mimo_supervisor", None)
     if _mimo_sup:
@@ -1206,6 +1249,13 @@ async def _shutdown_event():
             logger.info("[openthesius] mimo supervisor stopped")
         except Exception as e:
             logger.warning("[openthesius] mimo supervisor shutdown error: %s", e)
+    startup_tasks = list(getattr(app.state, "_startup_tasks", []))
+    for task in startup_tasks:
+        if not task.done():
+            task.cancel()
+    if startup_tasks:
+        await asyncio.gather(*startup_tasks, return_exceptions=True)
+    getattr(app.state, "_startup_tasks", []).clear()
     if upload_cleanup_task:
         upload_cleanup_task.cancel()
         try:

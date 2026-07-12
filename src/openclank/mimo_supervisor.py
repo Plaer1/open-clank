@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,21 @@ _RESTART_DELAY_MAX = 5.0
 _RESTART_DELAY_MULTIPLIER = 2.0
 _MAX_RESTART_ATTEMPTS = 10
 _RESTART_WINDOW = 60.0  # reset attempt counter after this many seconds of stability
+
+
+def _loopback_port(explicit: str | None = None) -> int:
+    """Return a valid configured port or reserve an ephemeral loopback port."""
+    if explicit:
+        try:
+            port = int(explicit)
+        except ValueError as exc:
+            raise ValueError("ODYSSEUS_MIMO_PORT must be an integer") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError("ODYSSEUS_MIMO_PORT must be between 1 and 65535")
+        return port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class MimoSupervisor:
@@ -61,6 +77,14 @@ class MimoSupervisor:
         self._permission_handler = permission_handler
         self._memory_provider = memory_provider
         self._safe_dirs = safe_dirs
+        self._grant_store = None
+        # The ACP command already owns an HTTP server. Pin its loopback port so
+        # Odysseus can expose a narrow provider-auth adapter without launching
+        # a second `mimo serve` process. Keep it stable across child restarts.
+        self._http_port = _loopback_port(os.environ.get("ODYSSEUS_MIMO_PORT"))
+        # The live handler (caller-supplied or auto-built); chat_routes uses
+        # this to resolve permission prompts from the UI.
+        self.permission_handler = permission_handler
 
     async def start(self) -> None:
         """Spawn the child, perform ACP handshake, set up bridge."""
@@ -71,7 +95,7 @@ class MimoSupervisor:
             logger.warning("mimo child already running (pid %d)", self._proc.pid)
             return
 
-        logger.info("starting mimo acp child: %s acp", MIMO_BIN)
+        logger.info("starting mimo acp child: %s acp (http 127.0.0.1:%d)", MIMO_BIN, self._http_port)
 
         # A1.1: inject odysseus skills path into mimo config via env.
         # MIMOCODE_CONFIG_CONTENT is loaded last in mimo's config chain
@@ -99,11 +123,23 @@ class MimoSupervisor:
         else:
             logger.warning("odysseus skills dir not found: %s", _ODYSSEUS_SKILLS_DIR)
 
-        # Phase 4: if THESIUS_AGENT_HOME is set, pass MIMOCODE_HOME to the child
-        # so mimo stores its data under the agent home instead of the XDG default.
-        _agent_home = os.environ.get("THESIUS_AGENT_HOME")
-        if _agent_home and "MIMOCODE_HOME" not in env:
-            env["MIMOCODE_HOME"] = os.path.join(_agent_home, ".mimocode")
+        # The embedded mimo must NEVER share state with a personal mimocode
+        # install: under XDG defaults it reads ~/.config/mimocode (the user's
+        # model defaults + provider config) and writes sessions/auth/logs into
+        # ~/.local/share/mimocode — both directions of that are wrong. Always
+        # set MIMOCODE_HOME (redirects config/data/state/cache wholesale) to
+        # Odysseus's own data dir. Precedence: explicit MIMOCODE_HOME env >
+        # THESIUS_AGENT_HOME (Phase 4 agent home) > data/mimocode default.
+        # Config + auth in that home are hand-managed (e's ruling 2026-07-09:
+        # no automatic copying of credential files — boot once, edit config).
+        if "MIMOCODE_HOME" not in env:
+            _agent_home = os.environ.get("THESIUS_AGENT_HOME")
+            if _agent_home:
+                env["MIMOCODE_HOME"] = os.path.join(os.path.expanduser(_agent_home), ".mimocode")
+            else:
+                _data_dir = os.environ.get("ODYSSEUS_DATA_DIR", str(REPO_ROOT / "data"))
+                env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
+        logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -111,35 +147,19 @@ class MimoSupervisor:
                 "acp",
                 "--hostname",
                 "127.0.0.1",
+                "--port",
+                str(self._http_port),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd="/home/e",
             )
-        except NotImplementedError:
-            logger.warning("create_subprocess_exec unavailable, falling back to sync spawn")
-            import subprocess
-            proc = subprocess.Popen(
-                [str(MIMO_BIN), "acp", "--hostname", "127.0.0.1"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd="/home/e",
-            )
-            # Wrap the sync Popen into an async-compatible object
-            self._proc = await asyncio.create_subprocess_exec(
-                str(MIMO_BIN),
-                "acp",
-                "--hostname",
-                "127.0.0.1",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd="/home/e",
-            )
+        except NotImplementedError as exc:
+            # A synchronous fallback cannot safely provide the asyncio stream
+            # objects ACPClient requires; the old fallback also leaked a first
+            # untracked child before spawning a second one.
+            raise RuntimeError("async subprocess support is required for mimo ACP") from exc
 
         logger.info("mimo child started (pid %d)", self._proc.pid)
         self._stderr_task = asyncio.create_task(self._drain_stderr())
@@ -148,13 +168,28 @@ class MimoSupervisor:
         assert self._proc.stdin and self._proc.stdout
         self._client = ACPClient(self._proc.stdout, self._proc.stdin)
 
-        # Build permission handler: caller-supplied handler takes precedence;
-        # if safe_dirs are configured and no explicit handler was given,
-        # create a PermissionHandler that auto-approves paths under safe dirs.
+        # Build permission handler: caller-supplied handler takes precedence.
+        # C1: otherwise always create one — safe-dirs auto-approve, then
+        # durable grants from app.db, then an interactive prompt in the chat
+        # stream (previously, requests outside safe dirs silently rejected).
         perm_handler = self._permission_handler
-        if perm_handler is None and self._safe_dirs:
-            perm_handler = PermissionHandler(safe_dirs=self._safe_dirs)
-            logger.info("auto-approve permission handler created with safe dirs: %s", self._safe_dirs)
+        if perm_handler is None:
+            if self._grant_store is None:
+                try:
+                    from src.constants import DATA_DIR
+                    from src.openclank.permission_grants import GrantStore
+                    self._grant_store = GrantStore(str(Path(DATA_DIR) / "app.db"))
+                except Exception as e:
+                    logger.warning("permission grant store unavailable: %s", e)
+            perm_handler = PermissionHandler(
+                safe_dirs=self._safe_dirs, grant_store=self._grant_store
+            )
+            logger.info(
+                "permission handler created (safe dirs: %s, durable grants: %s)",
+                self._safe_dirs,
+                "on" if self._grant_store else "off",
+            )
+        self.permission_handler = perm_handler
 
         register_client_callbacks(self._client, permission_handler=perm_handler)
         await self._client.start_reader()
@@ -169,14 +204,28 @@ class MimoSupervisor:
             raise
 
         # Create the bridge (B2: owner flows through for lifetools MCP context)
-        cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", str(Path.home() / "open-clank"))
+        configured_cwd = Path(os.environ.get("OPENTHESIUS_GLOBAL_CWD", str(REPO_ROOT))).expanduser()
+        if not configured_cwd.is_dir():
+            logger.warning("configured OPENTHESIUS_GLOBAL_CWD is missing: %s; using %s", configured_cwd, REPO_ROOT)
+            configured_cwd = REPO_ROOT
         self._bridge = ACPBridge(
             self._client,
-            cwd,
+            str(configured_cwd),
             owner=self._owner,
             permission_handler=perm_handler,
             memory_provider=self._memory_provider,
         )
+
+        # Warm the model catalog: mimo only reports availableModels in a
+        # session handshake, so open one throwaway session at boot. Lives
+        # only in the isolated mimo store; Odysseus never lists it.
+        try:
+            await self._bridge.open_session()
+            logger.info(
+                "mimo model catalog warmed: %d models", len(self._bridge.available_models)
+            )
+        except Exception as e:
+            logger.warning("mimo model catalog warmup failed: %s", e)
 
         # Start health monitor
         self._health_task = asyncio.create_task(self._health_monitor())
@@ -372,6 +421,17 @@ class MimoSupervisor:
             except asyncio.CancelledError:
                 pass
 
+    def available_models(self) -> list:
+        """mimo's model catalog ({modelId, name} dicts) from the last handshake."""
+        return list(self._bridge.available_models) if self._bridge else []
+
+    async def refresh_model_catalog(self) -> list:
+        """Refresh MiMo's authenticated provider/model catalog in-place."""
+        if not self._bridge or not self.is_alive():
+            raise RuntimeError("mimo ACP is unavailable")
+        await self._bridge.open_session()
+        return self.available_models()
+
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
@@ -382,3 +442,11 @@ class MimoSupervisor:
     @property
     def bridge(self) -> ACPBridge | None:
         return self._bridge
+
+    @property
+    def http_port(self) -> int:
+        return self._http_port
+
+    @property
+    def http_base_url(self) -> str:
+        return f"http://127.0.0.1:{self._http_port}"

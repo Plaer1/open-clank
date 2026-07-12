@@ -3,6 +3,7 @@ import Storage from '../storage.js';
 import state from './state.js';
 import uiModule from '../ui.js';
 import { sortModelObjects } from '../modelSort.js';
+import { catalogEntries } from '../modelCatalog.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -59,25 +60,12 @@ async function fetchModels() {
   const models = [];
   if (data.items && data.items.length > 0) {
     data.items.forEach(item => {
-      const displayNames = item.models_display || item.models || [];
-      const extraDisplay = item.models_extra_display || item.models_extra || [];
-      // Curated list (item.models) takes priority; non-curated extras come
-      // after so newer/uncatalogued models (e.g. deepseek-v4-pro) still show.
-      (item.models || []).forEach((mid, i) => {
+      catalogEntries(item).forEach(entry => {
+        const mid = entry.mid;
         models.push({
           id: mid,
           url: item.url,
-          name: (displayNames[i] || mid).split('/').pop(),
-          endpointId: item.endpoint_id || null,
-          endpointName: item.endpoint_name || '',
-          type: classifyModel(mid),
-        });
-      });
-      (item.models_extra || []).forEach((mid, i) => {
-        models.push({
-          id: mid,
-          url: item.url,
-          name: (extraDisplay[i] || mid).split('/').pop(),
+          name: (entry.displayName || mid).split('/').pop(),
           endpointId: item.endpoint_id || null,
           endpointName: item.endpoint_name || '',
           type: classifyModel(mid),

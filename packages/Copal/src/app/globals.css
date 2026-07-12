@@ -1,0 +1,580 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@source not "../../.references";
+@source not "../../treehouse";
+@source not "../../.next.bak-*";
+@source not "../../.node_modules.bak-*";
+@source not "../../.robonotes";
+@source not "../../.futures";
+@source not "../../sample-vault";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  /* Imported from /home/e/Downloads/Dark-Reader-Settings (1).json:
+     darkSchemeBackgroundColor #1d2815, darkSchemeTextColor #f6f5dd.
+     Copal keeps its own slate surfaces; Dark Reader supplies contrast and tint. */
+  --darkreader-bg-raw: #1d2815;
+  --darkreader-text: #f6f5dd;
+  --darkreader-text-muted: #d7d2aa;
+  --darkreader-text-dim: #aea982;
+  --darkreader-link: #a7d8ff;
+  --darkreader-accent: #c7e66f;
+  --darkreader-accent-2: #78d6a3;
+  --darkreader-warn: #ffbf7a;
+  --copal-bg: color-mix(in srgb, #111318 88%, var(--darkreader-bg-raw));
+  --copal-bg-deep: color-mix(in srgb, #080b10 90%, var(--darkreader-bg-raw));
+  --copal-surface: color-mix(in srgb, #171a21 86%, var(--darkreader-bg-raw));
+  --copal-surface-high: color-mix(in srgb, #1f2430 84%, var(--darkreader-bg-raw));
+  --copal-border: color-mix(in srgb, #334155 72%, var(--darkreader-bg-raw));
+  --background: var(--copal-bg);
+  --foreground: var(--darkreader-text);
+  --card: var(--copal-surface);
+  --card-foreground: var(--darkreader-text);
+  --popover: var(--copal-surface);
+  --popover-foreground: var(--darkreader-text);
+  --primary: var(--darkreader-accent);
+  --primary-foreground: #111318;
+  --secondary: var(--copal-surface-high);
+  --secondary-foreground: var(--darkreader-text);
+  --muted: color-mix(in srgb, #1e293b 86%, var(--darkreader-bg-raw));
+  --muted-foreground: var(--darkreader-text-muted);
+  --accent: color-mix(in srgb, #0e7490 62%, var(--darkreader-bg-raw));
+  --accent-foreground: var(--darkreader-text);
+  --destructive: #e46b61;
+  --border: color-mix(in srgb, var(--copal-border) 78%, transparent);
+  --input: color-mix(in srgb, var(--copal-border) 68%, transparent);
+  --ring: var(--darkreader-accent);
+  --chart-1: var(--darkreader-accent);
+  --chart-2: var(--darkreader-accent-2);
+  --chart-3: var(--darkreader-link);
+  --chart-4: var(--darkreader-warn);
+  --chart-5: #e2a6ff;
+  --sidebar: var(--copal-bg-deep);
+  --sidebar-foreground: var(--darkreader-text);
+  --sidebar-primary: var(--darkreader-accent);
+  --sidebar-primary-foreground: #111318;
+  --sidebar-accent: var(--copal-surface);
+  --sidebar-accent-foreground: var(--darkreader-text);
+  --sidebar-border: color-mix(in srgb, var(--copal-border) 78%, transparent);
+  --sidebar-ring: var(--darkreader-accent);
+}
+
+.dark {
+  --background: var(--copal-bg);
+  --foreground: var(--darkreader-text);
+  --card: var(--copal-surface);
+  --card-foreground: var(--darkreader-text);
+  --popover: var(--copal-surface);
+  --popover-foreground: var(--darkreader-text);
+  --primary: var(--darkreader-accent);
+  --primary-foreground: #111318;
+  --secondary: var(--copal-surface-high);
+  --secondary-foreground: var(--darkreader-text);
+  --muted: color-mix(in srgb, #1e293b 86%, var(--darkreader-bg-raw));
+  --muted-foreground: var(--darkreader-text-muted);
+  --accent: color-mix(in srgb, #0e7490 62%, var(--darkreader-bg-raw));
+  --accent-foreground: var(--darkreader-text);
+  --destructive: #e46b61;
+  --border: color-mix(in srgb, var(--copal-border) 78%, transparent);
+  --input: color-mix(in srgb, var(--copal-border) 68%, transparent);
+  --ring: var(--darkreader-accent);
+  --chart-1: var(--darkreader-accent);
+  --chart-2: var(--darkreader-accent-2);
+  --chart-3: var(--darkreader-link);
+  --chart-4: var(--darkreader-warn);
+  --chart-5: #e2a6ff;
+  --sidebar: var(--copal-bg-deep);
+  --sidebar-foreground: var(--darkreader-text);
+  --sidebar-primary: var(--darkreader-accent);
+  --sidebar-primary-foreground: #111318;
+  --sidebar-accent: var(--copal-surface);
+  --sidebar-accent-foreground: var(--darkreader-text);
+  --sidebar-border: color-mix(in srgb, var(--copal-border) 78%, transparent);
+  --sidebar-ring: var(--darkreader-accent);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    color-scheme: dark;
+    background:
+      radial-gradient(circle at 18% 0%, color-mix(in srgb, var(--darkreader-bg-raw) 24%, transparent) 0, transparent 32rem),
+      linear-gradient(180deg, var(--copal-bg) 0%, var(--copal-bg-deep) 100%);
+    color: var(--darkreader-text);
+  }
+}
+
+@layer components {
+  .copal-workspace {
+    @apply rounded-lg border border-slate-700/60 bg-slate-950/70 shadow-2xl shadow-black/30 overflow-hidden;
+  }
+
+  .copal-ribbon {
+    @apply hidden xl:flex flex-col items-center gap-1 border-r border-slate-800 bg-slate-950/90 px-1.5 py-2;
+  }
+
+  .copal-ribbon-button {
+    @apply h-8 w-8 border-slate-800 bg-slate-950 text-slate-400 hover:bg-slate-900 hover:text-cyan-200;
+  }
+
+  .copal-pane {
+    @apply min-h-0 flex flex-col bg-slate-950/60;
+  }
+
+  .copal-pane-header {
+    @apply border-b border-slate-800 bg-slate-900/45 px-3 py-2;
+  }
+
+  .copal-pane-tabs {
+    @apply flex flex-wrap gap-1 border-b border-slate-800 bg-slate-950/50 px-2 py-2;
+  }
+
+  .copal-pane-tab {
+    @apply h-7 rounded-md border border-slate-800 bg-slate-950 px-2 text-[10px] text-slate-400 hover:border-slate-700 hover:text-slate-100;
+  }
+
+  .copal-pane-tab-active {
+    @apply border-cyan-800/70 bg-cyan-950/30 text-cyan-100;
+  }
+
+  .copal-editor-leaf {
+    @apply min-h-0 overflow-hidden flex flex-col bg-slate-950/35;
+  }
+
+  .copal-editor-titlebar {
+    @apply border-b border-slate-800 bg-slate-900/55 px-3 py-2 flex flex-wrap items-center gap-2;
+  }
+
+  .copal-toolbar {
+    @apply border-b border-slate-800 bg-slate-950/55 px-3 py-2 flex flex-nowrap items-center gap-1 overflow-x-auto;
+  }
+
+  .copal-tool-group {
+    @apply flex shrink-0 items-center gap-1 rounded-md border border-slate-800/80 bg-slate-950/60 px-1 py-1;
+  }
+
+  .copal-statusbar {
+    @apply h-auto min-h-7 border-t border-slate-800 bg-slate-950/80 px-3 py-1.5 text-[10px] text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1;
+  }
+
+  .copal-editor-textarea {
+    @apply h-full min-h-[360px] rounded-none border-0 bg-slate-950/25 font-mono text-[12px] leading-5 text-slate-100 resize-none focus-visible:ring-0;
+  }
+
+  .copal-live-markdown-editor {
+    @apply h-full min-h-[420px] bg-[#14171d] text-slate-100;
+  }
+
+  .copal-live-markdown-editor .cm-editor {
+    @apply h-full bg-transparent text-slate-100;
+    font-family: var(--font-sans);
+  }
+
+  .copal-live-markdown-editor .cm-scroller {
+    @apply h-full overflow-auto;
+    font-family: var(--font-sans);
+  }
+
+  .copal-live-markdown-editor .cm-content {
+    @apply py-6;
+    max-width: 860px;
+    margin: 0 auto;
+    caret-color: #67e8f9;
+    font-size: 15px;
+    line-height: 1.72;
+  }
+
+  .copal-live-markdown-editor .cm-gutters {
+    @apply border-r border-slate-800 bg-[#101217] text-slate-600;
+  }
+
+  .copal-live-markdown-editor .cm-line {
+    @apply px-3;
+    letter-spacing: 0;
+  }
+
+  .copal-live-markdown-editor .cm-activeLine {
+    @apply bg-cyan-950/20;
+    font-family: var(--font-mono);
+  }
+
+  .copal-live-markdown-editor .cm-activeLineGutter {
+    @apply bg-cyan-950/30 text-cyan-300;
+  }
+
+  .copal-live-markdown-editor .cm-md-heading {
+    @apply text-slate-50 font-semibold;
+  }
+
+  .copal-live-markdown-editor .cm-md-h1 {
+    font-size: 1.85rem;
+    line-height: 2.25rem;
+  }
+
+  .copal-live-markdown-editor .cm-md-h2 {
+    font-size: 1.45rem;
+    line-height: 2rem;
+  }
+
+  .copal-live-markdown-editor .cm-md-h3,
+  .copal-live-markdown-editor .cm-md-h4,
+  .copal-live-markdown-editor .cm-md-h5,
+  .copal-live-markdown-editor .cm-md-h6 {
+    font-size: 1.15rem;
+    line-height: 1.75rem;
+  }
+
+  .copal-live-markdown-editor .cm-md-syntax-hidden {
+    font-size: 0;
+    opacity: 0;
+    letter-spacing: 0;
+  }
+
+  .copal-live-markdown-editor .cm-md-strong {
+    @apply font-semibold text-slate-50;
+  }
+
+  .copal-live-markdown-editor .cm-md-emphasis {
+    @apply italic text-slate-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-inline-code {
+    @apply rounded bg-slate-800 px-1 py-0.5 font-mono text-[0.88em] text-cyan-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-wikilink {
+    @apply rounded bg-cyan-950/35 px-1 text-cyan-200 underline decoration-cyan-700/60 underline-offset-2;
+  }
+
+  .copal-live-markdown-editor .cm-md-tag {
+    @apply rounded-full bg-slate-800 px-1.5 py-0.5 text-[0.86em] text-fuchsia-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-task-line {
+    @apply text-slate-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-task-checkbox {
+    width: 14px;
+    height: 14px;
+    margin: 0 6px 0 0;
+    vertical-align: -2px;
+    accent-color: #22d3ee;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-card {
+    @apply my-2 rounded-md border border-slate-800 bg-slate-950/55 px-3 py-2 text-[12px] text-slate-300;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-title {
+    @apply mb-1 text-[10px] font-semibold uppercase tracking-normal text-slate-500;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-list {
+    @apply grid gap-1;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-row {
+    @apply grid grid-cols-[112px_minmax(0,1fr)] gap-2;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-key {
+    @apply truncate font-mono text-slate-500;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-input {
+    @apply min-w-0 rounded border border-slate-800 bg-slate-900/70 px-2 py-1 text-[12px] text-slate-100 outline-none transition-colors focus:border-cyan-700 focus:bg-slate-950;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-empty {
+    @apply text-slate-500;
+  }
+
+  .copal-live-markdown-editor .cm-md-quote-line {
+    @apply border-l-2 border-slate-700 pl-3 text-slate-300;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-line {
+    @apply border-l-2 border-cyan-700 bg-cyan-950/20 text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-block-widget {
+    @apply my-2 block rounded-md border border-cyan-800/50 bg-cyan-950/20 px-3 py-2 text-[13px] text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-summary {
+    @apply flex cursor-pointer list-none items-center gap-2;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-kind {
+    @apply shrink-0 rounded bg-cyan-900/60 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-title {
+    @apply min-w-0 truncate font-medium;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-body {
+    @apply mt-2 whitespace-pre-wrap border-l border-cyan-800/50 pl-3 text-[12px] leading-relaxed text-cyan-50/90;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-line {
+    @apply bg-slate-900/45 font-mono text-[12px] text-slate-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-widget {
+    @apply my-2 overflow-x-auto rounded-md border border-slate-800 bg-slate-950/45;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-widget table {
+    @apply w-full border-collapse text-left text-[12px] text-slate-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-widget th {
+    @apply border-b border-slate-800 bg-slate-900/80 px-3 py-2 font-semibold text-slate-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-widget td {
+    @apply border-t border-slate-900 px-3 py-1.5;
+  }
+
+  .copal-live-markdown-editor .cm-md-table-widget th[contenteditable='true'],
+  .copal-live-markdown-editor .cm-md-table-widget td[contenteditable='true'] {
+    @apply outline-none transition-colors focus:bg-cyan-950/35 focus:text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-inline-math {
+    @apply rounded bg-fuchsia-950/40 px-1 font-mono text-[0.88em] text-fuchsia-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-math-block-widget {
+    @apply my-2 rounded-md border border-fuchsia-900/60 bg-fuchsia-950/20 p-3 text-fuchsia-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-math-block-widget pre {
+    @apply overflow-x-auto whitespace-pre-wrap font-mono text-[12px] leading-relaxed;
+  }
+
+  .copal-live-markdown-editor .cm-md-footnote-widget {
+    @apply my-1 flex max-w-full items-start gap-2 rounded-md border border-slate-800 bg-slate-950/55 px-2 py-1.5 text-left text-[12px] text-slate-300;
+  }
+
+  .copal-live-markdown-editor .cm-md-footnote-marker {
+    @apply shrink-0 rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-fuchsia-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-footnote-text {
+    @apply min-w-0 whitespace-pre-wrap;
+  }
+
+  .copal-live-markdown-editor .cm-md-widget-source {
+    @apply mt-2 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-300 transition-colors hover:border-cyan-800 hover:text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-code-line {
+    @apply bg-slate-950/75 font-mono text-[12px] text-slate-200;
+  }
+
+  .copal-live-markdown-editor .cm-md-embed-widget {
+    @apply inline-flex max-w-full items-center gap-2 rounded-md border border-slate-700 bg-slate-900/75 px-2 py-1 text-[12px] text-slate-200;
+  }
+
+  .copal-live-markdown-editor figure.cm-md-embed-widget {
+    @apply my-2 flex-col items-start overflow-hidden p-2;
+  }
+
+  .copal-live-markdown-editor .cm-md-embed-widget img {
+    @apply max-h-80 max-w-full rounded border border-slate-800 object-contain;
+  }
+
+  .copal-live-markdown-editor .cm-md-embed-widget figcaption {
+    @apply mt-1 max-w-full truncate text-[10px] text-slate-500;
+  }
+
+  .copal-live-markdown-editor .cm-md-embed-kind {
+    @apply shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400;
+  }
+
+  .copal-live-markdown-editor .cm-md-embed-label {
+    @apply min-w-0 truncate text-cyan-100;
+  }
+
+  .copal-live-markdown-editor .cm-md-frontmatter-line {
+    @apply font-mono text-[12px] text-slate-500;
+  }
+
+  .copal-preview {
+    @apply min-h-0 overflow-y-auto bg-slate-950/20 p-4;
+  }
+
+  .copal-command-surface {
+    @apply border-b border-slate-800 bg-slate-950/90 p-3 shadow-lg shadow-black/20;
+  }
+
+  .copal-property-row {
+    @apply grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[11px] leading-snug;
+  }
+
+  .copal-block-card {
+    @apply rounded-md border border-slate-800 bg-slate-900/35 p-3 text-left transition-colors hover:border-cyan-900/80 hover:bg-slate-900/65;
+  }
+
+  .copal-block-card-active {
+    @apply border-cyan-700/80 bg-cyan-950/25;
+  }
+
+  .copal-block-detail {
+    @apply rounded-md border border-slate-800 bg-slate-950/60 p-3;
+  }
+}
+
+@layer utilities {
+  html {
+    background: var(--copal-bg-deep);
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--darkreader-accent) 42%, transparent);
+    color: var(--darkreader-text);
+  }
+
+  body [class*="text-slate-50"],
+  body [class*="text-slate-100"],
+  body [class*="text-slate-200"],
+  body [class*="text-white"] {
+    color: var(--darkreader-text) !important;
+  }
+
+  body [class*="text-slate-300"],
+  body [class*="text-slate-400"] {
+    color: var(--darkreader-text-muted) !important;
+  }
+
+  body [class*="text-slate-500"],
+  body [class*="text-slate-600"] {
+    color: var(--darkreader-text-dim) !important;
+  }
+
+  body [class*="text-cyan"],
+  body a {
+    color: var(--darkreader-link) !important;
+  }
+
+  body [class*="text-fuchsia"],
+  body [class*="text-purple"] {
+    color: #e7c3ff !important;
+  }
+
+  body [data-state="active"],
+  body [class*="data-[state=active]"] {
+    color: var(--darkreader-accent) !important;
+  }
+
+  input,
+  textarea,
+  select,
+  .cm-editor,
+  .cm-scroller,
+  .cm-content {
+    color: var(--darkreader-text) !important;
+    caret-color: var(--darkreader-accent) !important;
+  }
+
+  input,
+  textarea,
+  select,
+  .cm-editor {
+    background-color: color-mix(in srgb, #101217 92%, var(--darkreader-bg-raw)) !important;
+  }
+
+  .cm-gutters,
+  .copal-live-markdown-editor .cm-gutters {
+    background-color: color-mix(in srgb, #101217 94%, var(--darkreader-bg-raw)) !important;
+    color: var(--darkreader-text-dim) !important;
+  }
+
+  .cm-activeLine,
+  .copal-live-markdown-editor .cm-activeLine {
+    background-color: color-mix(in srgb, #083344 34%, transparent) !important;
+  }
+
+  .copal-live-markdown-editor,
+  .copal-preview,
+  .copal-pane,
+  .copal-editor-leaf,
+  .copal-workspace {
+    color: var(--darkreader-text) !important;
+  }
+
+  .copal-live-markdown-editor .cm-md-inline-code,
+  .copal-live-markdown-editor .cm-md-tag,
+  .copal-live-markdown-editor .cm-md-footnote-marker,
+  code {
+    color: var(--darkreader-accent) !important;
+  }
+
+  .copal-live-markdown-editor .cm-md-wikilink,
+  .copal-live-markdown-editor .cm-md-embed-label {
+    color: var(--darkreader-link) !important;
+  }
+
+  .copal-live-markdown-editor .cm-md-callout-block-widget,
+  .copal-live-markdown-editor .cm-md-callout-line {
+    border-color: var(--darkreader-accent-2) !important;
+    color: var(--darkreader-text) !important;
+  }
+
+  * {
+    scrollbar-color: color-mix(in srgb, var(--darkreader-accent) 42%, #334155) var(--copal-bg-deep);
+  }
+}

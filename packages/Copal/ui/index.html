@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Copal · Vault</title>
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark">C</div>
+      <div>
+        <h1>Copal</h1>
+        <p class="brand-sub">Local-first vault · DB-backed · <span id="sync-state" class="sync-state">connecting…</span></p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="undo-btn" class="btn" title="Undo last operation">↩ Undo</button>
+      <button id="ops-btn" class="btn" title="Operation log">Ops</button>
+    </div>
+  </header>
+
+  <nav class="tab-bar" id="tab-bar">
+    <button class="tab active" data-tab="notes">Notes</button>
+    <button class="tab" data-tab="timeline" disabled title="Porting (V3)">Timeline</button>
+    <button class="tab" data-tab="calendar" disabled title="Porting (V3)">Calendar</button>
+    <button class="tab" data-tab="todo" disabled title="Porting (V3)">To-do</button>
+    <button class="tab" data-tab="wiki" disabled title="Porting (V4)">Wiki</button>
+    <button class="tab" data-tab="graph" disabled title="Porting (V4)">Graph</button>
+    <button class="tab" data-tab="mind" disabled title="Porting (V4)">Mind</button>
+    <button class="tab" data-tab="bases" disabled title="Porting (V4)">Bases</button>
+    <button class="tab" data-tab="treehouse" disabled title="Porting (V4)">Treehouse</button>
+    <button class="tab" data-tab="galaxy" disabled title="Porting (V4)">Galaxy</button>
+  </nav>
+
+  <main class="view-host">
+    <section id="view-notes" class="view active">
+      <aside class="doc-list-pane">
+        <div class="pane-header">
+          <span id="doc-count">0 docs</span>
+          <button id="refresh-btn" class="btn btn-small" title="Refresh">⟳</button>
+        </div>
+        <input id="doc-filter" class="input" placeholder="Filter…">
+        <div id="doc-list" class="doc-list"></div>
+      </aside>
+      <section class="editor-pane">
+        <div class="editor-titlebar">
+          <span id="doc-name" class="doc-name">select a doc</span>
+          <span id="doc-status" class="doc-status"></span>
+        </div>
+        <textarea id="editor" class="editor" spellcheck="false" disabled placeholder="Select a doc from the list."></textarea>
+        <div class="statusbar">
+          <span id="status-head">head —</span>
+          <span id="status-sync">idle</span>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="ops-panel" class="ops-panel hidden">
+    <div class="pane-header"><span>Operation log</span><button id="ops-close" class="btn btn-small">×</button></div>
+    <div id="ops-list" class="ops-list"></div>
+  </div>
+
+  <script type="module" src="/ui/js/main.js"></script>
+</body>
+</html>

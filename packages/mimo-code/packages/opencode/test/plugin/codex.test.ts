@@ -3,6 +3,7 @@ import {
   parseJwtClaims,
   extractAccountIdFromClaims,
   extractAccountId,
+  modelMatchesCodexEntitlement,
   type IdTokenClaims,
 } from "../../src/plugin/codex"
 
@@ -118,6 +119,18 @@ describe("plugin.codex", () => {
           refresh_token: "rt",
         }),
       ).toBe("acc-123")
+    })
+  })
+
+  describe("modelMatchesCodexEntitlement", () => {
+    test("accepts a live catalog slug without a hardcoded model list", () => {
+      const entitled = new Set(["gpt-new-codex"])
+      expect(modelMatchesCodexEntitlement("openai/gpt-new-codex", "gpt-new-codex", entitled)).toBe(true)
+    })
+
+    test("rejects a model whose name happens to contain codex", () => {
+      const entitled = new Set(["gpt-5.4"])
+      expect(modelMatchesCodexEntitlement("openai/not-entitled-codex", "not-entitled-codex", entitled)).toBe(false)
     })
   })
 })

@@ -1,0 +1,5 @@
+# Copal repo configuration.
+# debug = true  → the app stores its database in repo-local ./db/
+# debug = false → the app stores its database in ~/.local/share/copal/
+# Env overrides: COPAL_DEBUG=0|1 beats this file; COPAL_DB=/path beats everything.
+debug = true

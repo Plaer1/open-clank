@@ -162,7 +162,7 @@
         '/email': 'Email — Odysseus',
         '/memory': 'Memory — Odysseus',
         '/gallery': 'Gallery — Odysseus',
-        '/tasks': 'Tasks — Odysseus',
+        '/tasks': 'Clanker Tasks — Odysseus',
         '/library': 'Library — Odysseus',
       };
       if (titles[path]) document.title = titles[path];
@@ -256,6 +256,7 @@
       <div class="modal-body memory-modal-body">
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
+          <button class="memory-tab" data-memory-tab="inspect"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M3 3h18v18H3z"/><path d="M3 9h18M9 21V9"/></svg>Inspect</button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
@@ -264,7 +265,7 @@
         <div class="memory-tab-panel" data-memory-panel="browse">
           <div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
-              <h2 style="display:flex;align-items:center;gap:6px;margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count-h2" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
+              <h2 style="display:flex;align-items:center;gap:6px;margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count-h2" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span> <span id="memory-provider-status" style="font-size:0.55em;opacity:0.55;font-weight:normal"></span></h2>
               <span style="flex:1"></span>
               <span class="admin-toggle-state"></span>
               <label class="admin-switch" title="Include memories in chat context"><input type="checkbox" id="memory-enabled-header-toggle" checked /><span class="admin-slider"></span></label>
@@ -302,6 +303,30 @@
             <div id="memory-list" class="memory-list"></div>
             <div id="memory-suggestions-body" class="memory-suggestions hidden"></div>
           </div>
+        </div>
+        <!-- ── Honest tier inspection ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="inspect">
+          <div class="admin-card">
+            <h2 style="margin:0 0 6px">Memory pipeline</h2>
+            <p class="memory-desc doclib-desc">Raw trajectory is evidence, candidates await admission, Curated is recallable, and Quarantined stays hidden from normal recall.</p>
+            <div id="memory-quality" class="admin-toggle-sub" role="status" aria-live="polite">Loading integrity…</div>
+            <div class="memory-toolbar-row" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+              <select id="memory-inspect-tier" class="memory-sort-select" aria-label="Memory tier">
+                <option value="raw">Raw trajectory</option>
+                <option value="candidate">Candidates</option>
+                <option value="curated">Curated</option>
+                <option value="quarantine">Quarantined</option>
+              </select>
+              <select id="memory-inspect-status" class="memory-sort-select" aria-label="Candidate status" hidden>
+                <option value="">All candidate states</option>
+                <option value="pending">Pending</option>
+                <option value="accepted">Accepted</option>
+                <option value="rejected">Rejected</option>
+              </select>
+              <button id="memory-inspect-refresh" type="button" class="memory-toolbar-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="memory-inspect-list" class="memory-list" style="min-height:180px"></div>
         </div>
         <!-- ── Add tab ── -->
         <div class="memory-tab-panel hidden" data-memory-panel="add">
@@ -687,6 +712,7 @@
     <!-- Tool launchers — always visible, alphabetical -->
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
+    <button class="icon-rail-btn" id="rail-copal" title="Copal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M2 19h20"/><path d="M8 7h8M8 11h8M8 15h5"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
@@ -694,7 +720,7 @@
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
     <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
-    <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
+    <button class="icon-rail-btn" id="rail-tasks" title="Clanker Tasks" aria-label="Clanker Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
     <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
     <div style="flex:1"></div>
     <!-- Static: bottom -->
@@ -800,6 +826,23 @@
                dot at the far-right corner with the + just to its left —
                i.e. the dot and + swap places when the dot appears. -->
           <span id="email-unread-dot" class="sidebar-notif-dot" style="display:none"></span>
+        </div>
+      </div>
+
+      <div class="section copal-sidebar-section" id="copal-section">
+        <div class="section-header-flex" id="copal-section-toggle">
+          <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M2 19h20"/><path d="M8 7h8M8 11h8M8 15h5"/></svg><span>Copal</span></span>
+        </div>
+        <div id="copal-submenu" class="copal-sidebar-submenu">
+          <a class="list-item copal-sidebar-link" href="/copal/notes" data-copal-view="notes"><span class="grow">Notes</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/wiki" data-copal-view="wiki"><span class="grow">Wiki</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/timeline" data-copal-view="timeline"><span class="grow">Timeline</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/galaxy" data-copal-view="galaxy"><span class="grow">Galaxy</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/graph" data-copal-view="graph"><span class="grow">Graph</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/mind" data-copal-view="mind"><span class="grow">Mind</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/bases" data-copal-view="bases"><span class="grow">Bases</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/treehouse" data-copal-view="treehouse"><span class="grow">TreeHouse</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/todo" data-copal-view="todo"><span class="grow">Meatbag Tasks</span></a>
         </div>
       </div>
 
@@ -916,7 +959,7 @@
             <line x1="3" y1="10" x2="21" y2="10"/>
             <path d="M9 16l2 2 4-4"/>
           </svg>
-          <span class="grow">Tasks</span>
+          <span class="grow">Clanker Tasks</span>
           <span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>
         </div>
 
@@ -1363,6 +1406,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             <span>Added Models</span>
           </button>
+          <button class="settings-nav-item" data-settings-tab="mimo-providers">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            <span>MiMo Providers</span>
+          </button>
           <button class="settings-nav-item" data-settings-tab="ai">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/></svg>
             <span>AI Defaults</span>
@@ -1420,6 +1467,21 @@
         </div>
         <div class="settings-panels">
 
+        <!-- ═══ MIMO PROVIDERS ═══ -->
+        <div data-settings-panel="mimo-providers" class="hidden">
+          <div class="admin-card">
+            <h2>MiMo Providers</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">Connect the native providers used by the virtual <strong>MiMo (agent)</strong> endpoint. Credentials stay in MiMo's isolated MIMOCODE_HOME and do not create duplicate Odysseus endpoints.</div>
+            <div class="settings-row">
+              <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search providers…" autocomplete="off">
+              <button id="mimo-provider-refresh" type="button" class="btn secondary">Refresh</button>
+            </div>
+            <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+          </div>
+          <div id="mimo-provider-flow"></div>
+          <div id="mimo-provider-list"></div>
+        </div>
+
         <!-- ═══ AI TAB ═══ -->
 
         <div data-settings-panel="ai" class="hidden">
@@ -1449,7 +1511,7 @@
           </div>
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Utility Model <span style="font-size:0.72em;opacity:0.55;font-weight:normal;">(Recommended: Local Endpoint)</span></h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs background tasks (compaction, cleanup, auto-naming, retrieving memories from files) on a small/local model instead of your chat model. Leave blank to use the chat model.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs background tasks (compaction, cleanup, auto-naming, retrieving memories from files). Leave blank to inherit the Default Chat Model above.</div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Endpoint</label>
@@ -1492,7 +1554,7 @@
           </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>Research Model</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Model used for Deep Research, more settings under <a href="#" data-go-settings-tab="search" style="color:var(--accent, var(--red));text-decoration:underline;font-weight:600;">Search →</a></div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Model used for Deep Research. Leave blank to inherit the Default Chat Model above; more settings are under <a href="#" data-go-settings-tab="search" style="color:var(--accent, var(--red));text-decoration:underline;font-weight:600;">Search →</a></div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Endpoint</label>
@@ -1792,7 +1854,7 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></span>
-                <span class="vis-label">Tasks</span>
+                <span class="vis-label">Clanker Tasks</span>
                 <input type="checkbox" checked data-ui-key="tool-tasks"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
@@ -1966,8 +2028,8 @@
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Email Tasks</h2>
             <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Tasks.</div>
-              <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Open Tasks</button>
+              <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Clanker Tasks.</div>
+              <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Open Clanker Tasks</button>
             </div>
           </div>
 
@@ -2396,7 +2458,7 @@
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
               <div>
                 <div class="admin-toggle-label">Delete all tasks</div>
-                <div class="admin-toggle-sub">Every scheduled task and its run history (Tasks tool).</div>
+                <div class="admin-toggle-sub">Every scheduled task and its run history (Clanker Tasks tool).</div>
               </div>
               <button class="admin-btn-delete" data-wipe-kind="tasks" title="Delete all tasks" aria-label="Delete all tasks" style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Delete</button>
             </div>

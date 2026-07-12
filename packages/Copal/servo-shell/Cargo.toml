@@ -1,0 +1,25 @@
+[package]
+name = "copal-servo-shell"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+native-api = ["dep:chrono", "dep:copal-db", "dep:serde_json", "dep:zip"]
+embedded-assets = ["native-api", "dep:include_dir"]
+servo-probe = ["dep:servo"]
+servo-runtime = ["dep:euclid", "dep:rustls", "dep:servo", "dep:url", "dep:winit"]
+
+[dependencies]
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock", "std"] }
+copal-db = { path = "../rust/copal-db", optional = true }
+euclid = { version = "0.22", optional = true }
+include_dir = { version = "0.7", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["aws_lc_rs", "std"] }
+serde_json = { version = "1", optional = true }
+servo = { version = "0.3.0", optional = true, default-features = false, features = ["baked-in-resources"] }
+url = { version = "2", optional = true }
+winit = { version = "0.30", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }

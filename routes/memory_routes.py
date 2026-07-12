@@ -1,5 +1,5 @@
 # routes/memory_routes.py
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File, Query
 from typing import Dict, Any, Optional, List
 import json
 import os
@@ -26,7 +26,7 @@ from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
 from src.llm_core import llm_call_async
-from services.memory.memory_extractor import audit_memories
+from services.memory.memory_extractor import audit_memories, audit_provider_memories
 from src.auth_helpers import get_current_user, require_user
 from src.endpoint_resolver import resolve_endpoint
 from src.task_endpoint import resolve_task_endpoint
@@ -41,6 +41,20 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
 
     def _owner(request: Request) -> Optional[str]:
         return get_current_user(request)
+
+    def _provider_record(record) -> dict:
+        metadata = dict(getattr(record, "metadata", {}) or {})
+        return {
+            "id": record.id,
+            "text": record.text,
+            "timestamp": record.timestamp,
+            "category": record.category,
+            "source": record.source,
+            "owner": record.owner,
+            "session_id": record.session_id,
+            "pinned": bool(getattr(record, "pinned", False) or metadata.get("pinned", False)),
+            "metadata": metadata,
+        }
 
     def _assert_session_owner(session_obj, user):
         """SECURITY: 404 if the caller does not own this session.
@@ -102,7 +116,14 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         text = (memory_data.text or "").strip()
         if not text:
             raise HTTPException(400, "empty memory")
-        user_mem = memory_manager.load(owner=user)
+        if memory_provider:
+            try:
+                user_mem = [_provider_record(record) for record in await memory_provider.list_memories(owner=user, limit=1000)]
+            except Exception as exc:
+                logger.warning("Provider memory duplicate check failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
+        else:
+            user_mem = memory_manager.load(owner=user)
         if memory_manager.find_duplicates(text, user_mem):
             return {"ok": True, "count": len(user_mem), "message": "Memory already exists"}
 
@@ -126,7 +147,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                     logger.debug("memory_added event dispatch failed", exc_info=True)
                 return {"ok": True, "memory_id": record.id, "message": "Memory added via provider"}
             except Exception as e:
-                logger.warning("Provider add failed, falling back to native: %s", e)
+                logger.warning("Provider add failed: %s", e)
+                raise HTTPException(503, "Active memory provider is unavailable")
 
         new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
         if memory_data.session_id:
@@ -145,10 +167,89 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         return {"ok": True, "count": len([m for m in all_mem if m.get("owner") == user])}
 
     @router.get("")
-    def api_get_memory(request: Request):
+    async def api_get_memory(request: Request):
         """Return all memory entries with their metadata."""
         user = _owner(request)
+        if memory_provider:
+            try:
+                records = await memory_provider.list_memories(owner=user, limit=1000)
+                return {
+                    "memory": [_provider_record(record) for record in records],
+                    "provider": getattr(memory_provider, "provider_id", "unknown"),
+                }
+            except Exception as exc:
+                logger.warning("Provider memory list failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
         return {"memory": memory_manager.load(owner=user)}
+
+    @router.get("/inspect")
+    async def inspect_memory_tier(
+        request: Request,
+        tier: str = Query("raw"),
+        status: Optional[str] = Query(None),
+        limit: int = Query(500, ge=1, le=1000),
+    ):
+        """Inspect honest Frankenmemory tiers without making raw/rejected data recallable."""
+        if tier not in {"raw", "candidate", "curated", "quarantine"}:
+            raise HTTPException(400, "tier must be raw, candidate, curated, or quarantine")
+        if status not in {None, "pending", "accepted", "rejected", "quarantined"}:
+            raise HTTPException(400, "invalid candidate status")
+        if not memory_provider or not hasattr(memory_provider, "inspect_tier"):
+            raise HTTPException(503, "Active memory provider does not expose tier inspection")
+        try:
+            rows = await memory_provider.inspect_tier(
+                tier,
+                owner=_owner(request),
+                status=status,
+                limit=limit,
+            )
+        except Exception as exc:
+            logger.warning("Provider tier inspection failed: %s", exc)
+            raise HTTPException(503, "Active memory provider is unavailable") from exc
+        return {"tier": tier, "items": rows, "total": len(rows)}
+
+    @router.get("/quality")
+    async def memory_quality(request: Request, rebuild_graph_fts: bool = False):
+        if not memory_provider or not hasattr(memory_provider, "memory_quality"):
+            raise HTTPException(503, "Active memory provider does not expose quality status")
+        if rebuild_graph_fts:
+            from core.middleware import require_admin
+            require_admin(request)
+        try:
+            return await memory_provider.memory_quality(rebuild_graph_fts=rebuild_graph_fts)
+        except Exception as exc:
+            logger.warning("Provider quality check failed: %s", exc)
+            raise HTTPException(503, "Active memory provider is unavailable") from exc
+
+    @router.post("/candidate/{candidate_id}/review")
+    async def review_memory_candidate(request: Request, candidate_id: str):
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_manage_memory")
+        if not memory_provider or not hasattr(memory_provider, "review_candidate"):
+            raise HTTPException(503, "Active memory provider does not expose candidate review")
+        body = await request.json()
+        accept = body.get("accept")
+        if not isinstance(accept, bool):
+            raise HTTPException(400, "accept must be boolean")
+        workspace_id = str(body.get("workspace_id") or "").strip()
+        if not workspace_id:
+            raise HTTPException(400, "workspace_id is required")
+        reason = str(body.get("reason") or ("approved_by_user" if accept else "rejected_by_user")).strip()[:500]
+        owner = _owner(request)
+        if owner is None:
+            owner = str(body.get("owner") or "legacy").strip()
+        try:
+            result = await memory_provider.review_candidate(
+                candidate_id,
+                accept=accept,
+                reason=reason,
+                owner=owner,
+                workspace_id=workspace_id,
+            )
+        except Exception as exc:
+            logger.warning("Candidate review failed: %s", exc)
+            raise HTTPException(400, "Candidate could not be reviewed in this scope") from exc
+        return result
 
     @router.post("/search")
     async def search_memories(request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)):
@@ -158,14 +259,23 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if memory_provider:
             try:
                 hits = await memory_provider.recall(query, owner=user, top_k=20)
-                results = [{"text": h.memory.text, "category": h.memory.category, "id": h.memory.id, "score": h.score} for h in hits]
+                results = [{
+                    "text": h.memory.text,
+                    "category": h.memory.category,
+                    "id": h.memory.id,
+                    "score": h.score,
+                    "owner": h.memory.owner,
+                    "session_id": h.memory.session_id,
+                    "source": h.memory.source,
+                } for h in hits]
                 if session_id:
                     results = [r for r in results if r.get("session_id") == session_id]
                 if category:
                     results = [r for r in results if category in r.get("category", "")]
                 return {"memories": results, "total": len(results), "query": query}
             except Exception as e:
-                logger.warning("Provider search failed, falling back to native: %s", e)
+                logger.warning("Provider search failed: %s", e)
+                raise HTTPException(503, "Active memory provider is unavailable")
 
         memories = memory_manager.load(owner=user)
 
@@ -180,10 +290,19 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         return {"memories": relevant, "total": len(relevant), "query": query}
 
     @router.get("/timeline")
-    def memory_timeline(request: Request):
+    async def memory_timeline(request: Request):
         """Get memories in chronological order with source session information."""
         user = _owner(request)
-        memories = memory_manager.load(owner=user)
+        if memory_provider:
+            try:
+                memories = [_provider_record(record) for record in await memory_provider.list_memories(
+                    owner=user, limit=1000
+                )]
+            except Exception as exc:
+                logger.warning("Provider memory timeline failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
+        else:
+            memories = memory_manager.load(owner=user)
         sorted_memories = sorted(memories, key=lambda x: x.get("timestamp", 0), reverse=True)
 
         results = []
@@ -218,7 +337,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         return {"timeline": results, "total": len(results)}
 
     @router.get("/by-session/{session_id}")
-    def get_memory_by_session(request: Request, session_id: str):
+    async def get_memory_by_session(request: Request, session_id: str):
         """Get all memories associated with a specific session."""
         user = _owner(request)
         try:
@@ -226,7 +345,16 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
         _assert_session_owner(_session_obj, user)
-        memories = memory_manager.load(owner=user)
+        if memory_provider:
+            try:
+                memories = [_provider_record(record) for record in await memory_provider.list_memories(
+                    owner=user, limit=1000
+                )]
+            except Exception as exc:
+                logger.warning("Provider session memory list failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
+        else:
+            memories = memory_manager.load(owner=user)
         session_memories = [m for m in memories if m.get("session_id") == session_id]
 
         session_memories.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
@@ -325,14 +453,23 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if not endpoint_url or not model:
             raise HTTPException(400, "No default model configured — set one in Settings")
 
-        result = await audit_memories(
-            memory_manager,
-            memory_vector,
-            endpoint_url,
-            model,
-            headers,
-            owner=user,
-        )
+        if memory_provider:
+            result = await audit_provider_memories(
+                memory_provider,
+                endpoint_url,
+                model,
+                headers,
+                owner=user,
+            )
+        else:
+            result = await audit_memories(
+                memory_manager,
+                memory_vector,
+                endpoint_url,
+                model,
+                headers,
+                owner=user,
+            )
 
         if "error" in result and "before" not in result:
             raise HTTPException(502, f"Audit failed: {result['error']}")
@@ -512,9 +649,19 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             raise HTTPException(502, f"LLM extraction failed: {str(e)}")
 
     @router.post("/{memory_id}/pin")
-    def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):
+    async def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):
         """Pin or unpin a memory. Pinned memories are always included in context."""
         user = _owner(request)
+        if memory_provider:
+            try:
+                if not await memory_provider.pin(memory_id, pinned, owner=user):
+                    raise HTTPException(404, f"Memory item {memory_id} not found")
+                return {"ok": True, "pinned": pinned}
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("Provider memory pin failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
         all_mem = memory_manager.load_all()
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
@@ -526,9 +673,20 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
 
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")
-    def get_memory_item(request: Request, memory_id: str):
+    async def get_memory_item(request: Request, memory_id: str):
         """Get a specific memory item by ID."""
         user = _owner(request)
+        if memory_provider:
+            try:
+                record = await memory_provider.get(memory_id, owner=user)
+                if record is not None:
+                    return {"memory": _provider_record(record)}
+                raise HTTPException(404, "Memory not found")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("Provider memory get failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
         memories = memory_manager.load(owner=user)
         for memory in memories:
             if memory["id"] == memory_id:
@@ -537,9 +695,24 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         raise HTTPException(404, "Memory not found")
 
     @router.put("/{memory_id}")
-    def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
+    async def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
         """Update an existing memory item with new text and optional category."""
         user = _owner(request)
+        if memory_provider:
+            try:
+                record = await memory_provider.update(
+                    memory_id, text=text, category=category, owner=user
+                )
+                if record is None:
+                    raise HTTPException(404, f"Memory item {memory_id} not found")
+                return {"ok": True, "memory": _provider_record(record)}
+            except HTTPException:
+                raise
+            except NotImplementedError:
+                raise HTTPException(501, "Active memory provider does not support updates")
+            except Exception as exc:
+                logger.warning("Provider memory update failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
         all_mem = memory_manager.load_all()
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
@@ -559,9 +732,19 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         raise HTTPException(404, f"Memory item {memory_id} not found")
 
     @router.delete("/{memory_id}")
-    def delete_memory(request: Request, memory_id: str):
+    async def delete_memory(request: Request, memory_id: str):
         """Delete a memory item by its ID."""
         user = _owner(request)
+        if memory_provider:
+            try:
+                if not await memory_provider.delete(memory_id, owner=user):
+                    raise HTTPException(404, f"Memory item {memory_id} not found")
+                return {"ok": True, "message": "Memory deleted successfully"}
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("Provider memory delete failed: %s", exc)
+                raise HTTPException(503, "Active memory provider is unavailable")
         all_mem = memory_manager.load_all()
 
         # Find and verify ownership before deleting

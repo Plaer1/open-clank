@@ -8,10 +8,20 @@ import { Log } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
-import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { decideAskRouting } from "@/agent/config"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
-import { type Tool as AITool, type ModelMessage, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
+import {
+  type Tool as AITool,
+  type ModelMessage,
+  tool,
+  jsonSchema,
+  type ToolExecutionOptions,
+  asSchema,
+  generateText,
+  wrapLanguageModel,
+} from "ai"
+import { InstallationVersion } from "@/installation/version"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
@@ -44,6 +54,7 @@ import {
   TEXT_NGRAM_RECOVERY_REPLAN,
 } from "../session/prompt/text-ngram-detection"
 import { composeSkillsBlock } from "@/skill/compose/extract"
+import { builtinSkillRoot, matchDocumentSkills } from "@/skill/builtin/extract"
 import { ToolRegistry } from "../tool"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
@@ -168,6 +179,33 @@ function stepSignature(parts: MessageV2.Part[]): string | undefined {
   return segments.join("\n")
 }
 
+/**
+ * Debounce decision for the high-context-pressure memory-flush nudge.
+ *
+ * Returns true if a nudge (a text part containing `marker`) has already been
+ * injected within the *current high-pressure episode*, where the episode is the
+ * message window since the last checkpoint boundary.
+ *
+ * Keying off the checkpoint boundary rather than a fixed message count is
+ * deliberate: a single sustained high-pressure turn can emit many tool-call
+ * steps — each its own message — so a fixed-size tail would let the
+ * already-nudged message slide out of the window and re-fire the nudge
+ * mid-turn. The boundary only advances when a checkpoint/rebuild actually
+ * discards context, which is exactly when a fresh nudge becomes useful again.
+ *
+ * When `boundaryID` is undefined (no checkpoint yet) or is not found in `msgs`,
+ * the whole conversation is treated as the current episode.
+ */
+export function nudgedSinceBoundary(
+  msgs: readonly MessageV2.WithParts[],
+  boundaryID: string | undefined,
+  marker: string,
+): boolean {
+  const boundaryIdx = boundaryID ? msgs.findIndex((m) => m.info.id === boundaryID) : -1
+  const episode = boundaryIdx >= 0 ? msgs.slice(boundaryIdx) : msgs
+  return episode.some((m) => m.parts.some((p) => p.type === "text" && p.text?.includes(marker)))
+}
+
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
 IMPORTANT:
@@ -188,8 +226,11 @@ const TEXT_TOOL_CALL_RETRY_LIMIT = Flag.MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT
 
 const log = Log.create({ service: "session.prompt" })
 
+// Hooks are NOT listed here: the plugin layer detects hook file changes
+// itself via mtime staleness checks (covers external editors too), so only
+// tools and skills need the write/edit-triggered registry reload.
 function isExtensionPath(filePath: string): boolean {
-  return /\/\.mimocode\/(tools?|skills?|hooks?)\//.test(filePath)
+  return /\/\.mimocode\/(tools?|skills?)\//.test(filePath)
 }
 const elog = EffectLogger.create({ service: "session.prompt" })
 
@@ -267,7 +308,7 @@ export const layer = Layer.effect(
         if (!captureSession) return empty
         const [skills, env, instructions] = yield* Effect.all([
           sys.skills(ag),
-          Effect.sync(() => sys.environment(model, captureSession.time.created)),
+          sys.environment(model, captureSession.time.created),
           instruction.system().pipe(Effect.orDie),
         ])
         // (checkpoint-writer never requests json_schema output, so STRUCTURED_OUTPUT_SYSTEM_PROMPT
@@ -430,39 +471,81 @@ export const layer = Layer.effect(
       if (assistants.some((m) => m.info.time.completed === undefined)) return ""
       const lastAssistant = assistants[assistants.length - 1]
 
+      // Context fed to the prediction: up to 3 most recent user queries
+      // (chronological) plus the latest assistant turn (which carries tool
+      // outputs + final assistant text). Earlier assistant turns are dropped
+      // to keep the prompt small.
+      const recentUsers = history.filter(real).slice(-3)
+      const contextMsgs = [...recentUsers, lastAssistant]
+
       const base = yield* agents.get("title")
       if (!base) return ""
-      // Reuse the lightweight title agent's settings but swap its prompt for the
-      // prediction prompt — its default ("output ONLY a thread title") would
-      // otherwise be prepended ahead of PREDICT_SYSTEM and win.
-      const ag = { ...base, prompt: PREDICT_SYSTEM }
-      const mdl = ag.modelRef
-        ? yield* provider.resolveModelRef(ag.modelRef, lastAssistant.info.providerID)
-        : ag.model
-          ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
+      const mdl = base.modelRef
+        ? yield* provider.resolveModelRef(base.modelRef, lastAssistant.info.providerID)
+        : base.model
+          ? yield* provider.getModel(base.model.providerID, base.model.modelID)
           : ((yield* provider.getSmallModel(lastAssistant.info.providerID)) ??
             (yield* provider.getModel(lastAssistant.info.providerID, lastAssistant.info.modelID)))
 
-      const msgs = yield* MessageV2.toModelMessagesEffect([lastUser, lastAssistant], mdl, { stripMedia: true })
-      const text = yield* llm
-        .stream({
-          agent: ag,
-          user: lastUser.info,
-          system: [],
-          small: true,
-          tools: {},
-          model: mdl,
-          sessionID: input.sessionID,
-          retries: 1,
+      // Side-channel call: bypass llm.stream so prediction stays out of the
+      // session trajectory and never triggers session-coupled plugin hooks
+      // (chat.params, chat.headers, system.transform, memory instructions,
+      // x-session-affinity). Still publishes Metrics.ModelCall so the
+      // prediction cost shows up in analytics.
+      const msgs = yield* MessageV2.toModelMessagesEffect(contextMsgs, mdl, { stripMedia: true })
+      const language = yield* provider.getLanguage(mdl)
+      const wrapped = wrapLanguageModel({
+        model: language,
+        middleware: [
+          {
+            specificationVersion: "v3" as const,
+            async transformParams(args) {
+              if (args.type === "generate" || args.type === "stream") {
+                // @ts-expect-error
+                args.params.prompt = ProviderTransform.message(args.params.prompt, mdl, {})
+              }
+              return args.params
+            },
+          },
+        ],
+      })
+      const started = Date.now()
+      const result = yield* Effect.tryPromise(() =>
+        generateText({
+          model: wrapped,
+          system: PREDICT_SYSTEM,
           messages: [...msgs, { role: "user", content: PREDICT_NUDGE }],
+          maxOutputTokens: ProviderTransform.maxOutputTokens(mdl),
+          temperature: mdl.capabilities.temperature ? 0.7 : undefined,
+          providerOptions: ProviderTransform.providerOptions(mdl, ProviderTransform.smallOptions(mdl)),
+          headers: {
+            ...mdl.headers,
+            "User-Agent": `mimocode/${InstallationVersion}`,
+          },
+          maxRetries: 1,
+        }),
+      ).pipe(
+        Effect.catchCause((cause) =>
+          elog.warn("predict failed", { error: Cause.pretty(cause) }).pipe(Effect.as(undefined)),
+        ),
+      )
+      if (!result) return ""
+
+      const u = Session.getUsage({ model: mdl, usage: result.usage, metadata: result.providerMetadata })
+      yield* bus
+        .publish(Metrics.ModelCall, {
+          sessionID: input.sessionID,
+          finish_reason: result.finishReason,
+          latency_ms: Date.now() - started,
+          cached_read_tokens: u.tokens.cache.read,
+          model_id: mdl.id,
+          provider: mdl.providerID,
+          total_tokens_in: u.tokens.input + u.tokens.cache.read + u.tokens.cache.write,
+          total_tokens_out: u.tokens.output + u.tokens.reasoning,
         })
-        .pipe(
-          Stream.filter((e): e is Extract<LLM.Event, { type: "text-delta" }> => e.type === "text-delta"),
-          Stream.map((e) => e.text),
-          Stream.mkString,
-          Effect.orElseSucceed(() => ""),
-        )
-      const cleaned = text
+        .pipe(Effect.ignore)
+
+      const cleaned = result.text
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
         .split("\n")
         .map((line) => line.trim())
@@ -488,26 +571,46 @@ export const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         const composeCfg = (yield* config.get()).compose
         const docsDir = ConfigCompose.resolveDocsDir(ctx.worktree, composeCfg)
-        const composeDocsBlock = [
-          "<compose_docs_dir>",
-          `Save compose skill outputs: specs in \`${path.join(docsDir, "specs")}\`, plans in \`${path.join(docsDir, "plans")}\`, reports in \`${path.join(docsDir, "reports")}\`.`,
-          "</compose_docs_dir>",
-        ].join("\n")
+        const text = PROMPT_COMPOSE
+          .replace("{{compose_skills}}", composeModeBlock)
+          .replace("{{compose_docs_dir}}", `Save compose skill outputs: specs in \`${path.join(docsDir, "specs")}\`, plans in \`${path.join(docsDir, "plans")}\`, reports in \`${path.join(docsDir, "reports")}\`.`)
         composeModeMsg.parts.unshift({
           id: PartID.ascending(),
           messageID: composeModeMsg.info.id,
           sessionID: composeModeMsg.info.sessionID,
           type: "text",
-          text:
-            PROMPT_COMPOSE +
-            (composeModeBlock ? "\n\n" + composeModeBlock : "") +
-            "\n\n" +
-            composeDocsBlock,
+          text,
           synthetic: true,
         })
       }
 
       const assistantMessage = input.messages.findLast((msg) => msg.info.role === "assistant")
+      if (!Flag.MIMOCODE_DISABLE_BUILTIN_SKILLS && !Flag.MIMOCODE_DISABLE_OFFICIAL_SKILLS) {
+        const fileCandidates = userMessage.parts.flatMap((p) => {
+          if (p.type !== "file") return []
+          const filenameFromSource =
+            p.source?.type === "file" && p.source.path ? path.basename(p.source.path) : undefined
+          return [{ mime: p.mime, filename: p.filename ?? filenameFromSource }]
+        })
+        const skills = matchDocumentSkills(fileCandidates)
+        if (skills.length > 0) {
+          const root = builtinSkillRoot()
+          const entries = skills.map((skill) => `- ${skill}: ${path.join(root, skill, "SKILL.md")}`).join("\n")
+          const part = yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: userMessage.info.id,
+            sessionID: userMessage.info.sessionID,
+            type: "text",
+            text: `<system-reminder>
+The user's message attaches office document file(s). The following built-in skill(s) may be relevant for producing, reading, or transforming these files. You are recommended to consult the SKILL.md when it fits the task — prefer using these skills over ad-hoc approaches when applicable:
+${entries}
+</system-reminder>`,
+            synthetic: true,
+          })
+          userMessage.parts.push(part)
+        }
+      }
+
       if (input.agent.name !== "plan" && assistantMessage?.info.agent === "plan") {
         const plan = Session.plan(input.session)
         if (!(yield* fsys.existsSafe(plan))) return input.messages
@@ -649,6 +752,35 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return new Set(actor.tools)
       })
       const whitelist = yield* whitelistFor()
+      // Whether a permission ask must be non-interactive (fail clean, never hang):
+      // true for system-spawned actors (checkpoint-writer/dream/distill) AND any
+      // background actor such as compose workflow subagents (spawned as "general"
+      // + background:true). Scoped to THIS permission decision on purpose — not
+      // folded into the shared isSystemSpawned, which also gates memory
+      // instructions and checkpoint self-triggering for user background actors.
+      // Fall back to the agent-name check if the actor row is missing (race /
+      // unregistered) so a system actor can't slip through as interactive.
+      const askActor = input.agentID
+        ? yield* actorRegistry.get(input.session.id, input.agentID)
+        : undefined
+      // Three-way permission-ask routing (see decideAskRouting): system agent ->
+      // auto-deny; orchestrator peer -> FORWARD for approval; other background ->
+      // auto-deny; normal -> interactive.
+      const askRouting = decideAskRouting({
+        askActor: askActor
+          ? {
+              agent: askActor.agent,
+              background: askActor.background,
+              mode: askActor.mode,
+              parentActorID: askActor.parentActorID,
+            }
+          : undefined,
+        sessionParentID: input.session.parentID,
+        agentName: input.agent.name,
+        orchestratorEnabled: Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR,
+      })
+      const askInteractive = askRouting.interactive
+      const askForward = askRouting.forward
       const rejectionFor = (toolID: string) => ({
         title: "Tool not permitted",
         output: `The "${toolID}" tool is not in this actor's whitelist. Allowed tools: ${
@@ -689,9 +821,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID: input.session.id,
                 tool: { messageID: input.processor.message.id, callID: options.toolCallId },
                 ruleset: Agent.runtimePermission(input.agent, input.session.permission),
-                // System-spawned background agents (checkpoint-writer, dream, distill)
-                // have no human to answer a permission prompt — fail clean, don't hang.
-                interactive: !SYSTEM_SPAWNED_AGENT_TYPES.has(input.agent.name),
+                // System-spawned + non-peer background agents have no human to answer
+                // → fail clean, don't hang. Orchestrator peers FORWARD for approval.
+                interactive: askInteractive,
+                ...(askForward ? { forward: askForward } : {}),
               },
               options.abortSignal,
             )
@@ -1241,9 +1374,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             `,
           ],
         },
-        cmd: { args: ["/c", input.command] },
-        powershell: { args: ["-NoProfile", "-Command", input.command] },
-        pwsh: { args: ["-NoProfile", "-Command", input.command] },
+        cmd: { args: ["/c", `${Shell.CMD_UTF8_PREFIX}${input.command}`] },
+        powershell: {
+          args: ["-NoProfile", "-Command", `${Shell.POWERSHELL_UTF8_PREFIX}${input.command}`],
+        },
+        pwsh: {
+          args: ["-NoProfile", "-Command", `${Shell.POWERSHELL_UTF8_PREFIX}${input.command}`],
+        },
         "": { args: ["-c", input.command] },
       }
 
@@ -1258,7 +1395,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const cmd = ChildProcess.make(sh, args, {
         cwd,
         extendEnv: true,
-        env: { ...shellEnv.env, TERM: "dumb" },
+        env: {
+          ...shellEnv.env,
+          ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
+          TERM: "dumb",
+        },
         stdin: "ignore",
         forceKillAfter: "3 seconds",
       })
@@ -2554,7 +2695,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // the session layer out of the app-runtime module-init cycle
             // (prompt → app-runtime → AppLayer → SessionPrompt). Only loaded when a
             // trigger actually fires. Detached fire-and-forget on the full runtime.
-            if (dreamTrigger || distillTrigger) {
+            const needAppRuntime = dreamTrigger || distillTrigger || Flag.MIMOCODE_EXPERIMENTAL_CRON
+            if (needAppRuntime) {
               const { AppRuntime } = yield* Effect.promise(() => import("@/effect/app-runtime"))
               if (dreamTrigger) {
                 AppRuntime.runPromise(
@@ -2577,6 +2719,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     }),
                   ),
                 ).catch((err) => log.error("auto-distill prompt failed", { error: String(err) }))
+              }
+              // T18-bridge mount: fire CronBridge.start(sessionID, workspaceRoot)
+              // once per new top-level session boot. The bridge itself no-ops when
+              // MIMOCODE_EXPERIMENTAL_CRON is unset; the outer gate just skips the
+              // resolve cost in the common case. Mirrors auto-dream's detached
+              // dynamic-import pattern so prompt.ts stays out of the app-runtime
+              // module-init cycle. Bridge.start is idempotent via its `started`
+              // guard, and its Layer finalizer handles teardown on scope close.
+              if (Flag.MIMOCODE_EXPERIMENTAL_CRON) {
+                const workspaceRoot = (yield* InstanceState.context).worktree
+                const { CronBridge } = yield* Effect.promise(() => import("@/session/cron-bridge"))
+                AppRuntime.runPromise(
+                  CronBridge.use((b) => b.start(sessionID, workspaceRoot)),
+                ).catch((err) => log.error("cron-bridge start failed", { sessionID, error: String(err) }))
               }
             }
           }
@@ -2607,21 +2763,46 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               overflow: compactionPart?.overflow,
               agentID: lastUser.agentID,
             })
+            // cron-sentinel cache is invalidated via a SessionCompaction.Event
+            // .Compacted bus subscription inside cron-bridge — see
+            // `compaction.ts:468` publish + `cron-bridge.ts` subscribe pair.
+            // Covers this user-`/compact` path plus the overflow-boundary
+            // path in compaction.create.
             if (result === "stop") break
             continue
           }
 
-          // Memory flush nudge at high context pressure
+          // Memory flush nudge at high context pressure.
+          //
+          // Purpose: at high context fill, the session may soon checkpoint and
+          // discard old context, so remind the model to externalize durable
+          // learnings to memory BEFORE that happens. This is a *save-your-work*
+          // reminder, NOT a signal to wrap up.
+          //
+          // Two failure modes this guards against (both observed in prod):
+          //   1. Wording that reads as "we're about to reset — wind down" made
+          //      models prematurely end their turn and hand control back to the
+          //      user mid-task. The text below is explicit: persist memory, then
+          //      KEEP GOING; do not end the turn.
+          //   2. Re-injecting the nudge on every user turn while pressure stays
+          //      high turned a one-time heads-up into per-turn nagging. We now
+          //      dedup across the recent conversation window, not just the
+          //      current user message.
           if (lastFinished && lastFinished.summary !== true && model) {
             const cfg = yield* config.get()
             const pressure = pressureLevel({ cfg, tokens: lastFinished.tokens, model })
             if (pressure >= 2) {
-              // Inject nudge as a synthetic text part on the last user message
+              // De-bounce: nudge at most once per high-pressure episode (the
+              // window since the last checkpoint boundary). See
+              // nudgedSinceBoundary for why the boundary — not a fixed message
+              // count — is the right anchor.
+              const NUDGE_MARKER = "Context is filling up"
+              const boundaryID = yield* checkpoint
+                .lastBoundary(sessionID)
+                .pipe(Effect.catch(() => Effect.succeed(undefined)))
+              const alreadyNudged = nudgedSinceBoundary(msgs, boundaryID, NUDGE_MARKER)
               const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
-              if (
-                lastUserMsg &&
-                !lastUserMsg.parts.some((p) => p.type === "text" && p.text?.includes("Context is filling up"))
-              ) {
+              if (lastUserMsg && !alreadyNudged) {
                 lastUserMsg.parts.push({
                   id: PartID.ascending(),
                   messageID: lastUserMsg.info.id,
@@ -2631,8 +2812,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   text: [
                     "<system-reminder>",
                     `Context is filling up (${pressure >= 3 ? ">85%" : ">70%"}).`,
-                    "If you have important learnings or decisions from this session,",
-                    "consider writing them to memory now before context may be reset.",
+                    "If you have important learnings or decisions from this session that are",
+                    "not yet in memory, write them now (they may be summarized on the next",
+                    "checkpoint). This is a save-your-work reminder only.",
+                    "IMPORTANT: After writing to memory, CONTINUE with the current task in the",
+                    "same turn. Do NOT stop, wrap up, or hand control back to the user because",
+                    "of this reminder — only finish when the actual work is done.",
                     "</system-reminder>",
                   ].join("\n"),
                 })
@@ -3098,7 +3283,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             const [skills, env, instructions] = yield* Effect.all([
               sys.skills(agent),
-              Effect.sync(() => sys.environment(model, session.time.created)),
+              sys.environment(model, session.time.created),
               instruction.system().pipe(Effect.orDie),
             ])
             // Surface which instruction files (CLAUDE.md, AGENTS.md, ...) were loaded.
@@ -3851,5 +4036,58 @@ const bashRegex = /!`([^`]+)`/g
 const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
 const placeholderRegex = /\$(\d+)/g
 const quoteTrimRegex = /^["']|["']$/g
+
+/**
+ * Fire seam for scheduled prompts (T18, spec [S5]).
+ *
+ * Funnels a cron/loop fire through the SAME entry point typed user prompts use:
+ * `SessionPrompt.Service.prompt`. The synthetic part carries `synthetic: true`
+ * (mimocode convention for `isMeta`) so transcript-preview surfaces can hide it,
+ * and `metadata.origin = { kind: "cron", taskId, kindOfTask }` so the TUI can
+ * render a clock icon. Sentinel expansion is intentionally NOT done here — T19
+ * will wrap `value` before this call.
+ */
+export type ScheduledPromptOrigin = {
+  kind: "cron"
+  taskId: string
+  kindOfTask: "cron" | "loop"
+  /**
+   * ISO-8601 timestamp of when the scheduler tick fired this task. Set by the
+   * cron bridge in `onFire`; persisted on the synthetic part's metadata so the
+   * TUI and downstream consumers can recover fire time without parsing the
+   * prepended text prefix.
+   */
+  firedAt?: string
+}
+
+export type InjectScheduledPromptInput = {
+  sessionID: SessionID
+  value: string
+  origin: ScheduledPromptOrigin
+  priority?: "later" | "next" | "now"
+  isMeta?: boolean
+}
+
+export const injectScheduledPrompt = (input: InjectScheduledPromptInput) =>
+  Effect.gen(function* () {
+    const sp = yield* Service
+    yield* Effect.asVoid(
+      sp.prompt({
+        sessionID: input.sessionID,
+        source: "hook",
+        parts: [
+          {
+            type: "text",
+            text: input.value,
+            synthetic: input.isMeta ?? true,
+            metadata: {
+              origin: input.origin,
+              priority: input.priority ?? "later",
+            },
+          },
+        ],
+      }),
+    )
+  })
 
 export * as SessionPrompt from "./prompt"

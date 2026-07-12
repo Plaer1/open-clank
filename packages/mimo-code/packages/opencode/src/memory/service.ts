@@ -32,9 +32,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Memory") {}
 
-export const layer: Layer.Layer<Service, never, Config.Service> = Layer.effect(
-  Service,
-  Effect.gen(function* () {
+export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(function* () {
     const config = yield* Config.Service
     const root = path.join(Global.Path.data, "memory")
     const ccBase = path.join(os.homedir(), ".claude", "projects")
@@ -138,22 +136,35 @@ export const layer: Layer.Layer<Service, never, Config.Service> = Layer.effect(
       reconcile,
       search,
     })
-  }),
-)
+  })
 
-export const defaultLayer = Layer.suspend(() => {
-  // Layer.suspend defers execution; we check config at first materialization.
-  // Use Layer.unwrap to pick the layer based on config.
-  return Layer.unwrap(
+export const layer: Layer.Layer<Service, never, Config.Service> = Layer.effect(Service, make)
+
+export const defaultLayer = Layer.suspend(() =>
+  Layer.effect(
+    Service,
     Effect.gen(function* () {
       const config = yield* Config.Service
-      const cfg = yield* config.get()
-      const provider = cfg.memory?.provider
-      if (provider === "frankenmemory") {
-        const mod = yield* Effect.promise(() => import("./frankenmemory"))
-        return mod.frankenmemoryLayer
-      }
-      return layer
+      const native = yield* make
+      // Backend is picked PER CALL, not at layer materialization: Config state
+      // is instance-scoped (AsyncLocalStorage) since upstream v0.1.4+, so a
+      // config.get() while the layer is being built runs outside any instance
+      // context and throws. Method calls always run inside one.
+      let fm: Interface | undefined
+      const backend = Effect.fn("Memory.backend")(function* () {
+        const cfg = yield* config.get()
+        if (cfg.memory?.provider !== "frankenmemory") return native
+        if (!fm) {
+          const mod = yield* Effect.promise(() => import("./frankenmemory"))
+          fm = yield* mod.make
+        }
+        return fm
+      })
+      return Service.of({
+        root: () => backend().pipe(Effect.flatMap((b) => b.root())),
+        reconcile: () => backend().pipe(Effect.flatMap((b) => b.reconcile())),
+        search: (input) => backend().pipe(Effect.flatMap((b) => b.search(input))),
+      })
     }),
-  ).pipe(Layer.provide(Config.defaultLayer))
-})
+  ).pipe(Layer.provide(Config.defaultLayer)),
+)

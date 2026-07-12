@@ -188,6 +188,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
         }
 
+        // No args/config/recent match: prefer the free mimo-auto channel so a
+        // clean install defaults to a usable free model rather than whatever
+        // provider happens to sit first (e.g. paid xiaomi/ultraspeed).
+        const mimo = sync.data.provider.find((p) => p.id === "mimo")
+        if (mimo && "mimo-auto" in mimo.models) {
+          return { providerID: "mimo", modelID: "mimo-auto" }
+        }
+
         const provider = sync.data.provider[0]
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]
@@ -431,6 +439,32 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
     })
 
+    // skip-permissions: when on, permission asks auto-allow at runtime
+    // (instance-wide — subagents inherit). Deny rules and forced-ask
+    // permissions still apply. Same optimistic-update pattern as neverAsk.
+    const skipPermissions = iife(() => {
+      const [enabled, setEnabled] = createSignal(false)
+      return {
+        current: enabled,
+        set(value: boolean) {
+          const previous = enabled()
+          setEnabled(value)
+          void sdk.client.permission.setSkipAll({ enabled: value }).catch(() => {
+            setEnabled(previous)
+            toast.show({
+              variant: "error",
+              message: `Failed to ${value ? "enable" : "disable"} skip-permissions`,
+              duration: 4000,
+            })
+          })
+        },
+        toggle() {
+          this.set(!enabled())
+          return enabled()
+        },
+      }
+    })
+
     // Automatically update model when agent changes
     createEffect(() => {
       const value = agent.current()
@@ -455,6 +489,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       agent,
       mcp,
       neverAsk,
+      skipPermissions,
     }
     return result
   },

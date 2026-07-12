@@ -81,5 +81,5 @@ export function composeSkillsBlock(): string {
   }
 
   if (entries.length === 0) return ""
-  return ["<compose_skills>", ...entries, "</compose_skills>"].join("\n")
+  return ["<available_skills>", ...entries, "</available_skills>"].join("\n")
 }

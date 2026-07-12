@@ -79,6 +79,27 @@ describe("Permission.ask abortSignal (Spec ③ P3)", () => {
   )
 
   it.live(
+    "human reject resolves a blocked ask promptly (raceFirst regression: reject must not hang)",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const perm = yield* Permission.Service
+        const ctl = new AbortController()
+        // Ask blocks awaiting a human. With Effect.race (first-SUCCESS), a
+        // "reject" reply fails the Deferred and the race then waits forever
+        // on the never-succeeding abort arm — the tool call hangs and the
+        // turn never ends. raceFirst propagates the failure immediately.
+        const fiber = yield* perm.ask(buildRequest(), ctl.signal).pipe(Effect.forkScoped)
+        yield* Effect.sleep("20 millis")
+        const pending = yield* perm.list()
+        expect(pending.length).toBe(1)
+        yield* perm.reply({ requestID: pending[0].id, reply: "reject" })
+        const result = yield* Fiber.join(fiber).pipe(Effect.exit)
+        expect(result._tag).toBe("Failure")
+      }),
+    ),
+  )
+
+  it.live(
     "abortSignal listener is removed after race resolves (C1 regression: no leak)",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

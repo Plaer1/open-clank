@@ -15,6 +15,14 @@ let activeCategory = 'all';
 let sortOrder = 'newest';
 let selectMode = false;
 let selectedIds = new Set();
+let memoryLoadError = null;
+let memoryProviderStatus = '';
+let inspectedMemories = [];
+
+function _renderMemoryProviderStatus() {
+  const el = document.getElementById('memory-provider-status');
+  if (el) el.textContent = memoryProviderStatus ? `· ${memoryProviderStatus}` : '';
+}
 
 
 const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task'];
@@ -375,6 +383,9 @@ export async function loadMemories() {
 
     if (!response.ok) {
       console.error('Memory fetch failed with status:', response.status);
+      memoryLoadError = `Memory provider unavailable (HTTP ${response.status})`;
+      memoryProviderStatus = 'unavailable';
+      _renderMemoryProviderStatus();
       memories = [];
       buildCategoryChips();
       renderMemoryList();
@@ -384,6 +395,9 @@ export async function loadMemories() {
     }
 
     const data = await response.json();
+    memoryLoadError = null;
+    memoryProviderStatus = data?.provider || 'native';
+    _renderMemoryProviderStatus();
 
     if (data && data.memory) {
       memories = data.memory;
@@ -398,6 +412,9 @@ export async function loadMemories() {
     updateMemoryCount();
   } catch (error) {
     console.error('Failed to load memories:', error);
+    memoryLoadError = 'Memory provider unavailable';
+    memoryProviderStatus = 'unavailable';
+    _renderMemoryProviderStatus();
     memories = [];
     buildCategoryChips();
     renderMemoryList();
@@ -405,6 +422,121 @@ export async function loadMemories() {
   }
   // Always wire toggles, even if memory API failed
   syncToggles();
+}
+
+function _inspectText(item, tier) {
+  if (tier === 'candidate') return item.content || '';
+  if (tier === 'quarantine') return item.content || '';
+  return item.content || item.text || '';
+}
+
+function _inspectMeta(item, tier) {
+  const meta = item.metadata || item.payload || {};
+  const provenance = meta.provenance || {};
+  const parts = [
+    tier === 'raw' ? meta.role : item.status,
+    item.kind || item.tier,
+    item.owner || 'ownerless legacy',
+    item.workspace_id || 'global',
+    item.source || provenance.source,
+    item.reason || meta.admission_reason,
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+async function reviewInspectedCandidate(item, accept, button) {
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}/review`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accept,
+        reason: accept ? 'approved_by_user' : 'rejected_by_user',
+        owner: item.owner,
+        workspace_id: item.workspace_id,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'Review failed');
+    showToast(accept ? 'Candidate promoted to Curated' : 'Candidate rejected');
+    await Promise.all([loadMemoryInspect(), loadMemories()]);
+  } catch (error) {
+    showError(error.message || 'Review failed');
+    button.disabled = false;
+  }
+}
+
+function renderMemoryInspect() {
+  const list = document.getElementById('memory-inspect-list');
+  const tier = document.getElementById('memory-inspect-tier')?.value || 'raw';
+  if (!list) return;
+  list.replaceChildren();
+  if (!inspectedMemories.length) {
+    const empty = document.createElement('div');
+    empty.className = 'memory-empty';
+    empty.textContent = `No ${tier === 'raw' ? 'raw trajectory' : tier} records.`;
+    list.append(empty);
+    return;
+  }
+  inspectedMemories.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'memory-item';
+    const text = document.createElement('div');
+    text.className = 'memory-item-text';
+    text.textContent = _inspectText(item, tier);
+    const meta = document.createElement('div');
+    meta.className = 'admin-toggle-sub';
+    meta.style.marginTop = '6px';
+    meta.textContent = _inspectMeta(item, tier);
+    card.append(text, meta);
+    if (tier === 'candidate' && item.status === 'pending') {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+      const accept = document.createElement('button');
+      accept.type = 'button';
+      accept.className = 'memory-toolbar-btn';
+      accept.textContent = 'Promote';
+      accept.addEventListener('click', () => reviewInspectedCandidate(item, true, accept));
+      const reject = document.createElement('button');
+      reject.type = 'button';
+      reject.className = 'memory-toolbar-btn danger';
+      reject.textContent = 'Reject';
+      reject.addEventListener('click', () => reviewInspectedCandidate(item, false, reject));
+      actions.append(accept, reject);
+      card.append(actions);
+    }
+    list.append(card);
+  });
+}
+
+export async function loadMemoryInspect() {
+  const tier = document.getElementById('memory-inspect-tier')?.value || 'raw';
+  const statusSelect = document.getElementById('memory-inspect-status');
+  if (statusSelect) statusSelect.hidden = tier !== 'candidate';
+  const status = tier === 'candidate' ? (statusSelect?.value || '') : '';
+  const list = document.getElementById('memory-inspect-list');
+  if (list) list.textContent = 'Loading…';
+  try {
+    const [tierResponse, qualityResponse] = await Promise.all([
+      fetch(`/api/memory/inspect?tier=${encodeURIComponent(tier)}${status ? `&status=${encodeURIComponent(status)}` : ''}`, { credentials: 'same-origin' }),
+      fetch('/api/memory/quality', { credentials: 'same-origin' }),
+    ]);
+    if (!tierResponse.ok || !qualityResponse.ok) throw new Error('Memory inspection unavailable');
+    const tierData = await tierResponse.json();
+    const quality = await qualityResponse.json();
+    inspectedMemories = Array.isArray(tierData.items) ? tierData.items : [];
+    const graph = quality.graph || {};
+    const qualityEl = document.getElementById('memory-quality');
+    if (qualityEl) {
+      qualityEl.textContent = `Raw ${quality.raw || 0} · Candidates ${quality.candidates || 0} · Curated ${quality.curated || 0} · Quarantined ${quality.quarantined || 0} · Index ${graph.integrity_ok ? 'healthy' : 'needs rebuild'} (${graph.cues || 0}/${graph.cue_fts || 0}, ${graph.orphan_cues || 0} orphans)`;
+    }
+    renderMemoryInspect();
+  } catch (error) {
+    inspectedMemories = [];
+    if (list) list.textContent = error.message || 'Memory inspection unavailable';
+  }
 }
 
 // ---- Bulk select mode ----
@@ -691,15 +823,27 @@ export function renderMemoryList() {
     if (selectMode) exitSelectMode();
     const searchTerm = document.getElementById('memory-search')?.value?.trim() || '';
     const _smiley = '<span style="vertical-align:-3px;margin-left:6px;">' + uiModule.emptyStateIcon('smiley') + '</span>';
-    if (searchTerm || activeCategory !== 'all') {
+    if (memoryLoadError) {
+      memoryList.innerHTML = `<div class="memory-empty" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;">
+        <span>${uiModule.esc(memoryLoadError)}</span>
+        <button type="button" data-memory-retry style="color:var(--accent,var(--red));text-decoration:underline;background:none;border:0;cursor:pointer;">Retry</button>
+      </div>`;
+      memoryList.querySelector('[data-memory-retry]')?.addEventListener('click', () => loadMemories());
+    } else if (searchTerm || activeCategory !== 'all') {
       memoryList.innerHTML = `<div class="memory-empty">No matches.</div>`;
     } else {
+      const frankenmemory = memoryProviderStatus === 'frankenmemory';
       memoryList.innerHTML = `<div class="memory-empty" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;">
-        <span>No memories yet${_smiley}</span>
+        <span>${frankenmemory ? 'No curated memories yet' : 'No memories yet'}${_smiley}</span>
+        ${frankenmemory ? '<span style="opacity:0.7;font-size:11px;display:block;">Frankenmemory keeps raw evidence separate. <a href="#" data-mem-goto-inspect style="color:var(--accent,var(--red));text-decoration:underline;">Review it in Inspect</a>.</span>' : ''}
         <span style="opacity:0.7;font-size:11px;display:block;">
           <a href="#" data-mem-goto-add style="color:var(--accent,var(--red));text-decoration:underline;">Import in Add tab</a>
         </span>
       </div>`;
+      memoryList.querySelector('[data-mem-goto-inspect]')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        document.querySelector('.memory-tab[data-memory-tab="inspect"]')?.click();
+      });
       memoryList.querySelector('[data-mem-goto-add]')?.addEventListener('click', (e) => {
         e.preventDefault();
         document.querySelector('.memory-tab[data-memory-tab="add"]')?.click();
@@ -1461,6 +1605,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (target === 'skills') {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
       }
+      if (target === 'inspect') loadMemoryInspect();
     });
   });
 
@@ -1512,6 +1657,12 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('memory-refresh', () => {
     loadMemories();
   });
+  const inspectTier = document.getElementById('memory-inspect-tier');
+  const inspectStatus = document.getElementById('memory-inspect-status');
+  const inspectRefresh = document.getElementById('memory-inspect-refresh');
+  if (inspectTier) inspectTier.addEventListener('change', loadMemoryInspect);
+  if (inspectStatus) inspectStatus.addEventListener('change', loadMemoryInspect);
+  if (inspectRefresh) inspectRefresh.addEventListener('click', loadMemoryInspect);
 });
 
 const memoryModule = {
@@ -1525,7 +1676,8 @@ const memoryModule = {
   buildCategoryChips,
   tidyMemories,
   importMemories,
-  exportMemories
+  exportMemories,
+  loadMemoryInspect,
 };
 
 export default memoryModule;

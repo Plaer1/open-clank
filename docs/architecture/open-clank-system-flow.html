@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open-Clank System Flow</title>
+  <style>
+    :root {
+      --bg: #282c34;
+      --fg: #9cdef2;
+      --panel: #111111;
+      --border: #355a66;
+      --primary: #e06c75;
+      --green: #50fa7b;
+      --blue: #61afef;
+      --purple: #c678dd;
+      --gold: #e5c07b;
+      --orange: #d19a66;
+      --muted: color-mix(in srgb, var(--fg) 58%, transparent);
+      --line: color-mix(in srgb, var(--border) 70%, var(--fg));
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    body {
+      padding: 18px;
+    }
+
+    .page {
+      max-width: 1680px;
+      margin: 0 auto;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: end;
+      margin-bottom: 14px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 600;
+      color: var(--fg);
+    }
+
+    .subtitle {
+      max-width: 980px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .source-pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--fg);
+      background: var(--panel);
+      padding: 7px 10px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .source-pill b {
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    .frame {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--fg) 4%, var(--panel));
+    }
+
+    .key {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: var(--fg);
+      font-size: 11px;
+      background: var(--panel);
+    }
+
+    .swatch {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--fg) 28%, transparent);
+      background: var(--primary);
+    }
+
+    .flow-wrap {
+      padding: 0;
+      overflow: auto;
+    }
+
+    svg {
+      display: block;
+      width: 1560px;
+      height: 990px;
+      background: var(--bg);
+    }
+
+    .lane {
+      fill: color-mix(in srgb, var(--fg) 3%, var(--bg));
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 8;
+    }
+
+    .lane-title {
+      fill: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .box {
+      fill: var(--panel);
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 8;
+    }
+
+    .box-soft {
+      fill: color-mix(in srgb, var(--fg) 5%, var(--panel));
+    }
+
+    .box-hot {
+      stroke: var(--primary);
+    }
+
+    .box-blue {
+      stroke: var(--blue);
+    }
+
+    .box-green {
+      stroke: var(--green);
+    }
+
+    .box-purple {
+      stroke: var(--purple);
+    }
+
+    .box-gold {
+      stroke: var(--gold);
+    }
+
+    .box-dashed {
+      stroke-dasharray: 6 5;
+    }
+
+    .title {
+      fill: var(--fg);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .label {
+      fill: var(--fg);
+      font-size: 11px;
+      font-weight: 400;
+    }
+
+    .small {
+      fill: var(--muted);
+      font-size: 10px;
+      font-weight: 400;
+    }
+
+    .tiny {
+      fill: color-mix(in srgb, var(--fg) 45%, transparent);
+      font-size: 9px;
+      font-weight: 400;
+    }
+
+    .tag {
+      fill: var(--bg);
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 999;
+    }
+
+    .tag-text {
+      fill: var(--fg);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .arrow {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 1.4;
+      marker-end: url(#arrow);
+    }
+
+    .arrow-hot {
+      stroke: var(--primary);
+    }
+
+    .arrow-blue {
+      stroke: var(--blue);
+    }
+
+    .arrow-green {
+      stroke: var(--green);
+    }
+
+    .arrow-purple {
+      stroke: var(--purple);
+    }
+
+    .arrow-gold {
+      stroke: var(--gold);
+    }
+
+    .arrow-dashed {
+      stroke-dasharray: 6 5;
+    }
+
+    .note-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .note {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px 12px;
+      min-height: 128px;
+    }
+
+    .note h2 {
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 7px;
+    }
+
+    .note ul {
+      margin: 0;
+      padding-left: 16px;
+      color: var(--fg);
+      font-size: 11px;
+    }
+
+    .note li {
+      margin: 4px 0;
+    }
+
+    code {
+      color: var(--gold);
+      font-family: inherit;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        padding: 10px;
+      }
+
+      .topbar {
+        grid-template-columns: 1fr;
+      }
+
+      .source-pill {
+        width: max-content;
+      }
+
+      .note-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <h1>Open-Clank: Odysseus, MiMo Code, Frankenmemory, and the custom glue</h1>
+        <p class="subtitle">
+          Current architecture map of the hybrid stack: Odysseus remains the app shell, data plane, UI, auth, and owner-facing product. MiMo Code is the child agent brain. Open-Clank glue binds them through ACP, shared memory, permission UX, and repo governance.
+        </p>
+      </div>
+      <div class="source-pill"><b>Theme:</b> Downloads / odysseus-themes / dark / DESIGN.md</div>
+    </header>
+
+    <section class="frame" aria-label="Open-Clank system flowchart">
+      <div class="legend">
+        <span class="key"><span class="swatch" style="background:var(--primary)"></span> Odysseus app path</span>
+        <span class="key"><span class="swatch" style="background:var(--blue)"></span> ACP / streaming</span>
+        <span class="key"><span class="swatch" style="background:var(--green)"></span> memory / graph data</span>
+        <span class="key"><span class="swatch" style="background:var(--purple)"></span> permissions / human gate</span>
+        <span class="key"><span class="swatch" style="background:var(--gold)"></span> henxels / governance</span>
+        <span class="key"><span class="swatch" style="background:transparent"></span> dashed = planned or optional</span>
+      </div>
+
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1560 990" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Detailed flowchart showing Odysseus, MiMo Code, Frankenmemory, and Open-Clank glue</title>
+          <desc id="diagram-desc">Browser requests enter Odysseus, agent turns route through the Open-Clank ACP bridge to MiMo Code, memory converges on Frankenmemory, and permission or governance loops feed back through Odysseus.</desc>
+
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <!-- lanes -->
+          <rect class="lane" x="28" y="44" width="284" height="862"></rect>
+          <rect class="lane" x="334" y="44" width="384" height="862"></rect>
+          <rect class="lane" x="742" y="44" width="366" height="862"></rect>
+          <rect class="lane" x="1132" y="44" width="400" height="862"></rect>
+
+          <text class="lane-title" x="48" y="72">Browser and Odysseus UI</text>
+          <text class="lane-title" x="354" y="72">Odysseus server and custom glue</text>
+          <text class="lane-title" x="762" y="72">MiMo Code child runtime</text>
+          <text class="lane-title" x="1152" y="72">Shared systems and persistence</text>
+
+          <!-- Browser lane -->
+          <rect class="box box-hot" x="54" y="106" width="232" height="108"></rect>
+          <text class="title" x="70" y="132">Browser chat shell</text>
+          <text class="label" x="70" y="154">static/js/chat.js</text>
+          <text class="label" x="70" y="172">static/js/chatRenderer.js</text>
+          <text class="small" x="70" y="194">Form POST + EventSource-style SSE</text>
+
+          <rect class="box box-purple" x="54" y="260" width="232" height="104"></rect>
+          <text class="title" x="70" y="286">Inline permission card</text>
+          <text class="label" x="70" y="308">Allow once / Always allow / Reject</text>
+          <text class="small" x="70" y="330">Renders from permission_request SSE</text>
+          <text class="small" x="70" y="348">Answers POST back to Odysseus</text>
+
+          <rect class="box box-gold" x="54" y="416" width="232" height="118"></rect>
+          <text class="title" x="70" y="442">Theme henxel source</text>
+          <text class="label" x="70" y="464">Downloads zip DESIGN.md</text>
+          <text class="small" x="70" y="486">Flat panels, 1px hairlines</text>
+          <text class="small" x="70" y="504">Fira Code, tight spacing</text>
+          <text class="small" x="70" y="522">Coral only for important focus</text>
+
+          <!-- Odysseus lane -->
+          <rect class="box box-hot" x="362" y="96" width="316" height="116"></rect>
+          <text class="title" x="382" y="122">FastAPI route surface</text>
+          <text class="label" x="382" y="144">routes/chat_routes.py</text>
+          <text class="label" x="382" y="162">POST /api/chat_stream</text>
+          <text class="small" x="382" y="184">Session owner gate, model gate, stream save</text>
+          <text class="small" x="382" y="202">Routes agent mode to MiMo when OPENTHESIUS_DRIVE=mimo</text>
+
+          <rect class="box box-hot" x="362" y="250" width="316" height="112"></rect>
+          <text class="title" x="382" y="276">Odysseus app core</text>
+          <text class="label" x="382" y="298">app.py startup / shutdown</text>
+          <text class="label" x="382" y="316">SessionManager, app.db, auth, tasks</text>
+          <text class="small" x="382" y="338">Owns product data and long-running UI streams</text>
+
+          <rect class="box box-blue" x="362" y="402" width="316" height="134"></rect>
+          <text class="title" x="382" y="428">MimoSupervisor</text>
+          <text class="label" x="382" y="450">src/openclank/mimo_supervisor.py</text>
+          <text class="small" x="382" y="472">Starts bin/mimo acp as child process</text>
+          <text class="small" x="382" y="490">Injects MIMOCODE_CONFIG_CONTENT</text>
+          <text class="small" x="382" y="508">Passes MIMOCODE_HOME, FM_DB_PATH, safe dirs</text>
+          <text class="small" x="382" y="526">Creates permission handler + ACPBridge</text>
+
+          <rect class="box box-blue" x="362" y="578" width="316" height="136"></rect>
+          <text class="title" x="382" y="604">ACPBridge + ACPClient</text>
+          <text class="label" x="382" y="626">src/openclank/acp_bridge.py</text>
+          <text class="small" x="382" y="648">Maps Odysseus session to MiMo session id</text>
+          <text class="small" x="382" y="666">Pre-turn recall injects GT context</text>
+          <text class="small" x="382" y="684">Converts MiMo session/update to Odysseus SSE</text>
+          <text class="small" x="382" y="702">Provides lifetools + frankenmemory MCP descriptors</text>
+
+          <rect class="box box-purple" x="362" y="754" width="316" height="116"></rect>
+          <text class="title" x="382" y="780">PermissionHandler + GrantStore</text>
+          <text class="label" x="382" y="802">src/openclank/permission_grants.py</text>
+          <text class="small" x="382" y="824">safe dirs -> durable grants -> UI prompt</text>
+          <text class="small" x="382" y="842">Always allow persists in Odysseus app.db</text>
+          <text class="small" x="382" y="860">Prompt waits until human answers</text>
+
+          <!-- MiMo lane -->
+          <rect class="box box-blue" x="770" y="96" width="304" height="116"></rect>
+          <text class="title" x="790" y="122">MiMo Code ACP child</text>
+          <text class="label" x="790" y="144">packages/mimo-code / bin/mimo acp</text>
+          <text class="small" x="790" y="166">JSON-RPC over stdin/stdout</text>
+          <text class="small" x="790" y="184">Full MiMo runtime, provider registry, tools</text>
+          <text class="small" x="790" y="202">Currently inner git branch: updated</text>
+
+          <rect class="box box-blue" x="770" y="250" width="304" height="112"></rect>
+          <text class="title" x="790" y="276">Agent turn engine</text>
+          <text class="label" x="790" y="298">session/prompt.ts, agent/agent.ts</text>
+          <text class="small" x="790" y="320">Model calls, tool loop, session/update events</text>
+          <text class="small" x="790" y="338">Model selected by bridge from Odysseus session</text>
+
+          <rect class="box box-green" x="770" y="402" width="304" height="134"></rect>
+          <text class="title" x="790" y="428">MiMo memory capture</text>
+          <text class="label" x="790" y="450">memory/capture.ts</text>
+          <text class="label" x="790" y="468">memory/compaction-capture.ts</text>
+          <text class="small" x="790" y="490">Subscribes to PartUpdated per instance</text>
+          <text class="small" x="790" y="508">Captures user + assistant sides with roles</text>
+          <text class="small" x="790" y="526">Skips compaction double-capture path</text>
+
+          <rect class="box box-green" x="770" y="578" width="304" height="136"></rect>
+          <text class="title" x="790" y="604">Graph extraction side call</text>
+          <text class="label" x="790" y="626">memory/graph-extract.ts</text>
+          <text class="small" x="790" y="648">generateObject extracts entities, edges, cues</text>
+          <text class="small" x="790" y="666">Cheapest non-thinking configured model wins</text>
+          <text class="small" x="790" y="684">Throttle: every_n_turns + min_interval_seconds</text>
+          <text class="small" x="790" y="702">Failure logs, raw capture still survives</text>
+
+          <rect class="box box-purple" x="770" y="754" width="304" height="116"></rect>
+          <text class="title" x="790" y="780">MiMo permission asks</text>
+          <text class="label" x="790" y="802">session/request_permission</text>
+          <text class="small" x="790" y="824">File access, bash, and all MiMo permission types</text>
+          <text class="small" x="790" y="842">MiMo pauses until selected option returns</text>
+          <text class="small" x="790" y="860">Own reset-prone memory replaced by Odysseus grants</text>
+
+          <!-- Shared lane -->
+          <rect class="box box-green" x="1160" y="96" width="336" height="144"></rect>
+          <text class="title" x="1180" y="122">Frankenmemory MCP engine</text>
+          <text class="label" x="1180" y="144">mcp_servers/frankenmemory/target/release/fm-mcp</text>
+          <text class="small" x="1180" y="166">Rust MCP over stdio</text>
+          <text class="small" x="1180" y="184">capture / recall / search / groom</text>
+          <text class="small" x="1180" y="202">graph_upsert / graph_walk / code_index</text>
+          <text class="small" x="1180" y="220">Auto-built at app startup if needed</text>
+
+          <rect class="box box-green" x="1160" y="278" width="336" height="136"></rect>
+          <text class="title" x="1180" y="304">data/frankenmemory.db</text>
+          <text class="label" x="1180" y="326">SQLite + WAL + FTS5 + vectors</text>
+          <text class="small" x="1180" y="348">raw, curated, facts</text>
+          <text class="small" x="1180" y="366">graph_nodes, graph_edges, graph_cues</text>
+          <text class="small" x="1180" y="384">code_files + code graph nodes</text>
+          <text class="small" x="1180" y="402">Converged through FM_DB_PATH</text>
+
+          <rect class="box box-green" x="1160" y="452" width="336" height="128"></rect>
+          <text class="title" x="1180" y="478">Odysseus FrankenmemoryProvider</text>
+          <text class="label" x="1180" y="500">src/frankenmemory_provider.py</text>
+          <text class="small" x="1180" y="522">Owner-task actor owns MCP stdio session</text>
+          <text class="small" x="1180" y="540">Prevents cross-task cancel-scope transport bug</text>
+          <text class="small" x="1180" y="558">Feeds pre-turn recall back into ACPBridge</text>
+
+          <rect class="box box-hot" x="1160" y="618" width="336" height="128"></rect>
+          <text class="title" x="1180" y="644">lifetools MCP bridge</text>
+          <text class="label" x="1180" y="666">src/openclank/lifetools_server.py</text>
+          <text class="small" x="1180" y="688">Exposes Odysseus product tools to MiMo</text>
+          <text class="small" x="1180" y="706">Owner, session, and workspace env ride descriptor</text>
+          <text class="small" x="1180" y="724">Documents, notes, calendar, mail, local app tools</text>
+
+          <rect class="box box-gold" x="1160" y="782" width="336" height="88"></rect>
+          <text class="title" x="1180" y="808">Repo governance</text>
+          <text class="label" x="1180" y="830">henxels.yaml + AGENTS.md digest</text>
+          <text class="small" x="1180" y="852">Plans in .futures, notes in robonotes, no secrets, no Claude attribution</text>
+
+          <rect class="box box-dashed box-green" x="1160" y="894" width="336" height="58"></rect>
+          <text class="title" x="1180" y="918">C2 still pending</text>
+          <text class="small" x="1180" y="940">code_index stale action + FM_GROOM_INTERVAL_HOURS auto-groom</text>
+
+          <!-- tags -->
+          <rect class="tag" x="1202" y="30" width="98" height="22"></rect>
+          <text class="tag-text" x="1218" y="45">one DB</text>
+          <rect class="tag" x="1310" y="30" width="136" height="22"></rect>
+          <text class="tag-text" x="1325" y="45">one agent brain</text>
+
+          <!-- main request flow -->
+          <path class="arrow arrow-hot" d="M286 160 C318 160, 330 154, 362 154"></path>
+          <text class="tiny" x="305" y="145">POST /api/chat_stream</text>
+
+          <path class="arrow arrow-hot" d="M520 212 L520 250"></path>
+          <text class="tiny" x="530" y="235">server context</text>
+
+          <path class="arrow arrow-blue" d="M678 462 C720 462, 728 154, 770 154"></path>
+          <text class="tiny" x="690" y="140">spawn + ACP stdio</text>
+
+          <path class="arrow arrow-blue" d="M922 212 L922 250"></path>
+          <text class="tiny" x="934" y="235">prompt</text>
+
+          <path class="arrow arrow-blue" d="M770 306 C724 306, 718 642, 678 642"></path>
+          <text class="tiny" x="694" y="610">session/update</text>
+
+          <path class="arrow arrow-blue" d="M362 642 C322 642, 302 178, 286 178"></path>
+          <text class="tiny" x="302" y="410">SSE chunks</text>
+
+          <!-- memory flows -->
+          <path class="arrow arrow-green" d="M1074 470 C1118 470, 1118 168, 1160 168"></path>
+          <text class="tiny" x="1096" y="154">capture role=user/assistant</text>
+
+          <path class="arrow arrow-green" d="M1074 646 C1118 646, 1118 196, 1160 196"></path>
+          <text class="tiny" x="1096" y="630">graph_upsert</text>
+
+          <path class="arrow arrow-green" d="M1328 240 L1328 278"></path>
+          <text class="tiny" x="1340" y="263">store</text>
+
+          <path class="arrow arrow-green" d="M1160 516 C1064 516, 782 656, 678 656"></path>
+          <text class="tiny" x="930" y="548">pre-turn recall hits</text>
+
+          <path class="arrow arrow-green" d="M1160 486 C1088 486, 1052 122, 1074 122"></path>
+          <text class="tiny" x="1085" y="111">MCP recall/search</text>
+
+          <path class="arrow arrow-green" d="M1226 452 C1128 420, 1062 412, 1074 402"></path>
+          <text class="tiny" x="1095" y="423">shared FM_DB_PATH</text>
+
+          <!-- tools and permission -->
+          <path class="arrow arrow-hot" d="M1074 302 C1116 302, 1118 682, 1160 682"></path>
+          <text class="tiny" x="1094" y="492">lifetools MCP calls</text>
+
+          <path class="arrow arrow-purple" d="M770 812 C724 812, 724 812, 678 812"></path>
+          <text class="tiny" x="694" y="802">request_permission</text>
+
+          <path class="arrow arrow-purple" d="M362 812 C326 812, 306 312, 286 312"></path>
+          <text class="tiny" x="304" y="572">permission_request SSE</text>
+
+          <path class="arrow arrow-purple" d="M286 330 C322 330, 332 824, 362 824"></path>
+          <text class="tiny" x="304" y="845">POST /api/session/{sid}/permission</text>
+
+          <path class="arrow arrow-purple" d="M678 842 C724 842, 724 842, 770 842"></path>
+          <text class="tiny" x="704" y="862">optionId returns</text>
+
+          <path class="arrow arrow-purple" d="M678 802 C900 772, 1036 314, 1160 330"></path>
+          <text class="tiny" x="890" y="767">always grant persists</text>
+
+          <!-- governance and theme -->
+          <path class="arrow arrow-gold arrow-dashed" d="M286 474 C620 474, 840 804, 1160 826"></path>
+          <text class="tiny" x="520" y="500">visual + repo rules guide artifacts</text>
+
+          <path class="arrow arrow-gold arrow-dashed" d="M1328 782 L1328 746"></path>
+          <text class="tiny" x="1340" y="770">checks gate commits</text>
+
+          <!-- config/env control hints -->
+          <rect class="tag" x="586" y="386" width="92" height="22"></rect>
+          <text class="tag-text" x="599" y="401">env overlay</text>
+          <rect class="tag" x="936" y="386" width="138" height="22"></rect>
+          <text class="tag-text" x="950" y="401">memory.provider</text>
+          <path class="arrow arrow-gold" d="M678 424 C720 424, 728 418, 770 418"></path>
+
+          <!-- labels at bottom -->
+          <text class="small" x="54" y="936">Odysseus owns UX and persistence. MiMo owns agent execution. Frankenmemory owns cross-process memory. Open-Clank glue owns the fit.</text>
+          <text class="tiny" x="54" y="958">Generated as a static HTML/SVG architecture artifact. No runtime dependencies; open directly in browser.</text>
+        </svg>
+      </div>
+    </section>
+
+    <section class="note-grid" aria-label="Architecture notes">
+      <article class="note">
+        <h2>Odysseus stays the product shell</h2>
+        <ul>
+          <li>Browser talks to FastAPI routes, not MiMo directly.</li>
+          <li>Odysseus owns sessions, auth, app.db, UI streams, and product tools.</li>
+          <li>Agent mode swaps the native loop for <code>MimoSupervisor.bridge.run_turn()</code>.</li>
+        </ul>
+      </article>
+
+      <article class="note">
+        <h2>MiMo becomes the agent brain</h2>
+        <ul>
+          <li><code>bin/mimo acp</code> runs as a supervised child process.</li>
+          <li>ACP stdio carries prompts, model config, permission callbacks, and session updates.</li>
+          <li>The inner MiMo repo is clean on branch <code>updated</code>; outer repo still needs C3 submodule conversion.</li>
+        </ul>
+      </article>
+
+      <article class="note">
+        <h2>Frankenmemory is the shared memory plane</h2>
+        <ul>
+          <li>Odysseus pre-turn recall and MiMo capture both call <code>fm-mcp</code>.</li>
+          <li><code>FM_DB_PATH</code> converges all spawners on one SQLite DB.</li>
+          <li>Graph extraction, graph walk, groom, and code_index ride the same MCP surface.</li>
+        </ul>
+      </article>
+
+      <article class="note">
+        <h2>Custom glue is the real integration</h2>
+        <ul>
+          <li><code>ACPBridge</code> translates MiMo updates into Odysseus SSE.</li>
+          <li><code>PermissionHandler</code> turns MiMo permission pauses into clickable Odysseus cards.</li>
+          <li><code>lifetools_server.py</code> lets MiMo operate Odysseus-native tools without copying the app.</li>
+        </ul>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

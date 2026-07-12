@@ -319,6 +319,9 @@ def resolve_endpoint(
     if not ep_id:
         return fallback_url, fallback_model, fallback_headers
 
+    if ep_id == "mimo":
+        return "mimo://acp", model or fallback_model, fallback_headers or {}
+
     db = SessionLocal()
     try:
         ep = db.query(ModelEndpoint).filter(
@@ -371,6 +374,9 @@ def resolve_endpoint_by_id(
     """
     if not ep_id:
         return None
+    if ep_id == "mimo":
+        selected = (model or "").strip()
+        return "mimo://acp", selected, {}
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(

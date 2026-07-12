@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open-Clank Core Components</title>
+  <style>
+    :root {
+      --bg: #282c34;
+      --fg: #9cdef2;
+      --panel: #111111;
+      --border: #355a66;
+      --primary: #e06c75;
+      --green: #50fa7b;
+      --blue: #61afef;
+      --purple: #c678dd;
+      --gold: #e5c07b;
+      --muted: color-mix(in srgb, var(--fg) 58%, transparent);
+      --soft: color-mix(in srgb, var(--fg) 5%, var(--panel));
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    body { padding: 18px; }
+
+    .page {
+      max-width: 1420px;
+      margin: 0 auto;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    h1,
+    p { margin: 0; }
+
+    h1 {
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 600;
+    }
+
+    .subtitle {
+      margin-top: 6px;
+      max-width: 920px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      padding: 7px 10px;
+      color: var(--fg);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .pill b { color: var(--primary); }
+
+    .frame {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--fg) 4%, var(--panel));
+    }
+
+    .key {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      font-size: 11px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--primary);
+      border: 1px solid color-mix(in srgb, var(--fg) 28%, transparent);
+    }
+
+    .diagram-scroll { overflow: auto; }
+
+    svg {
+      display: block;
+      width: 1380px;
+      height: 850px;
+      background: var(--bg);
+    }
+
+    .zone {
+      fill: color-mix(in srgb, var(--fg) 3%, var(--bg));
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 8;
+    }
+
+    .zone-title {
+      fill: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .box {
+      fill: var(--panel);
+      stroke: var(--border);
+      stroke-width: 1;
+      rx: 8;
+    }
+
+    .box-soft { fill: var(--soft); }
+    .ody { stroke: var(--primary); }
+    .mimo { stroke: var(--blue); }
+    .mem { stroke: var(--green); }
+    .gate { stroke: var(--purple); }
+    .tool { stroke: var(--gold); }
+
+    .title {
+      fill: var(--fg);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .label {
+      fill: var(--fg);
+      font-size: 11px;
+      font-weight: 400;
+    }
+
+    .small {
+      fill: var(--muted);
+      font-size: 10px;
+      font-weight: 400;
+    }
+
+    .micro {
+      fill: color-mix(in srgb, var(--fg) 46%, transparent);
+      font-size: 9px;
+      font-weight: 400;
+    }
+
+    .arrow {
+      fill: none;
+      stroke: color-mix(in srgb, var(--border) 70%, var(--fg));
+      stroke-width: 1.4;
+      marker-end: url(#arrow);
+    }
+
+    .arrow-ody { stroke: var(--primary); }
+    .arrow-mimo { stroke: var(--blue); }
+    .arrow-mem { stroke: var(--green); }
+    .arrow-gate { stroke: var(--purple); }
+    .arrow-tool { stroke: var(--gold); }
+
+    .caption {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .card {
+      min-height: 120px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px 12px;
+    }
+
+    .card h2 {
+      margin: 0 0 7px;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .card p {
+      color: var(--fg);
+      font-size: 11px;
+    }
+
+    code {
+      color: var(--gold);
+      font-family: inherit;
+    }
+
+    @media (max-width: 900px) {
+      body { padding: 10px; }
+      .top { display: block; }
+      .pill { display: inline-block; margin-top: 10px; }
+      .caption { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="top">
+      <div>
+        <h1>Open-Clank core components</h1>
+        <p class="subtitle">
+          Simplified ownership map: which major component exists, what it owns, and how the core request, tool, memory, and permission paths connect.
+        </p>
+      </div>
+      <div class="pill"><b>Theme:</b> Odysseus Dark</div>
+    </header>
+
+    <section class="frame" aria-label="Open-Clank core component map">
+      <div class="legend">
+        <span class="key"><span class="dot" style="background:var(--primary)"></span> Odysseus app</span>
+        <span class="key"><span class="dot" style="background:var(--blue)"></span> MiMo agent runtime</span>
+        <span class="key"><span class="dot" style="background:var(--green)"></span> memory server</span>
+        <span class="key"><span class="dot" style="background:var(--purple)"></span> permission gate</span>
+        <span class="key"><span class="dot" style="background:var(--gold)"></span> tools / model providers</span>
+      </div>
+
+      <div class="diagram-scroll">
+        <svg viewBox="0 0 1380 850" role="img" aria-labelledby="diagram-title diagram-desc">
+          <title id="diagram-title">Open-Clank core component flow</title>
+          <desc id="diagram-desc">A simplified component map showing Browser UI, Odysseus, Open-Clank glue, MiMo Code, memory server, tools, permissions, and model providers.</desc>
+
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <rect class="zone" x="34" y="52" width="250" height="720"></rect>
+          <rect class="zone" x="320" y="52" width="300" height="720"></rect>
+          <rect class="zone" x="658" y="52" width="300" height="720"></rect>
+          <rect class="zone" x="994" y="52" width="352" height="720"></rect>
+
+          <text class="zone-title" x="56" y="82">User-facing shell</text>
+          <text class="zone-title" x="342" y="82">Odysseus ownership</text>
+          <text class="zone-title" x="680" y="82">MiMo ownership</text>
+          <text class="zone-title" x="1016" y="82">Shared support systems</text>
+
+          <rect class="box ody" x="64" y="126" width="190" height="112"></rect>
+          <text class="title" x="84" y="154">Browser UI</text>
+          <text class="label" x="84" y="178">chat stream view</text>
+          <text class="label" x="84" y="198">permission cards</text>
+          <text class="small" x="84" y="220">human sees one app</text>
+
+          <rect class="box ody" x="356" y="106" width="228" height="128"></rect>
+          <text class="title" x="378" y="134">Odysseus</text>
+          <text class="label" x="378" y="158">FastAPI + app.db</text>
+          <text class="label" x="378" y="178">sessions, auth, settings</text>
+          <text class="label" x="378" y="198">documents, mail, notes</text>
+          <text class="small" x="378" y="220">product shell + persistence</text>
+
+          <rect class="box box-soft" x="356" y="292" width="228" height="156"></rect>
+          <text class="title" x="378" y="320">Open-Clank glue</text>
+          <text class="label" x="378" y="344">MimoSupervisor</text>
+          <text class="label" x="378" y="364">ACPBridge</text>
+          <text class="label" x="378" y="384">PermissionHandler</text>
+          <text class="label" x="378" y="404">lifetools descriptor</text>
+          <text class="small" x="378" y="428">translation layer between app and agent</text>
+
+          <rect class="box mimo" x="696" y="126" width="224" height="138"></rect>
+          <text class="title" x="718" y="154">MiMo Code</text>
+          <text class="label" x="718" y="178">agent runtime</text>
+          <text class="label" x="718" y="198">model + tool loop</text>
+          <text class="label" x="718" y="218">subagents / workflows</text>
+          <text class="small" x="718" y="242">does thinking + action execution</text>
+
+          <rect class="box mem" x="1032" y="106" width="276" height="128"></rect>
+          <text class="title" x="1054" y="134">Memory server</text>
+          <text class="label" x="1054" y="158">Frankenmemory MCP</text>
+          <text class="label" x="1054" y="178">shared memory database</text>
+          <text class="label" x="1054" y="198">recall, capture, graph walk</text>
+          <text class="small" x="1054" y="220">one memory plane for both sides</text>
+
+          <rect class="box tool" x="1032" y="292" width="276" height="116"></rect>
+          <text class="title" x="1054" y="320">Odysseus tools</text>
+          <text class="label" x="1054" y="344">lifetools MCP</text>
+          <text class="label" x="1054" y="364">docs, mail, notes, calendar</text>
+          <text class="small" x="1054" y="388">app features exposed to MiMo</text>
+
+          <rect class="box tool" x="1032" y="468" width="276" height="116"></rect>
+          <text class="title" x="1054" y="496">Model providers</text>
+          <text class="label" x="1054" y="520">DeepSeek / local / configured endpoints</text>
+          <text class="label" x="1054" y="540">main answers + extraction side calls</text>
+          <text class="small" x="1054" y="564">MiMo chooses through its provider registry</text>
+
+          <rect class="box gate" x="696" y="624" width="224" height="104"></rect>
+          <text class="title" x="718" y="652">Permission gate</text>
+          <text class="label" x="718" y="676">safe dirs</text>
+          <text class="label" x="718" y="696">durable grants</text>
+          <text class="small" x="718" y="718">human choice when needed</text>
+
+          <rect class="box mem" x="356" y="540" width="228" height="104"></rect>
+          <text class="title" x="378" y="568">Pre-turn recall</text>
+          <text class="label" x="378" y="592">Odysseus asks memory first</text>
+          <text class="small" x="378" y="614">relevant facts injected into MiMo prompt</text>
+
+          <!-- flow arrows -->
+          <path class="arrow arrow-ody" d="M254 182 C300 182, 312 170, 356 170"></path>
+          <text class="micro" x="282" y="162">chat request</text>
+
+          <path class="arrow arrow-mimo" d="M584 370 C634 370, 646 195, 696 195"></path>
+          <text class="micro" x="626" y="188">ACP prompt</text>
+
+          <path class="arrow arrow-mimo" d="M696 218 C646 218, 632 382, 584 382"></path>
+          <text class="micro" x="606" y="402">stream updates</text>
+
+          <path class="arrow arrow-ody" d="M356 392 C300 392, 286 206, 254 206"></path>
+          <text class="micro" x="284" y="315">SSE response</text>
+
+          <path class="arrow arrow-mem" d="M584 592 C760 592, 864 170, 1032 170"></path>
+          <text class="micro" x="724" y="555">recall</text>
+
+          <path class="arrow arrow-mem" d="M920 190 C968 190, 982 190, 1032 190"></path>
+          <text class="micro" x="948" y="174">capture</text>
+
+          <path class="arrow arrow-mem" d="M920 210 C964 230, 984 222, 1032 206"></path>
+          <text class="micro" x="944" y="238">graph facts</text>
+
+          <path class="arrow arrow-tool" d="M920 212 C972 252, 980 332, 1032 348"></path>
+          <text class="micro" x="948" y="300">tool calls</text>
+
+          <path class="arrow arrow-tool" d="M920 178 C984 200, 986 512, 1032 526"></path>
+          <text class="micro" x="958" y="462">model calls</text>
+
+          <path class="arrow arrow-gate" d="M808 264 L808 624"></path>
+          <text class="micro" x="820" y="446">permission asks</text>
+
+          <path class="arrow arrow-gate" d="M696 680 C620 680, 596 408, 584 408"></path>
+          <text class="micro" x="592" y="666">resolve / persist grants</text>
+
+          <path class="arrow arrow-gate" d="M696 690 C490 760, 246 700, 164 238"></path>
+          <text class="micro" x="278" y="734">human prompt if not auto-approved</text>
+
+          <path class="arrow arrow-mem" d="M470 540 L470 448"></path>
+          <text class="micro" x="482" y="504">inject context</text>
+
+          <!-- core statement -->
+          <rect class="box box-soft" x="64" y="640" width="520" height="88"></rect>
+          <text class="title" x="86" y="668">Mental model</text>
+          <text class="label" x="86" y="694">Odysseus is the body. MiMo is the agent brain. Memory server is the shared memory.</text>
+          <text class="small" x="86" y="716">Open-Clank glue makes them behave like one app instead of three separate systems.</text>
+        </svg>
+      </div>
+    </section>
+
+    <section class="caption" aria-label="Core component notes">
+      <article class="card">
+        <h2>Odysseus</h2>
+        <p>Owns browser UX, auth, sessions, app data, and product tools. User interacts here first.</p>
+      </article>
+      <article class="card">
+        <h2>Open-Clank glue</h2>
+        <p>Owns process supervision, ACP translation, permission routing, and tool descriptors.</p>
+      </article>
+      <article class="card">
+        <h2>MiMo Code</h2>
+        <p>Owns agent execution: prompts, model calls, shell/file tools, subagents, and workflows.</p>
+      </article>
+      <article class="card">
+        <h2>Memory server</h2>
+        <p>Owns shared recall and capture so Odysseus and MiMo remember through one memory plane.</p>
+      </article>
+      <article class="card">
+        <h2>Support surfaces</h2>
+        <p>Model endpoints answer. Lifetools expose Odysseus features. Permission gate keeps risky actions visible.</p>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

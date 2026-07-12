@@ -556,6 +556,116 @@ describe("ActorRegistry", () => {
     })
   })
 
+  describe("servesCheckpoint", () => {
+    test("true for undefined actorID (main runLoop)", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, undefined)),
+        )
+        expect(result).toBe(true)
+      })
+    })
+
+    test("true for 'main' actorID", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, "main")),
+        )
+        expect(result).toBe(true)
+      })
+    })
+
+    test("true for peer (agentID is child.id, mode peer)", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.register({
+              sessionID: session.id,
+              actorID: "child-session-1",
+              mode: "peer",
+              agent: "build",
+              description: "x",
+              contextMode: "none",
+              background: true,
+              lifecycle: "ephemeral",
+            }),
+          ),
+        )
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, "child-session-1")),
+        )
+        expect(result).toBe(true)
+      })
+    })
+
+    test("false for subagent (explorer) — uses per-actor compaction", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.register({
+              sessionID: session.id,
+              actorID: "explorer-1",
+              mode: "subagent",
+              agent: "explorer",
+              description: "x",
+              contextMode: "none",
+              background: false,
+              lifecycle: "ephemeral",
+            }),
+          ),
+        )
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, "explorer-1")),
+        )
+        expect(result).toBe(false)
+      })
+    })
+
+    test("false for checkpoint-writer (system-spawned)", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.register({
+              sessionID: session.id,
+              actorID: "writer-1",
+              mode: "subagent",
+              agent: "checkpoint-writer",
+              description: "x",
+              contextMode: "full",
+              background: true,
+              lifecycle: "ephemeral",
+            }),
+          ),
+        )
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, "writer-1")),
+        )
+        expect(result).toBe(false)
+      })
+    })
+
+    test("true for unregistered actorID (fail open)", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        const result = await rt.runPromise(
+          ActorRegistry.Service.use((svc) => svc.servesCheckpoint(session.id, "ghost-9")),
+        )
+        expect(result).toBe(true)
+      })
+    })
+  })
+
   describe("allocateActorID", () => {
     test("returns sequential <type>-<n>", async () => {
       await using tmp = await tmpdir({ git: true })

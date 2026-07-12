@@ -83,17 +83,36 @@ pub struct HttpEmbeddingClient {
     api_base: String,
     model: String,
     dims: usize,
+    api_key: Option<String>,
     cache: std::sync::Mutex<lru::LruCache<String, Vec<f32>>>,
 }
 
 #[cfg(feature = "http-embed")]
 impl HttpEmbeddingClient {
+    // Works against any OpenAI-compatible /embeddings endpoint. Verified
+    // live against local ollama (qwen3-embedding:8b). Gemini's OpenAI-compat
+    // layer (generativelanguage.googleapis.com/v1beta/openai, model
+    // gemini-embedding-001, bearer key via FM_EMBED_API_KEY) is wired to the
+    // best of the author's ability but UNTESTED — the author had no Gemini
+    // API key at implementation time. Watch for: the "dimensions" body field
+    // may be ignored or rejected by some compat layers.
     pub fn new(api_base: &str, model: &str, dims: usize, cache_size: usize) -> Self {
+        Self::with_api_key(api_base, model, dims, cache_size, None)
+    }
+
+    pub fn with_api_key(
+        api_base: &str,
+        model: &str,
+        dims: usize,
+        cache_size: usize,
+        api_key: Option<String>,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_base: api_base.trim_end_matches('/').to_string(),
             model: model.to_string(),
             dims,
+            api_key,
             cache: std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(cache_size).unwrap(),
             )),
@@ -120,10 +139,11 @@ impl EmbeddingClient for HttpEmbeddingClient {
             "dimensions": self.dims,
         });
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
+        let mut req = self.client.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| EmbedError::Http(e.to_string()))?;

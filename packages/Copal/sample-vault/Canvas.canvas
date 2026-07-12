@@ -1,0 +1,30 @@
+{
+  "nodes": [
+    {
+      "id": "welcome",
+      "x": 0,
+      "y": 0,
+      "width": 260,
+      "height": 100,
+      "type": "file",
+      "file": "Welcome to Copal.md"
+    },
+    {
+      "id": "treehouse",
+      "x": 320,
+      "y": 40,
+      "width": 280,
+      "height": 100,
+      "type": "file",
+      "file": "Treehouse Learning Map.md"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-welcome-treehouse",
+      "fromNode": "welcome",
+      "toNode": "treehouse",
+      "label": "feeds"
+    }
+  ]
+}
