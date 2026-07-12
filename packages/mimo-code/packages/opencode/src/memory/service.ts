@@ -6,6 +6,8 @@ import { Database } from "../storage"
 import { Config } from "../config"
 import { reconcileMemory } from "./reconcile"
 import { buildFtsQuery } from "./fts-query"
+import { resolveProjectId } from "./paths"
+import { memorySessionScope } from "./session-scope"
 
 type SearchRow = {
   path: string
@@ -14,6 +16,9 @@ type SearchRow = {
   type: string
   snippet: string
   score: number
+  source?: string
+  trust?: string
+  backend?: "mimo" | "frankenmemory"
 }
 
 export interface Interface {
@@ -21,13 +26,12 @@ export interface Interface {
   readonly reconcile: () => Effect.Effect<{ indexed: number; pruned: number }>
   readonly search: (input: {
     query: string
+    sessionID?: string
     scope?: string
     scope_id?: string
     type?: string
     limit?: number
-  }) => Effect.Effect<
-    Array<{ path: string; snippet: string; score: number; scope: string; scope_id: string; type: string }>
-  >
+  }) => Effect.Effect<SearchRow[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Memory") {}
@@ -49,6 +53,7 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
 
     const search = Effect.fn("Memory.search")(function* (input: {
       query: string
+      sessionID?: string
       scope?: string
       scope_id?: string
       type?: string
@@ -155,15 +160,67 @@ export const defaultLayer = Layer.suspend(() =>
         const cfg = yield* config.get()
         if (cfg.memory?.provider !== "frankenmemory") return native
         if (!fm) {
-          const mod = yield* Effect.promise(() => import("./frankenmemory"))
+          const mod = yield* Effect.promise(() => import("./frankenmemory")).pipe(Effect.orDie)
           fm = yield* mod.make
         }
         return fm
       })
       return Service.of({
-        root: () => backend().pipe(Effect.flatMap((b) => b.root())),
-        reconcile: () => backend().pipe(Effect.flatMap((b) => b.reconcile())),
-        search: (input) => backend().pipe(Effect.flatMap((b) => b.search(input))),
+        root: () => native.root(),
+        reconcile: () => native.reconcile(),
+        search: (input) =>
+          Effect.gen(function* () {
+            const selected = yield* backend()
+            if (selected === native) return yield* native.search(input)
+
+            const limit = input.limit ?? 10
+            const scope = input.sessionID ? memorySessionScope(input.sessionID) : undefined
+            const nativeQueries: Parameters<Interface["search"]>[0][] = input.scope
+              ? [{ ...input, limit }]
+              : scope
+                ? [
+                    { ...input, scope: "global", scope_id: undefined, limit },
+                    {
+                      ...input,
+                      scope: "projects",
+                      scope_id: resolveProjectId(scope.workspacePath),
+                      limit,
+                    },
+                    { ...input, scope: "sessions", scope_id: scope.sessionId, limit },
+                  ]
+                : []
+            const nativeRows = yield* Effect.all(
+              nativeQueries.map((query) => native.search(query)),
+              { concurrency: 3 },
+            ).pipe(Effect.map((pages) => pages.flat()))
+            const fmRows = yield* selected.search(input).pipe(
+              Effect.catchCause(() => Effect.succeed([] as SearchRow[])),
+            )
+
+            const normalize = (rows: SearchRow[], backend: SearchRow["backend"]) => {
+              const top = Math.max(...rows.map((row) => row.score), 0)
+              return rows.map((row) => ({
+                ...row,
+                score: top > 0 ? row.score / top : row.score,
+                source: row.source ?? (backend === "mimo" ? "markdown" : "unknown"),
+                trust: row.trust ?? (backend === "mimo" ? "authored" : "unknown"),
+                backend,
+              }))
+            }
+            const combined = [
+              ...normalize(fmRows, "frankenmemory"),
+              ...normalize(nativeRows, "mimo"),
+            ].sort((a, b) => b.score - a.score)
+            const seen = new Set<string>()
+            return combined
+              .filter((row) => {
+                const key = `${row.backend}:${row.path}`
+                if (seen.has(key)) return false
+                seen.add(key)
+                return true
+              })
+              .slice(0, limit)
+          }),
       })
     }),
   ).pipe(Layer.provide(Config.defaultLayer)),

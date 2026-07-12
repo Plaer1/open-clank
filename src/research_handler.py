@@ -161,6 +161,8 @@ class ResearchHandler:
                 headers=llm_headers,
                 timeout=15,
                 max_retries=1,
+                owner=getattr(sess, "owner", None),
+                session_id=getattr(sess, "id", None),
             )
             query = strip_thinking(response).strip().strip('"\'')
             if query and len(query) > 5:
@@ -172,6 +174,7 @@ class ResearchHandler:
 
     async def generate_plan(
         self, query: str, llm_endpoint: str, llm_model: str, llm_headers: dict = None,
+        owner: str = "", session_id: str | None = None,
     ) -> Optional[dict]:
         """Generate a research plan for user review before starting research."""
         try:
@@ -188,6 +191,8 @@ class ResearchHandler:
                 headers=llm_headers,
                 timeout=30,
                 max_retries=1,
+                owner=owner or None,
+                session_id=session_id,
             )
             response = strip_thinking(response)
 
@@ -339,6 +344,8 @@ class ResearchHandler:
                         category=category,
                         extraction_timeout=extraction_timeout,
                         extraction_concurrency=extraction_concurrency,
+                        owner=owner,
+                        session_id=session_id,
                     ),
                     timeout=hard_timeout,
                 )
@@ -717,7 +724,13 @@ class ResearchHandler:
             return False
 
     @staticmethod
-    async def _probe_endpoint(endpoint: str, model: str, headers: dict = None):
+    async def _probe_endpoint(
+        endpoint: str,
+        model: str,
+        headers: dict = None,
+        owner: str = "",
+        session_id: str | None = None,
+    ):
         """Quick probe to verify the LLM endpoint/model responds before research."""
         from src.llm_core import llm_call_async
         try:
@@ -731,6 +744,8 @@ class ResearchHandler:
                 headers=headers,
                 timeout=15,
                 max_retries=1,
+                owner=owner or None,
+                session_id=session_id,
             )
             logger.info(f"Endpoint probe OK: {model}")
         except Exception as e:
@@ -754,6 +769,8 @@ class ResearchHandler:
         category: str = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
+        owner: str = "",
+        session_id: str | None = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
@@ -782,7 +799,13 @@ class ResearchHandler:
         # Probe the endpoint before committing to a long research run
         if progress_callback:
             progress_callback({"phase": "probing", "model": llm_model})
-        await self._probe_endpoint(llm_endpoint, llm_model, llm_headers)
+        await self._probe_endpoint(
+            llm_endpoint,
+            llm_model,
+            llm_headers,
+            owner=owner,
+            session_id=session_id,
+        )
 
         try:
             from src.deep_research import DeepResearcher
@@ -829,6 +852,8 @@ class ResearchHandler:
                 progress_callback=progress_callback,
                 search_provider=search_provider,
                 category=category,
+                owner=owner or None,
+                session_id=session_id,
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher

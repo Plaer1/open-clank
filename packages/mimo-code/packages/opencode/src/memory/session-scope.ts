@@ -4,23 +4,37 @@ export type MemorySessionScope = {
   owner: string
   workspaceId: string
   workspacePath: string
+  sessionId: string
+  sessionKey: string
+  includeGlobal: boolean
 }
 
 const scopes = new Map<string, MemorySessionScope>()
 
 export function registerMemorySessionScope(sessionID: string, servers: McpServer[], cwd: string) {
-  const server = servers.find((item) => item.name === "frankenmemory")
+  const server = servers.find((item) => item.name === "frankenmemory" || item.name.startsWith("frankenmemory_"))
   if (!server || !("env" in server)) return
   const env = Object.fromEntries(server.env.map((item) => [item.name, item.value]))
   const owner = env.FM_OWNER?.trim()
-  if (!owner) return
+  const workspaceId = env.FM_WORKSPACE_ID?.trim()
+  if (!owner || !workspaceId) throw new Error("frankenmemory MCP descriptor requires owner and workspace")
   scopes.set(sessionID, {
     owner,
-    workspaceId: env.FM_WORKSPACE_ID?.trim() || cwd,
+    workspaceId,
     workspacePath: cwd,
+    sessionId: sessionID,
+    sessionKey: sessionID,
+    includeGlobal: true,
   })
 }
 
 export function memorySessionScope(sessionID: string) {
   return scopes.get(sessionID)
+}
+
+export function unregisterMemorySessionScope(sessionID: string) {
+  scopes.delete(sessionID)
+  if (scopes.size === 0) {
+    void import("./mcp-client").then((module) => module.closeSharedMcpClient())
+  }
 }

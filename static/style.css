@@ -38120,6 +38120,29 @@ body.theme-frosted .modal {
 /* Focused only programmatically (tabIndex -1) to move SR/keyboard position; no
    visible outline on the whole card box. */
 .ask-user-card:focus { outline: none; }
+
+.mimo-plan-dock {
+  margin: 0 18px 10px;
+  padding: 10px 12px;
+  max-height: 34vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface, var(--bg-secondary));
+}
+.mimo-plan-head { display: flex; justify-content: space-between; gap: 12px; }
+.mimo-plan-head span { color: var(--text-muted); font-size: 12px; }
+.mimo-plan-dock pre { white-space: pre-wrap; font: inherit; margin: 8px 0; }
+.mimo-plan-dock ol { margin: 8px 0 0; padding-left: 22px; }
+.mimo-plan-dock li[data-status="completed"] { text-decoration: line-through; opacity: .65; }
+.mimo-plan-dock li[data-status="cancelled"] { opacity: .55; }
+.settings-scope-label {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
 .ask-user-head {
   display: flex;
   justify-content: flex-end;

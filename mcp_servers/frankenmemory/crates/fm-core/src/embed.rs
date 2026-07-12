@@ -227,7 +227,8 @@ impl Bm25Encoder {
             let n = self.doc_count.max(1) as f64;
             let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
             let tf_norm = (tf as f64 * (self.k1 + 1.0))
-                / (tf as f64 + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_doc_len.max(1.0)));
+                / (tf as f64
+                    + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_doc_len.max(1.0)));
             let score = (idf * tf_norm) as f32;
             if score > 0.0 {
                 result.push((i as u32, score));
@@ -244,16 +245,14 @@ impl Default for Bm25Encoder {
 }
 
 const STOPWORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-    "should", "may", "might", "must", "can", "could", "of", "in", "to",
-    "for", "with", "on", "at", "from", "by", "about", "as", "into",
-    "through", "during", "before", "after", "above", "below", "between",
-    "out", "off", "over", "under", "again", "further", "then", "once",
-    "and", "but", "or", "nor", "not", "so", "very", "just", "than", "too",
-    "it", "its", "this", "that", "these", "those", "i", "me", "my", "we",
-    "our", "you", "your", "he", "him", "his", "she", "her", "they", "them",
-    "their", "what", "which", "who", "whom",
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "shall", "should", "may", "might", "must", "can",
+    "could", "of", "in", "to", "for", "with", "on", "at", "from", "by", "about", "as", "into",
+    "through", "during", "before", "after", "above", "below", "between", "out", "off", "over",
+    "under", "again", "further", "then", "once", "and", "but", "or", "nor", "not", "so", "very",
+    "just", "than", "too", "it", "its", "this", "that", "these", "those", "i", "me", "my", "we",
+    "our", "you", "your", "he", "him", "his", "she", "her", "they", "them", "their", "what",
+    "which", "who", "whom",
 ];
 
 fn tokenize(text: &str) -> Vec<String> {

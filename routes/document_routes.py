@@ -934,6 +934,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 max_tokens=200,
                 headers=headers,
                 timeout=30,
+                owner=user or None,
             )
 
             # Parse verdicts
@@ -1241,6 +1242,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     raw = await llm_call_async(
                         url, model_id, messages,
                         temperature=0.1, max_tokens=2000, headers=headers,
+                        owner=user or None,
                     )
                 except Exception as e:
                     logger.error(f"VL call failed on page {page_index + 1}: {e}")

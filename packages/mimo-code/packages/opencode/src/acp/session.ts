@@ -2,7 +2,7 @@ import { RequestError, type McpServer } from "@agentclientprotocol/sdk"
 import type { ACPSessionState } from "./types"
 import { Log } from "@/util"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
-import { registerMemorySessionScope } from "@/memory/session-scope"
+import { registerMemorySessionScope, unregisterMemorySessionScope } from "@/memory/session-scope"
 
 const log = Log.create({ service: "acp-session-manager" })
 
@@ -84,6 +84,23 @@ export class ACPSessionManager {
       throw RequestError.invalidParams(JSON.stringify({ error: `Session not found: ${sessionId}` }))
     }
     return session
+  }
+
+  async release(sessionId: string) {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    await Promise.all(
+      session.mcpServers.map((server) =>
+        this.sdk.mcp
+          .disconnect(
+            { name: server.name, directory: session.cwd },
+            { throwOnError: true },
+          )
+          .catch((error) => log.warn("mcp disconnect failed", { name: server.name, error })),
+      ),
+    )
+    unregisterMemorySessionScope(sessionId)
+    this.sessions.delete(sessionId)
   }
 
   getModel(sessionId: string) {

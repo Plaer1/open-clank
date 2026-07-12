@@ -18,20 +18,84 @@ let _authPolicy = { password_min_length: 8 };
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
+async function checkedFetch(input, init) {
+  const response = await window.fetch(input, init);
+  if (response.ok) return response;
+  let detail = {};
+  try { detail = await response.clone().json(); } catch (_) {}
+  const message = detail.detail?.message || detail.detail || detail.error || `Request failed (${response.status})`;
+  throw new Error(String(message));
+}
 function safeRasterDataUrl(raw) {
   const value = String(raw || '').trim();
   return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
 }
 
 /* ── Tab switching ── */
-const ADMIN_TABS = new Set(['services', 'integrations', 'tools', 'users', 'system']);
+const SETTINGS_OWNERSHIP = Object.freeze({
+  services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
+  'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
+  'mimo-providers': { scope: 'sidecar-native', api: '/api/mimo/providers', consumer: 'owner-partitioned MiMo runtime', admin: true },
+  ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
+  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
+  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
+  email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
+  reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
+  appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
+  shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
+  account: { scope: 'per-user', api: '/api/auth', consumer: 'current account lifecycle' },
+  tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Odysseus and MiMo effective tool policy' },
+  users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
+  system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
+});
+const ADMIN_MODULE_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system']);
+const ADMIN_ONLY_TABS = new Set(
+  Object.entries(SETTINGS_OWNERSHIP)
+    .filter(([, item]) => item.scope === 'global-admin' || item.admin)
+    .map(([name]) => name),
+);
+
+function applyControlOwnership(root) {
+  const controls = root.matches?.('button, input, select, textarea')
+    ? [root]
+    : root.querySelectorAll?.('button, input, select, textarea') || [];
+  for (const control of controls) {
+    const panel = control.closest('[data-settings-panel]');
+    if (!panel) continue;
+    control.dataset.settingsScope ||= control.closest('.admin-only')
+      ? 'global-admin'
+      : panel.dataset.settingsScope;
+  }
+}
+
+function applyOwnershipManifest() {
+  for (const [tab, owner] of Object.entries(SETTINGS_OWNERSHIP)) {
+    const nav = modalEl.querySelector(`[data-settings-tab="${tab}"]`);
+    const panel = modalEl.querySelector(`[data-settings-panel="${tab}"]`);
+    for (const node of [nav, panel]) {
+      if (!node) continue;
+      node.dataset.settingsScope = owner.scope;
+      node.dataset.settingsApi = owner.api;
+      node.dataset.settingsConsumer = owner.consumer;
+      if (ADMIN_ONLY_TABS.has(tab)) node.classList.add('admin-only');
+    }
+    if (panel && !panel.querySelector(':scope > .settings-scope-label')) {
+      const label = document.createElement('div');
+      label.className = 'settings-scope-label';
+      label.textContent = `${owner.scope} · ${owner.consumer}`;
+      panel.prepend(label);
+    }
+    if (panel) applyControlOwnership(panel);
+  }
+}
 
 function initTabs() {
   modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
       const tab = btn.dataset.settingsTab;
+      if (ADMIN_ONLY_TABS.has(tab) && !window._isAdmin) return;
       // Lazy-init admin when first clicking an admin tab
-      if (ADMIN_TABS.has(tab) && window.adminModule && typeof window.adminModule.open === 'function') {
+      if (ADMIN_MODULE_TABS.has(tab) && window._isAdmin && window.adminModule && typeof window.adminModule.open === 'function') {
         window.adminModule.open(tab);
         return;
       }
@@ -44,6 +108,7 @@ function initTabs() {
       syncAppearanceOpacity(tab === 'appearance');
       if (tab === 'ai') refreshAiModelEndpoints();
       if (tab === 'mimo-providers') mimoProviders.load();
+      if (tab === 'mimo-providers') loadPermissionGrants();
     });
   });
 }
@@ -210,7 +275,7 @@ const _aiEndpointRefreshers = new Set();
 let _aiEndpointRefreshInFlight = null;
 
 async function _fetchModelEndpoints() {
-  const epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin', cache: 'no-store' });
+  const epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin', cache: 'no-store' });
   const endpoints = await epRes.json();
   return Array.isArray(endpoints) ? endpoints : [];
 }
@@ -376,7 +441,7 @@ function _bindFallbackWidget(opts) {
     var body = {};
     body[settingKey] = clean;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
@@ -543,7 +608,7 @@ async function initDefaultChat() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
@@ -558,7 +623,7 @@ async function initDefaultChat() {
   async function saveDefault() {
     try {
       var clean = _fallbacks.filter(function(f) { return f.endpoint_id && f.model; });
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           default_endpoint_id: epSel.value,
@@ -608,7 +673,7 @@ async function initUtilityModel() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.utility_endpoint_id) epSel.value = settings.utility_endpoint_id;
     refreshModels(settings.utility_model || '');
@@ -628,7 +693,7 @@ async function initUtilityModel() {
   // no toggle, "—" means "unset, use chat").
   async function saveUtility() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           utility_endpoint_id: epSel.value || '',
@@ -695,7 +760,7 @@ async function initTeacherModel() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (enabledToggle) enabledToggle.checked = !!settings.teacher_enabled;
     // teacher_model is stored as "model@endpoint_name". Split on the
@@ -726,7 +791,7 @@ async function initTeacherModel() {
         spec = ep ? (modelSel.value + '@' + ep.name) : modelSel.value;
       }
       var enabled = enabledToggle ? !!enabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ teacher_enabled: enabled, teacher_model: spec })
       });
@@ -760,7 +825,7 @@ async function initImageSettings() {
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
   try {
-    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
+    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
     const modelsData = await modelsRes.json();
     // Inpaint-compat allowlist — image gen here is scoped to inpainting only,
     // so DALL-E / GPT-Image-1 (no inpaint API) are excluded. Currently:
@@ -788,7 +853,7 @@ async function initImageSettings() {
     });
   } catch (e) { console.warn('Failed to load models for image settings', e); }
   try {
-    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
     if (settings.image_model) modelSel.value = settings.image_model;
     if (settings.image_quality) qualSel.value = settings.image_quality;
@@ -805,7 +870,7 @@ async function initImageSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value }) });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -829,13 +894,14 @@ async function initVisionSettings() {
     return !_vlExclude.some(function(kw) { return lower.includes(kw); });
   }
   try {
-    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
+    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
     const modelsData = await modelsRes.json();
     const visionModels = [];
     (modelsData.items || []).forEach(item => {
       if (item.offline) return;
       catalogEntries(item).forEach(entry => {
         const mid = entry.mid;
+        if (item.virtual && entry.capabilities?.vision !== true) return;
         if (_isVisionModel(mid)) {
           visionModels.push(mid);
         }
@@ -848,10 +914,14 @@ async function initVisionSettings() {
   // Also pull the raw endpoint list so the fallback widget can resolve
   // endpoint-id → models the same way the other cards do.
   try {
-    _visionEndpoints = await _fetchModelEndpoints();
+    _visionEndpoints = (await _fetchModelEndpoints()).filter(function(ep) {
+      return !ep.virtual || _endpointCatalog(ep).some(function(entry) {
+        return entry.capabilities?.vision === true;
+      });
+    });
   } catch (e) { console.warn('Failed to load endpoints for vision fallback', e); }
   try {
-    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
     if (settings.vision_model) vlSel.value = settings.vision_model;
     _syncModelLogo(vlSel);
@@ -880,7 +950,7 @@ async function initVisionSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value }) });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -931,10 +1001,10 @@ async function initTtsSettings() {
 
   var ttsKeywords = ['tts', 'audio'];
   try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
     var endpoints = await epRes.json();
     endpoints.forEach(function(ep) {
-      if (!ep.is_enabled) return;
+      if (!ep.is_enabled || ep.virtual) return;
       var hasTTS = _endpointCatalog(ep).some(entry => ttsKeywords.some(kw => entry.mid.toLowerCase().includes(kw)));
       if (!hasTTS) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
@@ -942,7 +1012,7 @@ async function initTtsSettings() {
   } catch (e) { console.warn('Failed to load endpoints for TTS', e); }
 
   try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await settingsRes.json();
     if (settings.tts_provider) provSel.value = settings.tts_provider;
     if (settings.tts_model) { modelSelect.value = settings.tts_model; modelInput.value = settings.tts_model; }
@@ -962,7 +1032,7 @@ async function initTtsSettings() {
 
   async function saveTTS() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' }) });
       ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
       if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
@@ -1029,7 +1099,7 @@ async function initTtsSettings() {
             window.speechSynthesis.speak(utt);
           });
         } else {
-          var res = await fetch('/api/tts/synthesize', {
+          var res = await checkedFetch('/api/tts/synthesize', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: testText, format: 'audio' })
@@ -1100,17 +1170,17 @@ async function initSttSettings() {
 
   // Add API endpoints that might support STT
   try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
     var endpoints = await epRes.json();
     endpoints.forEach(function(ep) {
-      if (!ep.is_enabled) return;
+      if (!ep.is_enabled || ep.virtual) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
     });
   } catch (e) { console.warn('Failed to load endpoints for STT', e); }
 
   // Load saved settings
   try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await settingsRes.json();
     if (settings.stt_provider) provSel.value = settings.stt_provider;
     if (settings.stt_model) { modelSelect.value = settings.stt_model; modelInput.value = settings.stt_model; }
@@ -1124,7 +1194,7 @@ async function initSttSettings() {
   async function saveSTT() {
     try {
       var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() }) });
       sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
@@ -1216,7 +1286,7 @@ async function initSearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     _settings = await res.json();
     if (_settings.search_provider) provSel.value = _settings.search_provider;
     updateCountDisplay();
@@ -1237,7 +1307,7 @@ async function initSearchSettings() {
 
   async function refreshStatus() {
     try {
-      var sRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+      var sRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
       var s = await sRes.json();
       _settings = s;
       var active = s.search_provider || 'searxng';
@@ -1282,7 +1352,7 @@ async function initSearchSettings() {
         payload[kf] = keyInput.value.trim();
         _settings[kf] = keyInput.value.trim();
       }
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
@@ -1437,7 +1507,7 @@ async function initSearchSettings() {
   async function _saveFallbackChain(chain) {
     _settings.search_fallback_chain = chain;
     try {
-      await fetch('/api/auth/settings', {
+      await checkedFetch('/api/auth/settings', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ search_fallback_chain: chain }),
@@ -1483,7 +1553,7 @@ async function initSearchSettings() {
         fd.append('query', 'hello world');
         fd.append('provider', prov);
         fd.append('count', '3');
-        var r = await fetch('/api/search/query', { method: 'POST', body: fd, credentials: 'same-origin' });
+        var r = await checkedFetch('/api/search/query', { method: 'POST', body: fd, credentials: 'same-origin' });
         var d = await r.json();
         var ms = Math.round(performance.now() - t0);
         if (d.error) {
@@ -1542,7 +1612,7 @@ async function initResearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.research_endpoint_id) epSel.value = settings.research_endpoint_id;
     refreshModels(settings.research_model || '');
@@ -1605,7 +1675,7 @@ async function initResearchSettings() {
       }
     }
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
@@ -1663,7 +1733,7 @@ async function initResearchSearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.research_search_provider) searchSel.value = settings.research_search_provider;
     updateSearchOptions(settings);
@@ -1672,7 +1742,7 @@ async function initResearchSearchSettings() {
 
   async function saveResearchSearch() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ research_search_provider: searchSel.value })
       });
@@ -1693,7 +1763,7 @@ async function initAgentSettings() {
   if (!toolsInput) return;
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
@@ -1717,7 +1787,7 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
@@ -1742,12 +1812,12 @@ async function initAgentSettings() {
   var emailConfirm = el('set-agentEmailConfirm');
   if (emailConfirm) {
     try {
-      var s = await fetch('/api/auth/settings', { credentials: 'same-origin' }).then(r => r.json());
+      var s = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' }).then(r => r.json());
       emailConfirm.checked = s.agent_email_confirm !== false;
     } catch (_) {}
     emailConfirm.addEventListener('change', async () => {
       try {
-        await fetch('/api/auth/settings', {
+        await checkedFetch('/api/auth/settings', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ agent_email_confirm: !!emailConfirm.checked }),
@@ -1973,7 +2043,7 @@ async function initShortcuts() {
   // Load saved keybinds
   let keybinds = { ...SHORTCUT_DEFAULTS };
   try {
-    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await res.json();
     if (settings.keybinds) keybinds = { ...keybinds, ...settings.keybinds };
   } catch (e) {}
@@ -2133,7 +2203,7 @@ async function initShortcuts() {
 
   async function saveKeybinds() {
     try {
-      await fetch('/api/auth/settings', {
+      await checkedFetch('/api/auth/settings', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keybinds }),
@@ -2201,7 +2271,7 @@ function initAccount() {
       if (nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
       saveBtn.disabled = true;
       try {
-        const res = await fetch('/api/auth/change-password', {
+        const res = await checkedFetch('/api/auth/change-password', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ current_password: cur, new_password: nw })
@@ -2226,7 +2296,7 @@ function initAccount() {
   if (tfaContent) {
     async function render2FA() {
       try {
-        const res = await fetch('/api/auth/2fa/status', { credentials: 'same-origin' });
+        const res = await checkedFetch('/api/auth/2fa/status', { credentials: 'same-origin' });
         const data = await res.json();
         if (data.enabled) {
           // 2FA is ON — show disable option
@@ -2245,7 +2315,7 @@ function initAccount() {
             const msg = el('tfa-msg');
             if (!pw) { msg.textContent = 'Enter your password'; msg.style.color = 'var(--red)'; return; }
             try {
-              const r = await fetch('/api/auth/2fa/disable', {
+              const r = await checkedFetch('/api/auth/2fa/disable', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password: pw })
@@ -2265,7 +2335,7 @@ function initAccount() {
           el('tfa-setup-btn').addEventListener('click', async () => {
             const msg = el('tfa-msg');
             try {
-              const r = await fetch('/api/auth/2fa/setup', { method: 'POST', credentials: 'same-origin' });
+              const r = await checkedFetch('/api/auth/2fa/setup', { method: 'POST', credentials: 'same-origin' });
               if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
               const setup = await r.json();
               const qrCode = safeRasterDataUrl(setup.qr_code);
@@ -2291,7 +2361,7 @@ function initAccount() {
                 const vmsg = el('tfa-msg');
                 if (!code) { vmsg.textContent = 'Enter the code'; vmsg.style.color = 'var(--red)'; return; }
                 try {
-                  const vr = await fetch('/api/auth/2fa/confirm', {
+                  const vr = await checkedFetch('/api/auth/2fa/confirm', {
                     method: 'POST', credentials: 'same-origin',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })
@@ -2324,7 +2394,7 @@ function initAccount() {
     logoutBtn.addEventListener('mouseenter', () => { logoutBtn.style.opacity = '1'; logoutBtn.style.borderColor = 'var(--red)'; logoutBtn.style.color = 'var(--red)'; });
     logoutBtn.addEventListener('mouseleave', () => { logoutBtn.style.opacity = ''; logoutBtn.style.borderColor = ''; logoutBtn.style.color = ''; });
     logoutBtn.addEventListener('click', async () => {
-      try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
+      try { await checkedFetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
       // SECURITY: wipe all client-side state on logout so the next user that
       // signs in on this browser doesn't inherit the previous account's
       // session id, last-used model, draft chat input, or any cached lists.
@@ -2349,6 +2419,14 @@ function initAccount() {
 
 function initAll() {
   modalEl = el('settings-modal');
+  applyOwnershipManifest();
+  new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) applyControlOwnership(node);
+      }
+    }
+  }).observe(modalEl, { childList: true, subtree: true });
   initTabs();
   mimoProviders.init({
     onCatalogChanged: async () => {
@@ -2368,10 +2446,12 @@ function initAll() {
   initVisionSettings();
   initTtsSettings();
   initSttSettings();
-  initSearchSettings();
-  initResearchSettings();
-  initResearchSearchSettings();
-  initAgentSettings();
+  if (window._isAdmin) {
+    initSearchSettings();
+    initResearchSettings();
+    initResearchSearchSettings();
+    initAgentSettings();
+  }
   initAppearance();
   initShortcuts();
   initAccount();
@@ -2397,7 +2477,7 @@ async function initReminderSettings() {
   const pubUrlMsg = el('set-app-public-url-msg');
   if (pubUrlIn) {
     try {
-      const r = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+      const r = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
       const s = await r.json();
       pubUrlIn.value = s.app_public_url || '';
     } catch (_) {}
@@ -2407,7 +2487,7 @@ async function initReminderSettings() {
       pubDebounce = setTimeout(async () => {
         try {
           const val = pubUrlIn.value.trim().replace(/\/+$/, '');
-          await fetch('/api/auth/settings', {
+          await checkedFetch('/api/auth/settings', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ app_public_url: val }),
@@ -2451,7 +2531,7 @@ async function initReminderSettings() {
   // configured if there's at least one account with SMTP set.
   let emailAccounts = [];
   try {
-    const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
     if (res.ok) {
       const d = await res.json();
       emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
@@ -2468,7 +2548,7 @@ async function initReminderSettings() {
   // checking if an ntfy integration was saved in settings (non-admin users).
   let ntfyConfigured = false;
   try {
-    const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
     if (res.ok) {
       const data = await res.json();
       ntfyConfigured = (data.integrations || []).some(
@@ -2479,7 +2559,7 @@ async function initReminderSettings() {
   // If admin check failed, check if ntfy was previously selected (trust the saved setting)
   if (!ntfyConfigured) {
     try {
-      const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
       const s = await res.json();
       if (s.reminder_channel === 'ntfy') ntfyConfigured = true;
     } catch (_) {}
@@ -2495,7 +2575,7 @@ async function initReminderSettings() {
   let allIntegrations = [];
   let webhookConfigured = false;
   try {
-    const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
     if (res.ok) {
       const data = await res.json();
       allIntegrations = (data.integrations || []).filter(i => i.base_url && i.enabled !== false);
@@ -2555,7 +2635,7 @@ async function initReminderSettings() {
     const currentEmailAccount = emailAcctSel?.value || '';
     const currentWebhookIntg = webhookIntgSel?.value || '';
     try {
-      const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
       if (res.ok) {
         const d = await res.json();
         emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
@@ -2565,7 +2645,7 @@ async function initReminderSettings() {
 
     ntfyConfigured = false;
     try {
-      const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
       if (res.ok) {
         const data = await res.json();
         ntfyConfigured = (data.integrations || []).some(
@@ -2577,7 +2657,7 @@ async function initReminderSettings() {
     } catch (_) {}
     if (!ntfyConfigured) {
       try {
-        const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+        const res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
         const s = await res.json();
         if (s.reminder_channel === 'ntfy') ntfyConfigured = true;
       } catch (_) {}
@@ -2635,7 +2715,7 @@ async function initReminderSettings() {
   };
 
   try {
-    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const s = await res.json();
     let savedChannel = s.reminder_channel || 'browser';
     if (savedChannel === 'email' && !smtpConfigured) savedChannel = 'browser';
@@ -2704,7 +2784,7 @@ async function initReminderSettings() {
 
   async function save(patch) {
     try {
-      await fetch('/api/auth/settings', {
+      await checkedFetch('/api/auth/settings', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
@@ -2793,7 +2873,7 @@ async function initReminderSettings() {
         // Persona picker is in a different scope (Reminders init), look it up
         // by id so we can pass whatever is currently selected on screen.
         const personaSel = el('set-reminder-llm-persona');
-        const res = await fetch('/api/notes/fire-reminder', {
+        const res = await checkedFetch('/api/notes/fire-reminder', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
@@ -2882,7 +2962,7 @@ async function initEmailAccountsSettings() {
   const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   async function fetchAccounts() {
-    const r = await fetch('/api/email/accounts', { credentials: 'same-origin' });
+    const r = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
     const d = await r.json();
     return d.accounts || [];
   }
@@ -2914,7 +2994,7 @@ async function initEmailAccountsSettings() {
       const id = row.dataset.accId;
       row.querySelector('.email-acc-default-btn')?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        await fetch(`/api/email/accounts/${id}/set-default`, { method: 'POST', credentials: 'same-origin' });
+        await checkedFetch(`/api/email/accounts/${id}/set-default`, { method: 'POST', credentials: 'same-origin' });
         renderList();
       });
       row.querySelector('.email-acc-edit-btn')?.addEventListener('click', (e) => {
@@ -2924,7 +3004,7 @@ async function initEmailAccountsSettings() {
       row.querySelector('.email-acc-del-btn')?.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!await window.styledConfirm(`Delete account "${accs.find(a => a.id === id)?.name}"?`, { confirmText: 'Delete', danger: true })) return;
-        await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+        await checkedFetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
         renderList();
       });
     });
@@ -3063,7 +3143,7 @@ async function initEmailAccountsSettings() {
       if (!body.name) { el('eaf-msg').textContent = 'Enter a Name or Email first'; el('eaf-msg').style.color = 'var(--red)'; return; }
       const url = isEdit ? `/api/email/accounts/${a.id}` : '/api/email/accounts';
       const method = isEdit ? 'PUT' : 'POST';
-      const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const r = await checkedFetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const d = await r.json();
       if (!d.ok) { el('eaf-msg').textContent = d.error || 'Save failed'; el('eaf-msg').style.color = 'var(--red)'; return; }
       const accId = isEdit ? a.id : d.id;
@@ -3115,7 +3195,7 @@ async function initEmailAccountsSettings() {
       try {
         const url = isEdit ? `/api/email/accounts/${a.id}` : '/api/email/accounts';
         const method = isEdit ? 'PUT' : 'POST';
-        const r = await fetch(url, {
+        const r = await checkedFetch(url, {
           method, credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -3146,7 +3226,7 @@ async function initEmailSettings() {
 
   // Load current email config
   try {
-    const res = await fetch('/api/email/config');
+    const res = await checkedFetch('/api/email/config');
     const cfg = await res.json();
     if (el('set-email-imap-host')) el('set-email-imap-host').value = cfg.imap_host || '';
     if (el('set-email-imap-port')) el('set-email-imap-port').value = cfg.imap_port || '';
@@ -3161,7 +3241,7 @@ async function initEmailSettings() {
 
   // Load contacts config
   try {
-    const res = await fetch('/api/contacts/config');
+    const res = await checkedFetch('/api/contacts/config');
     const cfg = await res.json();
     if (el('set-carddav-url')) el('set-carddav-url').value = cfg.url || '';
     if (el('set-carddav-user')) el('set-carddav-user').value = cfg.username || '';
@@ -3170,7 +3250,7 @@ async function initEmailSettings() {
 
   // Load writing style
   try {
-    const res = await fetch('/api/email/style');
+    const res = await checkedFetch('/api/email/style');
     const data = await res.json();
     if (el('set-email-style')) el('set-email-style').value = data.style || '';
   } catch (_) {}
@@ -3193,7 +3273,7 @@ async function initEmailSettings() {
     if (imapPass) data.imap_password = imapPass;
     if (smtpPass) data.smtp_password = smtpPass;
     try {
-      const res = await fetch('/api/email/config', {
+      const res = await checkedFetch('/api/email/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -3217,7 +3297,7 @@ async function initEmailSettings() {
     const pass = el('set-carddav-pass').value;
     if (pass) data.carddav_password = pass;
     try {
-      const res = await fetch('/api/contacts/config', {
+      const res = await checkedFetch('/api/contacts/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -3258,7 +3338,7 @@ async function initEmailSettings() {
       }
     }
     try {
-      const res = await fetch('/api/email/extract-style', {
+      const res = await checkedFetch('/api/email/extract-style', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sample_count: 15 }),
@@ -3284,7 +3364,7 @@ async function initEmailSettings() {
     const msg = el('set-email-style-msg');
     if (msg) msg.textContent = 'Saving...';
     try {
-      const res = await fetch('/api/email/style', {
+      const res = await checkedFetch('/api/email/style', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ style: el('set-email-style').value }),
@@ -3338,7 +3418,7 @@ async function initIntegrations() {
 
   // Load presets
   try {
-    const res = await fetch('/api/auth/integrations/presets', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/integrations/presets', { credentials: 'same-origin' });
     if (res.ok) {
       const data = await res.json();
       presets = data.presets || {};
@@ -3365,7 +3445,7 @@ async function initIntegrations() {
   // Render list
   async function renderList() {
     try {
-      const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
       if (!res.ok) { listEl.innerHTML = '<div style="padding:12px;opacity:0.5;font-size:12px;">Admin access required</div>'; return; }
       const data = await res.json();
       const items = data.integrations || [];
@@ -3398,7 +3478,7 @@ async function initIntegrations() {
     formTitle.textContent = 'Edit Integration';
     // Fetch full data (with unmasked key from a dedicated edit fetch — we'll just load what we have)
     try {
-      const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
       const data = await res.json();
       const item = (data.integrations || []).find(i => i.id === id);
       if (!item) return;
@@ -3454,7 +3534,7 @@ async function initIntegrations() {
     try {
       const url = editingId ? `/api/auth/integrations/${editingId}` : '/api/auth/integrations';
       const method = editingId ? 'PUT' : 'POST';
-      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), credentials: 'same-origin' });
+      const res = await checkedFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), credentials: 'same-origin' });
       if (res.ok) {
         statusEl.textContent = 'Saved';
         statusEl.style.color = 'var(--green, #98c379)';
@@ -3478,7 +3558,7 @@ async function initIntegrations() {
     statusEl.textContent = 'Testing...';
     statusEl.style.color = 'var(--fg)';
     try {
-      const res = await fetch(`/api/auth/integrations/${editingId}/test`, { method: 'POST', credentials: 'same-origin' });
+      const res = await checkedFetch(`/api/auth/integrations/${editingId}/test`, { method: 'POST', credentials: 'same-origin' });
       const data = await res.json();
       statusEl.textContent = data.message || (data.ok ? 'OK' : 'Failed');
       statusEl.style.color = data.ok ? 'var(--green, #98c379)' : 'var(--red)';
@@ -3492,7 +3572,7 @@ async function initIntegrations() {
   async function doDelete(id) {
     if (!await window.styledConfirm('Delete this integration?', { confirmText: 'Delete', danger: true })) return;
     try {
-      await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+      await checkedFetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
       if (editingId === id) { formCard.style.display = 'none'; editingId = null; }
       await renderList();
       notifyIntegrationsChanged();
@@ -3613,9 +3693,9 @@ async function initUnifiedIntegrations() {
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/contacts/list', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { contacts: [], count: 0 }).catch(() => ({ contacts: [], count: 0 })),
       fetch('/api/email/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
-      fetch('/api/mcp/servers', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      window._isAdmin ? fetch('/api/mcp/servers', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []) : Promise.resolve([]),
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
-      fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      window._isAdmin ? fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []) : Promise.resolve([]),
       fetch('/api/calendar/calendars', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { calendars: [] }).catch(() => ({ calendars: [] })),
     ]);
     const items = [];
@@ -3739,18 +3819,18 @@ async function initUnifiedIntegrations() {
         const type = btn.dataset.intgType;
         const id = btn.dataset.intgId;
         try {
-          if (type === 'api') await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'caldav') await fetch(`/api/calendar/config/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          if (type === 'api') await checkedFetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'caldav') await checkedFetch(`/api/calendar/config/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'contacts') {
-            await fetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
+            await checkedFetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
           }
           else if (type === 'carddav') {
-            await fetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carddav_url: '', carddav_username: '', carddav_password: '' }) });
+            await checkedFetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carddav_url: '', carddav_username: '', carddav_password: '' }) });
           }
-          else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'codex' || type === 'claude') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
+          else if (type === 'email') await checkedFetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'mcp') await checkedFetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'codex' || type === 'claude') await checkedFetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'vault') await checkedFetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
         await renderList();
@@ -3775,7 +3855,7 @@ async function initUnifiedIntegrations() {
   async function showApiForm(editId) {
     let presets = {};
     try {
-      const r = await fetch('/api/auth/integrations/presets', { credentials: 'same-origin' });
+      const r = await checkedFetch('/api/auth/integrations/presets', { credentials: 'same-origin' });
       if (r.ok) { const d = await r.json(); presets = d.presets || {}; }
     } catch (_) {}
     const presetEntries = Object.entries(presets);
@@ -3895,7 +3975,7 @@ async function initUnifiedIntegrations() {
     // Load existing
     if (_editId) {
       try {
-        const r = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+        const r = await checkedFetch('/api/auth/integrations', { credentials: 'same-origin' });
         const d = await r.json();
         const item = (d.integrations || []).find(i => i.id === _editId);
         if (item) { name.value = item.name || ''; url.value = item.base_url || ''; auth.value = item.auth_type || 'none'; header.value = item.auth_header || ''; }
@@ -3943,7 +4023,7 @@ async function initUnifiedIntegrations() {
       try {
         const u = _editId ? `/api/auth/integrations/${_editId}` : '/api/auth/integrations';
         const m = _editId ? 'PUT' : 'POST';
-        const r = await fetch(u, { method: m, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const r = await checkedFetch(u, { method: m, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (!r.ok) throw new Error();
         const saved = await r.json().catch(() => null);
         // If this was a create, capture the new ID so Test works
@@ -3960,7 +4040,7 @@ async function initUnifiedIntegrations() {
     el('uf-api-test').addEventListener('click', async () => {
       if (!_editId) { el('uf-api-msg').textContent = 'Save first'; return; }
       try {
-        const r = await fetch(`/api/auth/integrations/${_editId}/test`, { method: 'POST', credentials: 'same-origin' });
+        const r = await checkedFetch(`/api/auth/integrations/${_editId}/test`, { method: 'POST', credentials: 'same-origin' });
         const d = await r.json();
         // Backend returns {ok: bool, message: str}
         if (d.ok) {
@@ -3996,7 +4076,7 @@ async function initUnifiedIntegrations() {
 
     if (!isNew) {
       try {
-        const r = await fetch('/api/calendar/config/accounts', { credentials: 'same-origin' });
+        const r = await checkedFetch('/api/calendar/config/accounts', { credentials: 'same-origin' });
         const d = await r.json();
         const acc = (d.accounts || []).find(a => a.id === editId);
         if (acc) {
@@ -4017,7 +4097,7 @@ async function initUnifiedIntegrations() {
       };
       if (!isNew && !body.password) body.account_id = editId;
       try {
-        const r = await fetch('/api/calendar/test', {
+        const r = await checkedFetch('/api/calendar/test', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -4051,13 +4131,13 @@ async function initUnifiedIntegrations() {
         };
         let resp;
         if (isNew) {
-          resp = await fetch('/api/calendar/config/accounts', {
+          resp = await checkedFetch('/api/calendar/config/accounts', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
           });
         } else {
-          resp = await fetch(`/api/calendar/config/accounts/${editId}`, {
+          resp = await checkedFetch(`/api/calendar/config/accounts/${editId}`, {
             method: 'PUT', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -4127,7 +4207,7 @@ async function initUnifiedIntegrations() {
         <div id="cm-list" class="contacts-list"><div style="opacity:0.4;font-size:11px;padding:8px 2px;">Loading…</div></div>
       </div>`;
     try {
-      const r = await fetch('/api/contacts/config', { credentials: 'same-origin' }); const d = await r.json();
+      const r = await checkedFetch('/api/contacts/config', { credentials: 'same-origin' }); const d = await r.json();
       el('uf-carddav-url').value = d.url || ''; el('uf-carddav-user').value = d.username || '';
       // Server masks the password as '***' when one is saved (or '' when
       // none). Surface that state via the input's placeholder so users
@@ -4140,7 +4220,7 @@ async function initUnifiedIntegrations() {
       const body = { carddav_url: el('uf-carddav-url').value, carddav_username: el('uf-carddav-user').value };
       if (el('uf-carddav-pass').value) body.carddav_password = el('uf-carddav-pass').value;
       try {
-        await fetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        await checkedFetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         el('uf-carddav-msg').textContent = 'Saved';
         el('uf-carddav-msg').style.color = 'var(--green, #50fa7b)';
         // Refresh both the sub-panel (contacts manager) AND the
@@ -4170,7 +4250,7 @@ async function initUnifiedIntegrations() {
       // name aren't useful as a contact.
       if (!name && !email) { (name ? el('cm-add-email') : el('cm-add-name')).focus(); return; }
       try {
-        await fetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, phone, address }) });
+        await checkedFetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, phone, address }) });
       } catch (_) {}
       el('cm-add-name').value = '';
       el('cm-add-email').value = '';
@@ -4184,7 +4264,7 @@ async function initUnifiedIntegrations() {
       const orig = btn ? btn.textContent : '';
       if (btn) { btn.textContent = 'Exporting...'; btn.disabled = true; }
       try {
-        const res = await fetch(`/api/contacts/export?format=${encodeURIComponent(format)}`, { credentials: 'same-origin' });
+        const res = await checkedFetch(`/api/contacts/export?format=${encodeURIComponent(format)}`, { credentials: 'same-origin' });
         if (!res.ok) throw new Error('Export failed');
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
@@ -4225,7 +4305,7 @@ async function initUnifiedIntegrations() {
         });
         let imported = 0, total = 0, failed = 0;
         const _postImport = async (body) => {
-          const r = await fetch('/api/contacts/import', {
+          const r = await checkedFetch('/api/contacts/import', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -4259,7 +4339,7 @@ async function initUnifiedIntegrations() {
     if (!list) return;
     let contacts = [];
     try {
-      const r = await fetch('/api/contacts/list', { credentials: 'same-origin' });
+      const r = await checkedFetch('/api/contacts/list', { credentials: 'same-origin' });
       const d = await r.json();
       contacts = d.contacts || [];
     } catch (_) {
@@ -4355,7 +4435,7 @@ async function initUnifiedIntegrations() {
           address: row.querySelector('.contact-edit-address')?.value.trim() || '',
         };
         try {
-          await fetch('/api/contacts/' + encodeURIComponent(uid), { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          await checkedFetch('/api/contacts/' + encodeURIComponent(uid), { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         } catch (_) {}
         await _renderContactsManager();
       });
@@ -4365,7 +4445,7 @@ async function initUnifiedIntegrations() {
           : window.confirm('Delete this contact?');
         if (!ok) return;
         try {
-          await fetch('/api/contacts/' + encodeURIComponent(uid), { method: 'DELETE', credentials: 'same-origin' });
+          await checkedFetch('/api/contacts/' + encodeURIComponent(uid), { method: 'DELETE', credentials: 'same-origin' });
         } catch (_) {}
         await _renderContactsManager();
       });
@@ -4381,7 +4461,7 @@ async function initUnifiedIntegrations() {
     let existing = null;
     if (isEdit) {
       try {
-        const r = await fetch('/api/email/accounts', { credentials: 'same-origin' });
+        const r = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
         const d = await r.json();
         existing = (d.accounts || []).find(a => a.id === editId) || null;
       } catch (_) {}
@@ -4674,7 +4754,7 @@ async function initUnifiedIntegrations() {
       if (!body.name) { el('uf-email-msg').textContent = 'Enter a Name or Email first'; el('uf-email-msg').style.color = 'var(--red)'; return; }
       const url = isEdit ? `/api/email/accounts/${editId}` : '/api/email/accounts';
       const method = isEdit ? 'PUT' : 'POST';
-      const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const r = await checkedFetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const d = await r.json();
       if (!(d.ok || d.id)) { el('uf-email-msg').textContent = d.error || 'Save failed'; el('uf-email-msg').style.color = 'var(--red)'; return; }
       const accId = isEdit ? editId : d.id;
@@ -4796,7 +4876,7 @@ async function initUnifiedIntegrations() {
       msg.textContent = '';
       msg.style.color = '';
       try {
-        const r = await fetch('/api/email/accounts/test', {
+        const r = await checkedFetch('/api/email/accounts/test', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -4857,7 +4937,7 @@ async function initUnifiedIntegrations() {
       try {
         const url = isEdit ? `/api/email/accounts/${editId}` : '/api/email/accounts';
         const method = isEdit ? 'PUT' : 'POST';
-        const r = await fetch(url, {
+        const r = await checkedFetch(url, {
           method, credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -4919,7 +4999,7 @@ async function initUnifiedIntegrations() {
 
     async function refreshStatus() {
       try {
-        const r = await fetch('/api/vault/config', { credentials: 'same-origin' });
+        const r = await checkedFetch('/api/vault/config', { credentials: 'same-origin' });
         const d = await r.json();
         el('uf-vault-url').value = d.server_url || '';
         el('uf-vault-email').value = d.email || '';
@@ -4942,7 +5022,7 @@ async function initUnifiedIntegrations() {
     el('uf-vault-save').addEventListener('click', async () => {
       msg('Saving...');
       try {
-        const r = await fetch('/api/vault/config', {
+        const r = await checkedFetch('/api/vault/config', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ server_url: el('uf-vault-url').value, email: el('uf-vault-email').value }),
@@ -4959,7 +5039,7 @@ async function initUnifiedIntegrations() {
       if (!email || !pass) { msg('Email + master password required', 'var(--red)'); return; }
       msg('Logging in...');
       try {
-        const r = await fetch('/api/vault/login', {
+        const r = await checkedFetch('/api/vault/login', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, master_password: pass }),
@@ -4978,7 +5058,7 @@ async function initUnifiedIntegrations() {
       if (!pass) { msg('Master password required', 'var(--red)'); return; }
       msg('Unlocking...');
       try {
-        const r = await fetch('/api/vault/unlock', {
+        const r = await checkedFetch('/api/vault/unlock', {
           method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ master_password: pass }),
@@ -4995,7 +5075,7 @@ async function initUnifiedIntegrations() {
     el('uf-vault-lock').addEventListener('click', async () => {
       msg('Locking...');
       try {
-        await fetch('/api/vault/lock', { method: 'POST', credentials: 'same-origin' });
+        await checkedFetch('/api/vault/lock', { method: 'POST', credentials: 'same-origin' });
         msg('Locked', 'var(--green,#50fa7b)');
         await refreshStatus(); await renderList();
       } catch (e) { msg('Error: ' + e.message, 'var(--red)'); }
@@ -5005,7 +5085,7 @@ async function initUnifiedIntegrations() {
       if (!await window.styledConfirm('Log out of Bitwarden CLI? You\'ll need to re-enter your master password to log back in.', { confirmText: 'Log out' })) return;
       msg('Logging out...');
       try {
-        await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
+        await checkedFetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         msg('Logged out', 'var(--green,#50fa7b)');
         await refreshStatus(); await renderList();
       } catch (e) { msg('Error: ' + e.message, 'var(--red)'); }
@@ -5036,7 +5116,7 @@ async function initUnifiedIntegrations() {
         const pf = new FormData(); pf.append('callback_url', cb);
         _setBtnLoading(pasteGo, true, 'Submitting…');
         try {
-          await fetch(`/api/mcp/oauth/exchange/${id}`, { method: 'POST', credentials: 'same-origin', body: pf });
+          await checkedFetch(`/api/mcp/oauth/exchange/${id}`, { method: 'POST', credentials: 'same-origin', body: pf });
         } finally {
           _setBtnLoading(pasteGo, false, 'Submit');
         }
@@ -5054,7 +5134,7 @@ async function initUnifiedIntegrations() {
       for (let i = 0; i < tries; i++) {
         await new Promise(res => setTimeout(res, 2000));
         try {
-          const r = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
+          const r = await checkedFetch('/api/mcp/servers', { credentials: 'same-origin' });
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const list = await r.json();
           fails = 0;
@@ -5080,7 +5160,7 @@ async function initUnifiedIntegrations() {
       // Show management view for existing server
       formEl.innerHTML = '<div class="admin-card" style="margin-top:8px"><span style="opacity:0.5;font-size:11px">Loading...</span></div>';
       try {
-        const res = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
+        const res = await checkedFetch('/api/mcp/servers', { credentials: 'same-origin' });
         const servers = await res.json();
         const srv = servers.find(s => (s.id || s.name) === editId);
         if (!srv) { formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Server not found</div>'; return; }
@@ -5108,7 +5188,7 @@ async function initUnifiedIntegrations() {
         el('uf-mcp-reconnect').addEventListener('click', async () => {
           const msg = el('uf-mcp-msg'); msg.textContent = 'Reconnecting...';
           try {
-            const r = await fetch(`/api/mcp/servers/${srv.id}/reconnect`, { method: 'POST', credentials: 'same-origin' });
+            const r = await checkedFetch(`/api/mcp/servers/${srv.id}/reconnect`, { method: 'POST', credentials: 'same-origin' });
             const d = await r.json();
             msg.textContent = d.connected ? `Connected (${d.tool_count} tools)` : `Failed: ${d.error || 'unknown'}`;
             await renderList();
@@ -5118,7 +5198,7 @@ async function initUnifiedIntegrations() {
         // Toggle enable/disable
         el('uf-mcp-toggle').addEventListener('click', async () => {
           const fd = new FormData(); fd.append('is_enabled', String(!srv.is_enabled));
-          await fetch(`/api/mcp/servers/${srv.id}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
+          await checkedFetch(`/api/mcp/servers/${srv.id}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
           await renderList();
           showMcpForm(editId);
         });
@@ -5127,7 +5207,7 @@ async function initUnifiedIntegrations() {
         if (srv.status === 'connected' && srv.tool_count > 0) {
           const panel = el('uf-mcp-tools-panel');
           try {
-            const tr = await fetch(`/api/mcp/servers/${srv.id}/tools`, { credentials: 'same-origin' });
+            const tr = await checkedFetch(`/api/mcp/servers/${srv.id}/tools`, { credentials: 'same-origin' });
             const tools = await tr.json();
             if (tools.length) {
               const disabled = new Set(tools.filter(t => t.is_disabled).map(t => t.name));
@@ -5135,7 +5215,7 @@ async function initUnifiedIntegrations() {
               const saveFn = async () => {
                 const dis = [];
                 panel.querySelectorAll('input[type=checkbox]').forEach(cb => { if (!cb.checked) dis.push(cb.dataset.mcpToolName); });
-                await fetch(`/api/mcp/servers/${srv.id}/tools`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ disabled: dis }) });
+                await checkedFetch(`/api/mcp/servers/${srv.id}/tools`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ disabled: dis }) });
                 const cnt = panel.querySelector('.mcp-tools-count');
                 if (cnt) cnt.textContent = `${tools.length - dis.length}/${tools.length} enabled`;
               };
@@ -5197,7 +5277,7 @@ async function initUnifiedIntegrations() {
         const _origLabel = saveBtn.textContent;
         _setBtnLoading(saveBtn, true, 'Saving…'); if (cancelBtn) cancelBtn.disabled = true;
         try {
-          const r = await fetch('/api/mcp/servers', { method: 'POST', credentials: 'same-origin', body: fd });
+          const r = await checkedFetch('/api/mcp/servers', { method: 'POST', credentials: 'same-origin', body: fd });
           const data = await r.json().catch(() => ({}));
           if (r.ok && data.needs_auth) {
             el('uf-mcp-msg').textContent = 'Preparing authorization…';
@@ -5220,7 +5300,7 @@ async function initUnifiedIntegrations() {
     const cfg = AGENT_CONFIGS[kind] || AGENT_CONFIGS.codex;
     let tokens = [];
     try {
-      const tokRes = await fetch('/api/tokens', { credentials: 'same-origin' });
+      const tokRes = await checkedFetch('/api/tokens', { credentials: 'same-origin' });
       if (tokRes.ok) tokens = await tokRes.json();
     } catch (_) {}
 
@@ -5370,7 +5450,7 @@ async function initUnifiedIntegrations() {
           const name = (renameInput.value || '').trim();
           if (!name || name === original) return;
           try {
-            const r = await fetch(`/api/tokens/${renameInput.dataset.tokenId}`, {
+            const r = await checkedFetch(`/api/tokens/${renameInput.dataset.tokenId}`, {
               method: 'PATCH', credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ name }),
@@ -5389,7 +5469,7 @@ async function initUnifiedIntegrations() {
             Array.from(formEl.querySelectorAll('.uf-codex-scope:checked')).map(input => input.dataset.scope)
           );
           try {
-            const r = await fetch(`/api/tokens/${cb.dataset.tokenId}`, {
+            const r = await checkedFetch(`/api/tokens/${cb.dataset.tokenId}`, {
               method: 'PATCH', credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ scopes }),
@@ -5430,7 +5510,7 @@ async function initUnifiedIntegrations() {
           .map(input => input.dataset.scope)
       );
       try {
-        const r = await fetch(`/api/tokens/${tokenId}`, {
+        const r = await checkedFetch(`/api/tokens/${tokenId}`, {
           method: 'PATCH', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ scopes }),
@@ -5456,7 +5536,7 @@ async function initUnifiedIntegrations() {
       if (!ok) return;
       const msg = el('uf-codex-msg');
       try {
-        const r = await fetch(`/api/tokens/${tokenId}`, { method: 'DELETE', credentials: 'same-origin' });
+        const r = await checkedFetch(`/api/tokens/${tokenId}`, { method: 'DELETE', credentials: 'same-origin' });
         if (!r.ok) throw new Error('Revoke failed');
         if (msg) { msg.textContent = 'Revoked'; msg.style.color = 'var(--color-error)'; }
         await renderList();
@@ -5506,7 +5586,7 @@ async function initUnifiedIntegrations() {
       fd.append('name', name);
       fd.append('scopes', 'chat');
       try {
-        const r = await fetch('/api/tokens', { method: 'POST', credentials: 'same-origin', body: fd });
+        const r = await checkedFetch('/api/tokens', { method: 'POST', credentials: 'same-origin', body: fd });
         const d = await r.json();
         if (!r.ok) throw new Error(d.detail || 'Failed');
         if (_wp) { try { _wp.destroy(); } catch (_) {} }
@@ -5632,7 +5712,7 @@ async function initUnifiedIntegrations() {
           const msg = formEl.querySelector(`.uf-codex-scope-msg[data-token-id="${CSS.escape(tokenId)}"]`);
           const scopes = Array.from(panel.querySelectorAll('.uf-codex-scope:checked')).map(input => input.dataset.scope);
           try {
-            const r = await fetch(`/api/tokens/${tokenId}`, {
+            const r = await checkedFetch(`/api/tokens/${tokenId}`, {
               method: 'PATCH',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
@@ -5728,6 +5808,40 @@ function syncAdminVisibility() {
   });
 }
 
+async function loadPermissionGrants() {
+  const list = el('mimo-permission-grants');
+  const status = el('mimo-permission-grants-status');
+  if (!list || !window._isAdmin) return;
+  try {
+    const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin' });
+    const data = await response.json();
+    const grants = Array.isArray(data.grants) ? data.grants : [];
+    list.replaceChildren(...grants.map((grant) => {
+      const row = document.createElement('div');
+      row.className = 'admin-user-row';
+      const text = document.createElement('span');
+      text.textContent = `${grant.permission_type} · ${grant.pattern} · ${grant.workspace || 'any workspace'}`;
+      const revoke = document.createElement('button');
+      revoke.type = 'button';
+      revoke.className = 'admin-btn-sm';
+      revoke.textContent = 'Revoke';
+      revoke.addEventListener('click', async () => {
+        try {
+          await checkedFetch(`/api/mimo/permission-grants/${grant.id}`, { method: 'DELETE', credentials: 'same-origin' });
+          await loadPermissionGrants();
+        } catch (error) { status.textContent = error.message; }
+      });
+      row.append(text, revoke);
+      return row;
+    }));
+    if (!grants.length) list.textContent = 'No persistent grants.';
+    status.textContent = `${grants.length} owner-scoped persistent grant${grants.length === 1 ? '' : 's'}`;
+  } catch (error) {
+    list.textContent = '';
+    status.textContent = error.message;
+  }
+}
+
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
@@ -5741,16 +5855,23 @@ export function open(tab) {
   syncAdminVisibility();
   const content = modalEl.querySelector('.settings-modal-content');
   if (tab) {
+    if (ADMIN_ONLY_TABS.has(tab) && !window._isAdmin) tab = 'ai';
     modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
     modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
   }
   // Auto-init admin data if showing an admin tab
-  const activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
+  let activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
+  if (ADMIN_ONLY_TABS.has(activeTab) && !window._isAdmin) {
+    activeTab = 'ai';
+    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === activeTab));
+    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== activeTab));
+  }
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
   if (activeTab === 'ai') refreshAiModelEndpoints();
   if (activeTab === 'mimo-providers') mimoProviders.load();
-  if (ADMIN_TABS.has(activeTab) && window.adminModule && !window.adminModule._initialized) {
+  if (activeTab === 'mimo-providers') loadPermissionGrants();
+  if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
 }

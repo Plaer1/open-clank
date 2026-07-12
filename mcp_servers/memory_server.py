@@ -26,6 +26,7 @@ _memory_provider = None
 _initialized = False
 
 _OWNER_ENV_KEYS = ("ODYSSEUS_MCP_MEMORY_OWNER", "ODYSSEUS_MEMORY_OWNER")
+_WORKSPACE_ENV_KEYS = ("ODYSSEUS_MCP_MEMORY_WORKSPACE", "FM_WORKSPACE_ID")
 _OWNER_SCOPE_ERROR = (
     "Error: Memory MCP owner is not configured for an owner-scoped memory store. "
     "Set ODYSSEUS_MCP_MEMORY_OWNER for this server or use the owner-aware native memory tool."
@@ -38,6 +39,14 @@ def _configured_owner() -> str | None:
         if owner:
             return owner
     return None
+
+
+def _configured_workspace() -> str:
+    for key in _WORKSPACE_ENV_KEYS:
+        workspace = os.environ.get(key, "").strip()
+        if workspace:
+            return workspace
+    return str(Path.cwd().resolve())
 
 
 def _entry_owner(entry: dict) -> str | None:
@@ -86,9 +95,19 @@ def _ensure_init():
     from src.memory import MemoryManager
     _memory_manager = MemoryManager(DATA_DIR)
 
-    # Phase 5: frankenmemory path removed — thesius already provides
-    # FrankenmemoryProvider through app_initializer.py. This standalone
-    # MCP server now always uses the native memory provider.
+    if os.environ.get("MEMORY_PROVIDER", "frankenmemory") == "frankenmemory":
+        from src.app_initializer import prepare_frankenmemory_database
+        from src.constants import FM_DB_PATH
+        from src.frankenmemory_provider import FrankenmemoryProvider
+
+        database_id = prepare_frankenmemory_database()
+        _memory_provider = FrankenmemoryProvider(
+            command=os.environ.get("FM_MCP_COMMAND", "fm-mcp"),
+            workspace_id=_configured_workspace(),
+            env={"FM_DB_PATH": FM_DB_PATH, "FM_DB_ID": database_id},
+        )
+        return
+
     if not _memory_provider:
         try:
             from src.memory_vector import MemoryVectorStore
@@ -142,7 +161,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         category_filter = arguments.get("category", "")
         if _memory_provider:
             try:
-                records = await _memory_provider.list_memories(owner=_configured_owner(), limit=100)
+                records = []
+                cursor = None
+                while True:
+                    page, cursor = await _memory_provider.list_page(
+                        owner=_configured_owner(), limit=1000, cursor=cursor
+                    )
+                    records.extend(page)
+                    if cursor is None:
+                        break
                 if category_filter:
                     records = [r for r in records if r.category.lower() == category_filter.lower()]
                 if not records:
@@ -216,10 +243,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _text_result("Error: edit needs memory_id and text")
         if _memory_provider:
             try:
-                await _memory_provider.delete(memory_id, owner=_configured_owner())
-                record = await _memory_provider.remember(
-                    new_text, owner=_configured_owner(), category="fact", source="ai_agent",
+                owner = _configured_owner()
+                full_id = await _memory_provider.resolve_id(memory_id, owner=owner)
+                record = await _memory_provider.update(
+                    full_id,
+                    text=new_text,
+                    category=arguments.get("category"),
+                    owner=owner,
                 )
+                if record is None:
+                    return _text_result(f"Error: Memory '{memory_id}' not found")
                 return _text_result(f"Memory updated: {new_text} (id: {record.id[:8]})")
             except Exception as e:
                 return _text_result(f"Provider edit failed: {e}")
@@ -253,7 +286,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _text_result("Error: delete needs memory_id")
         if _memory_provider:
             try:
-                deleted = await _memory_provider.delete(memory_id, owner=_configured_owner())
+                owner = _configured_owner()
+                full_id = await _memory_provider.resolve_id(memory_id, owner=owner)
+                deleted = await _memory_provider.delete(full_id, owner=owner)
                 if not deleted:
                     return _text_result(f"Error: Memory '{memory_id}' not found")
                 return _text_result(f"Memory deleted: {memory_id}")

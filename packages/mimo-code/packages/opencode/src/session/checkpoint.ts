@@ -626,15 +626,18 @@ export const layer: Layer.Layer<
       // Migrate legacy lowercase memory.md → MEMORY.md before templating/reading.
       yield* Effect.promise(() => migrateProjectMemory(projectID))
 
+      // Test first-run state before bootstrapping; creating the template first
+      // made the first-checkpoint prompt branch unreachable.
+      const checkpointExists = yield* Effect.promise(() => Bun.file(checkpointFile).exists())
+      const memoryExists = yield* Effect.promise(() => Bun.file(memoryFile).exists())
+
       // Bootstrap checkpoint.md, memory.md, and notes.md from templates if missing.
       // Self-contained helpers also mkdir parent so they're safe in isolation.
       yield* Effect.promise(() => ensureCheckpointTemplate(checkpointFile))
       yield* Effect.promise(() => ensureMemoryTemplate(memoryFile))
       yield* Effect.promise(() => ensureNotesTemplate(notesFile))
 
-      // v5: single-file checkpoint, check if prior content exists
-      const checkpointExists = yield* Effect.promise(() => Bun.file(checkpointFile).exists())
-      const memoryExists = yield* Effect.promise(() => Bun.file(memoryFile).exists())
+      // v5: single-file checkpoint, using the pre-bootstrap state above.
       const rangeDesc = checkpointExists
         ? [
             `Previous checkpoint: ${checkpointFile}`,
@@ -886,14 +889,21 @@ export const layer: Layer.Layer<
       // to the layer's lifetime — no orphan fiber on shutdown.
       yield* Effect.gen(function* () {
         const outcome = yield* Deferred.await(result.outcome)
-        yield* Effect.sync(() =>
-          Database.use((d) =>
-            d.update(SessionTable)
-              .set({ last_checkpoint_message_id: endMessageID as MessageID })
-              .where(eq(SessionTable.id, input.sessionID))
-              .run(),
-          ),
-        )
+        if (outcome.status === "success") {
+          yield* Effect.sync(() =>
+            Database.use((d) =>
+              d.update(SessionTable)
+                .set({ last_checkpoint_message_id: endMessageID as MessageID })
+                .where(eq(SessionTable.id, input.sessionID))
+                .run(),
+            ),
+          )
+        } else {
+          log.warn("checkpoint writer failed; watermark retained for retry", {
+            sessionID: input.sessionID,
+            endMessageID,
+          })
+        }
 
         // F40: capture pending before deleting the slot so a queued writer
         // (held while writer1 was running) can fire as a fresh writer.

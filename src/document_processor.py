@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import base64
 import tempfile
+import urllib.parse
 from typing import List, Dict, Any
 
 from src.llm_core import llm_call
@@ -401,6 +402,7 @@ def build_user_content(
     auto_opened_docs: list[Dict[str, Any]] | None = None,
     owner: str | None = None,
     resolved_uploads: dict[str, Dict[str, Any]] | None = None,
+    structured_resources: bool = False,
 ) -> str | List[Dict[str, Any]]:
     """Build user content with attachments (text, images, audio, documents).
 
@@ -578,22 +580,52 @@ def build_user_content(
                     owner=owner,
                 )
 
-            extracted_text, inline_attachment_remaining = _fit_inline_attachment_text(
-                extracted_text,
-                inline_attachment_remaining,
-                display_name,
-            )
-            if content and content[0]["type"] == "text":
-                content[0]["text"] += extracted_text
+            if structured_resources:
+                with open(path, "rb") as resource_file:
+                    blob = base64.b64encode(resource_file.read()).decode("ascii")
+                content.append({
+                    "type": "resource",
+                    "resource": {
+                        "uri": "attachment://" + urllib.parse.quote(
+                            f"{fid}/{os.path.basename(display_name)}"
+                        ),
+                        "mimeType": mime,
+                        "blob": blob,
+                    },
+                })
             else:
-                content.insert(0, {"type": "text", "text": extracted_text.lstrip()})
+                extracted_text, inline_attachment_remaining = _fit_inline_attachment_text(
+                    extracted_text,
+                    inline_attachment_remaining,
+                    display_name,
+                )
+                if content and content[0]["type"] == "text":
+                    content[0]["text"] += extracted_text
+                else:
+                    content.insert(0, {"type": "text", "text": extracted_text.lstrip()})
         else:
-            if content and content[0]["type"] == "text":
+            if structured_resources:
+                with open(path, "rb") as resource_file:
+                    blob = base64.b64encode(resource_file.read()).decode("ascii")
+                content.append({
+                    "type": "resource",
+                    "resource": {
+                        "uri": "attachment://" + urllib.parse.quote(
+                            f"{fid}/{os.path.basename(display_name)}"
+                        ),
+                        "mimeType": mime,
+                        "blob": blob,
+                    },
+                })
+            elif content and content[0]["type"] == "text":
                 content[0]["text"] += "\n\n[Attached non-text file]"
             else:
                 content.insert(0, {"type": "text", "text": "[Attached non-text file]"})
 
-    has_media = any(item.get("type") in ["image_url", "audio"] for item in content if isinstance(item, dict))
+    has_media = any(
+        item.get("type") in ["image_url", "audio", "resource", "resource_link"]
+        for item in content if isinstance(item, dict)
+    )
     if not has_media and content:
         combined_text = ""
         for item in content:

@@ -16,6 +16,7 @@ import shutil
 from fastapi import APIRouter, HTTPException, Request
 
 from core.middleware import require_admin
+from src.auth_helpers import get_current_user
 from core.database import (
     SessionLocal,
     Session as DbSession,
@@ -62,20 +63,37 @@ def _rmtree_quiet(path: str):
             logger.warning(f"Could not remove {path}: {e}")
 
 
-def setup_admin_wipe_routes(session_manager):
+def setup_admin_wipe_routes(session_manager, memory_provider=None):
     """The session_manager is passed in so we can also clear its
     in-memory cache when wiping chats — without it the DB is empty
     but the next /api/sessions returns stale entries."""
     router = APIRouter(prefix="/api/admin")
 
     @router.delete("/wipe/{kind}")
-    def wipe(kind: str, request: Request):
+    async def wipe(kind: str, request: Request):
         require_admin(request)
         kind = (kind or "").strip().lower()
 
         db = SessionLocal()
         try:
             if kind == "chats":
+                session_ids = {row[0] for row in db.query(DbSession.id).all()}
+                from src.openclank.transcript_projection import (
+                    list_projections,
+                    purge_execution_projection,
+                )
+                supervisor = getattr(request.app.state, "mimo_supervisor", None)
+                session_ids.update(
+                    row["odysseus_session_id"] for row in list_projections()
+                )
+                bridge = getattr(supervisor, "bridge", None) if supervisor else None
+                if bridge is not None:
+                    session_ids.update(bridge.mapped_sessions())
+                for session_id in session_ids:
+                    try:
+                        await purge_execution_projection(supervisor, session_id)
+                    except RuntimeError as exc:
+                        raise HTTPException(503, str(exc)) from exc
                 count = db.query(DbSession).count()
                 db.query(DbChatMessage).delete()
                 db.query(DbSession).delete()
@@ -87,6 +105,14 @@ def setup_admin_wipe_routes(session_manager):
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "memory":
+                owner = get_current_user(request) or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+                if memory_provider:
+                    try:
+                        provider_result = await memory_provider.purge_owner(owner=owner)
+                    except Exception as exc:
+                        raise HTTPException(503, f"Active memory provider purge failed: {exc}") from exc
+                else:
+                    provider_result = None
                 count = db.query(Memory).count()
                 db.query(Memory).delete()
                 db.commit()
@@ -101,7 +127,12 @@ def setup_admin_wipe_routes(session_manager):
                         mv.clear()
                 except Exception as e:
                     logger.info(f"Memory vector clear skipped: {e}")
-                return {"status": "deleted", "kind": kind, "count": count}
+                return {
+                    "status": "deleted",
+                    "kind": kind,
+                    "count": count,
+                    "provider": provider_result,
+                }
 
             if kind == "skills":
                 # Skills live as SKILL.md files under data/skills/. Drop

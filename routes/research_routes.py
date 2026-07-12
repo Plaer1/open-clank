@@ -403,28 +403,38 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                         pass
                 user = tool_owner
         session_id = f"rp-{uuid.uuid4().hex[:12]}"
-        if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            if supervisor and supervisor.is_alive() and supervisor.bridge:
-                cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                session_id = await supervisor.bridge.open_session(cwd or None)
 
         if body.endpoint_id:
-            from src.database import SessionLocal
-            db = SessionLocal()
-            try:
-                # Owner-scoped: never resolve another user's private endpoint
-                # (and its decrypted api_key / internal base_url). A scoped miss
-                # reads as 404 so the endpoint's existence isn't revealed.
-                ep = _owned_enabled_endpoint(db, user, body.endpoint_id)
-                if not ep:
-                    raise HTTPException(404, "Endpoint not found or disabled")
-                resolved = _resolve_endpoint_runtime(ep, owner=user, model=body.model)
+            if body.endpoint_id == "mimo":
+                from src.endpoint_resolver import resolve_endpoint_by_id
+
+                resolved = resolve_endpoint_by_id("mimo", body.model, owner=user)
                 if not resolved:
-                    raise HTTPException(400, "Endpoint is not configured with a usable model.")
+                    raise HTTPException(400, "MiMo model is unavailable")
+                auth_manager = getattr(request.app.state, "auth_manager", None)
+                get_privileges = getattr(auth_manager, "get_privileges", None)
+                privileges = get_privileges(user) if get_privileges and user else {}
+                allowed = set((privileges or {}).get("allowed_models") or [])
+                restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
+                if (privileges or {}).get("block_all_models") or (restricted and resolved[1] not in allowed):
+                    raise HTTPException(403, f"Your account is not allowed to use model {resolved[1]!r}")
                 ep_url, ep_model, ep_headers = resolved
-            finally:
-                db.close()
+            else:
+                from src.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    # Owner-scoped: never resolve another user's private endpoint
+                    # (and its decrypted api_key / internal base_url). A scoped miss
+                    # reads as 404 so the endpoint's existence isn't revealed.
+                    ep = _owned_enabled_endpoint(db, user, body.endpoint_id)
+                    if not ep:
+                        raise HTTPException(404, "Endpoint not found or disabled")
+                    resolved = _resolve_endpoint_runtime(ep, owner=user, model=body.model)
+                    if not resolved:
+                        raise HTTPException(400, "Endpoint is not configured with a usable model.")
+                    ep_url, ep_model, ep_headers = resolved
+                finally:
+                    db.close()
         else:
             ep_url, ep_model, ep_headers = resolve_endpoint("research", owner=user)
             if not ep_url:
@@ -629,11 +639,6 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
 
         # Create new session
         new_sid = str(uuid.uuid4())
-        if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            if supervisor and supervisor.is_alive() and supervisor.bridge:
-                cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                new_sid = await supervisor.bridge.open_session(cwd or None)
 
         title_query = (query or "research").strip()
         if len(title_query) > 60:

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.middleware import require_admin
+from src.auth_helpers import effective_user
 
 
 _PROVIDER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -35,8 +36,7 @@ class ApiKeyCredential(_StrictModel):
     key: str = Field(min_length=1, max_length=131_072)
 
 
-def _supervisor(request: Request):
-    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+def _validate_supervisor(supervisor):
     if not supervisor or not supervisor.is_alive():
         raise HTTPException(503, "MiMo is not running")
     base_url = supervisor.http_base_url
@@ -44,6 +44,18 @@ def _supervisor(request: Request):
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
         raise HTTPException(503, "MiMo provider service is not loopback-only")
     return supervisor
+
+
+def _supervisor(request: Request):
+    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+    return _validate_supervisor(supervisor)
+
+
+async def _owner_supervisor(request: Request):
+    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+    if supervisor and hasattr(supervisor, "for_owner"):
+        supervisor = await supervisor.for_owner(effective_user(request))
+    return _validate_supervisor(supervisor)
 
 
 def _provider_id(value: str) -> str:
@@ -162,7 +174,7 @@ def setup_mimo_provider_routes() -> APIRouter:
     @router.get("")
     async def list_providers(request: Request):
         require_admin(request)
-        supervisor = _supervisor(request)
+        supervisor = await _owner_supervisor(request)
         providers, methods = await _catalog(supervisor)
         connected = set(providers.get("connected") or [])
         clean = []
@@ -192,7 +204,7 @@ def setup_mimo_provider_routes() -> APIRouter:
     @router.post("/{provider_id}/oauth/authorize")
     async def oauth_authorize(provider_id: str, payload: OAuthStart, request: Request):
         require_admin(request)
-        supervisor = _supervisor(request)
+        supervisor = await _owner_supervisor(request)
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
         _, provider_methods = _known_provider(provider_id, providers, methods)
@@ -218,7 +230,7 @@ def setup_mimo_provider_routes() -> APIRouter:
     @router.post("/{provider_id}/oauth/callback")
     async def oauth_callback(provider_id: str, payload: OAuthCallback, request: Request):
         require_admin(request)
-        supervisor = _supervisor(request)
+        supervisor = await _owner_supervisor(request)
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
         _, provider_methods = _known_provider(provider_id, providers, methods)
@@ -240,7 +252,7 @@ def setup_mimo_provider_routes() -> APIRouter:
     @router.put("/{provider_id}/api-key")
     async def set_api_key(provider_id: str, payload: ApiKeyCredential, request: Request):
         require_admin(request)
-        supervisor = _supervisor(request)
+        supervisor = await _owner_supervisor(request)
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
         _known_provider(provider_id, providers, methods)
@@ -257,7 +269,7 @@ def setup_mimo_provider_routes() -> APIRouter:
     @router.delete("/{provider_id}")
     async def disconnect(provider_id: str, request: Request):
         require_admin(request)
-        supervisor = _supervisor(request)
+        supervisor = await _owner_supervisor(request)
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
         _known_provider(provider_id, providers, methods)

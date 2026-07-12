@@ -2688,8 +2688,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (step === 1 && !session.parentID) {
             const cfg = yield* config.get()
-            const dreamTrigger = yield* shouldAutoDream(cfg).pipe(Effect.catch(() => Effect.succeed(false)))
-            const distillTrigger = yield* shouldAutoDistill(cfg).pipe(Effect.catch(() => Effect.succeed(false)))
+            const dreamTrigger = yield* shouldAutoDream(cfg, session.projectID).pipe(Effect.catch(() => Effect.succeed(false)))
+            const distillTrigger = yield* shouldAutoDistill(cfg, session.projectID).pipe(Effect.catch(() => Effect.succeed(false)))
             const mdl = { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID }
             // AppRuntime is imported dynamically (not at module top level) to keep
             // the session layer out of the app-runtime module-init cycle

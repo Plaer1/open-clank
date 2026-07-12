@@ -5,16 +5,16 @@
 use std::collections::HashMap;
 
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "while", "for", "to",
-    "of", "in", "on", "at", "by", "with", "from", "as", "is", "are", "was", "were", "be",
-    "been", "being", "it", "its", "this", "that", "these", "those", "i", "you", "he", "she",
-    "we", "they", "them", "his", "her", "their", "my", "your", "our", "me", "him", "us",
-    "do", "does", "did", "done", "will", "would", "can", "could", "should", "shall", "may",
-    "might", "must", "have", "has", "had", "not", "no", "yes", "so", "too", "very", "just",
-    "also", "about", "into", "over", "under", "again", "there", "here", "what", "which",
-    "who", "whom", "how", "why", "where", "all", "any", "both", "each", "more", "most",
-    "some", "such", "only", "own", "same", "than", "up", "down", "out", "off", "please",
-    "remember", "reply", "sentence", "short", "exactly", "one", "verbatim", "token",
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "while", "for", "to", "of",
+    "in", "on", "at", "by", "with", "from", "as", "is", "are", "was", "were", "be", "been",
+    "being", "it", "its", "this", "that", "these", "those", "i", "you", "he", "she", "we", "they",
+    "them", "his", "her", "their", "my", "your", "our", "me", "him", "us", "do", "does", "did",
+    "done", "will", "would", "can", "could", "should", "shall", "may", "might", "must", "have",
+    "has", "had", "not", "no", "yes", "so", "too", "very", "just", "also", "about", "into", "over",
+    "under", "again", "there", "here", "what", "which", "who", "whom", "how", "why", "where",
+    "all", "any", "both", "each", "more", "most", "some", "such", "only", "own", "same", "than",
+    "up", "down", "out", "off", "please", "remember", "reply", "sentence", "short", "exactly",
+    "one", "verbatim", "token",
 ];
 
 fn is_stopword(word: &str) -> bool {
@@ -61,19 +61,26 @@ pub fn rake_cues(text: &str, max: usize) -> Vec<String> {
     let mut scored: Vec<(f64, String)> = phrases
         .iter()
         .map(|phrase| {
-            let score: f64 = phrase
-                .iter()
-                .map(|w| (degree[w] + freq[w]) / freq[w])
-                .sum();
+            let score: f64 = phrase.iter().map(|w| (degree[w] + freq[w]) / freq[w]).sum();
             (score, phrase.join(" "))
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     let mut seen = std::collections::HashSet::new();
     scored
         .into_iter()
-        .filter_map(|(_, p)| if seen.insert(p.clone()) { Some(p) } else { None })
+        .filter_map(|(_, p)| {
+            if seen.insert(p.clone()) {
+                Some(p)
+            } else {
+                None
+            }
+        })
         .filter(|p| p.len() > 2)
         .take(max)
         .collect()

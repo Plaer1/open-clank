@@ -19,13 +19,22 @@ fn row_to_node(row: &rusqlite::Row) -> rusqlite::Result<GraphNodeRow> {
         trust: row.get(5)?,
         created_at: row.get(6)?,
         last_seen: row.get(7)?,
+        owner: row.get(8)?,
+        workspace_id: row.get(9)?,
     })
 }
 
-const NODE_COLS: &str = "id, kind, label, name, layer, trust, created_at, last_seen";
+const NODE_COLS: &str =
+    "id, kind, label, name, layer, trust, created_at, last_seen, owner, workspace_id";
+
+#[cfg(test)]
+fn test_scope() -> GraphScope {
+    GraphScope::new("test-owner", "test-workspace").unwrap()
+}
 
 fn upsert_node_inner(
     conn: &Connection,
+    scope: &GraphScope,
     kind: &str,
     name: &str,
     label: Option<&str>,
@@ -33,14 +42,16 @@ fn upsert_node_inner(
     trust: i64,
     now: &str,
 ) -> rusqlite::Result<String> {
-    let id = node_id(kind, name);
+    let id = scope.node_id(kind, name);
     conn.execute(
-        "INSERT INTO graph_nodes (id, kind, label, name, norm_name, layer, trust, created_at, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        "INSERT INTO graph_nodes
+         (id, kind, label, name, norm_name, layer, trust, created_at, last_seen, owner, workspace_id, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, 'active')
          ON CONFLICT(id) DO UPDATE SET
             last_seen = excluded.last_seen,
             label = COALESCE(excluded.label, graph_nodes.label),
-            trust = MAX(graph_nodes.trust, excluded.trust)",
+            trust = MAX(graph_nodes.trust, excluded.trust),
+            status = 'active'",
         params![
             id,
             kind.trim().to_lowercase(),
@@ -49,7 +60,9 @@ fn upsert_node_inner(
             norm_name(name),
             layer,
             trust,
-            now
+            now,
+            scope.owner,
+            scope.workspace_id,
         ],
     )?;
     Ok(id)
@@ -57,16 +70,27 @@ fn upsert_node_inner(
 
 impl SqliteStore {
     /// Point a node at the tier row backing it (fetch returns that content).
-    pub fn graph_link_ref(&self, node_id: &str, ref_table: &str, ref_id: &str) -> rusqlite::Result<()> {
+    pub fn graph_link_ref(
+        &self,
+        scope: &GraphScope,
+        node_id: &str,
+        ref_table: &str,
+        ref_id: &str,
+    ) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE graph_nodes SET ref_table = ?2, ref_id = ?3 WHERE id = ?1",
-            params![node_id, ref_table, ref_id],
+            "UPDATE graph_nodes SET ref_table = ?2, ref_id = ?3
+             WHERE id = ?1 AND owner = ?4 AND workspace_id = ?5",
+            params![node_id, ref_table, ref_id, scope.owner, scope.workspace_id],
         )?;
         Ok(())
     }
 
-    pub fn graph_upsert(&self, input: &GraphUpsertInput) -> rusqlite::Result<GraphUpsertResult> {
+    pub fn graph_upsert(
+        &self,
+        scope: &GraphScope,
+        input: &GraphUpsertInput,
+    ) -> rusqlite::Result<GraphUpsertResult> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let mut nodes_upserted = 0usize;
@@ -76,6 +100,7 @@ impl SqliteStore {
         for n in &input.nodes {
             upsert_node_inner(
                 &conn,
+                scope,
                 &n.kind,
                 &n.name,
                 n.label.as_deref(),
@@ -89,8 +114,26 @@ impl SqliteStore {
         for e in &input.edges {
             // Edge endpoints are auto-created (idempotent by UUIDv5) so an
             // extraction payload never has to list every node explicitly.
-            let src = upsert_node_inner(&conn, &e.src.kind, &e.src.name, None, "semantic", 0, &now)?;
-            let dst = upsert_node_inner(&conn, &e.dst.kind, &e.dst.name, None, "semantic", 0, &now)?;
+            let src = upsert_node_inner(
+                &conn,
+                scope,
+                &e.src.kind,
+                &e.src.name,
+                None,
+                "semantic",
+                0,
+                &now,
+            )?;
+            let dst = upsert_node_inner(
+                &conn,
+                scope,
+                &e.dst.kind,
+                &e.dst.name,
+                None,
+                "semantic",
+                0,
+                &now,
+            )?;
             let tag = e.tag.trim().to_lowercase().replace(' ', "_");
 
             // The edge fact lives in the facts tier: FTS (and vectors, once
@@ -103,14 +146,20 @@ impl SqliteStore {
                     )
                     .to_string();
                     conn.execute(
-                        "INSERT INTO facts (id, content, entities, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?4)
-                         ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+                        "INSERT INTO facts
+                         (id, content, entities, created_at, updated_at, owner, workspace_id, status)
+                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 'active')
+                         ON CONFLICT(id) DO UPDATE SET
+                           content = excluded.content,
+                           updated_at = excluded.updated_at,
+                           status = 'active'",
                         params![
                             fid,
                             fact.trim(),
                             serde_json::to_string(&[&e.src.name, &e.dst.name]).unwrap_or_default(),
-                            now
+                            now,
+                            scope.owner,
+                            scope.workspace_id,
                         ],
                     )?;
                     let rowid: i64 = conn.query_row(
@@ -138,27 +187,57 @@ impl SqliteStore {
             )
             .to_string();
             conn.execute(
-                "INSERT INTO graph_edges (id, src_id, tag, dst_id, fact_id, trust, created_at, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                "INSERT INTO graph_edges
+                 (id, src_id, tag, dst_id, fact_id, trust, created_at, last_seen, owner, workspace_id, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, 'active')
                  ON CONFLICT(src_id, tag, dst_id) DO UPDATE SET
                     last_seen = excluded.last_seen,
                     fact_id = COALESCE(excluded.fact_id, graph_edges.fact_id),
-                    trust = MAX(graph_edges.trust, excluded.trust)",
-                params![edge_id, src, tag, dst, fact_id, e.trust.unwrap_or(0), now],
+                    trust = MAX(graph_edges.trust, excluded.trust),
+                    status = 'active'",
+                params![
+                    edge_id,
+                    src,
+                    tag,
+                    dst,
+                    fact_id,
+                    e.trust.unwrap_or(0),
+                    now,
+                    scope.owner,
+                    scope.workspace_id,
+                ],
             )?;
             edges_upserted += 1;
         }
 
         for c in &input.cues {
-            let node = upsert_node_inner(&conn, &c.node.kind, &c.node.name, None, "semantic", 0, &now)?;
+            let node = upsert_node_inner(
+                &conn,
+                scope,
+                &c.node.kind,
+                &c.node.name,
+                None,
+                "semantic",
+                0,
+                &now,
+            )?;
             let cue = norm_name(&c.cue);
             if cue.is_empty() {
                 continue;
             }
             let inserted = conn.execute(
-                "INSERT OR IGNORE INTO graph_cues (cue, node_id, source, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![cue, node, c.source.as_deref().unwrap_or("extracted"), now],
+                "INSERT INTO graph_cues
+                 (cue, node_id, source, created_at, owner, workspace_id, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')
+                 ON CONFLICT(cue, node_id) DO UPDATE SET status = 'active'",
+                params![
+                    cue,
+                    node,
+                    c.source.as_deref().unwrap_or("extracted"),
+                    now,
+                    scope.owner,
+                    scope.workspace_id,
+                ],
             )?;
             // graph_cues_fts is synchronized by database triggers installed
             // with the v5 schema. Keeping a second manual write here created
@@ -175,7 +254,12 @@ impl SqliteStore {
     }
 
     /// FTS match over cues → candidate entry nodes.
-    pub fn graph_cues(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<CueHit>> {
+    pub fn graph_cues(
+        &self,
+        scope: &GraphScope,
+        query: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<CueHit>> {
         let conn = self.conn.lock().unwrap();
         let fts_query = query
             .split_whitespace()
@@ -185,54 +269,95 @@ impl SqliteStore {
         if fts_query.is_empty() {
             return Ok(vec![]);
         }
-        let mut stmt = conn.prepare(
-            &format!(
-                "SELECT f.cue, {cols} FROM graph_cues_fts f
+        let mut stmt = conn.prepare(&format!(
+            "SELECT f.cue, {cols} FROM graph_cues_fts f
                  JOIN graph_nodes n ON n.id = f.node_id
                  WHERE graph_cues_fts MATCH ?1 AND n.status = 'active'
-                 LIMIT ?2",
-                cols = NODE_COLS
-                    .split(", ")
-                    .map(|c| format!("n.{c}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                   AND n.owner = ?2
+                   AND (n.workspace_id = ?3 OR (?4 AND n.workspace_id = 'global'))
+                 LIMIT ?5",
+            cols = NODE_COLS
+                .split(", ")
+                .map(|c| format!("n.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                fts_query,
+                scope.owner,
+                scope.workspace_id,
+                scope.include_global,
+                limit as i64,
+            ],
+            |row| {
+                Ok(CueHit {
+                    cue: row.get(0)?,
+                    node: GraphNodeRow {
+                        id: row.get(1)?,
+                        kind: row.get(2)?,
+                        label: row.get(3)?,
+                        name: row.get(4)?,
+                        layer: row.get(5)?,
+                        trust: row.get(6)?,
+                        created_at: row.get(7)?,
+                        last_seen: row.get(8)?,
+                        owner: row.get(9)?,
+                        workspace_id: row.get(10)?,
+                    },
+                })
+            },
         )?;
-        let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
-            Ok(CueHit {
-                cue: row.get(0)?,
-                node: GraphNodeRow {
-                    id: row.get(1)?,
-                    kind: row.get(2)?,
-                    label: row.get(3)?,
-                    name: row.get(4)?,
-                    layer: row.get(5)?,
-                    trust: row.get(6)?,
-                    created_at: row.get(7)?,
-                    last_seen: row.get(8)?,
-                },
-            })
-        })?;
         rows.collect()
     }
 
     /// Cheap routing read: which tags leave/enter this node (NO content).
-    pub fn graph_tags(&self, node_id: &str) -> rusqlite::Result<Vec<TagCount>> {
+    pub fn graph_tags(&self, scope: &GraphScope, node_id: &str) -> rusqlite::Result<Vec<TagCount>> {
         let conn = self.conn.lock().unwrap();
         let mut out = Vec::new();
         let mut stmt = conn.prepare(
-            "SELECT tag, COUNT(*) FROM graph_edges WHERE src_id = ?1 AND status='active' GROUP BY tag",
+            "SELECT tag, COUNT(*) FROM graph_edges
+             WHERE src_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))
+             GROUP BY tag",
         )?;
-        for r in stmt.query_map(params![node_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        for r in stmt.query_map(
+            params![
+                node_id,
+                scope.owner,
+                scope.workspace_id,
+                scope.include_global
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )? {
             let (tag, count) = r?;
-            out.push(TagCount { tag, direction: "out".into(), count });
+            out.push(TagCount {
+                tag,
+                direction: "out".into(),
+                count,
+            });
         }
         let mut stmt = conn.prepare(
-            "SELECT tag, COUNT(*) FROM graph_edges WHERE dst_id = ?1 AND status='active' GROUP BY tag",
+            "SELECT tag, COUNT(*) FROM graph_edges
+             WHERE dst_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))
+             GROUP BY tag",
         )?;
-        for r in stmt.query_map(params![node_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        for r in stmt.query_map(
+            params![
+                node_id,
+                scope.owner,
+                scope.workspace_id,
+                scope.include_global
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )? {
             let (tag, count) = r?;
-            out.push(TagCount { tag, direction: "in".into(), count });
+            out.push(TagCount {
+                tag,
+                direction: "in".into(),
+                count,
+            });
         }
         Ok(out)
     }
@@ -241,6 +366,7 @@ impl SqliteStore {
     /// Bumps traversal_count on returned edges (Hebbian raw material for G2).
     pub fn graph_expand(
         &self,
+        scope: &GraphScope,
         node_id: &str,
         tag: Option<&str>,
         direction: Option<&str>,
@@ -254,7 +380,11 @@ impl SqliteStore {
             _ => vec!["out", "in"],
         };
         for dir in directions {
-            let (self_col, other_col) = if dir == "out" { ("src_id", "dst_id") } else { ("dst_id", "src_id") };
+            let (self_col, other_col) = if dir == "out" {
+                ("src_id", "dst_id")
+            } else {
+                ("dst_id", "src_id")
+            };
             let sql = format!(
                 "SELECT e.id, e.src_id, e.tag, e.dst_id, f.content, e.weight, e.traversal_count, e.trust,
                         {cols}
@@ -262,9 +392,14 @@ impl SqliteStore {
                  JOIN graph_nodes n ON n.id = e.{other_col}
                  LEFT JOIN facts f ON f.id = e.fact_id
                  WHERE e.{self_col} = ?1 AND e.status='active' AND n.status='active'
-                   AND (f.id IS NULL OR f.status='active') AND (?2 IS NULL OR e.tag = ?2)
+                   AND e.owner = ?2 AND n.owner = ?2
+                   AND (e.workspace_id = ?3 OR (?4 AND e.workspace_id = 'global'))
+                   AND (n.workspace_id = ?3 OR (?4 AND n.workspace_id = 'global'))
+                   AND (f.id IS NULL OR (f.status='active' AND f.owner = ?2
+                     AND (f.workspace_id = ?3 OR (?4 AND f.workspace_id = 'global'))))
+                   AND (?5 IS NULL OR e.tag = ?5)
                  ORDER BY e.weight DESC, e.last_seen DESC
-                 LIMIT ?3",
+                 LIMIT ?6",
                 cols = NODE_COLS
                     .split(", ")
                     .map(|c| format!("n.{c}"))
@@ -272,31 +407,45 @@ impl SqliteStore {
                     .join(", ")
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![node_id, tag, limit as i64], |row| {
-                Ok(ExpandHit {
-                    edge: GraphEdgeRow {
-                        id: row.get(0)?,
-                        src_id: row.get(1)?,
-                        tag: row.get(2)?,
-                        dst_id: row.get(3)?,
-                        fact: row.get(4)?,
-                        weight: row.get(5)?,
-                        traversal_count: row.get(6)?,
-                        trust: row.get(7)?,
-                    },
-                    other: GraphNodeRow {
-                        id: row.get(8)?,
-                        kind: row.get(9)?,
-                        label: row.get(10)?,
-                        name: row.get(11)?,
-                        layer: row.get(12)?,
-                        trust: row.get(13)?,
-                        created_at: row.get(14)?,
-                        last_seen: row.get(15)?,
-                    },
-                    direction: dir.to_string(),
-                })
-            })?;
+            let rows = stmt.query_map(
+                params![
+                    node_id,
+                    scope.owner,
+                    scope.workspace_id,
+                    scope.include_global,
+                    tag,
+                    limit as i64,
+                ],
+                |row| {
+                    Ok(ExpandHit {
+                        edge: GraphEdgeRow {
+                            id: row.get(0)?,
+                            src_id: row.get(1)?,
+                            tag: row.get(2)?,
+                            dst_id: row.get(3)?,
+                            fact: row.get(4)?,
+                            weight: row.get(5)?,
+                            traversal_count: row.get(6)?,
+                            trust: row.get(7)?,
+                            owner: scope.owner.clone(),
+                            workspace_id: row.get(17)?,
+                        },
+                        other: GraphNodeRow {
+                            id: row.get(8)?,
+                            kind: row.get(9)?,
+                            label: row.get(10)?,
+                            name: row.get(11)?,
+                            layer: row.get(12)?,
+                            trust: row.get(13)?,
+                            created_at: row.get(14)?,
+                            last_seen: row.get(15)?,
+                            owner: row.get(16)?,
+                            workspace_id: row.get(17)?,
+                        },
+                        direction: dir.to_string(),
+                    })
+                },
+            )?;
             for r in rows {
                 hits.push(r?);
             }
@@ -304,19 +453,33 @@ impl SqliteStore {
         hits.truncate(limit);
         for h in &hits {
             let _ = conn.execute(
-                "UPDATE graph_edges SET traversal_count = traversal_count + 1 WHERE id = ?1",
-                params![h.edge.id],
+                "UPDATE graph_edges SET traversal_count = traversal_count + 1
+                 WHERE id = ?1 AND owner = ?2 AND workspace_id = ?3",
+                params![h.edge.id, h.edge.owner, h.edge.workspace_id],
             );
         }
         Ok(hits)
     }
 
-    pub fn graph_fetch(&self, node_id: &str) -> rusqlite::Result<Option<(GraphNodeRow, Option<String>)>> {
+    pub fn graph_fetch(
+        &self,
+        scope: &GraphScope,
+        node_id: &str,
+    ) -> rusqlite::Result<Option<(GraphNodeRow, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
         let node = conn
             .query_row(
-                &format!("SELECT {NODE_COLS} FROM graph_nodes WHERE id = ?1 AND status='active'"),
-                params![node_id],
+                &format!(
+                    "SELECT {NODE_COLS} FROM graph_nodes
+                     WHERE id = ?1 AND status='active' AND owner = ?2
+                       AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))"
+                ),
+                params![
+                    node_id,
+                    scope.owner,
+                    scope.workspace_id,
+                    scope.include_global
+                ],
                 row_to_node,
             )
             .optional()?;
@@ -324,17 +487,39 @@ impl SqliteStore {
         // Referenced tier content, when the node points at a stored record.
         let content: Option<String> = conn
             .query_row(
-                "SELECT ref_table, ref_id FROM graph_nodes WHERE id = ?1 AND status='active'",
-                params![node_id],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+                "SELECT ref_table, ref_id FROM graph_nodes
+                 WHERE id = ?1 AND status='active' AND owner = ?2
+                   AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
+                params![
+                    node_id,
+                    scope.owner,
+                    scope.workspace_id,
+                    scope.include_global
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .ok()
             .and_then(|(t, i)| match (t.as_deref(), i) {
                 (Some("curated"), Some(id)) => conn
-                    .query_row("SELECT content FROM curated WHERE id = ?1 AND archived=0", params![id], |r| r.get(0))
+                    .query_row(
+                        "SELECT content FROM curated WHERE id = ?1 AND archived=0 AND owner = ?2
+                         AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
+                        params![id, scope.owner, scope.workspace_id, scope.include_global],
+                        |r| r.get(0),
+                    )
                     .ok(),
                 (Some("facts"), Some(id)) => conn
-                    .query_row("SELECT content FROM facts WHERE id = ?1 AND status='active'", params![id], |r| r.get(0))
+                    .query_row(
+                        "SELECT content FROM facts WHERE id = ?1 AND status='active' AND owner = ?2
+                         AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
+                        params![id, scope.owner, scope.workspace_id, scope.include_global],
+                        |r| r.get(0),
+                    )
                     .ok(),
                 _ => None,
             });
@@ -345,6 +530,7 @@ impl SqliteStore {
     /// Without: the reachable frontier up to max_depth as single-node paths.
     pub fn graph_trace(
         &self,
+        scope: &GraphScope,
         src_id: &str,
         dst_id: Option<&str>,
         max_depth: usize,
@@ -358,9 +544,13 @@ impl SqliteStore {
         let mut paths: Vec<TracePath> = Vec::new();
 
         let mut neighbors_stmt = conn.prepare(
-            "SELECT dst_id, tag FROM graph_edges WHERE src_id = ?1 AND status='active'
+            "SELECT dst_id, tag FROM graph_edges
+             WHERE src_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))
              UNION ALL
-             SELECT src_id, tag FROM graph_edges WHERE dst_id = ?1 AND status='active'",
+             SELECT src_id, tag FROM graph_edges
+             WHERE dst_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
         )?;
 
         while let Some((current, depth)) = queue.pop_front() {
@@ -368,7 +558,15 @@ impl SqliteStore {
                 continue;
             }
             let neighbors: Vec<(String, String)> = neighbors_stmt
-                .query_map(params![current], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(
+                    params![
+                        current,
+                        scope.owner,
+                        scope.workspace_id,
+                        scope.include_global
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?
                 .collect::<Result<_, _>>()?;
             for (next, tag) in neighbors {
                 if !seen.insert(next.clone()) {
@@ -399,7 +597,10 @@ impl SqliteStore {
 
         if dst_id.is_none() {
             for id in seen.into_iter().filter(|n| n != src_id).take(limit) {
-                paths.push(TracePath { node_ids: vec![id], tags: vec![] });
+                paths.push(TracePath {
+                    node_ids: vec![id],
+                    tags: vec![],
+                });
             }
         }
         Ok(paths)
@@ -415,38 +616,54 @@ mod tests {
     }
 
     fn upsert_fixture(s: &SqliteStore) -> GraphUpsertResult {
-        s.graph_upsert(&GraphUpsertInput {
-            nodes: vec![GraphNodeInput {
-                kind: "person".into(),
-                name: "e".into(),
-                label: Some("owner".into()),
-                layer: None,
-                trust: Some(4),
-            }],
-            edges: vec![
-                GraphEdgeInput {
-                    src: NodeRef { kind: "person".into(), name: "e".into() },
-                    tag: "works_on".into(),
-                    dst: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                    fact: Some("e works on the open-clank workspace".into()),
+        s.graph_upsert(
+            &test_scope(),
+            &GraphUpsertInput {
+                nodes: vec![GraphNodeInput {
+                    kind: "person".into(),
+                    name: "e".into(),
+                    label: Some("owner".into()),
+                    layer: None,
                     trust: Some(4),
-                },
-                GraphEdgeInput {
-                    src: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                    tag: "uses".into(),
-                    dst: NodeRef { kind: "tool".into(), name: "frankenmemory".into() },
-                    fact: Some("open-clank uses frankenmemory for agent memory".into()),
-                    trust: Some(3),
-                },
-            ],
-            cues: vec![
-                GraphCueInput {
+                }],
+                edges: vec![
+                    GraphEdgeInput {
+                        src: NodeRef {
+                            kind: "person".into(),
+                            name: "e".into(),
+                        },
+                        tag: "works_on".into(),
+                        dst: NodeRef {
+                            kind: "project".into(),
+                            name: "open-clank".into(),
+                        },
+                        fact: Some("e works on the open-clank workspace".into()),
+                        trust: Some(4),
+                    },
+                    GraphEdgeInput {
+                        src: NodeRef {
+                            kind: "project".into(),
+                            name: "open-clank".into(),
+                        },
+                        tag: "uses".into(),
+                        dst: NodeRef {
+                            kind: "tool".into(),
+                            name: "frankenmemory".into(),
+                        },
+                        fact: Some("open-clank uses frankenmemory for agent memory".into()),
+                        trust: Some(3),
+                    },
+                ],
+                cues: vec![GraphCueInput {
                     cue: "Hedgehog Snacks".into(),
-                    node: NodeRef { kind: "project".into(), name: "open-clank".into() },
+                    node: NodeRef {
+                        kind: "project".into(),
+                        name: "open-clank".into(),
+                    },
                     source: None,
-                },
-            ],
-        })
+                }],
+            },
+        )
         .unwrap()
     }
 
@@ -460,9 +677,15 @@ mod tests {
 
         upsert_fixture(&s);
         let conn = s.conn.lock().unwrap();
-        let nodes: i64 = conn.query_row("SELECT count(*) FROM graph_nodes", [], |r| r.get(0)).unwrap();
-        let edges: i64 = conn.query_row("SELECT count(*) FROM graph_edges", [], |r| r.get(0)).unwrap();
-        let cues: i64 = conn.query_row("SELECT count(*) FROM graph_cues", [], |r| r.get(0)).unwrap();
+        let nodes: i64 = conn
+            .query_row("SELECT count(*) FROM graph_nodes", [], |r| r.get(0))
+            .unwrap();
+        let edges: i64 = conn
+            .query_row("SELECT count(*) FROM graph_edges", [], |r| r.get(0))
+            .unwrap();
+        let cues: i64 = conn
+            .query_row("SELECT count(*) FROM graph_cues", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(nodes, 3, "e, open-clank, frankenmemory — no dupes");
         assert_eq!(edges, 2);
         assert_eq!(cues, 1);
@@ -472,30 +695,82 @@ mod tests {
     fn cue_lookup_finds_entry_node() {
         let s = store();
         upsert_fixture(&s);
-        let hits = s.graph_cues("hedgehog snacks pantry", 10).unwrap();
+        let hits = s
+            .graph_cues(&test_scope(), "hedgehog snacks pantry", 10)
+            .unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].node.name, "open-clank");
+    }
+
+    #[test]
+    fn graph_scope_isolates_identical_entities() {
+        let s = store();
+        let alice = GraphScope::new("alice", "same-workspace").unwrap();
+        let bob = GraphScope::new("bob", "same-workspace").unwrap();
+        let input = GraphUpsertInput {
+            nodes: vec![],
+            edges: vec![],
+            cues: vec![GraphCueInput {
+                cue: "private telescope".into(),
+                node: NodeRef {
+                    kind: "project".into(),
+                    name: "shared-name".into(),
+                },
+                source: None,
+            }],
+        };
+        s.graph_upsert(&alice, &input).unwrap();
+        s.graph_upsert(&bob, &input).unwrap();
+
+        let alice_hits = s.graph_cues(&alice, "private telescope", 10).unwrap();
+        let bob_hits = s.graph_cues(&bob, "private telescope", 10).unwrap();
+        assert_eq!(alice_hits.len(), 1);
+        assert_eq!(bob_hits.len(), 1);
+        assert_eq!(alice_hits[0].node.owner, "alice");
+        assert_eq!(bob_hits[0].node.owner, "bob");
+        assert_ne!(alice_hits[0].node.id, bob_hits[0].node.id);
+        assert!(s
+            .graph_fetch(&alice, &bob_hits[0].node.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn tags_then_expand_walks_without_content() {
         let s = store();
         upsert_fixture(&s);
-        let oc = node_id("project", "open-clank");
+        let oc = test_scope().node_id("project", "open-clank");
 
-        let tags = s.graph_tags(&oc).unwrap();
-        let out: Vec<_> = tags.iter().filter(|t| t.direction == "out").map(|t| t.tag.as_str()).collect();
-        let inn: Vec<_> = tags.iter().filter(|t| t.direction == "in").map(|t| t.tag.as_str()).collect();
+        let tags = s.graph_tags(&test_scope(), &oc).unwrap();
+        let out: Vec<_> = tags
+            .iter()
+            .filter(|t| t.direction == "out")
+            .map(|t| t.tag.as_str())
+            .collect();
+        let inn: Vec<_> = tags
+            .iter()
+            .filter(|t| t.direction == "in")
+            .map(|t| t.tag.as_str())
+            .collect();
         assert_eq!(out, vec!["uses"]);
         assert_eq!(inn, vec!["works_on"]);
 
-        let hits = s.graph_expand(&oc, Some("uses"), Some("out"), 10).unwrap();
+        let hits = s
+            .graph_expand(&test_scope(), &oc, Some("uses"), Some("out"), 10)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].other.name, "frankenmemory");
-        assert!(hits[0].edge.fact.as_deref().unwrap().contains("agent memory"));
+        assert!(hits[0]
+            .edge
+            .fact
+            .as_deref()
+            .unwrap()
+            .contains("agent memory"));
 
         // Hebbian raw material: traversal bumped.
-        let hits2 = s.graph_expand(&oc, Some("uses"), Some("out"), 10).unwrap();
+        let hits2 = s
+            .graph_expand(&test_scope(), &oc, Some("uses"), Some("out"), 10)
+            .unwrap();
         assert_eq!(hits2[0].edge.traversal_count, 1);
     }
 
@@ -503,24 +778,30 @@ mod tests {
     fn fetch_returns_node() {
         let s = store();
         upsert_fixture(&s);
-        let id = node_id("person", "e");
-        let (node, content) = s.graph_fetch(&id).unwrap().unwrap();
+        let id = test_scope().node_id("person", "e");
+        let (node, content) = s.graph_fetch(&test_scope(), &id).unwrap().unwrap();
         assert_eq!(node.kind, "person");
         assert_eq!(node.label.as_deref(), Some("owner"));
         assert!(content.is_none(), "no ref content attached");
-        assert!(s.graph_fetch("nonexistent").unwrap().is_none());
+        assert!(s
+            .graph_fetch(&test_scope(), "nonexistent")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn trace_finds_two_hop_path() {
         let s = store();
         upsert_fixture(&s);
-        let e = node_id("person", "e");
-        let fm = node_id("tool", "frankenmemory");
-        let paths = s.graph_trace(&e, Some(&fm), 4, 5).unwrap();
+        let e = test_scope().node_id("person", "e");
+        let fm = test_scope().node_id("tool", "frankenmemory");
+        let paths = s.graph_trace(&test_scope(), &e, Some(&fm), 4, 5).unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].node_ids.len(), 3);
-        assert_eq!(paths[0].tags, vec!["works_on".to_string(), "uses".to_string()]);
+        assert_eq!(
+            paths[0].tags,
+            vec!["works_on".to_string(), "uses".to_string()]
+        );
     }
 
     #[test]
@@ -538,9 +819,13 @@ mod tests {
         }
         s.init_tables().unwrap();
         let conn = s.conn.lock().unwrap();
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, crate::store::sqlite::SCHEMA_VERSION);
-        let n: i64 = conn.query_row("SELECT count(*) FROM graph_nodes", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM graph_nodes", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
     }
 }
@@ -549,9 +834,28 @@ mod tests {
 /// .futures/frankenmemory-update/tag-vocabulary.md and the extraction prompt
 /// in mimo's memory/graph-extract.ts.
 pub const CANONICAL_TAGS: &[&str] = &[
-    "is", "has", "uses", "makes", "runs", "talks_to", "lives_in", "made_by",
-    "works_on", "wants", "likes", "dislikes", "before", "blocks", "fixes", "about",
-    "imports", "calls", "defines", "extends", "tests", "configures",
+    "is",
+    "has",
+    "uses",
+    "makes",
+    "runs",
+    "talks_to",
+    "lives_in",
+    "made_by",
+    "works_on",
+    "wants",
+    "likes",
+    "dislikes",
+    "before",
+    "blocks",
+    "fixes",
+    "about",
+    "imports",
+    "calls",
+    "defines",
+    "extends",
+    "tests",
+    "configures",
 ];
 
 fn levenshtein(a: &str, b: &str) -> usize {
@@ -604,7 +908,11 @@ pub struct EdgeDecayParams {
 
 impl Default for EdgeDecayParams {
     fn default() -> Self {
-        Self { half_life_days: 30.0, min_weight: 0.05, traversal_gain: 0.15 }
+        Self {
+            half_life_days: 30.0,
+            min_weight: 0.05,
+            traversal_gain: 0.15,
+        }
     }
 }
 
@@ -614,6 +922,7 @@ impl SqliteStore {
     /// whose decayed weight drops below `min_weight`. Returns (decayed, pruned).
     pub fn graph_edge_decay(
         &self,
+        scope: &GraphScope,
         p: &EdgeDecayParams,
         dry_run: bool,
     ) -> rusqlite::Result<(usize, usize)> {
@@ -623,16 +932,22 @@ impl SqliteStore {
         let mut prune: Vec<String> = Vec::new();
         let mut updates: Vec<(String, f64)> = Vec::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT id, weight, traversal_count, last_seen FROM graph_edges WHERE status='active'")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, f64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
+            let mut stmt = conn.prepare(
+                "SELECT id, weight, traversal_count, last_seen FROM graph_edges
+                 WHERE status='active' AND owner = ?1
+                   AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))",
+            )?;
+            let rows = stmt.query_map(
+                params![scope.owner, scope.workspace_id, scope.include_global],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
             for row in rows {
                 let (id, weight, traversals, last_seen) = row?;
                 let age_days = chrono::DateTime::parse_from_rfc3339(&last_seen)
@@ -652,10 +967,16 @@ impl SqliteStore {
         }
         if !dry_run {
             for (id, w) in &updates {
-                conn.execute("UPDATE graph_edges SET weight = ?2 WHERE id = ?1", params![id, w])?;
+                conn.execute(
+                    "UPDATE graph_edges SET weight = ?2 WHERE id = ?1 AND owner = ?3",
+                    params![id, w, scope.owner],
+                )?;
             }
             for id in &prune {
-                conn.execute("DELETE FROM graph_edges WHERE id = ?1", params![id])?;
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE id = ?1 AND owner = ?2",
+                    params![id, scope.owner],
+                )?;
             }
         }
         Ok((decayed, prune.len()))
@@ -665,23 +986,35 @@ impl SqliteStore {
     /// collide with an existing (src, tag, dst) edge, the edges MERGE:
     /// traversal counts add, max weight/trust win, the stray row dies.
     /// Returns the number of edges rewritten or merged.
-    pub fn graph_tag_normalize(&self, dry_run: bool) -> rusqlite::Result<usize> {
+    pub fn graph_tag_normalize(
+        &self,
+        scope: &GraphScope,
+        dry_run: bool,
+    ) -> rusqlite::Result<usize> {
         let conn = self.conn.lock().unwrap();
         let strays: Vec<(String, String, String, String)> = {
-            let mut stmt =
-                conn.prepare("SELECT id, src_id, tag, dst_id FROM graph_edges WHERE status='active'")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
+            let mut stmt = conn.prepare(
+                "SELECT id, src_id, tag, dst_id FROM graph_edges
+                 WHERE status='active' AND owner = ?1
+                   AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))",
+            )?;
+            let rows = stmt.query_map(
+                params![scope.owner, scope.workspace_id, scope.include_global],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
             rows.collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .filter(|(_, _, tag, _)| {
-                    canonicalize_tag(tag).map(|c| c != tag.as_str()).unwrap_or(false)
+                    canonicalize_tag(tag)
+                        .map(|c| c != tag.as_str())
+                        .unwrap_or(false)
                 })
                 .collect()
         };
@@ -694,8 +1027,17 @@ impl SqliteStore {
             }
             let existing: Option<String> = conn
                 .query_row(
-                    "SELECT id FROM graph_edges WHERE src_id = ?1 AND tag = ?2 AND dst_id = ?3",
-                    params![src, canonical, dst],
+                    "SELECT id FROM graph_edges
+                     WHERE src_id = ?1 AND tag = ?2 AND dst_id = ?3 AND owner = ?4
+                       AND (workspace_id = ?5 OR (?6 AND workspace_id = 'global'))",
+                    params![
+                        src,
+                        canonical,
+                        dst,
+                        scope.owner,
+                        scope.workspace_id,
+                        scope.include_global,
+                    ],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -731,33 +1073,54 @@ mod groom_tests {
 
     fn seeded() -> SqliteStore {
         let s = SqliteStore::memory(4).unwrap();
-        s.graph_upsert(&GraphUpsertInput {
-            nodes: vec![],
-            edges: vec![
-                GraphEdgeInput {
-                    src: NodeRef { kind: "person".into(), name: "e".into() },
-                    tag: "works_onn".into(),
-                    dst: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                    fact: Some("e is working on open-clank".into()),
-                    trust: Some(2),
-                },
-                GraphEdgeInput {
-                    src: NodeRef { kind: "person".into(), name: "e".into() },
-                    tag: "works_on".into(),
-                    dst: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                    fact: None,
-                    trust: Some(4),
-                },
-                GraphEdgeInput {
-                    src: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                    tag: "usess".into(),
-                    dst: NodeRef { kind: "tool".into(), name: "frankenmemory".into() },
-                    fact: None,
-                    trust: None,
-                },
-            ],
-            cues: vec![],
-        })
+        s.graph_upsert(
+            &test_scope(),
+            &GraphUpsertInput {
+                nodes: vec![],
+                edges: vec![
+                    GraphEdgeInput {
+                        src: NodeRef {
+                            kind: "person".into(),
+                            name: "e".into(),
+                        },
+                        tag: "works_onn".into(),
+                        dst: NodeRef {
+                            kind: "project".into(),
+                            name: "open-clank".into(),
+                        },
+                        fact: Some("e is working on open-clank".into()),
+                        trust: Some(2),
+                    },
+                    GraphEdgeInput {
+                        src: NodeRef {
+                            kind: "person".into(),
+                            name: "e".into(),
+                        },
+                        tag: "works_on".into(),
+                        dst: NodeRef {
+                            kind: "project".into(),
+                            name: "open-clank".into(),
+                        },
+                        fact: None,
+                        trust: Some(4),
+                    },
+                    GraphEdgeInput {
+                        src: NodeRef {
+                            kind: "project".into(),
+                            name: "open-clank".into(),
+                        },
+                        tag: "usess".into(),
+                        dst: NodeRef {
+                            kind: "tool".into(),
+                            name: "frankenmemory".into(),
+                        },
+                        fact: None,
+                        trust: None,
+                    },
+                ],
+                cues: vec![],
+            },
+        )
         .unwrap();
         s
     }
@@ -769,7 +1132,11 @@ mod groom_tests {
         assert_eq!(canonicalize_tag("use"), Some("uses"));
         assert_eq!(canonicalize_tag("Works On"), Some("works_on"));
         assert_eq!(canonicalize_tag("maintains"), None, "no aggressive merges");
-        assert_eq!(canonicalize_tag("working_on"), None, "distance 3 stays stray by design");
+        assert_eq!(
+            canonicalize_tag("working_on"),
+            None,
+            "distance 3 stays stray by design"
+        );
     }
 
     #[test]
@@ -784,7 +1151,7 @@ mod groom_tests {
             )
             .unwrap();
         }
-        let changed = s.graph_tag_normalize(false).unwrap();
+        let changed = s.graph_tag_normalize(&test_scope(), false).unwrap();
         assert_eq!(changed, 2, "works_onn merged + usess rewritten");
 
         let conn = s.conn.lock().unwrap();
@@ -813,7 +1180,8 @@ mod groom_tests {
         {
             let conn = s.conn.lock().unwrap();
             let old = (Utc::now() - chrono::Duration::days(365)).to_rfc3339();
-            conn.execute("UPDATE graph_edges SET last_seen = ?1", params![old]).unwrap();
+            conn.execute("UPDATE graph_edges SET last_seen = ?1", params![old])
+                .unwrap();
             // one edge earned heavy traversal — Hebbian boost should not save
             // it from a year of silence at default settings, but weights must
             // differ from the untraversed one before pruning kicks both out.
@@ -823,16 +1191,24 @@ mod groom_tests {
             )
             .unwrap();
         }
-        let (_, pruned) = s.graph_edge_decay(&EdgeDecayParams::default(), false).unwrap();
-        assert!(pruned >= 2, "year-old edges die at default half-life, got {pruned}");
+        let (_, pruned) = s
+            .graph_edge_decay(&test_scope(), &EdgeDecayParams::default(), false)
+            .unwrap();
+        assert!(
+            pruned >= 2,
+            "year-old edges die at default half-life, got {pruned}"
+        );
 
         // fresh store: traversal boost GROWS weight instead of decaying it
         let s2 = seeded();
         {
             let conn = s2.conn.lock().unwrap();
-            conn.execute("UPDATE graph_edges SET traversal_count = 20", []).unwrap();
+            conn.execute("UPDATE graph_edges SET traversal_count = 20", [])
+                .unwrap();
         }
-        let (decayed, pruned) = s2.graph_edge_decay(&EdgeDecayParams::default(), false).unwrap();
+        let (decayed, pruned) = s2
+            .graph_edge_decay(&test_scope(), &EdgeDecayParams::default(), false)
+            .unwrap();
         assert_eq!(pruned, 0);
         assert!(decayed > 0);
         let conn = s2.conn.lock().unwrap();
@@ -845,11 +1221,15 @@ mod groom_tests {
     #[test]
     fn dry_run_changes_nothing() {
         let s = seeded();
-        let changed = s.graph_tag_normalize(true).unwrap();
+        let changed = s.graph_tag_normalize(&test_scope(), true).unwrap();
         assert_eq!(changed, 2);
         let conn = s.conn.lock().unwrap();
         let stray: i64 = conn
-            .query_row("SELECT count(*) FROM graph_edges WHERE tag = 'usess'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM graph_edges WHERE tag = 'usess'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(stray, 1, "dry run must not rewrite");
     }
@@ -861,6 +1241,7 @@ impl SqliteStore {
     /// relevance signal (codegraph steal). Returns node_id → score.
     pub fn graph_rwr(
         &self,
+        scope: &GraphScope,
         seeds: &[String],
         alpha: f64,
         iterations: usize,
@@ -870,20 +1251,54 @@ impl SqliteStore {
         }
         let conn = self.conn.lock().unwrap();
 
+        // Caller-provided IDs are hints, not authority. Only seed nodes that
+        // are visible in this scope so rank cannot echo a foreign/arbitrary ID.
+        let mut seed_stmt = conn.prepare(
+            "SELECT 1 FROM graph_nodes
+             WHERE id = ?1 AND status = 'active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
+        )?;
+        let scoped_seeds: Vec<String> = seeds
+            .iter()
+            .filter_map(|seed| {
+                seed_stmt
+                    .query_row(
+                        params![seed, scope.owner, scope.workspace_id, scope.include_global],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .map(|_| seed.clone())
+            })
+            .collect();
+        drop(seed_stmt);
+        if scoped_seeds.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let seeds = scoped_seeds.as_slice();
+
         // Collect the bounded subgraph: seeds + 2 hops, undirected.
         let mut nodes: HashSet<String> = seeds.iter().cloned().collect();
         let mut frontier: Vec<String> = seeds.to_vec();
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         let mut stmt = conn.prepare(
-            "SELECT dst_id FROM graph_edges WHERE src_id = ?1 AND status='active'
+            "SELECT dst_id FROM graph_edges
+             WHERE src_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))
              UNION ALL
-             SELECT src_id FROM graph_edges WHERE dst_id = ?1 AND status='active'",
+             SELECT src_id FROM graph_edges
+             WHERE dst_id = ?1 AND status='active' AND owner = ?2
+               AND (workspace_id = ?3 OR (?4 AND workspace_id = 'global'))",
         )?;
         for _ in 0..2 {
             let mut next = Vec::new();
             for node in frontier.drain(..) {
                 let neighbors: Vec<String> = stmt
-                    .query_map(params![node], |r| r.get(0))?
+                    .query_map(
+                        params![node, scope.owner, scope.workspace_id, scope.include_global],
+                        |r| r.get(0),
+                    )?
                     .collect::<Result<_, _>>()?;
                 for n in &neighbors {
                     if nodes.insert(n.clone()) {
@@ -897,7 +1312,15 @@ impl SqliteStore {
         // Adjacency for the last frontier layer (their edges INTO the set).
         for node in frontier {
             let neighbors: Vec<String> = stmt
-                .query_map(params![node.clone()], |r| r.get(0))?
+                .query_map(
+                    params![
+                        node.clone(),
+                        scope.owner,
+                        scope.workspace_id,
+                        scope.include_global,
+                    ],
+                    |r| r.get(0),
+                )?
                 .collect::<Result<_, _>>()?;
             adjacency
                 .entry(node)
@@ -906,8 +1329,7 @@ impl SqliteStore {
         }
 
         let restart = 1.0 / seeds.len() as f64;
-        let mut score: HashMap<String, f64> =
-            seeds.iter().map(|s| (s.clone(), restart)).collect();
+        let mut score: HashMap<String, f64> = seeds.iter().map(|s| (s.clone(), restart)).collect();
         for _ in 0..iterations {
             let mut next: HashMap<String, f64> = HashMap::new();
             for s in seeds {
@@ -942,34 +1364,68 @@ mod rwr_tests {
         let s = SqliteStore::memory(4).unwrap();
         // star: hub connected to seeds and many others; leaf hangs alone off seed
         let mut edges = vec![GraphEdgeInput {
-            src: NodeRef { kind: "concept".into(), name: "seed".into() },
+            src: NodeRef {
+                kind: "concept".into(),
+                name: "seed".into(),
+            },
             tag: "about".into(),
-            dst: NodeRef { kind: "concept".into(), name: "leaf".into() },
+            dst: NodeRef {
+                kind: "concept".into(),
+                name: "leaf".into(),
+            },
             fact: None,
             trust: None,
         }];
         for i in 0..4 {
             edges.push(GraphEdgeInput {
-                src: NodeRef { kind: "concept".into(), name: "seed".into() },
+                src: NodeRef {
+                    kind: "concept".into(),
+                    name: "seed".into(),
+                },
                 tag: "about".into(),
-                dst: NodeRef { kind: "concept".into(), name: "hub".into() },
+                dst: NodeRef {
+                    kind: "concept".into(),
+                    name: "hub".into(),
+                },
                 fact: None,
                 trust: None,
             });
             edges.push(GraphEdgeInput {
-                src: NodeRef { kind: "concept".into(), name: format!("spoke{i}") },
+                src: NodeRef {
+                    kind: "concept".into(),
+                    name: format!("spoke{i}"),
+                },
                 tag: "about".into(),
-                dst: NodeRef { kind: "concept".into(), name: "hub".into() },
+                dst: NodeRef {
+                    kind: "concept".into(),
+                    name: "hub".into(),
+                },
                 fact: None,
                 trust: None,
             });
         }
-        s.graph_upsert(&GraphUpsertInput { nodes: vec![], edges, cues: vec![] }).unwrap();
+        s.graph_upsert(
+            &test_scope(),
+            &GraphUpsertInput {
+                nodes: vec![],
+                edges,
+                cues: vec![],
+            },
+        )
+        .unwrap();
 
-        let seed = node_id("concept", "seed");
-        let scores = s.graph_rwr(&[seed.clone()], 0.25, 20).unwrap();
-        let hub = scores.get(&node_id("concept", "hub")).copied().unwrap_or(0.0);
-        let leaf = scores.get(&node_id("concept", "leaf")).copied().unwrap_or(0.0);
+        let seed = test_scope().node_id("concept", "seed");
+        let scores = s
+            .graph_rwr(&test_scope(), &[seed.clone()], 0.25, 20)
+            .unwrap();
+        let hub = scores
+            .get(&test_scope().node_id("concept", "hub"))
+            .copied()
+            .unwrap_or(0.0);
+        let leaf = scores
+            .get(&test_scope().node_id("concept", "leaf"))
+            .copied()
+            .unwrap_or(0.0);
         assert!(hub > leaf, "hub {hub} must outrank leaf {leaf}");
         assert!(scores.get(&seed).copied().unwrap_or(0.0) > 0.0);
     }
@@ -977,11 +1433,16 @@ mod rwr_tests {
     #[test]
     fn deterministic_and_empty_seeds_safe() {
         let s = SqliteStore::memory(4).unwrap();
-        assert!(s.graph_rwr(&[], 0.25, 10).unwrap().is_empty());
+        assert!(s
+            .graph_rwr(&test_scope(), &[], 0.25, 10)
+            .unwrap()
+            .is_empty());
         upsert_smoke(&s);
-        let seed = node_id("person", "e");
-        let a = s.graph_rwr(&[seed.clone()], 0.25, 20).unwrap();
-        let b = s.graph_rwr(&[seed], 0.25, 20).unwrap();
+        let seed = test_scope().node_id("person", "e");
+        let a = s
+            .graph_rwr(&test_scope(), &[seed.clone()], 0.25, 20)
+            .unwrap();
+        let b = s.graph_rwr(&test_scope(), &[seed], 0.25, 20).unwrap();
         assert_eq!(a.len(), b.len());
         for (k, v) in &a {
             assert!((v - b[k]).abs() < 1e-12);
@@ -989,17 +1450,26 @@ mod rwr_tests {
     }
 
     fn upsert_smoke(s: &SqliteStore) {
-        s.graph_upsert(&GraphUpsertInput {
-            nodes: vec![],
-            edges: vec![GraphEdgeInput {
-                src: NodeRef { kind: "person".into(), name: "e".into() },
-                tag: "works_on".into(),
-                dst: NodeRef { kind: "project".into(), name: "open-clank".into() },
-                fact: None,
-                trust: None,
-            }],
-            cues: vec![],
-        })
+        s.graph_upsert(
+            &test_scope(),
+            &GraphUpsertInput {
+                nodes: vec![],
+                edges: vec![GraphEdgeInput {
+                    src: NodeRef {
+                        kind: "person".into(),
+                        name: "e".into(),
+                    },
+                    tag: "works_on".into(),
+                    dst: NodeRef {
+                        kind: "project".into(),
+                        name: "open-clank".into(),
+                    },
+                    fact: None,
+                    trust: None,
+                }],
+                cues: vec![],
+            },
+        )
         .unwrap();
     }
 }
@@ -1026,18 +1496,42 @@ pub struct CodeStaleResult {
 use serde::Serialize;
 
 impl SqliteStore {
-    fn code_delete_file_nodes(conn: &Connection, codebase: &str, rel_path: &str) -> rusqlite::Result<()> {
+    fn codebase_key(scope: &GraphScope, codebase: &str) -> String {
+        format!(
+            "{}\u{1f}{}\u{1f}{codebase}",
+            scope.owner, scope.workspace_id
+        )
+    }
+
+    fn code_delete_file_nodes(
+        conn: &Connection,
+        scope: &GraphScope,
+        codebase: &str,
+        rel_path: &str,
+    ) -> rusqlite::Result<()> {
         let prefix = format!("{codebase}::{rel_path}");
         // file node + its symbols share the FQN prefix
         let ids: Vec<String> = {
             let mut stmt = conn.prepare(
-                "SELECT id FROM graph_nodes WHERE name = ?1 OR name LIKE ?2",
+                "SELECT id FROM graph_nodes
+                 WHERE (name = ?1 OR name LIKE ?2) AND owner = ?3 AND workspace_id = ?4",
             )?;
-            let rows = stmt.query_map(params![prefix, format!("{prefix}::%")], |r| r.get(0))?;
+            let rows = stmt.query_map(
+                params![
+                    prefix,
+                    format!("{prefix}::%"),
+                    scope.owner,
+                    scope.workspace_id
+                ],
+                |r| r.get(0),
+            )?;
             rows.collect::<Result<_, _>>()?
         };
         for id in &ids {
-            conn.execute("DELETE FROM graph_edges WHERE src_id = ?1 OR dst_id = ?1", params![id])?;
+            conn.execute(
+                "DELETE FROM graph_edges WHERE src_id = ?1 OR dst_id = ?1",
+                params![id],
+            )?;
             conn.execute("DELETE FROM graph_cues WHERE node_id = ?1", params![id])?;
             let _ = conn.execute("DELETE FROM graph_cues_fts WHERE node_id = ?1", params![id]);
             conn.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])?;
@@ -1049,16 +1543,23 @@ impl SqliteStore {
     /// (mtime_ns + size match) are skipped; changed files cascade-delete
     /// their old nodes first; files gone from disk are swept. OPT-IN ONLY —
     /// nothing calls this except the code_index tool.
-    pub fn code_stale(&self, root: &std::path::Path) -> Result<CodeStaleResult, String> {
+    pub fn code_stale(
+        &self,
+        scope: &GraphScope,
+        root: &std::path::Path,
+    ) -> Result<CodeStaleResult, String> {
         let codebase = root.to_string_lossy().to_string();
+        let codebase_key = Self::codebase_key(scope, &codebase);
         let files = crate::code::scan_codebase(root)?;
         let known: HashMap<String, (String, i64, i64)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn
-                .prepare("SELECT rel_path, blake3, mtime_ns, size FROM code_files WHERE codebase = ?1")
+                .prepare(
+                    "SELECT rel_path, blake3, mtime_ns, size FROM code_files WHERE codebase = ?1",
+                )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![codebase], |r| {
+                .query_map(params![codebase_key], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .map_err(|e| e.to_string())?;
@@ -1104,7 +1605,11 @@ impl SqliteStore {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(0);
-            let current = (blake3::hash(&bytes).to_hex().to_string(), mtime_ns, meta.len() as i64);
+            let current = (
+                blake3::hash(&bytes).to_hex().to_string(),
+                mtime_ns,
+                meta.len() as i64,
+            );
             if known.get(&rel) != Some(&current) {
                 result.changed_files.push(rel);
             }
@@ -1119,8 +1624,13 @@ impl SqliteStore {
         Ok(result)
     }
 
-    pub fn code_index(&self, root: &std::path::Path) -> Result<CodeIndexResult, String> {
+    pub fn code_index(
+        &self,
+        scope: &GraphScope,
+        root: &std::path::Path,
+    ) -> Result<CodeIndexResult, String> {
         let codebase = root.to_string_lossy().to_string();
+        let codebase_key = Self::codebase_key(scope, &codebase);
         let files = crate::code::scan_codebase(root)?;
         let mut result = CodeIndexResult {
             codebase: codebase.clone(),
@@ -1137,7 +1647,9 @@ impl SqliteStore {
                 .prepare("SELECT rel_path, mtime_ns, size FROM code_files WHERE codebase = ?1")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![codebase], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .query_map(params![codebase_key], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
         };
@@ -1171,17 +1683,18 @@ impl SqliteStore {
             match crate::code::index_file(&codebase, root, &path) {
                 Ok(indexed) => {
                     let conn = self.conn.lock().unwrap();
-                    Self::code_delete_file_nodes(&conn, &codebase, &indexed.rel_path)
+                    Self::code_delete_file_nodes(&conn, scope, &codebase, &indexed.rel_path)
                         .map_err(|e| e.to_string())?;
                     drop(conn);
-                    self.graph_upsert(&indexed.upsert).map_err(|e| e.to_string())?;
+                    self.graph_upsert(scope, &indexed.upsert)
+                        .map_err(|e| e.to_string())?;
                     let conn = self.conn.lock().unwrap();
                     conn.execute(
                         "INSERT OR REPLACE INTO code_files
                          (codebase, rel_path, blake3, mtime_ns, size, symbol_count, indexed_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
-                            codebase,
+                            codebase_key,
                             indexed.rel_path,
                             indexed.blake3,
                             indexed.mtime_ns,
@@ -1207,10 +1720,11 @@ impl SqliteStore {
         if !gone.is_empty() {
             let conn = self.conn.lock().unwrap();
             for rel in &gone {
-                Self::code_delete_file_nodes(&conn, &codebase, rel).map_err(|e| e.to_string())?;
+                Self::code_delete_file_nodes(&conn, scope, &codebase, rel)
+                    .map_err(|e| e.to_string())?;
                 conn.execute(
                     "DELETE FROM code_files WHERE codebase = ?1 AND rel_path = ?2",
-                    params![codebase, rel],
+                    params![codebase_key, rel],
                 )
                 .map_err(|e| e.to_string())?;
                 result.files_removed += 1;
@@ -1219,17 +1733,22 @@ impl SqliteStore {
         Ok(result)
     }
 
-    pub fn code_status(&self, codebase: &str) -> rusqlite::Result<(usize, usize, Option<String>)> {
+    pub fn code_status(
+        &self,
+        scope: &GraphScope,
+        codebase: &str,
+    ) -> rusqlite::Result<(usize, usize, Option<String>)> {
         let conn = self.conn.lock().unwrap();
+        let codebase_key = Self::codebase_key(scope, codebase);
         let (files, symbols): (i64, i64) = conn.query_row(
             "SELECT count(*), COALESCE(SUM(symbol_count),0) FROM code_files WHERE codebase = ?1",
-            params![codebase],
+            params![codebase_key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let last: Option<String> = conn
             .query_row(
                 "SELECT MAX(indexed_at) FROM code_files WHERE codebase = ?1",
-                params![codebase],
+                params![codebase_key],
                 |r| r.get(0),
             )
             .optional()?
@@ -1237,49 +1756,68 @@ impl SqliteStore {
         Ok((files as usize, symbols as usize, last))
     }
 
-    pub fn code_remove(&self, codebase: &str) -> Result<usize, String> {
+    pub fn code_remove(&self, scope: &GraphScope, codebase: &str) -> Result<usize, String> {
+        let codebase_key = Self::codebase_key(scope, codebase);
         let rels: Vec<String> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn
                 .prepare("SELECT rel_path FROM code_files WHERE codebase = ?1")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![codebase], |r| r.get(0))
+                .query_map(params![codebase_key], |r| r.get(0))
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
         };
         let conn = self.conn.lock().unwrap();
         for rel in &rels {
-            Self::code_delete_file_nodes(&conn, codebase, rel).map_err(|e| e.to_string())?;
+            Self::code_delete_file_nodes(&conn, scope, codebase, rel).map_err(|e| e.to_string())?;
         }
         // Modules and callables are codebase-scoped (not file-prefixed) —
         // sweep whatever remains under the namespace.
         let leftovers: Vec<String> = {
             let mut stmt = conn
-                .prepare("SELECT id FROM graph_nodes WHERE name LIKE ?1")
+                .prepare(
+                    "SELECT id FROM graph_nodes
+                     WHERE name LIKE ?1 AND owner = ?2 AND workspace_id = ?3",
+                )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map(params![format!("{codebase}::%")], |r| r.get(0))
+                .query_map(
+                    params![format!("{codebase}::%"), scope.owner, scope.workspace_id],
+                    |r| r.get(0),
+                )
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
         };
         for id in &leftovers {
-            conn.execute("DELETE FROM graph_edges WHERE src_id = ?1 OR dst_id = ?1", params![id])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM graph_edges WHERE src_id = ?1 OR dst_id = ?1",
+                params![id],
+            )
+            .map_err(|e| e.to_string())?;
             conn.execute("DELETE FROM graph_cues WHERE node_id = ?1", params![id])
                 .map_err(|e| e.to_string())?;
             let _ = conn.execute("DELETE FROM graph_cues_fts WHERE node_id = ?1", params![id]);
             conn.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])
                 .map_err(|e| e.to_string())?;
         }
-        conn.execute("DELETE FROM code_files WHERE codebase = ?1", params![codebase])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM code_files WHERE codebase = ?1",
+            params![codebase_key],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(rels.len())
     }
 
     /// Which files transitively import `rel_path`? Reverse-imports BFS —
     /// the cheap blast-radius query.
-    pub fn code_impact(&self, codebase: &str, rel_path: &str, max_depth: usize) -> rusqlite::Result<Vec<String>> {
+    pub fn code_impact(
+        &self,
+        scope: &GraphScope,
+        codebase: &str,
+        rel_path: &str,
+        max_depth: usize,
+    ) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         // module nodes that this file could be imported as: match rel_path
         // stem against module node names (suffix match — import strings are
@@ -1290,31 +1828,43 @@ impl SqliteStore {
             .unwrap_or_else(|| rel_path.to_string());
         let mut targets: Vec<String> = {
             let mut stmt = conn.prepare(
-                "SELECT id FROM graph_nodes WHERE kind = 'module' AND name LIKE ?1 AND name LIKE ?2",
+                "SELECT id FROM graph_nodes
+                 WHERE kind = 'module' AND name LIKE ?1 AND name LIKE ?2
+                   AND owner = ?3 AND workspace_id = ?4",
             )?;
             let rows = stmt.query_map(
-                params![format!("{codebase}::%"), format!("%{stem}%")],
+                params![
+                    format!("{codebase}::%"),
+                    format!("%{stem}%"),
+                    scope.owner,
+                    scope.workspace_id,
+                ],
                 |r| r.get(0),
             )?;
             rows.collect::<Result<_, _>>()?
         };
         // plus the file node itself
-        targets.push(crate::graph::node_id("file", &format!("{codebase}::{rel_path}")));
+        targets.push(scope.node_id("file", &format!("{codebase}::{rel_path}")));
 
         let mut impacted: HashSet<String> = HashSet::new();
         let mut frontier = targets;
         let mut stmt = conn.prepare(
             "SELECT n.name FROM graph_edges e JOIN graph_nodes n ON n.id = e.src_id
-             WHERE e.tag = 'imports' AND e.dst_id = ?1",
+             WHERE e.tag = 'imports' AND e.dst_id = ?1
+               AND e.owner = ?2 AND e.workspace_id = ?3
+               AND n.owner = ?2 AND n.workspace_id = ?3",
         )?;
         for _ in 0..max_depth {
             let mut next = Vec::new();
             for target in frontier.drain(..) {
-                let importers: Vec<String> =
-                    stmt.query_map(params![target], |r| r.get(0))?.collect::<Result<_, _>>()?;
+                let importers: Vec<String> = stmt
+                    .query_map(params![target, scope.owner, scope.workspace_id], |r| {
+                        r.get(0)
+                    })?
+                    .collect::<Result<_, _>>()?;
                 for name in importers {
                     if impacted.insert(name.clone()) {
-                        next.push(crate::graph::node_id("file", &name));
+                        next.push(scope.node_id("file", &name));
                     }
                 }
             }
@@ -1376,17 +1926,20 @@ mod code_index_tests {
         let root = &repo.0;
         write(root, "src/lib.py", "def core_helper():\n    return 1\n");
         let store = SqliteStore::memory(4).unwrap();
-        store.code_index(root).unwrap();
+        store.code_index(&test_scope(), root).unwrap();
 
-        let clean = store.code_stale(root).unwrap();
-        assert!(clean.changed_files.is_empty(), "fresh index should be clean: {clean:?}");
+        let clean = store.code_stale(&test_scope(), root).unwrap();
+        assert!(
+            clean.changed_files.is_empty(),
+            "fresh index should be clean: {clean:?}"
+        );
 
         write(root, "src/lib.py", "def core_helper():\n    return 2\n");
-        let changed = store.code_stale(root).unwrap();
+        let changed = store.code_stale(&test_scope(), root).unwrap();
         assert_eq!(changed.changed_files, vec!["src/lib.py"]);
 
         std::fs::remove_file(root.join("src/lib.py")).unwrap();
-        let stale = store.code_stale(root).unwrap();
+        let stale = store.code_stale(&test_scope(), root).unwrap();
         assert!(stale.changed_files.is_empty());
         assert_eq!(stale.missing_files, vec!["src/lib.py"]);
     }
@@ -1396,38 +1949,44 @@ mod code_index_tests {
         let repo = fixture_repo();
         let root = &repo.0;
         write(root, "src/lib.py", "def core_helper():\n    return 1\n");
-        write(root, "src/app.py", "from lib import core_helper\ndef main():\n    core_helper()\n");
+        write(
+            root,
+            "src/app.py",
+            "from lib import core_helper\ndef main():\n    core_helper()\n",
+        );
 
         let s = SqliteStore::memory(4).unwrap();
-        let result = s.code_index(root).unwrap();
+        let result = s.code_index(&test_scope(), root).unwrap();
         assert_eq!(result.files_indexed, 2);
         assert_eq!(result.symbols, 2, "core_helper + main");
         assert!(result.errors.is_empty(), "{:?}", result.errors);
 
         let codebase = root.to_string_lossy().to_string();
-        let (files, symbols, last) = s.code_status(&codebase).unwrap();
+        let (files, symbols, last) = s.code_status(&test_scope(), &codebase).unwrap();
         assert_eq!(files, 2);
         assert_eq!(symbols, 2);
         assert!(last.is_some());
 
         // cues from identifiers findable through the normal graph surface
-        let hits = s.graph_cues("core helper", 10).unwrap();
+        let hits = s.graph_cues(&test_scope(), "core helper", 10).unwrap();
         assert!(hits.iter().any(|h| h.node.name.ends_with("::core_helper")));
 
         // incremental: nothing changed → nothing re-indexed
-        let again = s.code_index(root).unwrap();
+        let again = s.code_index(&test_scope(), root).unwrap();
         assert_eq!(again.files_indexed, 0);
         assert_eq!(again.files_unchanged, 2);
 
         // impact: app.py imports lib → touching lib.py impacts app.py
-        let impacted = s.code_impact(&codebase, "src/lib.py", 4).unwrap();
+        let impacted = s
+            .code_impact(&test_scope(), &codebase, "src/lib.py", 4)
+            .unwrap();
         assert!(
             impacted.iter().any(|f| f.ends_with("src/app.py")),
             "expected app.py in impact set, got {impacted:?}"
         );
 
         // removal sweeps everything
-        let removed = s.code_remove(&codebase).unwrap();
+        let removed = s.code_remove(&test_scope(), &codebase).unwrap();
         assert_eq!(removed, 2);
         let conn = s.conn.lock().unwrap();
         let left: i64 = conn
@@ -1447,12 +2006,12 @@ mod code_index_tests {
         write(root, "a.rs", "pub fn alpha() {}\n");
         write(root, "b.rs", "pub fn beta() {}\n");
         let s = SqliteStore::memory(4).unwrap();
-        assert_eq!(s.code_index(root).unwrap().files_indexed, 2);
+        assert_eq!(s.code_index(&test_scope(), root).unwrap().files_indexed, 2);
 
         std::fs::remove_file(root.join("b.rs")).unwrap();
-        let result = s.code_index(root).unwrap();
+        let result = s.code_index(&test_scope(), root).unwrap();
         assert_eq!(result.files_removed, 1);
-        let hits = s.graph_cues("beta", 10).unwrap();
+        let hits = s.graph_cues(&test_scope(), "beta", 10).unwrap();
         assert!(hits.is_empty(), "beta's cues must be gone");
     }
 }

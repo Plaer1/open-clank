@@ -17,8 +17,17 @@ use crate::graph::{GraphCueInput, GraphEdgeInput, GraphNodeInput, GraphUpsertInp
 /// Directories never worth indexing. v1 deny-list; .gitignore awareness can
 /// come later if noise shows up in practice.
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", "build", ".venv", "venv",
-    "__pycache__", ".next", ".cache", "vendor",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".cache",
+    "vendor",
 ];
 
 const MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -53,7 +62,8 @@ impl Lang {
     /// a navigable map, not a compiler.
     fn query_source(&self) -> &'static str {
         match self {
-            Self::Rust => r#"
+            Self::Rust => {
+                r#"
                 (function_item name: (identifier) @def)
                 (struct_item name: (type_identifier) @def)
                 (enum_item name: (type_identifier) @def)
@@ -62,23 +72,28 @@ impl Lang {
                 (call_expression function: (identifier) @call)
                 (call_expression function: (field_expression field: (field_identifier) @call))
                 (call_expression function: (scoped_identifier name: (identifier) @call))
-            "#,
-            Self::Python => r#"
+            "#
+            }
+            Self::Python => {
+                r#"
                 (function_definition name: (identifier) @def)
                 (class_definition name: (identifier) @def)
                 (import_statement name: (dotted_name) @import)
                 (import_from_statement module_name: (dotted_name) @import)
                 (call function: (identifier) @call)
                 (call function: (attribute attribute: (identifier) @call))
-            "#,
-            Self::TypeScript => r#"
+            "#
+            }
+            Self::TypeScript => {
+                r#"
                 (function_declaration name: (identifier) @def)
                 (class_declaration name: (type_identifier) @def)
                 (method_definition name: (property_identifier) @def)
                 (import_statement source: (string (string_fragment) @import))
                 (call_expression function: (identifier) @call)
                 (call_expression function: (member_expression property: (property_identifier) @call))
-            "#,
+            "#
+            }
         }
     }
 }
@@ -140,7 +155,8 @@ pub fn identifier_cues(identifier: &str) -> Vec<String> {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
-        } else if c.is_uppercase() && !current.is_empty()
+        } else if c.is_uppercase()
+            && !current.is_empty()
             && current.chars().last().is_some_and(|p| p.is_lowercase())
         {
             words.push(std::mem::take(&mut current));
@@ -208,7 +224,10 @@ pub fn index_file(codebase: &str, root: &Path, path: &Path) -> Result<IndexedFil
 
     let extraction = extract_file(lang, &source)?;
     let file_fqn = format!("{codebase}::{rel}");
-    let file_ref = NodeRef { kind: "file".into(), name: file_fqn.clone() };
+    let file_ref = NodeRef {
+        kind: "file".into(),
+        name: file_fqn.clone(),
+    };
 
     let mut nodes = vec![GraphNodeInput {
         kind: "file".into(),
@@ -223,7 +242,10 @@ pub fn index_file(codebase: &str, root: &Path, path: &Path) -> Result<IndexedFil
 
     for def in &extraction.defs {
         let sym_fqn = format!("{file_fqn}::{def}");
-        let sym_ref = NodeRef { kind: "code_symbol".into(), name: sym_fqn.clone() };
+        let sym_ref = NodeRef {
+            kind: "code_symbol".into(),
+            name: sym_fqn.clone(),
+        };
         nodes.push(GraphNodeInput {
             kind: "code_symbol".into(),
             name: sym_fqn.clone(),
@@ -253,7 +275,10 @@ pub fn index_file(codebase: &str, root: &Path, path: &Path) -> Result<IndexedFil
         edges.push(GraphEdgeInput {
             src: file_ref.clone(),
             tag: "imports".into(),
-            dst: NodeRef { kind: "module".into(), name: format!("{codebase}::{import}") },
+            dst: NodeRef {
+                kind: "module".into(),
+                name: format!("{codebase}::{import}"),
+            },
             fact: None,
             trust: Some(3),
         });
@@ -267,7 +292,10 @@ pub fn index_file(codebase: &str, root: &Path, path: &Path) -> Result<IndexedFil
         edges.push(GraphEdgeInput {
             src: file_ref.clone(),
             tag: "calls".into(),
-            dst: NodeRef { kind: "callable".into(), name: format!("{codebase}::{call}") },
+            dst: NodeRef {
+                kind: "callable".into(),
+                name: format!("{codebase}::{call}"),
+            },
             fact: None,
             trust: Some(0),
         });
@@ -325,8 +353,14 @@ mod tests {
 
     #[test]
     fn identifier_cues_split_cases() {
-        assert_eq!(identifier_cues("parseModelSelection"), vec!["parse", "model", "selection"]);
-        assert_eq!(identifier_cues("graph_edge_decay"), vec!["graph", "edge", "decay"]);
+        assert_eq!(
+            identifier_cues("parseModelSelection"),
+            vec!["parse", "model", "selection"]
+        );
+        assert_eq!(
+            identifier_cues("graph_edge_decay"),
+            vec!["graph", "edge", "decay"]
+        );
         assert!(identifier_cues("ab").is_empty(), "short fragments dropped");
     }
 }

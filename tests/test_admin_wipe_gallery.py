@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -41,7 +43,7 @@ def test_wipe_gallery_clears_albums(monkeypatch):
     wipe_handler = wipe_route.endpoint
     
     # 6. Execute the wipe logic for gallery
-    result = wipe_handler(kind="gallery", request=request)
+    result = asyncio.run(wipe_handler(kind="gallery", request=request))
     
     # 7. Assertions
     db = TestSessionLocal()

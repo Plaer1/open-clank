@@ -45,6 +45,13 @@ BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
 
+# Every fm-mcp child inherits one canonical absolute database path. Resolving
+# here avoids cwd-dependent split brains between Odyssius and MiMo.
+FM_DB_PATH = os.path.abspath(
+    os.path.expanduser(os.environ.get("FM_DB_PATH") or os.path.join(DATA_DIR, "frankenmemory.db"))
+)
+os.environ["FM_DB_PATH"] = FM_DB_PATH
+
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which
 # is the ONLY place ODYSSEUS_DATA_DIR is read. Import these constants instead of

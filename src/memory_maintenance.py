@@ -13,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 def groom_interval_hours(raw: Any = None) -> float:
     """Parse the maintenance interval; zero disables the background loop."""
-    value = os.environ.get("FM_GROOM_INTERVAL_HOURS", "24") if raw is None else raw
+    value = os.environ.get("FM_GROOM_INTERVAL_HOURS", "0") if raw is None else raw
     try:
         hours = float(value)
     except (TypeError, ValueError):
-        hours = 24.0
+        hours = 0.0
     return max(0.0, hours)
 
 

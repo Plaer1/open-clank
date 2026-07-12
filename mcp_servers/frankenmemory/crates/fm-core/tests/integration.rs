@@ -30,17 +30,22 @@ async fn exit_1_dual_record() {
         workspace_id: "global".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
 
     let result = provider.capture(&turn).await;
-    assert!(result.records_captured >= 2, "should capture user + assistant + curated");
+    assert!(
+        result.records_captured >= 2,
+        "should capture user + assistant + curated"
+    );
     assert!(result.providers_succeeded >= 1);
 
     // Verify records exist in store
-    let curated = store.search_curated_fts("Rust programming", 10).await;
+    let curated = store
+        .search_curated_fts_scoped("Rust programming", 10, Some("alice"), Some("global"))
+        .await;
     assert!(!curated.is_empty(), "curated store should have records");
 }
 
@@ -56,7 +61,7 @@ async fn exit_2_recall_toggle() {
         workspace_id: "global".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
@@ -64,6 +69,8 @@ async fn exit_2_recall_toggle() {
 
     let mut q = RecallQuery {
         query: "borrow checker".into(),
+        owner: Some("alice".into()),
+        workspace_id: Some("global".into()),
         top_k: 5,
         ..Default::default()
     };
@@ -74,8 +81,14 @@ async fn exit_2_recall_toggle() {
     q.mode = RecallMode::LayerB;
     let result_b = provider.recall(&q).await;
 
-    assert!(!result_a.memories.is_empty(), "LayerA should return results");
-    assert!(!result_b.memories.is_empty(), "LayerB should return results");
+    assert!(
+        !result_a.memories.is_empty(),
+        "LayerA should return results"
+    );
+    assert!(
+        !result_b.memories.is_empty(),
+        "LayerB should return results"
+    );
     // Native provider uses "hybrid" strategy; layers use "layer_a_hybrid"/"layer_b_hybrid"
     assert_eq!(result_a.recall_strategy, "hybrid");
     assert_eq!(result_b.recall_strategy, "hybrid");
@@ -90,6 +103,7 @@ async fn exit_3_ground_truth_in_both() {
     record.source_type = SourceType::Human;
     record.trust_score = 0.9;
     record.workspace_id = "global".into();
+    record.owner = Some("alice".into());
     let emb = vec![1.0, 0.0, 0.0, 0.0];
     store.upsert_curated(&record, Some(&emb)).await;
 
@@ -98,18 +112,27 @@ async fn exit_3_ground_truth_in_both() {
     record2.source_type = SourceType::AutoExtracted;
     record2.trust_score = 0.2;
     record2.workspace_id = "global".into();
+    record2.owner = Some("alice".into());
     store.upsert_curated(&record2, None).await;
 
     let q = RecallQuery {
         query: "dark mode theme".into(),
+        owner: Some("alice".into()),
+        workspace_id: Some("global".into()),
         top_k: 5,
         ..Default::default()
     };
 
     let result = provider.recall(&q).await;
-    assert!(result.ground_truth_preamble.is_some(), "GT preamble should be present");
     assert!(
-        result.ground_truth_preamble.unwrap().contains("Ground-Truth"),
+        result.ground_truth_preamble.is_some(),
+        "GT preamble should be present"
+    );
+    assert!(
+        result
+            .ground_truth_preamble
+            .unwrap()
+            .contains("Ground-Truth"),
         "GT preamble should mention Ground-Truth"
     );
 }
@@ -148,17 +171,23 @@ async fn exit_4_hybrid_pipeline_deterministic() {
     .collect();
 
     let att = attest(&candidates);
-    assert!(verify_attestation(&candidates, &att), "verify should pass for same candidates");
+    assert!(
+        verify_attestation(&candidates, &att),
+        "verify should pass for same candidates"
+    );
 
     // Tamper: changing a candidate should break verification
     let mut tampered = candidates.clone();
     tampered[0].record.record.id = "tampered".to_string();
-    assert!(!verify_attestation(&tampered, &att), "verify should fail for tampered candidates");
+    assert!(
+        !verify_attestation(&tampered, &att),
+        "verify should fail for tampered candidates"
+    );
 }
 
 #[tokio::test]
 async fn exit_5_two_tier() {
-    let (provider, store) = setup();
+    let (provider, _store) = setup();
 
     // Capture generates raw turns
     let turn = CompletedTurn {
@@ -169,7 +198,7 @@ async fn exit_5_two_tier() {
         workspace_id: "global".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
@@ -183,8 +212,8 @@ async fn exit_5_two_tier() {
             scene: None,
             tier: Tier::Curated,
             limit: 10,
-            workspace_id: None,
-            owner: None,
+            workspace_id: Some("global".into()),
+            owner: Some("alice".into()),
         })
         .await;
 
@@ -196,8 +225,8 @@ async fn exit_5_two_tier() {
             scene: None,
             tier: Tier::Raw,
             limit: 10,
-            workspace_id: None,
-            owner: None,
+            workspace_id: Some("global".into()),
+            owner: Some("alice".into()),
         })
         .await;
 
@@ -209,7 +238,7 @@ async fn exit_5_two_tier() {
 
 #[tokio::test]
 async fn exit_8_workspace_scoped_recall() {
-    let (provider, store) = setup();
+    let (provider, _store) = setup();
 
     // Capture in workspace A
     let turn_a = CompletedTurn {
@@ -220,7 +249,7 @@ async fn exit_8_workspace_scoped_recall() {
         workspace_id: "alpha".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
@@ -235,7 +264,7 @@ async fn exit_8_workspace_scoped_recall() {
         workspace_id: "beta".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
@@ -245,6 +274,7 @@ async fn exit_8_workspace_scoped_recall() {
     let q_a = RecallQuery {
         query: "project language".into(),
         workspace_id: Some("alpha".into()),
+        owner: Some("alice".into()),
         top_k: 10,
         ..Default::default()
     };
@@ -254,15 +284,17 @@ async fn exit_8_workspace_scoped_recall() {
     let q_b = RecallQuery {
         query: "project language".into(),
         workspace_id: Some("beta".into()),
+        owner: Some("alice".into()),
         top_k: 10,
         ..Default::default()
     };
     let result_b = provider.recall(&q_b).await;
 
-    // Recall from global (no workspace)
+    // Recall from global: active project scopes never widen to sibling projects.
     let q_global = RecallQuery {
         query: "project language".into(),
-        workspace_id: None,
+        workspace_id: Some("global".into()),
+        owner: Some("alice".into()),
         top_k: 10,
         ..Default::default()
     };
@@ -270,7 +302,7 @@ async fn exit_8_workspace_scoped_recall() {
 
     // Workspace A should surface alpha content (boosted)
     // Workspace B should surface beta content (boosted)
-    // Global should see both
+    // Global should not see either project without an explicit privileged widen.
     assert!(
         !result_a.memories.is_empty(),
         "workspace A should have results"
@@ -280,8 +312,8 @@ async fn exit_8_workspace_scoped_recall() {
         "workspace B should have results"
     );
     assert!(
-        result_global.memories.len() >= result_a.memories.len(),
-        "global should see at least as many as scoped"
+        result_global.memories.is_empty(),
+        "global must not widen to project scopes"
     );
 }
 
@@ -299,7 +331,7 @@ async fn exit_9_standalone_no_external_services() {
         workspace_id: "global".into(),
         workspace_path: None,
         source: "test".into(),
-        owner: None,
+        owner: Some("alice".into()),
         category: None,
         metadata: Default::default(),
     };
@@ -310,6 +342,8 @@ async fn exit_9_standalone_no_external_services() {
     let recall = provider
         .recall(&RecallQuery {
             query: "standalone".into(),
+            owner: Some("alice".into()),
+            workspace_id: Some("global".into()),
             top_k: 5,
             ..Default::default()
         })

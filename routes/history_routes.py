@@ -14,7 +14,7 @@ from src.topic_analyzer import analyze_topics
 from routes.session_routes import (
     _message_role,
     _message_text,
-    _reject_compact_during_active_run,
+    _prepare_context_mutation,
     _verify_session_owner,
 )
 
@@ -125,6 +125,7 @@ def setup_history_routes(session_manager) -> APIRouter:
     @router.post("/api/session/{session_id}/truncate")
     async def truncate_session(request: Request, session_id: str):
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         try:
             body = await request.json()
             keep_count = body.get("keep_count", 0)
@@ -140,6 +141,7 @@ def setup_history_routes(session_manager) -> APIRouter:
     async def add_message(request: Request, session_id: str):
         """Add a message to a session (for slash command persistence)."""
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         try:
             body = await request.json()
             role = body.get("role", "assistant")
@@ -156,6 +158,7 @@ def setup_history_routes(session_manager) -> APIRouter:
     async def delete_messages(request: Request, session_id: str):
         """Delete specific messages by DB ID (or legacy index)."""
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         try:
             body = await request.json()
             msg_ids = body.get("msg_ids", [])
@@ -219,6 +222,7 @@ def setup_history_routes(session_manager) -> APIRouter:
     async def edit_message(request: Request, session_id: str):
         """Edit the content of a message by its database ID."""
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         try:
             body = await request.json()
             msg_id = body.get("msg_id")
@@ -378,6 +382,7 @@ def setup_history_routes(session_manager) -> APIRouter:
     async def merge_last_assistant(request: Request, session_id: str):
         """Merge the last two assistant messages into one (for continue)."""
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         try:
             body = await request.json()
             separator = body.get("separator", "\n\n")
@@ -478,11 +483,6 @@ def setup_history_routes(session_manager) -> APIRouter:
 
             # Create new session
             new_id = str(uuid.uuid4())
-            if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-                supervisor = getattr(request.app.state, "mimo_supervisor", None)
-                if supervisor and supervisor.is_alive() and supervisor.bridge:
-                    cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                    new_id = await supervisor.bridge.open_session(cwd or None)
             fork_name = f"\u2ADD {source.name}"
             new_session = session_manager.create_session(
                 session_id=new_id,
@@ -534,14 +534,13 @@ def setup_history_routes(session_manager) -> APIRouter:
     async def compact_session(request: Request, session_id: str):
         """Manually trigger context compaction for a session."""
         _verify_session_owner(request, session_id)
+        await _prepare_context_mutation(request, session_id)
         from src.auth_helpers import effective_user
         owner = effective_user(request)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, "Session not found")
-        _reject_compact_during_active_run(session_id)
-
         try:
             from src.model_context import estimate_tokens, get_context_length
             from src.llm_core import llm_call_async
@@ -585,6 +584,8 @@ def setup_history_routes(session_manager) -> APIRouter:
                 ],
                 temperature=0.2, max_tokens=1024,
                 headers=compact_headers, timeout=30,
+                owner=owner or None,
+                session_id=session_id,
             )
 
             # Replace session history: summary as system message + recent messages

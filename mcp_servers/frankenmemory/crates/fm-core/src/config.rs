@@ -64,8 +64,21 @@ pub struct ProviderConfig {
 
 impl Default for FmConfig {
     fn default() -> Self {
-        let db_path = std::env::var("FM_DB_PATH")
-            .unwrap_or_else(|_| "frankenmemory.db".to_string());
+        let db_path = std::env::var("FM_DB_PATH").unwrap_or_else(|_| {
+            let data = std::env::var("XDG_DATA_HOME")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("HOME")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                        .map(|home| format!("{home}/.local/share"))
+                });
+            format!(
+                "{}/open-clank/frankenmemory.db",
+                data.unwrap_or_else(|| "/tmp".to_string())
+            )
+        });
 
         Self {
             db_path,
@@ -157,7 +170,10 @@ mod tests {
         std::env::remove_var("FM_EMBED_TIMEOUT_MS");
 
         let cfg = EmbeddingConfig::from_env();
-        assert_eq!(cfg.api_base, "http://127.0.0.1:11434/v1", "local-first default");
+        assert_eq!(
+            cfg.api_base, "http://127.0.0.1:11434/v1",
+            "local-first default"
+        );
         assert_eq!(cfg.dimensions, 4096);
     }
 }

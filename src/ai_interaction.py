@@ -255,7 +255,13 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
             ]
 
             response = await llm_call_async(
-                url, model, messages, headers=headers, timeout=AI_CHAT_TIMEOUT
+                url,
+                model,
+                messages,
+                headers=headers,
+                timeout=AI_CHAT_TIMEOUT,
+                owner=owner,
+                session_id=session_id,
             )
 
             step_outputs.append({
@@ -355,17 +361,18 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         elif action == "edit":
             if len(lines) < 3:
                 return {"error": "Edit needs line 2: memory_id, line 3: new text"}
-            memory_id = lines[1].strip()
+            display_id = lines[1].strip()
             new_text = lines[2].strip()
+            category = lines[3].strip().lower() if len(lines) > 3 and lines[3].strip() else None
             if not new_text:
                 return {"error": "New text cannot be empty"}
-            # Provider edit = delete old + add new
             try:
-                await _memory_provider.delete(memory_id, owner=owner)
-                record = await _memory_provider.remember(
-                    new_text, owner=owner, session_id=session_id,
-                    category="fact", source="ai_agent",
+                memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
+                record = await _memory_provider.update(
+                    memory_id, text=new_text, category=category, owner=owner,
                 )
+                if record is None:
+                    return {"error": f"Memory '{display_id}' not found"}
                 return {"action": "edit", "memory_id": memory_id,
                         "results": f"Memory updated: {new_text}"}
             except Exception as e:
@@ -374,11 +381,12 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         elif action == "delete":
             if len(lines) < 2:
                 return {"error": "Delete needs line 2: memory_id"}
-            memory_id = lines[1].strip()
+            display_id = lines[1].strip()
             try:
+                memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
                 deleted = await _memory_provider.delete(memory_id, owner=owner)
                 if not deleted:
-                    return {"error": f"Memory '{memory_id}' not found"}
+                    return {"error": f"Memory '{display_id}' not found"}
                 return {"action": "delete", "memory_id": memory_id,
                         "results": f"Memory '{memory_id}' deleted"}
             except Exception as e:

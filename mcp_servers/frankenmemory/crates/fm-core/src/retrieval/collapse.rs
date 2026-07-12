@@ -41,18 +41,13 @@ pub fn collapse(
     let base_scores: Vec<f64> = candidates
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            base_salience(c, i, &query_tokens, &candidate_tokens[i], config)
-        })
+        .map(|(i, c)| base_salience(c, i, &query_tokens, &candidate_tokens[i], config))
         .collect();
 
     let final_scores = hebbian_amplify(&candidates, &base_scores, &candidate_tokens, config);
 
     // Step 2: Prune relative to max salience
-    let max_salience = final_scores
-        .iter()
-        .cloned()
-        .fold(0.0f64, f64::max);
+    let max_salience = final_scores.iter().cloned().fold(0.0f64, f64::max);
     let floor = max_salience * config.prune_ratio;
 
     let mut kept: Vec<(usize, f64)> = final_scores
@@ -71,9 +66,9 @@ pub fn collapse(
 
     for &(idx, salience) in &kept {
         let tokens = &candidate_tokens[idx];
-        let is_dup = survivor_token_sets.iter().any(|existing| {
-            token_overlap(tokens, existing) >= config.dup_overlap
-        });
+        let is_dup = survivor_token_sets
+            .iter()
+            .any(|existing| token_overlap(tokens, existing) >= config.dup_overlap);
 
         if !is_dup {
             survivors.push(CollapsedCandidate {
@@ -136,9 +131,10 @@ fn hebbian_amplify(
     let mut final_scores = base_scores.to_vec();
 
     for i in 0..n {
-        let corroboration = count_corroboration(i, candidates, token_sets, config.corroboration_overlap);
-        let boost = (corroboration as f64 * config.amplify_gain * base_scores[i])
-            .min(config.amplify_cap);
+        let corroboration =
+            count_corroboration(i, candidates, token_sets, config.corroboration_overlap);
+        let boost =
+            (corroboration as f64 * config.amplify_gain * base_scores[i]).min(config.amplify_cap);
         final_scores[i] = base_scores[i] * (1.0 + boost);
     }
 
@@ -173,12 +169,11 @@ fn token_overlap(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 
 pub fn tokenize(text: &str) -> HashSet<String> {
     let stopwords: HashSet<&str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-        "should", "may", "might", "must", "can", "could", "of", "in", "to",
-        "for", "with", "on", "at", "from", "by", "about", "as", "into",
-        "through", "during", "before", "after", "and", "but", "or", "not",
-        "so", "very", "just", "than", "too", "it", "its", "this", "that",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "shall", "should", "may", "might", "must", "can",
+        "could", "of", "in", "to", "for", "with", "on", "at", "from", "by", "about", "as", "into",
+        "through", "during", "before", "after", "and", "but", "or", "not", "so", "very", "just",
+        "than", "too", "it", "its", "this", "that",
     ]
     .iter()
     .copied()
@@ -194,13 +189,7 @@ pub fn tokenize(text: &str) -> HashSet<String> {
 pub fn attest(survivors: &[CollapsedCandidate]) -> Attestation {
     let mut commitment_parts: Vec<String> = survivors
         .iter()
-        .map(|s| {
-            format!(
-                "{}:{}",
-                s.record.source_label,
-                &s.record.record.id
-            )
-        })
+        .map(|s| format!("{}:{}", s.record.source_label, &s.record.record.id))
         .collect();
     commitment_parts.sort();
     let commitment = commitment_parts.join("|");
@@ -317,7 +306,12 @@ mod tests {
     fn collapse_basic() {
         let candidates = vec![
             scored("1", 0.9, "curated_fts", "rust memory safety borrow checker"),
-            scored("2", 0.8, "curated_vector", "rust has a borrow checker for safety"),
+            scored(
+                "2",
+                0.8,
+                "curated_vector",
+                "rust has a borrow checker for safety",
+            ),
             scored("3", 0.3, "raw_fts", "python is great too"),
         ];
         let config = default_config();
@@ -330,7 +324,12 @@ mod tests {
     fn collapse_prunes_low_salience() {
         let candidates = vec![
             scored("1", 0.9, "curated_fts", "rust is a systems language"),
-            scored("2", 0.01, "curated_fts", "completely unrelated topic about cooking"),
+            scored(
+                "2",
+                0.01,
+                "curated_fts",
+                "completely unrelated topic about cooking",
+            ),
         ];
         let config = default_config();
         let result = collapse(candidates, "rust programming", &config);
@@ -341,8 +340,18 @@ mod tests {
     #[test]
     fn collapse_dedup() {
         let candidates = vec![
-            scored("1", 0.9, "curated_fts", "rust memory safety borrow checker ownership"),
-            scored("2", 0.85, "curated_vector", "rust memory safety borrow checker ownership model"),
+            scored(
+                "1",
+                0.9,
+                "curated_fts",
+                "rust memory safety borrow checker ownership",
+            ),
+            scored(
+                "2",
+                0.85,
+                "curated_vector",
+                "rust memory safety borrow checker ownership model",
+            ),
         ];
         let config = default_config();
         let result = collapse(candidates, "rust memory", &config);

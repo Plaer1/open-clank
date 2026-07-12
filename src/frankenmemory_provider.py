@@ -7,9 +7,16 @@ import json
 import logging
 import os
 from contextlib import AsyncExitStack
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from src.memory_provider import MemoryProvider, MemoryRecord, MemorySearchHit
+from src.memory_provider import (
+    MemoryProvider,
+    MemoryRecord,
+    MemoryScope,
+    MemorySearchHit,
+    MemoryTransportError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +38,12 @@ class FrankenmemoryProvider(MemoryProvider):
     def __init__(
         self,
         command: Optional[str] = None,
-        workspace_id: str = "global",
+        workspace_id: str = "",
         env: Optional[Dict[str, str]] = None,
     ):
         self._command = command or os.environ.get("FM_MCP_COMMAND", "fm-mcp")
-        self._workspace_id = workspace_id
-        self._env = env
+        self._workspace_id = workspace_id or os.environ.get("FM_WORKSPACE_ID") or os.getcwd()
+        self._env = {"FM_SCOPE_AUTHORITY": "trusted-caller", **(env or {})}
         # The MCP stdio transport pins anyio cancel scopes to the task that
         # entered them. The server initializes in its startup task and calls
         # from request-handler tasks, which breaks those scopes (the infamous
@@ -72,6 +79,16 @@ class FrankenmemoryProvider(MemoryProvider):
                 read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 await session.initialize()
+                health = await session.call_tool("memory_quality", {"rebuild_graph_fts": False})
+                health_text = health.content[0].text if health.content else "{}"
+                health_data = json.loads(health_text)
+                expected_id = (self._env or {}).get("FM_DB_ID") or os.environ.get("FM_DB_ID")
+                if expected_id and health_data.get("database_id") != expected_id:
+                    raise RuntimeError(
+                        "frankenmemory database identity mismatch during provider handshake"
+                    )
+                if int(health_data.get("schema_version", 0)) < 6:
+                    raise RuntimeError("frankenmemory schema is older than the scoped-memory contract")
                 logger.info("FrankenmemoryProvider connected to fm-mcp")
                 if not self._ready.done():
                     self._ready.set_result(None)
@@ -120,12 +137,53 @@ class FrankenmemoryProvider(MemoryProvider):
             await self.initialize()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._requests.put((name, arguments, fut))
-        result = await fut
+        try:
+            result = await fut
+        except Exception as exc:
+            raise MemoryTransportError(f"frankenmemory {name} failed: {exc}") from exc
+        if getattr(result, "isError", False):
+            detail = result.content[0].text if result.content else "unknown MCP error"
+            raise MemoryTransportError(f"frankenmemory {name} rejected the request: {detail}")
         text = result.content[0].text if result.content else "{}"
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             return {"raw": text}
+
+    def _scope(self, owner: Optional[str], session_id: Optional[str] = None) -> MemoryScope:
+        return MemoryScope(
+            owner=owner or "",
+            workspace_id=self._workspace_id,
+            workspace_path=self._workspace_id,
+            session_id=session_id,
+            session_key=session_id,
+        )
+
+    @staticmethod
+    def _record(data: Dict[str, Any]) -> MemoryRecord:
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        updated_at = data.get("updated_at") or data.get("created_at")
+        timestamp = 0
+        if isinstance(updated_at, str):
+            try:
+                timestamp = int(datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                pass
+        return MemoryRecord(
+            id=data.get("id", ""),
+            text=data.get("content", data.get("text", "")),
+            timestamp=timestamp,
+            category=metadata.get("category", data.get("kind", "episodic")),
+            source=data.get("source", ""),
+            owner=data.get("owner"),
+            session_id=data.get("session_id"),
+            metadata=metadata,
+            pinned=bool(metadata.get("pinned", False) or data.get("source_label") == "pinned"),
+            workspace_id=data.get("workspace_id"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+            uses=int(metadata.get("uses", 0) or 0),
+        )
 
     async def remember(
         self,
@@ -137,16 +195,17 @@ class FrankenmemoryProvider(MemoryProvider):
         source: str = "user",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> MemoryRecord:
+        scope = self._scope(owner, session_id)
         args: Dict[str, Any] = {
             "content": text,
             "capture_mode": "manual",
-            "workspace_id": self._workspace_id,
+            "workspace_id": scope.workspace_id,
+            "workspace_path": scope.workspace_path,
+            "owner": scope.owner,
             "source": source,
             "category": category,
             "source_type": _SOURCE_TYPE_MAP.get(source, "auto_extracted"),
         }
-        if owner:
-            args["owner"] = owner
         if session_id:
             args["session_id"] = session_id
             args["session_key"] = session_id
@@ -176,32 +235,18 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
         top_k: int = 5,
     ) -> List[MemorySearchHit]:
+        scope = self._scope(owner)
         args: Dict[str, Any] = {
             "query": query,
             "top_k": top_k,
             "tier": "curated",
-            "workspace_id": self._workspace_id,
+            "workspace_id": scope.workspace_id,
+            "owner": scope.owner,
         }
-        if owner:
-            args["owner"] = owner
-
-        try:
-            result = await self._call_tool("recall", args)
-        except Exception as e:
-            logger.warning("frankenmemory recall failed: %r", e)
-            return []
+        result = await self._call_tool("recall", args)
         hits: List[MemorySearchHit] = []
         for mem in result.get("memories", []):
-            record = MemoryRecord(
-                id=mem.get("id", ""),
-                text=mem.get("content", ""),
-                category=mem.get("kind", "episodic"),
-                source=mem.get("source", ""),
-                owner=mem.get("owner"),
-                session_id=mem.get("session_id"),
-                metadata=mem.get("metadata", {}),
-                pinned=bool((mem.get("metadata") or {}).get("pinned", False)),
-            )
+            record = self._record(mem)
             hits.append(MemorySearchHit(
                 memory=record,
                 provider_id=self.provider_id,
@@ -215,34 +260,37 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
         limit: int = 100,
     ) -> List[MemoryRecord]:
-        args: Dict[str, Any] = {
-            "query": "",
-            "limit": limit,
-            "tier": "curated",
-            "workspace_id": self._workspace_id,
-        }
-        if owner:
-            args["owner"] = owner
-
-        try:
-            result = await self._call_tool("search", args)
-        except Exception as e:
-            logger.warning("frankenmemory list_memories failed: %r", e)
-            raise
         records: List[MemoryRecord] = []
-        for r in result.get("results", []):
-            rec = r.get("record", r)
-            records.append(MemoryRecord(
-                id=rec.get("id", ""),
-                text=rec.get("content", ""),
-                category=rec.get("kind", "episodic"),
-                source=rec.get("source", ""),
-                owner=rec.get("owner"),
-                session_id=rec.get("session_id"),
-                metadata=rec.get("metadata", {}),
-                pinned=bool((rec.get("metadata") or {}).get("pinned", False)),
-            ))
+        cursor: Optional[str] = None
+        while len(records) < limit:
+            page, cursor = await self.list_page(
+                owner=owner,
+                limit=min(1000, limit - len(records)),
+                cursor=cursor,
+            )
+            records.extend(page)
+            if cursor is None:
+                break
         return records
+
+    async def list_page(
+        self,
+        *,
+        owner: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> tuple[List[MemoryRecord], Optional[str]]:
+        scope = self._scope(owner)
+        result = await self._call_tool(
+            "list_memories",
+            {
+                "owner": scope.owner,
+                "workspace_id": scope.workspace_id,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
+        return [self._record(record) for record in result.get("records", [])], result.get("next_cursor")
 
     async def inspect_tier(
         self,
@@ -252,23 +300,22 @@ class FrankenmemoryProvider(MemoryProvider):
         status: Optional[str] = None,
         limit: int = 500,
     ) -> List[Dict[str, Any]]:
+        scope = self._scope(owner)
         if tier == "candidate":
             args = {
-                "owner": owner,
+                "owner": scope.owner,
+                "workspace_id": scope.workspace_id,
                 "status": status,
                 "limit": limit,
             }
-            if self._workspace_id != "global":
-                args["workspace_id"] = self._workspace_id
             result = await self._call_tool("list_candidates", args)
             return list(result.get("candidates") or [])
         if tier == "quarantine":
             args = {
-                "owner": owner,
+                "owner": scope.owner,
+                "workspace_id": scope.workspace_id,
                 "limit": limit,
             }
-            if self._workspace_id != "global":
-                args["workspace_id"] = self._workspace_id
             result = await self._call_tool("list_quarantine", args)
             return list(result.get("quarantine") or [])
         if tier not in {"raw", "curated"}:
@@ -277,11 +324,9 @@ class FrankenmemoryProvider(MemoryProvider):
             "query": "",
             "tier": tier,
             "limit": limit,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
         }
-        if self._workspace_id != "global":
-            args["workspace_id"] = self._workspace_id
-        if owner:
-            args["owner"] = owner
         result = await self._call_tool("search", args)
         return [dict(row.get("record", row)) for row in result.get("results", [])]
 
@@ -297,30 +342,31 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: str,
         workspace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        scope = self._scope(owner)
         return await self._call_tool("review_candidate", {
             "id": candidate_id,
             "accept": accept,
             "reason": reason,
-            "owner": owner,
-            "workspace_id": workspace_id or self._workspace_id,
+            "owner": scope.owner,
+            "workspace_id": workspace_id or scope.workspace_id,
         })
 
     async def get(self, memory_id: str, *, owner: Optional[str] = None) -> Optional[MemoryRecord]:
-        for record in await self.list_memories(owner=owner, limit=1000):
-            if record.id == memory_id:
-                return record
-        return None
+        scope = self._scope(owner)
+        result = await self._call_tool(
+            "get_memory",
+            {"id": memory_id, "owner": scope.owner, "workspace_id": scope.workspace_id},
+        )
+        record = result.get("record")
+        return self._record(record) if isinstance(record, dict) else None
 
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
-        try:
-            result = await self._call_tool("delete_memory", {
-                "id": memory_id,
-                "owner": owner,
-                "workspace_id": self._workspace_id,
-            })
-        except Exception as e:
-            logger.warning("frankenmemory delete failed: %r", e)
-            return False
+        scope = self._scope(owner)
+        result = await self._call_tool("delete_memory", {
+            "id": memory_id,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
+        })
         return bool(result.get("deleted"))
 
     async def update(
@@ -331,27 +377,66 @@ class FrankenmemoryProvider(MemoryProvider):
         category: Optional[str] = None,
         owner: Optional[str] = None,
     ) -> Optional[MemoryRecord]:
+        scope = self._scope(owner)
         result = await self._call_tool("update_memory", {
             "id": memory_id,
             "content": text,
-            "owner": owner,
-            "workspace_id": self._workspace_id,
+            "category": category,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
         })
         if not result.get("updated"):
             return None
-        for record in await self.list_memories(owner=owner, limit=1000):
-            if record.id == memory_id:
-                return record
-        return None
+        return await self.get(memory_id, owner=owner)
 
     async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
+        scope = self._scope(owner)
         result = await self._call_tool("update_memory", {
             "id": memory_id,
             "pinned": bool(pinned),
-            "owner": owner,
-            "workspace_id": self._workspace_id,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
         })
         return bool(result.get("updated"))
+
+    async def record_access(
+        self,
+        memory_ids: List[str],
+        *,
+        owner: Optional[str] = None,
+    ) -> int:
+        scope = self._scope(owner)
+        result = await self._call_tool(
+            "record_memory_access",
+            {"ids": memory_ids, "owner": scope.owner, "workspace_id": scope.workspace_id},
+        )
+        return int(result.get("updated", 0))
+
+    async def owner_stats(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        scope = self._scope(owner)
+        return await self._call_tool(
+            "owner_lifecycle",
+            {"action": "stats", "owner": scope.owner, "workspace_id": scope.workspace_id},
+        )
+
+    async def purge_owner(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        scope = self._scope(owner)
+        return await self._call_tool(
+            "owner_lifecycle",
+            {"action": "purge", "owner": scope.owner, "workspace_id": scope.workspace_id},
+        )
+
+    async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        scope = self._scope(owner)
+        return await self._call_tool(
+            "owner_lifecycle",
+            {
+                "action": "rename",
+                "owner": scope.owner,
+                "workspace_id": scope.workspace_id,
+                "new_owner": new_owner,
+            },
+        )
 
     async def groom(
         self,
@@ -361,9 +446,15 @@ class FrankenmemoryProvider(MemoryProvider):
         workspace_id: Optional[str] = None,
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        args: Dict[str, Any] = {"op": op, "dry_run": dry_run}
-        if owner:
-            args["owner"] = owner
-        if workspace_id:
-            args["workspace_id"] = workspace_id
+        scope = MemoryScope(
+            owner=owner or "",
+            workspace_id=workspace_id or self._workspace_id,
+            workspace_path=self._workspace_id,
+        )
+        args: Dict[str, Any] = {
+            "op": op,
+            "dry_run": dry_run,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
+        }
         return await self._call_tool("groom", args)

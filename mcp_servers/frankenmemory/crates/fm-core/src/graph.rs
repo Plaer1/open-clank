@@ -17,13 +17,59 @@ pub const FM_GRAPH_NAMESPACE: Uuid = uuid::uuid!("3c8e6f5a-1d2b-4e9c-8a70-5f4b3d
 /// Casefold + whitespace-collapse + trim, so "The  Ceramic HEDGEHOG " and
 /// "the ceramic hedgehog" are the same node.
 pub fn norm_name(name: &str) -> String {
-    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
-/// Deterministic node id: UUIDv5(FM_GRAPH_NAMESPACE, "kind:norm_name").
+/// Legacy deterministic node id. New memory graph writes use
+/// [`GraphScope::node_id`] so identical entities in different tenants never
+/// share identity.
 pub fn node_id(kind: &str, name: &str) -> String {
     let key = format!("{}:{}", kind.trim().to_lowercase(), norm_name(name));
     Uuid::new_v5(&FM_GRAPH_NAMESPACE, key.as_bytes()).to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct GraphScope {
+    pub owner: String,
+    pub workspace_id: String,
+    #[serde(default = "default_include_global")]
+    pub include_global: bool,
+}
+
+fn default_include_global() -> bool {
+    true
+}
+
+impl GraphScope {
+    pub fn new(
+        owner: impl Into<String>,
+        workspace_id: impl Into<String>,
+    ) -> Result<Self, &'static str> {
+        let owner = owner.into();
+        let workspace_id = workspace_id.into();
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Err("graph owner and workspace_id are required");
+        }
+        Ok(Self {
+            owner,
+            workspace_id,
+            include_global: true,
+        })
+    }
+
+    pub fn node_id(&self, kind: &str, name: &str) -> String {
+        let key = format!(
+            "{}:{}:{}:{}",
+            self.owner.trim(),
+            self.workspace_id.trim(),
+            kind.trim().to_lowercase(),
+            norm_name(name)
+        );
+        Uuid::new_v5(&FM_GRAPH_NAMESPACE, key.as_bytes()).to_string()
+    }
 }
 
 /// Reference to a node by identity fields (the wire shape extraction sends).
@@ -34,8 +80,8 @@ pub struct NodeRef {
 }
 
 impl NodeRef {
-    pub fn id(&self) -> String {
-        node_id(&self.kind, &self.name)
+    pub fn id(&self, scope: &GraphScope) -> String {
+        scope.node_id(&self.kind, &self.name)
     }
 }
 
@@ -101,6 +147,8 @@ pub struct GraphNodeRow {
     pub trust: i64,
     pub created_at: String,
     pub last_seen: String,
+    pub owner: String,
+    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +161,8 @@ pub struct GraphEdgeRow {
     pub weight: f64,
     pub traversal_count: i64,
     pub trust: i64,
+    pub owner: String,
+    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,5 +213,10 @@ mod tests {
         // Stability contract: this exact value must never change across
         // releases — existing DBs depend on it.
         assert_eq!(node_id("person", "e"), node_id("person", " E "));
+
+        let alice = GraphScope::new("alice", "project").unwrap();
+        let bob = GraphScope::new("bob", "project").unwrap();
+        assert_eq!(alice.node_id("person", "e"), alice.node_id("PERSON", " E "));
+        assert_ne!(alice.node_id("person", "e"), bob.node_id("person", "e"));
     }
 }

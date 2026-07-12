@@ -304,11 +304,6 @@ def setup_webhook_routes(
                 raise HTTPException(500, "Session manager not available")
 
             sid = str(uuid.uuid4())
-            if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-                supervisor = getattr(request.app.state, "mimo_supervisor", None)
-                if supervisor and supervisor.is_alive() and supervisor.bridge:
-                    cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                    sid = await supervisor.bridge.open_session(cwd or None)
             sess = session_manager.create_session(
                 session_id=sid, name="API Chat", endpoint_url=endpoint_url,
                 model=model, owner=token_owner,
@@ -369,11 +364,6 @@ def setup_webhook_routes(
                 raise HTTPException(500, "Session manager not available")
 
             sid = str(uuid.uuid4())
-            if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-                supervisor = getattr(request.app.state, "mimo_supervisor", None)
-                if supervisor and supervisor.is_alive() and supervisor.bridge:
-                    cwd = os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                    sid = await supervisor.bridge.open_session(cwd or None)
             sess = session_manager.create_session(
                 session_id=sid, name="API Chat", endpoint_url=endpoint_url,
                 model=model, owner=token_owner,
@@ -391,6 +381,8 @@ def setup_webhook_routes(
         reply = await llm_call_async(
             sess.endpoint_url, sess.model, messages,
             headers=sess.headers, timeout=120,
+            owner=token_owner,
+            session_id=session_id,
         )
         sess.add_message(ChatMessage("assistant", reply))
         session_manager.save_sessions()

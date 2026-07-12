@@ -17,6 +17,14 @@ let _authPolicy = { password_min_length: 8, reserved_usernames: [] };
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
+async function checkedFetch(input, init) {
+  const response = await window.fetch(input, init);
+  if (response.ok) return response;
+  let detail = {};
+  try { detail = await response.clone().json(); } catch (_) {}
+  const message = detail.detail?.message || detail.detail || detail.error || `Request failed (${response.status})`;
+  throw new Error(String(message));
+}
 
 /* ═══════════════════════════════════════════
    USERS TAB
@@ -34,7 +42,7 @@ const PRIV_LABELS = {
 async function loadUsers() {
   const list = el('adm-userList');
   try {
-    const res = await fetch('/api/auth/users', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/users', { credentials: 'same-origin' });
     if (res.status === 401 || res.status === 403) { list.innerHTML = '<div class="admin-empty">Access denied</div>'; return; }
     const data = await res.json();
     if (!data.users || data.users.length === 0) { list.innerHTML = '<div class="admin-empty">No users found</div>'; return; }
@@ -140,7 +148,7 @@ async function loadUsers() {
             else if (input.type === 'number') value = parseInt(input.value) || 0;
             else value = input.value;
             try {
-              await fetch(`/api/auth/users/${encodeURIComponent(username)}/privileges`, {
+              await checkedFetch(`/api/auth/users/${encodeURIComponent(username)}/privileges`, {
                 method: 'PUT', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ [key]: value }),
@@ -166,7 +174,7 @@ async function loadUsers() {
           const username = (next || '').trim();
           if (!username || username === oldUsername) return;
           try {
-            const res = await fetch(`/api/auth/users/${encodeURIComponent(oldUsername)}/rename`, {
+            const res = await checkedFetch(`/api/auth/users/${encodeURIComponent(oldUsername)}/rename`, {
               method: 'PUT',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
@@ -195,7 +203,7 @@ async function loadUsers() {
           e.stopPropagation();
           const username = delBtn.dataset.admDelUser;
           if (!await uiModule.styledConfirm(`Remove user "${username}"?`, { confirmText: 'Remove', danger: true })) return;
-          const res = await fetch('/api/auth/users', { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
+          const res = await checkedFetch('/api/auth/users', { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
           if (res.ok) loadUsers();
           else uiModule.showError('Failed to delete user');
         });
@@ -214,7 +222,7 @@ async function loadUsers() {
           if (!await uiModule.styledConfirm(confirmMsg, { confirmText: makeAdmin ? 'Make admin' : 'Revoke admin', danger: !makeAdmin })) return;
           adminToggleBtn.disabled = true;
           try {
-            const res = await fetch(`/api/auth/users/${encodeURIComponent(username)}/admin`, {
+            const res = await checkedFetch(`/api/auth/users/${encodeURIComponent(username)}/admin`, {
               method: 'PUT',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
@@ -251,7 +259,7 @@ async function _loadModelsForUser(username, allowedSet, modelsRestricted, blockA
     // (e.g. a freshly-added cloud API like DeepSeek) simply don't show up
     // until some other endpoint happens to trigger a cache refresh. The
     // endpoints listing always reflects every configured endpoint.
-    const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
     const data = await res.json();
     const allModels = [];
     (Array.isArray(data) ? data : []).forEach(ep => {
@@ -336,7 +344,7 @@ function initSignupToggle() {
     .catch(e => console.warn('Auth status fetch failed:', e));
   toggle.addEventListener('change', async () => {
     try {
-      const res = await fetch('/api/auth/signup-toggle', { method: 'POST', credentials: 'same-origin' });
+      const res = await checkedFetch('/api/auth/signup-toggle', { method: 'POST', credentials: 'same-origin' });
       const data = await res.json();
       toggle.checked = data.signup_enabled;
     } catch (e) { toggle.checked = !toggle.checked; }
@@ -351,7 +359,7 @@ function initShareDefaultsToggle() {
     .catch(e => console.warn('Settings fetch failed:', e));
   toggle.addEventListener('change', async () => {
     try {
-      const res = await fetch('/api/auth/settings', {
+      const res = await checkedFetch('/api/auth/settings', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
@@ -386,7 +394,7 @@ function initAddUser() {
     if (_authPolicy.reserved_usernames.includes(username.toLowerCase())) { msg.textContent = 'This username is reserved'; msg.className = 'admin-error'; return; }
     el('adm-addBtn').disabled = true;
     try {
-      const res = await fetch('/api/auth/users', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, is_admin }) });
+      const res = await checkedFetch('/api/auth/users', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, is_admin }) });
       const data = await res.json();
       if (res.ok) { msg.textContent = 'User created'; msg.className = 'admin-success'; el('adm-newUsername').value = ''; el('adm-newPassword').value = ''; el('adm-newIsAdmin').checked = false; loadUsers(); }
       else { msg.textContent = data.detail || 'Failed'; msg.className = 'admin-error'; }
@@ -482,7 +490,7 @@ async function loadEndpoints() {
     settingsModule.refreshAiModelEndpoints();
   }
   try {
-    const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
     // Treat a non-OK response (e.g. 401/403 for non-admins, or backend
     // returning an error envelope) the same as "no endpoints yet": show the
     // empty state, not "Failed to load". The user just installed the app —
@@ -499,6 +507,7 @@ async function loadEndpoints() {
       return;
     }
     const rowHtml = data.map(ep => {
+      const readOnly = !!ep.read_only;
       const visibleCount = ep.models.length;
       const totalCount = visibleCount + (ep.hidden_count || 0);
       // `ep.models` is the *visible* set — when every model is hidden it's
@@ -517,7 +526,7 @@ async function loadEndpoints() {
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
         : '';
       return `
-        <div class="admin-user-row${ep.is_enabled ? '' : ' admin-ep-disabled'}${justAddedClass}" data-adm-ep-id="${ep.id}">
+        <div class="admin-user-row${ep.is_enabled ? '' : ' admin-ep-disabled'}${justAddedClass}" data-adm-ep-id="${ep.id}" data-adm-ep-readonly="${readOnly ? '1' : '0'}">
           <div style="display:flex;align-items:center;justify-content:space-between;${hasModels ? 'cursor:pointer;' : ''}padding:4px 0;" data-adm-ep-header="${ep.id}">
             <div class="admin-user-info" style="flex:1;flex-wrap:wrap;gap:0.3rem;align-items:center;">
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
@@ -525,12 +534,14 @@ async function loadEndpoints() {
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
               ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
               ${statusBadge}
+              ${readOnly ? '<span class="admin-badge">virtual · read-only</span>' : ''}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
-              ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
+              ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">${readOnly ? 'Click to view models' : 'Click to manage models'}</span>` : ''}
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
-              <button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button>
-              <button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>
+              ${readOnly
+                ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Configure providers</button>'
+                : `<button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button><button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>`}
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
           </div>
@@ -571,7 +582,13 @@ async function loadEndpoints() {
       return out;
     };
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
-      btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+      btn.addEventListener('click', async (e) => { e.stopPropagation(); await checkedFetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+    });
+    queryAll('[data-adm-open-mimo-providers]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelector('[data-settings-tab="mimo-providers"]')?.click();
+      });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -599,7 +616,7 @@ async function loadEndpoints() {
         if (!isOffline) {
           var deps = [];
           try {
-            var depRes = await fetch('/api/model-endpoints/' + epId + '/dependents', { credentials: 'same-origin' });
+            var depRes = await checkedFetch('/api/model-endpoints/' + epId + '/dependents', { credentials: 'same-origin' });
             var depData = await depRes.json();
             deps = depData.dependents || [];
           } catch (e) { /* proceed without warning */ }
@@ -634,6 +651,7 @@ async function loadEndpoints() {
         // because clicking it bubbled up to here.
         if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label')) return;
         const epId = header.dataset.admEpHeader;
+        const readOnly = row.dataset.admEpReadonly === '1';
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
         if (!panel) return;
         panel.classList.toggle('hidden');
@@ -663,12 +681,20 @@ async function loadEndpoints() {
           const renderModels = (models, warning = '') => {
             const sortedModels = sortModelObjects(models);
             const warningHtml = warning ? `<div class="admin-error" style="font-size:11px;margin:6px 0;">${esc(warning)}</div>` : '';
+            if (readOnly) {
+              panel.innerHTML = `<div class="mcp-tools-header"><span>Models</span><span class="mcp-tools-count">${sortedModels.length} available</span></div>${warningHtml}<div class="mcp-tools-list">${sortedModels.map(m => `<div class="adm-model-row" title="${esc(m.id)}"><span>${esc(m.display)}</span></div>`).join('')}</div><button type="button" class="admin-btn-sm" data-adm-open-mimo-providers>Configure MiMo providers</button>`;
+              panel.querySelector('[data-adm-open-mimo-providers]')?.addEventListener('click', (event) => {
+                event.stopPropagation();
+                document.querySelector('[data-settings-tab="mimo-providers"]')?.click();
+              });
+              return;
+            }
             const attachRefresh = () => {
               panel.querySelector(`[data-ep-refresh-models="${epId}"]`)?.addEventListener('click', async (e) => {
                 e.preventDefault();
                 panel.innerHTML = _loadingHtml('Refreshing models...');
                 try {
-                  const res = await fetch(`/api/model-endpoints/${epId}/models?refresh=true&refresh_timeout=60`, { credentials: 'same-origin' });
+                  const res = await checkedFetch(`/api/model-endpoints/${epId}/models?refresh=true&refresh_timeout=60`, { credentials: 'same-origin' });
                   const refreshWarning = res.headers.get('X-Model-Refresh-Warning') || '';
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const refreshedModels = await res.json();
@@ -734,7 +760,7 @@ async function loadEndpoints() {
             });
           };
           try {
-            const res = await fetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' });
+            const res = await checkedFetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const models = await res.json();
             _stopSpin();
@@ -756,7 +782,7 @@ async function _saveEpModelState(epId, panel) {
   });
   const total = panel.querySelectorAll('input[type=checkbox]').length;
   try {
-    await fetch(`/api/model-endpoints/${epId}/models`, {
+    await checkedFetch(`/api/model-endpoints/${epId}/models`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -972,7 +998,7 @@ function initEndpointForm() {
 
   async function _defaultOllamaUrl() {
     try {
-      const res = await fetch('/api/runtime', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/runtime', { credentials: 'same-origin' });
       if (res.ok) {
         const data = await res.json();
         if (data && data.ollama_base_url) return data.ollama_base_url;
@@ -1030,7 +1056,7 @@ function initEndpointForm() {
         fd.append('endpoint_kind', _apiEndpointKind());
         fd.append('model_refresh_timeout', '30');
         if (apiKey) fd.append('api_key', apiKey);
-        const res = await fetch('/api/model-endpoints/test', {
+        const res = await checkedFetch('/api/model-endpoints/test', {
           method: 'POST',
           body: fd,
           credentials: 'same-origin',
@@ -1090,7 +1116,7 @@ function initEndpointForm() {
       if (epType) fd.append('model_type', epType.value);
       if (provider.value && /openrouter\.ai|ollama\.com/i.test(provider.value)) fd.append('require_models', 'true');
       else fd.append('skip_probe', 'false');
-      const res = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
+      const res = await checkedFetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
       const d = await res.json();
       if (res.ok) {
         const count = d.models ? d.models.length : 0;
@@ -1411,13 +1437,13 @@ function initEndpointForm() {
       }
       try {
         // Hit the bulk local probe (same one the model picker uses).
-        await fetch('/api/model-endpoints/probe-local', { credentials: 'same-origin' }).catch(() => {});
+        await checkedFetch('/api/model-endpoints/probe-local', { credentials: 'same-origin' }).catch(() => {});
         // Then per-endpoint /probe for the rest so API/cloud endpoints
         // refresh too. Parallel — capped to 6 at a time so we don't
         // hammer the backend on a big list.
         const ids = Array.from(document.querySelectorAll('[data-adm-ep-id]')).map(r => r.getAttribute('data-adm-ep-id')).filter(Boolean);
         const lane = async (id) => {
-          try { await fetch(`/api/model-endpoints/${id}/probe`, { credentials: 'same-origin' }); } catch (_) {}
+          try { await checkedFetch(`/api/model-endpoints/${id}/probe`, { credentials: 'same-origin' }); } catch (_) {}
         };
         const queue = [...ids];
         const workers = Array.from({length: Math.min(6, queue.length)}, () => (async () => {
@@ -1463,12 +1489,17 @@ function initEndpointForm() {
         const row = b.closest('[data-adm-ep-id]');
         if (row) row.remove();
       });
-      await Promise.all(ids.map(id =>
-        fetch('/api/model-endpoints/' + id, { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
-      ));
-      try { await loadEndpoints(); } catch (_) {}
-      _refreshOfflineCount();
-      if (uiModule && uiModule.showToast) uiModule.showToast(`Removed ${ids.length} offline endpoint${ids.length === 1 ? '' : 's'}`, 1800);
+      try {
+        await Promise.all(ids.map(id =>
+          checkedFetch('/api/model-endpoints/' + id, { method: 'DELETE', credentials: 'same-origin' })
+        ));
+        await loadEndpoints();
+        _refreshOfflineCount();
+        if (uiModule && uiModule.showToast) uiModule.showToast(`Removed ${ids.length} offline endpoint${ids.length === 1 ? '' : 's'}`, 1800);
+      } catch (error) {
+        await loadEndpoints();
+        if (uiModule && uiModule.showError) uiModule.showError(error.message);
+      }
     });
   }
 
@@ -1515,7 +1546,7 @@ function initEndpointForm() {
         const fd = new FormData();
         fd.append('base_url', url);
         if (apiKey) fd.append('api_key', apiKey);
-        const res = await fetch('/api/model-endpoints/test', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const res = await checkedFetch('/api/model-endpoints/test', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await res.json();
         _renderEndpointTestResult(msg, res, d);
       } catch (e) {
@@ -1547,7 +1578,7 @@ function initEndpointForm() {
         const lt = el('adm-epLocalType');
         if (lt) fd.append('model_type', lt.value);
         fd.append('skip_probe', 'false');
-        const res = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const res = await checkedFetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await res.json();
         if (res.ok) {
           el('adm-epLocalUrl').value = '';
@@ -1610,7 +1641,7 @@ function initEndpointForm() {
         discoverBtn._wp = wp;
       } catch(e) { msg.textContent = 'Scanning...'; }
       try {
-        const res = await fetch('/api/discover');
+        const res = await checkedFetch('/api/discover');
         const data = await res.json();
         const items = data.items || [];
         if (!items.length) {
@@ -1640,7 +1671,7 @@ function initEndpointForm() {
             fd.append('endpoint_kind', 'local');
             fd.append('model_refresh_mode', 'auto');
             fd.append('skip_probe', 'false');
-            const r = await fetch('/api/model-endpoints', { method: 'POST', body: fd });
+            const r = await checkedFetch('/api/model-endpoints', { method: 'POST', body: fd });
             if (r.ok) {
               try {
                 const dd = await r.json();
@@ -1816,7 +1847,7 @@ async function loadBuiltinTools() {
   const list = el('adm-builtin-tools-list');
   if (!list) return;
   try {
-    const res = await fetch('/api/tools', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/tools', { credentials: 'same-origin' });
     const data = await res.json();
     const tools = data.tools || [];
     if (!tools.length) { list.innerHTML = '<div class="admin-empty">No tools found</div>'; return; }
@@ -1896,7 +1927,7 @@ async function loadBuiltinTools() {
       const allChecks = list.querySelectorAll('input[data-tool-id]');
       const disabled = [];
       allChecks.forEach(c => { if (!c.checked) disabled.push(c.dataset.toolId); });
-      await fetch('/api/tools', {
+      await checkedFetch('/api/tools', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ disabled }),
@@ -1942,7 +1973,7 @@ async function loadMcpServers() {
   const list = el('adm-mcpList');
   if (!list) return;  // MCP section not visible / not yet rendered
   try {
-    const res = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/mcp/servers', { credentials: 'same-origin' });
     const servers = await res.json();
     if (!servers.length) { list.innerHTML = '<div class="admin-empty">No MCP servers configured</div>'; return; }
     list.innerHTML = servers.map(s => {
@@ -1972,7 +2003,7 @@ async function loadMcpServers() {
       btn.addEventListener('click', async () => {
         const msg = el('adm-mcpMsg'); msg.textContent = 'Reconnecting...'; msg.className = '';
         try {
-          const res = await fetch(`/api/mcp/servers/${btn.dataset.admMcpReconnect}/reconnect`, { method: 'POST', credentials: 'same-origin' });
+          const res = await checkedFetch(`/api/mcp/servers/${btn.dataset.admMcpReconnect}/reconnect`, { method: 'POST', credentials: 'same-origin' });
           const data = await res.json();
           msg.textContent = data.connected ? `Reconnected (${data.tool_count} tools)` : `Failed: ${data.error || 'unknown'}`;
           msg.className = data.connected ? 'admin-success' : 'admin-error';
@@ -1983,14 +2014,14 @@ async function loadMcpServers() {
     list.querySelectorAll('[data-adm-mcp-toggle]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const fd = new FormData(); fd.append('is_enabled', btn.dataset.admMcpEnable);
-        await fetch(`/api/mcp/servers/${btn.dataset.admMcpToggle}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
+        await checkedFetch(`/api/mcp/servers/${btn.dataset.admMcpToggle}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
         loadMcpServers();
       });
     });
     list.querySelectorAll('[data-adm-mcp-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!await uiModule.styledConfirm('Delete this MCP server?', { confirmText: 'Delete', danger: true })) return;
-        await fetch(`/api/mcp/servers/${btn.dataset.admMcpDelete}`, { method: 'DELETE', credentials: 'same-origin' });
+        await checkedFetch(`/api/mcp/servers/${btn.dataset.admMcpDelete}`, { method: 'DELETE', credentials: 'same-origin' });
         loadMcpServers();
       });
     });
@@ -2016,7 +2047,7 @@ async function loadMcpServers() {
           _toolsLoaded = true;
           panel.innerHTML = '<span style="opacity:0.5;font-size:11px;">Loading tools...</span>';
           try {
-            const res = await fetch(`/api/mcp/servers/${sid}/tools`, { credentials: 'same-origin' });
+            const res = await checkedFetch(`/api/mcp/servers/${sid}/tools`, { credentials: 'same-origin' });
             const tools = await res.json();
             if (!tools.length) { panel.innerHTML = '<span style="opacity:0.5;font-size:11px;">No tools</span>'; return; }
             const disabled = new Set(tools.filter(t => t.is_disabled).map(t => t.name));
@@ -2060,7 +2091,7 @@ async function _saveMcpToolState(serverId, panel) {
   });
   const total = panel.querySelectorAll('input[type=checkbox]').length;
   try {
-    await fetch(`/api/mcp/servers/${serverId}/tools`, {
+    await checkedFetch(`/api/mcp/servers/${serverId}/tools`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
@@ -2259,7 +2290,7 @@ function initMcpForm() {
     }
     msg.textContent = 'Adding...'; msg.className = '';
     try {
-      const res = await fetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
+      const res = await checkedFetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
       const data = await res.json();
       if (data.needs_oauth) {
         msg.innerHTML = `Added ${esc(name)} — <a href="/api/mcp/oauth/authorize/${data.id}" target="_blank" style="color:var(--red);font-weight:600;">Authorize with Google</a> to connect`;
@@ -2283,7 +2314,7 @@ function initMcpForm() {
 /* ── RAG ── */
 async function loadRag() {
   try {
-    const res = await fetch('/api/personal');
+    const res = await checkedFetch('/api/personal');
     const data = await res.json();
     const dirList = el('adm-ragDirList');
     const dirs = data.directories || [];
@@ -2295,7 +2326,7 @@ async function loadRag() {
           if (!await uiModule.styledConfirm(`Remove directory "${btn.dataset.admRagDir}" from RAG?`, { confirmText: 'Remove', danger: true })) return;
           btn.disabled = true; btn.textContent = '...';
           try {
-            const res = await fetch('/api/personal/remove_directory?directory=' + encodeURIComponent(btn.dataset.admRagDir), { method: 'DELETE' });
+            const res = await checkedFetch('/api/personal/remove_directory?directory=' + encodeURIComponent(btn.dataset.admRagDir), { method: 'DELETE' });
             if (res.ok) { ragMsg('Directory removed'); loadRag(); }
             else { const e = await res.json(); ragMsg(e.detail || 'Failed', true); }
           } catch (e) { ragMsg('Error: ' + e.message, true); }
@@ -2315,7 +2346,7 @@ async function loadRag() {
           if (!await uiModule.styledConfirm(`Delete "${btn.dataset.admRagFile}" from RAG?`, { confirmText: 'Delete', danger: true })) return;
           btn.disabled = true; btn.textContent = '...';
           try {
-            const res = await fetch('/api/personal/file?filepath=' + encodeURIComponent(btn.dataset.admRagFile), { method: 'DELETE' });
+            const res = await checkedFetch('/api/personal/file?filepath=' + encodeURIComponent(btn.dataset.admRagFile), { method: 'DELETE' });
             if (res.ok) { ragMsg('File removed'); loadRag(); }
             else { const e = await res.json(); ragMsg(e.detail || 'Failed', true); }
           } catch (e) { ragMsg('Error: ' + e.message, true); }
@@ -2342,7 +2373,7 @@ async function ragUpload(files) {
   const fd = new FormData();
   for (const f of files) fd.append('files', f);
   try {
-    const res = await fetch('/api/personal/upload', { method: 'POST', body: fd });
+    const res = await checkedFetch('/api/personal/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (data.success) { ragMsg(`Uploaded ${data.uploaded.length} file(s), ${data.indexed_count} chunks indexed`); loadRag(); }
     else ragMsg(data.detail || 'Upload failed', true);
@@ -2363,7 +2394,7 @@ function initRag() {
     const btn = el('adm-ragAddDirBtn');
     btn.disabled = true; btn.textContent = 'Indexing...';
     try {
-      const res = await fetch('/api/personal/add_directory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ directory: dir }) });
+      const res = await checkedFetch('/api/personal/add_directory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ directory: dir }) });
       const data = await res.json();
       if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory`); el('adm-ragDirInput').value = ''; loadRag(); }
       else ragMsg(data.detail || data.message || 'Failed', true);
@@ -2374,7 +2405,7 @@ function initRag() {
     const btn = el('adm-ragReloadBtn');
     btn.disabled = true; btn.textContent = 'Reloading...';
     try {
-      const res = await fetch('/api/personal/reload', { method: 'POST' });
+      const res = await checkedFetch('/api/personal/reload', { method: 'POST' });
       const data = await res.json();
       ragMsg(`Index reloaded: ${data.count} documents`);
       loadRag();
@@ -2426,7 +2457,7 @@ async function loadTokens() {
   const list = el('adm-tokenList');
   if (!list) return;
   try {
-    const res = await fetch('/api/tokens', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/tokens', { credentials: 'same-origin' });
     const tokens = await res.json();
     if (!tokens.length) { list.innerHTML = '<div class="admin-empty" style="color:var(--accent, var(--red));opacity:0.7;font-size:10px;">No API tokens</div>'; return; }
     list.innerHTML = tokens.map(t => `
@@ -2451,7 +2482,7 @@ async function loadTokens() {
     list.querySelectorAll('[data-adm-del-token]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!await uiModule.styledConfirm('Revoke this API token? External integrations using it will stop working.', { confirmText: 'Revoke', danger: true })) return;
-        await fetch(`/api/tokens/${btn.dataset.admDelToken}`, { method: 'DELETE', credentials: 'same-origin' });
+        await checkedFetch(`/api/tokens/${btn.dataset.admDelToken}`, { method: 'DELETE', credentials: 'same-origin' });
         loadTokens();
         // Codex / Claude integration cards on the Integrations panel are
         // backed by these tokens — let them re-render so the deleted token
@@ -2474,7 +2505,7 @@ async function loadTokens() {
         const name = (input.value || '').trim();
         if (!name || name === original) return;
         try {
-          const r = await fetch(`/api/tokens/${input.dataset.tokenId}`, {
+          const r = await checkedFetch(`/api/tokens/${input.dataset.tokenId}`, {
             method: 'PATCH', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name }),
@@ -2494,7 +2525,7 @@ async function loadTokens() {
         const msg = list.querySelector(`.adm-tok-scope-msg[data-token-id="${tokenId}"]`);
         const scopes = Array.from(panel.querySelectorAll('.adm-tok-scope:checked')).map(input => input.dataset.scope);
         try {
-          const r = await fetch(`/api/tokens/${tokenId}`, {
+          const r = await checkedFetch(`/api/tokens/${tokenId}`, {
             method: 'PATCH', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scopes }),
@@ -2525,7 +2556,7 @@ function initTokenForm() {
     const scopes = (el('adm-tokenScopes')?.value || '').trim();
     if (scopes) fd.append('scopes', scopes);
     try {
-      const res = await fetch('/api/tokens', { method: 'POST', body: fd, credentials: 'same-origin' });
+      const res = await checkedFetch('/api/tokens', { method: 'POST', body: fd, credentials: 'same-origin' });
       const data = await res.json();
       if (res.ok) {
         el('adm-tokenValue').textContent = data.token;
@@ -2559,7 +2590,7 @@ function initTokenForm() {
 async function loadWebhooks() {
   const list = el('adm-whList');
   try {
-    const res = await fetch('/api/webhooks', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/webhooks', { credentials: 'same-origin' });
     const hooks = await res.json();
     if (!hooks.length) { list.innerHTML = '<div class="admin-empty">No webhooks configured</div>'; return; }
     list.innerHTML = hooks.map(w => {
@@ -2589,19 +2620,19 @@ async function loadWebhooks() {
       btn.addEventListener('click', async () => {
         const msg = el('adm-whMsg'); msg.textContent = 'Sending test...'; msg.className = '';
         try {
-          const res = await fetch(`/api/webhooks/${btn.dataset.admWhTest}/test`, { method: 'POST', credentials: 'same-origin' });
+          const res = await checkedFetch(`/api/webhooks/${btn.dataset.admWhTest}/test`, { method: 'POST', credentials: 'same-origin' });
           msg.textContent = res.ok ? 'Test sent!' : 'Test failed'; msg.className = res.ok ? 'admin-success' : 'admin-error';
           setTimeout(() => loadWebhooks(), 1000);
         } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
       });
     });
     list.querySelectorAll('[data-adm-wh-toggle]').forEach(btn => {
-      btn.addEventListener('click', async () => { await fetch(`/api/webhooks/${btn.dataset.admWhToggle}`, { method: 'PATCH', credentials: 'same-origin' }); loadWebhooks(); });
+      btn.addEventListener('click', async () => { await checkedFetch(`/api/webhooks/${btn.dataset.admWhToggle}`, { method: 'PATCH', credentials: 'same-origin' }); loadWebhooks(); });
     });
     list.querySelectorAll('[data-adm-wh-delete]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!await uiModule.styledConfirm('Delete this webhook?', { confirmText: 'Delete', danger: true })) return;
-        await fetch(`/api/webhooks/${btn.dataset.admWhDelete}`, { method: 'DELETE', credentials: 'same-origin' }); loadWebhooks();
+        await checkedFetch(`/api/webhooks/${btn.dataset.admWhDelete}`, { method: 'DELETE', credentials: 'same-origin' }); loadWebhooks();
       });
     });
   } catch (e) { list.innerHTML = '<div class="admin-error">Failed to load webhooks</div>'; }
@@ -2621,7 +2652,7 @@ function initWebhookForm() {
     const fd = new FormData();
     fd.append('name', name); fd.append('url', url); fd.append('secret', secret); fd.append('events', events);
     try {
-      const res = await fetch('/api/webhooks', { method: 'POST', body: fd, credentials: 'same-origin' });
+      const res = await checkedFetch('/api/webhooks', { method: 'POST', body: fd, credentials: 'same-origin' });
       if (res.ok) { msg.textContent = 'Webhook added'; msg.className = 'admin-success'; el('adm-whName').value = ''; el('adm-whUrl').value = ''; el('adm-whSecret').value = ''; loadWebhooks(); }
       else { const d = await res.json(); msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
     } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
@@ -2638,7 +2669,7 @@ const featureLabels = {
 async function loadFeatures() {
   const container = el('adm-featureToggles');
   try {
-    const res = await fetch('/api/auth/features', { credentials: 'same-origin' });
+    const res = await checkedFetch('/api/auth/features', { credentials: 'same-origin' });
     const features = await res.json();
     container.innerHTML = Object.entries(featureLabels).map(([key, label]) => `
       <div class="admin-toggle-row" style="padding:0.4rem 0;border-bottom:1px solid var(--border);">
@@ -2648,7 +2679,7 @@ async function loadFeatures() {
     container.querySelectorAll('input[data-adm-feature]').forEach(toggle => {
       toggle.addEventListener('change', async () => {
         const body = {}; body[toggle.dataset.admFeature] = toggle.checked;
-        await fetch('/api/auth/features', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        await checkedFetch('/api/auth/features', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       });
     });
   } catch (e) { container.innerHTML = '<div class="admin-error">Failed to load features</div>'; }
@@ -2675,7 +2706,7 @@ function initCalDAV() {
   saveBtn.addEventListener('click', async () => {
     status.textContent = 'Saving...';
     try {
-      const res = await fetch(`${API_BASE}/api/calendar/config`, {
+      const res = await checkedFetch(`${API_BASE}/api/calendar/config`, {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ caldav_url: urlIn.value, caldav_username: userIn.value, caldav_password: passIn.value }),
@@ -2691,12 +2722,12 @@ function initCalDAV() {
     status.textContent = 'Testing...';
     try {
       // Save first
-      await fetch(`${API_BASE}/api/calendar/config`, {
+      await checkedFetch(`${API_BASE}/api/calendar/config`, {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ caldav_url: urlIn.value, caldav_username: userIn.value, caldav_password: passIn.value }),
       });
-      const res = await fetch(`${API_BASE}/api/calendar/test`, { method: 'POST', credentials: 'same-origin' });
+      const res = await checkedFetch(`${API_BASE}/api/calendar/test`, { method: 'POST', credentials: 'same-origin' });
       const d = await res.json();
       status.textContent = d.ok ? `Connected (${d.calendars} calendars)` : `Failed: ${d.error}`;
       status.style.color = d.ok ? 'var(--green)' : 'var(--red)';
@@ -2712,7 +2743,7 @@ function initBackup() {
     const msg = el('adm-backupMsg');
     btn.disabled = true; btn.textContent = 'Exporting...'; msg.textContent = '';
     try {
-      const res = await fetch('/api/export', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/export', { credentials: 'same-origin' });
       if (!res.ok) throw new Error('Export failed');
       const blob = await res.blob();
       const disposition = res.headers.get('Content-Disposition') || '';
@@ -2744,7 +2775,7 @@ function initBackup() {
       } catch (e) {
         throw new Error('Invalid backup file: ' + e.message);
       }
-      const res = await fetch('/api/import', {
+      const res = await checkedFetch('/api/import', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -2793,7 +2824,7 @@ function initDangerZone() {
           const results = [];
           for (const k of kinds) {
             try {
-              const r = await fetch(`/api/admin/wipe/${k}`, { method: 'DELETE', credentials: 'same-origin' });
+              const r = await checkedFetch(`/api/admin/wipe/${k}`, { method: 'DELETE', credentials: 'same-origin' });
               const d = await r.json().catch(() => ({}));
               results.push({ k, ok: r.ok, count: d.count ?? 0, error: r.ok ? null : (d.detail || 'failed') });
             } catch (e) {
@@ -2813,7 +2844,7 @@ function initDangerZone() {
             }
           }
         } else {
-          const res = await fetch(`/api/admin/wipe/${kind}`, { method: 'DELETE', credentials: 'same-origin' });
+          const res = await checkedFetch(`/api/admin/wipe/${kind}`, { method: 'DELETE', credentials: 'same-origin' });
           const data = await res.json().catch(() => ({}));
           if (res.ok) {
             if (_wipeMsg) { _wipeMsg.textContent = `Deleted ${data.count ?? 0} ${label}.`; _wipeMsg.className = 'admin-success'; }
@@ -2911,7 +2942,7 @@ async function loadLogs(isAutoPoll = false) {
   const { signal } = logsAbortController;
 
   try {
-    const res = await fetch(`/api/diagnostics/logs?limit=${limit}`, {
+    const res = await checkedFetch(`/api/diagnostics/logs?limit=${limit}`, {
       credentials: 'same-origin',
       signal
     });
@@ -3019,6 +3050,33 @@ function initLogsView() {
   loadLogs(false);
 }
 
+async function loadStackHealth() {
+  const container = el('settings-stack-health');
+  if (!container) return;
+  container.textContent = 'Checking…';
+  try {
+    const response = await checkedFetch('/api/diagnostics/services', { credentials: 'same-origin' });
+    const report = await response.json();
+    container.replaceChildren(...(report.services || []).map((service) => {
+      const row = document.createElement('div');
+      row.className = 'admin-user-row';
+      row.dataset.status = service.status || 'unknown';
+      const name = document.createElement('strong');
+      name.textContent = service.name || 'service';
+      const detail = document.createElement('span');
+      detail.textContent = `${service.status || 'unknown'} · ${service.detail || ''}`;
+      row.append(name, detail);
+      return row;
+    }));
+  } catch (error) {
+    container.textContent = error.message;
+  }
+}
+
+function initStackHealth() {
+  el('settings-stack-health-refresh')?.addEventListener('click', loadStackHealth);
+}
+
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
@@ -3026,7 +3084,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initStackHealth,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -3043,6 +3101,7 @@ function refreshAll() {
   loadMcpServers();
   loadTokens();
   loadLogs(false);
+  loadStackHealth();
 }
 
 /* ═══════════════════════════════════════════

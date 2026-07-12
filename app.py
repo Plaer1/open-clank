@@ -538,6 +538,7 @@ memory_manager    = components["memory_manager"]
 memory_vector     = components.get("memory_vector")
 memory_provider_registry = components.get("memory_provider_registry")
 memory_provider   = memory_provider_registry.active()[0] if memory_provider_registry and memory_provider_registry.active() else None
+app.state.memory_provider = memory_provider
 upload_handler    = components["upload_handler"]
 app.state.upload_handler = upload_handler
 personal_docs_mgr = components["personal_docs_manager"]
@@ -603,7 +604,7 @@ app.include_router(setup_session_routes(session_manager, session_config, webhook
 
 # Admin Danger Zone wipes (Settings → System → Danger Zone)
 from routes.admin_wipe_routes import setup_admin_wipe_routes
-app.include_router(setup_admin_wipe_routes(session_manager))
+app.include_router(setup_admin_wipe_routes(session_manager, memory_provider=memory_provider))
 
 # Memory
 from routes.memory_routes import setup_memory_routes
@@ -743,7 +744,9 @@ app.include_router(setup_prefs_routes())
 
 # Backup (export/import user data)
 from routes.backup_routes import setup_backup_routes
-app.include_router(setup_backup_routes(memory_manager, preset_manager, skills_manager))
+app.include_router(setup_backup_routes(
+    memory_manager, preset_manager, skills_manager, memory_provider=memory_provider
+))
 
 from routes.font_routes import setup_font_routes
 app.include_router(setup_font_routes())
@@ -1044,6 +1047,65 @@ async def _startup_event():
 
     _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
 
+    async def _initialize_and_migrate_memory():
+        if not memory_provider:
+            return
+        await memory_provider.initialize()
+        if getattr(memory_provider, "provider_id", "") != "frankenmemory":
+            return
+        from core.atomic_io import atomic_write_json
+        ledger_path = os.path.join(DATA_DIR, "memory_provider_migration_v1.json")
+        try:
+            with open(ledger_path, encoding="utf-8") as handle:
+                ledger = json.load(handle)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            ledger = {"version": 1, "migrated_ids": [], "ownerless_ids": []}
+        migrated = set(ledger.get("migrated_ids") or [])
+        ownerless = set(ledger.get("ownerless_ids") or [])
+        for entry in memory_manager.load_all():
+            legacy_id = str(entry.get("id") or "")
+            if not legacy_id or legacy_id in migrated:
+                continue
+            owner = str(entry.get("owner") or "").strip()
+            if not owner:
+                ownerless.add(legacy_id)
+                continue
+            metadata = dict(entry.get("metadata") or {})
+            metadata.update({
+                "migrated_from": "memory.json",
+                "legacy_id": legacy_id,
+                "legacy_timestamp": entry.get("timestamp"),
+            })
+            record = await memory_provider.remember(
+                str(entry.get("text") or ""),
+                owner=owner,
+                session_id=entry.get("session_id"),
+                category=entry.get("category") or "fact",
+                source=entry.get("source") or "legacy_migration",
+                metadata=metadata,
+            )
+            if entry.get("pinned"):
+                await memory_provider.pin(record.id, True, owner=owner)
+            migrated.add(legacy_id)
+            ledger.update({
+                "migrated_ids": sorted(migrated),
+                "ownerless_ids": sorted(ownerless),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            atomic_write_json(ledger_path, ledger)
+        ledger.update({
+            "migrated_ids": sorted(migrated),
+            "ownerless_ids": sorted(ownerless),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        atomic_write_json(ledger_path, ledger)
+        logger.info(
+            "Memory migration checked: %d migrated, %d ownerless awaiting claim",
+            len(migrated), len(ownerless),
+        )
+
+    _startup_tasks.append(asyncio.create_task(_initialize_and_migrate_memory()))
+
     # Frankenmemory maintenance is deliberately one small task, not another
     # scheduler framework. Zero disables it for deployments that groom
     # externally; the default is one daily pass through all graph/tier ops.
@@ -1191,7 +1253,7 @@ async def _startup_event():
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
 
     # ── openthesius mimo supervisor (non-critical) ──
-    if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
+    if os.environ.get("OPENTHESIUS_DRIVE", "mimo") == "mimo":
         async def _startup_mimo():
             try:
                 import sys as _sys
@@ -1202,7 +1264,7 @@ async def _startup_event():
                 from src.openclank.fmmcp_builder import ensure_fmmcp_built
                 await ensure_fmmcp_built()
 
-                from src.openclank.mimo_supervisor import MimoSupervisor
+                from src.openclank.mimo_supervisor import MimoSupervisorPool
 
                 # Parse OPENTHESIUS_SAFE_DIRS (colon-separated, ~ expanded)
                 _raw = os.environ.get("OPENTHESIUS_SAFE_DIRS", "")
@@ -1218,17 +1280,34 @@ async def _startup_event():
 
                 _safe_dirs = _safe_dirs or None
 
-                _sup = MimoSupervisor(
+                _auth_enabled = bool(getattr(auth_manager, "is_configured", False))
+                _initial_owner = ""
+                if _auth_enabled:
+                    _initial_owner = next(
+                        (
+                            str(name)
+                            for name, record in getattr(auth_manager, "users", {}).items()
+                            if isinstance(record, dict) and record.get("is_admin") is True
+                        ),
+                        "",
+                    )
+                _sup = MimoSupervisorPool(
                     memory_provider=memory_provider,
                     safe_dirs=_safe_dirs,
+                    auth_enabled=_auth_enabled,
+                    initial_owner=_initial_owner,
                 )
                 await _sup.start()
                 app.state.mimo_supervisor = _sup
                 task_scheduler._mimo_supervisor = _sup
+                from src.model_dispatch import set_mimo_supervisor
+                set_mimo_supervisor(_sup)
                 logger.info("[openthesius] mimo supervisor started")
             except Exception as e:
                 logger.error("[openthesius] mimo supervisor failed to start: %s", e, exc_info=True)
                 app.state.mimo_supervisor = None
+                from src.model_dispatch import set_mimo_supervisor
+                set_mimo_supervisor(None)
         _startup_tasks.append(asyncio.create_task(_startup_mimo()))
 
     logger.info("Application startup complete")
@@ -1246,6 +1325,8 @@ async def _shutdown_event():
     if _mimo_sup:
         try:
             await _mimo_sup.stop()
+            from src.model_dispatch import set_mimo_supervisor
+            set_mimo_supervisor(None)
             logger.info("[openthesius] mimo supervisor stopped")
         except Exception as e:
             logger.warning("[openthesius] mimo supervisor shutdown error: %s", e)

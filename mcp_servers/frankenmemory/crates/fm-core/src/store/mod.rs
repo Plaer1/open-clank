@@ -79,11 +79,13 @@ pub trait MemoryStore: Send + Sync {
         &self,
         id: &str,
         content: Option<&str>,
+        kind: Option<MemoryKind>,
+        category: Option<&str>,
         pinned: Option<bool>,
         owner: Option<&str>,
         workspace_id: Option<&str>,
     ) -> bool {
-        let _ = (id, content, pinned, owner, workspace_id);
+        let _ = (id, content, kind, category, pinned, owner, workspace_id);
         false
     }
     async fn delete_curated_record(

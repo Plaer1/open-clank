@@ -21,6 +21,10 @@ class MemoryRecord:
     session_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     pinned: bool = False
+    workspace_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    uses: int = 0
 
 
 @dataclass
@@ -30,6 +34,38 @@ class MemorySearchHit:
     memory: MemoryRecord
     provider_id: str
     score: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class MemoryScope:
+    """Authenticated memory namespace carried across provider operations."""
+
+    owner: str
+    workspace_id: str
+    workspace_path: Optional[str] = None
+    session_id: Optional[str] = None
+    session_key: Optional[str] = None
+    include_global: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.owner.strip() or not self.workspace_id.strip():
+            raise MemoryScopeError("authenticated owner and workspace_id are required")
+
+
+class MemoryProviderError(RuntimeError):
+    """Provider operation failed; this is distinct from an empty result."""
+
+
+class MemoryScopeError(MemoryProviderError):
+    """A request reached memory without an authenticated scope."""
+
+
+class MemoryTransportError(MemoryProviderError):
+    """The configured provider could not complete a transport operation."""
+
+
+class MemoryAmbiguousIdError(MemoryProviderError):
+    """A short display ID matches more than one record."""
 
 
 class MemoryProvider(ABC):
@@ -82,6 +118,17 @@ class MemoryProvider(ABC):
     ) -> List[MemoryRecord]:
         """List memories visible to the owner."""
 
+    async def list_page(
+        self,
+        *,
+        owner: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> tuple[List[MemoryRecord], Optional[str]]:
+        if cursor not in {None, "0"}:
+            return [], None
+        return await self.list_memories(owner=owner, limit=limit), None
+
     async def get(
         self,
         memory_id: str,
@@ -109,6 +156,40 @@ class MemoryProvider(ABC):
     async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
         """Set pinned state when the provider supports it."""
         raise NotImplementedError(f"Provider {self.provider_id} does not support pinning")
+
+    async def resolve_id(self, display_id: str, *, owner: Optional[str] = None) -> str:
+        direct = await self.get(display_id, owner=owner)
+        if direct is not None:
+            return direct.id
+        matches: List[str] = []
+        cursor: Optional[str] = None
+        while True:
+            records, cursor = await self.list_page(owner=owner, limit=500, cursor=cursor)
+            matches.extend(record.id for record in records if record.id.startswith(display_id))
+            if len(matches) > 1 or cursor is None:
+                break
+        if len(matches) > 1:
+            raise MemoryAmbiguousIdError(f"memory id prefix {display_id!r} is ambiguous")
+        if not matches:
+            raise KeyError(display_id)
+        return matches[0]
+
+    async def record_access(
+        self,
+        memory_ids: List[str],
+        *,
+        owner: Optional[str] = None,
+    ) -> int:
+        return 0
+
+    async def owner_stats(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        return {"curated": len(await self.list_memories(owner=owner, limit=1_000_000))}
+
+    async def purge_owner(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support owner purge")
+
+    async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support owner rename")
 
     async def groom(
         self,
@@ -260,6 +341,19 @@ class NativeMemoryProvider(MemoryProvider):
             for entry in self.memory_manager.load(owner=owner)[:limit]
         ]
 
+    async def list_page(
+        self,
+        *,
+        owner: Optional[str] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> tuple[List[MemoryRecord], Optional[str]]:
+        offset = int(cursor or 0)
+        rows = self.memory_manager.load(owner=owner)
+        page = rows[offset : offset + limit]
+        next_cursor = str(offset + len(page)) if offset + len(page) < len(rows) else None
+        return [self._to_record(entry) for entry in page], next_cursor
+
     async def get(self, memory_id: str, *, owner: Optional[str] = None) -> Optional[MemoryRecord]:
         for entry in self.memory_manager.load(owner=owner):
             if entry.get("id") == memory_id:
@@ -325,6 +419,26 @@ class NativeMemoryProvider(MemoryProvider):
             self.memory_manager.save(memories)
             return True
         return False
+
+    async def purge_owner(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        memories = self.memory_manager.load_all()
+        removed = [entry for entry in memories if entry.get("owner") == owner]
+        self.memory_manager.save([entry for entry in memories if entry.get("owner") != owner])
+        if self._vector_available():
+            for entry in removed:
+                if entry.get("id"):
+                    self.memory_vector.remove(entry["id"])
+        return {"purged": True, "counts": {"curated": len(removed)}}
+
+    async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
+        memories = self.memory_manager.load_all()
+        changed = 0
+        for entry in memories:
+            if entry.get("owner") == owner:
+                entry["owner"] = new_owner
+                changed += 1
+        self.memory_manager.save(memories)
+        return {"renamed": True, "from": owner, "to": new_owner, "counts": {"curated": changed}}
 
     def _vector_available(self) -> bool:
         return bool(self.memory_vector and getattr(self.memory_vector, "healthy", True))

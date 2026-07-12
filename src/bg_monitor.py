@@ -29,20 +29,20 @@ async def _drain_agent(sess, messages):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
     saves, so the frontend rebuilds them as standard agent-thread tool cards."""
-    import os as _os
-    from src.agent_loop import stream_agent_loop
-
-    # ── openthesius: background monitor must be re-pointed to ACP ──
-    if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-        logger.warning("[openthesius] _drain_agent skipped — agent loop disabled under OPENTHESIUS_DRIVE=mimo")
-        return "(bg monitor disabled under openthesius/ACP)", []
+    from src.endpoint_resolver import resolve_model_target
+    from src.model_dispatch import stream_agent_target
 
     full = ""
     tool_events = []
     round_num = 1
-    async for chunk in stream_agent_loop(
-        sess.endpoint_url, sess.model, messages,
-        headers=getattr(sess, "headers", None),
+    target = resolve_model_target(
+        sess.endpoint_url,
+        sess.model,
+        getattr(sess, "headers", None),
+    )
+    async for chunk in stream_agent_target(
+        target,
+        messages,
         context_length=getattr(sess, "context_length", 0) or 0,
         session_id=sess.id,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,

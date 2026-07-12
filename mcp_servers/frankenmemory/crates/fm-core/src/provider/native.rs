@@ -33,12 +33,14 @@ impl NativeProvider {
         &self,
         id: &str,
         content: Option<&str>,
+        kind: Option<MemoryKind>,
+        category: Option<&str>,
         pinned: Option<bool>,
         owner: Option<&str>,
         workspace_id: Option<&str>,
     ) -> bool {
         self.store
-            .update_curated_record(id, content, pinned, owner, workspace_id)
+            .update_curated_record(id, content, kind, category, pinned, owner, workspace_id)
             .await
     }
 
@@ -51,6 +53,46 @@ impl NativeProvider {
         self.store
             .delete_curated_record(id, owner, workspace_id)
             .await
+    }
+
+    pub fn get_curated_record(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Option<MemoryRecord>, String> {
+        self.store
+            .as_sqlite()
+            .ok_or_else(|| "direct reads require SQLite".to_string())?
+            .get_curated_record(id, owner, workspace_id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn list_curated_records(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MemoryRecord>, String> {
+        self.store
+            .as_sqlite()
+            .ok_or_else(|| "paginated reads require SQLite".to_string())?
+            .list_curated_records(owner, workspace_id, limit, offset)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn record_curated_access(
+        &self,
+        ids: &[String],
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<usize, String> {
+        self.store
+            .as_sqlite()
+            .ok_or_else(|| "access accounting requires SQLite".to_string())?
+            .record_curated_access(ids, owner, workspace_id)
+            .map_err(|error| error.to_string())
     }
 
     pub fn list_candidates(
@@ -266,6 +308,64 @@ fn prefilter_candidate(content: &str, evidence_role: &str) -> Option<&'static st
     None
 }
 
+fn automatic_admission(
+    content: &str,
+    evidence_role: &str,
+) -> Option<(&'static str, MemoryKind, &'static str, bool)> {
+    if evidence_role != "user" || content.contains('?') {
+        return None;
+    }
+    let text = normalized(content);
+    if [
+        "password",
+        "api key",
+        "secret",
+        "access token",
+        "credit card",
+        "ssn",
+    ]
+    .iter()
+    .any(|term| text.contains(term))
+    {
+        return None;
+    }
+    if ["my name is ", "call me "]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return Some(("auto_identity_claim", MemoryKind::Persona, "identity", true));
+    }
+    if ["i like ", "i love ", "i prefer ", "i dislike ", "i hate "]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return Some((
+            "auto_preference_claim",
+            MemoryKind::Instruction,
+            "preference",
+            false,
+        ));
+    }
+    if [
+        "i live in ",
+        "i am from ",
+        "i'm from ",
+        "i work on ",
+        "i am working on ",
+        "i'm working on ",
+        "i am traveling to ",
+        "i'm traveling to ",
+        "i am travelling to ",
+        "i'm travelling to ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+    {
+        return Some(("auto_user_claim", MemoryKind::Fact, "fact", false));
+    }
+    None
+}
+
 fn metadata_string(metadata: &serde_json::Value, key: &str) -> String {
     metadata
         .get(key)
@@ -306,7 +406,7 @@ impl MemoryProvider for NativeProvider {
         };
         let workspace_id = turn.workspace_id.trim();
         let owner = turn.owner.as_deref().unwrap_or_default().trim();
-        if capture_mode == "raw_only"
+        if capture_mode != "manual"
             && (owner.is_empty() || workspace_id.is_empty() || workspace_id == "global")
         {
             tracing::warn!(
@@ -421,6 +521,7 @@ impl MemoryProvider for NativeProvider {
             (turn.assistant_text.trim(), "assistant")
         };
         let rejection = prefilter_candidate(content, evidence_role);
+        let auto_admission = automatic_admission(content, evidence_role);
         let dedup_key = stable_id(
             "dedup",
             &[effective_owner, effective_workspace, &normalized(content)],
@@ -428,12 +529,35 @@ impl MemoryProvider for NativeProvider {
         let candidate_id = stable_id("candidate", &[&dedup_key]);
         let now = chrono::Utc::now().to_rfc3339();
         let manual = capture_mode == "manual";
+        let candidate_kind = turn
+            .category
+            .as_deref()
+            .map(|category| category_to_kind(Some(category)))
+            .or_else(|| auto_admission.map(|(_, kind, _, _)| kind))
+            .unwrap_or(MemoryKind::Episodic);
+        let admission_reason = if manual {
+            Some("manual_admission")
+        } else {
+            auto_admission.map(|(reason, _, _, _)| reason)
+        };
         let mut candidate = CandidateRecord {
             id: candidate_id.clone(),
             content: content.to_string(),
-            kind: category_to_kind(turn.category.as_deref()),
-            confidence_score: if manual { 0.95 } else { 0.55 },
-            importance_score: if manual { 0.8 } else { 0.5 },
+            kind: candidate_kind,
+            confidence_score: if manual {
+                0.95
+            } else if auto_admission.is_some() {
+                0.88
+            } else {
+                0.55
+            },
+            importance_score: if manual {
+                0.8
+            } else if auto_admission.is_some() {
+                0.7
+            } else {
+                0.5
+            },
             owner: effective_owner.to_string(),
             workspace_id: effective_workspace.to_string(),
             workspace_path: turn.workspace_path.clone(),
@@ -450,11 +574,7 @@ impl MemoryProvider for NativeProvider {
                 CandidateStatus::Pending
             },
             reason: rejection
-                .unwrap_or(if manual {
-                    "manual_admission"
-                } else {
-                    "awaiting_review"
-                })
+                .unwrap_or(admission_reason.unwrap_or("awaiting_review"))
                 .into(),
             accepted_curated_id: None,
             created_at: now.clone(),
@@ -511,7 +631,7 @@ impl MemoryProvider for NativeProvider {
                 providers_failed: 0,
             };
         }
-        if !manual {
+        let Some(admission_reason) = admission_reason else {
             sqlite.metric_add("candidates_pending", 1);
             return CaptureResult {
                 records_captured,
@@ -520,7 +640,7 @@ impl MemoryProvider for NativeProvider {
                 providers_succeeded: 1,
                 providers_failed: 0,
             };
-        }
+        };
 
         let curated_id = stable_id("m", &[&candidate_id]);
         let mut record = MemoryRecord::new(content);
@@ -529,7 +649,13 @@ impl MemoryProvider for NativeProvider {
         record.metadata = metadata;
         if let Some(object) = record.metadata.as_object_mut() {
             object.insert("candidate_id".into(), candidate_id.clone().into());
-            object.insert("admission_reason".into(), "manual_admission".into());
+            object.insert("admission_reason".into(), admission_reason.into());
+            if let Some((_, _, category, pinned)) = auto_admission {
+                object.entry("category").or_insert_with(|| category.into());
+                if pinned {
+                    object.insert("pinned".into(), true.into());
+                }
+            }
         }
         record.source = turn.source.clone();
         record.source_type = SourceType::Human;
@@ -541,6 +667,10 @@ impl MemoryProvider for NativeProvider {
         record.source_message_ids = source_message_ids;
         record.confidence_score = candidate.confidence_score;
         record.importance_score = candidate.importance_score;
+        if auto_admission.is_some_and(|(_, _, _, pinned)| pinned) {
+            record.exempt_from_decay = true;
+            record.exempt_from_dedup = true;
+        }
 
         let embedding = self.embed.embed(content).await.ok();
         if self
@@ -557,7 +687,7 @@ impl MemoryProvider for NativeProvider {
             let _ = sqlite.set_candidate_status(
                 &candidate_id,
                 CandidateStatus::Accepted,
-                "manual_admission",
+                admission_reason,
                 Some(&curated_id),
                 effective_owner,
                 effective_workspace,
@@ -575,11 +705,32 @@ impl MemoryProvider for NativeProvider {
     }
 
     async fn recall(&self, q: &RecallQuery) -> RecallResult {
+        let Some(owner) = q.owner.as_deref().filter(|value| !value.trim().is_empty()) else {
+            return RecallResult {
+                prepend_context: String::new(),
+                append_system_context: String::new(),
+                memories: vec![],
+                recall_strategy: "scope_required".into(),
+                ground_truth_preamble: None,
+            };
+        };
+        let Some(requested_workspace) = q
+            .workspace_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return RecallResult {
+                prepend_context: String::new(),
+                append_system_context: String::new(),
+                memories: vec![],
+                recall_strategy: "scope_required".into(),
+                ground_truth_preamble: None,
+            };
+        };
         let workspace_id = q
             .workspace_id
             .clone()
             .unwrap_or_else(|| self.config.workspace_id.clone());
-        let requested_workspace = q.workspace_id.as_deref();
 
         let query_emb = self.embed.embed(&q.query).await.ok();
 
@@ -592,24 +743,38 @@ impl MemoryProvider for NativeProvider {
             &workspace_id,
             self.config.recall.workspace_boost,
             &self.config.collapse,
-            q.owner.as_deref(),
-            requested_workspace,
+            Some(owner),
+            Some(requested_workspace),
         )
         .await;
+
+        if let Some(sqlite) = self.store.as_sqlite() {
+            if let Ok(pinned) = sqlite.list_pinned_curated(owner, requested_workspace) {
+                for record in pinned.into_iter().rev() {
+                    if let Some(hit) = results.iter_mut().find(|hit| hit.record.id == record.id) {
+                        hit.source_label = "pinned".into();
+                        hit.score = hit.score.max(1.0);
+                    } else {
+                        results.insert(
+                            0,
+                            ScoredRecord {
+                                record,
+                                score: 1.0,
+                                source_label: "pinned".into(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
 
         // Enforce scope at the provider boundary as well as in callers. Legacy
         // ownerless records are treated as global compatibility records; all
         // newly captured records carry the bridge owner.
         results.retain(|hit| {
-            let owner_ok = q.owner.as_deref().map_or(true, |owner| {
-                hit.record
-                    .owner
-                    .as_deref()
-                    .map_or(true, |stored| stored == owner)
-            });
-            let workspace_ok = requested_workspace.map_or(true, |workspace| {
-                hit.record.workspace_id == workspace || hit.record.workspace_id == "global"
-            });
+            let owner_ok = hit.record.owner.as_deref() == Some(owner);
+            let workspace_ok = hit.record.workspace_id == requested_workspace
+                || hit.record.workspace_id == "global";
             owner_ok && workspace_ok
         });
 
@@ -626,16 +791,27 @@ impl MemoryProvider for NativeProvider {
     }
 
     async fn search(&self, p: &SearchParams) -> SearchResult {
+        let Some(owner) = p.owner.as_deref().filter(|value| !value.trim().is_empty()) else {
+            return SearchResult {
+                results: vec![],
+                total: 0,
+            };
+        };
+        let Some(workspace) = p
+            .workspace_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return SearchResult {
+                results: vec![],
+                total: 0,
+            };
+        };
         let mut results = match p.tier {
             Tier::Raw => {
                 let raw_results = self
                     .store
-                    .search_raw_fts_scoped(
-                        &p.query,
-                        p.limit,
-                        p.owner.as_deref(),
-                        p.workspace_id.as_deref(),
-                    )
+                    .search_raw_fts_scoped(&p.query, p.limit, Some(owner), Some(workspace))
                     .await;
                 raw_results
                     .into_iter()
@@ -666,26 +842,15 @@ impl MemoryProvider for NativeProvider {
             }
             Tier::Curated => {
                 self.store
-                    .search_curated_fts_scoped(
-                        &p.query,
-                        p.limit,
-                        p.owner.as_deref(),
-                        p.workspace_id.as_deref(),
-                    )
+                    .search_curated_fts_scoped(&p.query, p.limit, Some(owner), Some(workspace))
                     .await
             }
         };
 
         results.retain(|hit| {
-            let owner_ok = p.owner.as_deref().map_or(true, |owner| {
-                hit.record
-                    .owner
-                    .as_deref()
-                    .map_or(true, |stored| stored == owner)
-            });
-            let workspace_ok = p.workspace_id.as_deref().map_or(true, |workspace| {
-                hit.record.workspace_id == workspace || hit.record.workspace_id == "global"
-            });
+            let owner_ok = hit.record.owner.as_deref() == Some(owner);
+            let workspace_ok =
+                hit.record.workspace_id == workspace || hit.record.workspace_id == "global";
             owner_ok && workspace_ok
         });
 
@@ -716,7 +881,15 @@ impl MemoryProvider for NativeProvider {
                     alerts: vec![],
                 };
                 match self.store.as_sqlite() {
-                    Some(s) => match s.graph_edge_decay(&Default::default(), op.dry_run) {
+                    Some(s) => match crate::graph::GraphScope::new(
+                        op.owner.clone().unwrap_or_default(),
+                        op.workspace_id.clone().unwrap_or_default(),
+                    )
+                    .map_err(str::to_string)
+                    .and_then(|scope| {
+                        s.graph_edge_decay(&scope, &Default::default(), op.dry_run)
+                            .map_err(|error| error.to_string())
+                    }) {
                         Ok((decayed, pruned)) => {
                             result.records_reflected = decayed;
                             result.records_archived = pruned;
@@ -738,7 +911,15 @@ impl MemoryProvider for NativeProvider {
                     alerts: vec![],
                 };
                 match self.store.as_sqlite() {
-                    Some(s) => match s.graph_tag_normalize(op.dry_run) {
+                    Some(s) => match crate::graph::GraphScope::new(
+                        op.owner.clone().unwrap_or_default(),
+                        op.workspace_id.clone().unwrap_or_default(),
+                    )
+                    .map_err(str::to_string)
+                    .and_then(|scope| {
+                        s.graph_tag_normalize(&scope, op.dry_run)
+                            .map_err(|error| error.to_string())
+                    }) {
                         Ok(changed) => result.records_merged = changed,
                         Err(e) => result.alerts.push(format!("tag_normalize failed: {e}")),
                     },
@@ -795,11 +976,16 @@ mod tests {
         let (p, store) = provider();
         p.capture(&turn("", "the sky is green today")).await;
 
-        let raws = store.search_raw_fts("sky green", 10).await;
+        let raws = store
+            .search_raw_fts_scoped("sky green", 10, Some("alice"), Some("workspace-test"))
+            .await;
         assert_eq!(raws.len(), 1, "exactly one raw row, no empty-side row");
         assert_eq!(raws[0].turn.role, "assistant");
 
-        assert!(store.search_curated_fts("sky green", 10).await.is_empty());
+        assert!(store
+            .search_curated_fts_scoped("sky green", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
         assert!(store
             .list_candidates(Some("alice"), Some("workspace-test"), None, 10)
             .unwrap()
@@ -815,12 +1001,14 @@ mod tests {
             "automatic capture writes raw only"
         );
 
-        let raws = store.search_raw_fts("blue notebook", 10).await;
+        let raws = store
+            .search_raw_fts_scoped("blue notebook", 10, Some("alice"), Some("workspace-test"))
+            .await;
         assert_eq!(raws.len(), 1);
         assert_eq!(raws[0].turn.role, "user");
 
         assert!(store
-            .search_curated_fts("blue notebook", 10)
+            .search_curated_fts_scoped("blue notebook", 10, Some("alice"), Some("workspace-test"),)
             .await
             .is_empty());
     }
@@ -836,8 +1024,17 @@ mod tests {
             .await;
         assert_eq!(first.records_captured, 2);
         assert_eq!(replay.records_captured, 0);
-        assert_eq!(store.search_raw_fts("sky", 10).await.len(), 2);
-        assert!(store.search_curated_fts("sky", 10).await.is_empty());
+        assert_eq!(
+            store
+                .search_raw_fts_scoped("sky", 10, Some("alice"), Some("workspace-test"))
+                .await
+                .len(),
+            2
+        );
+        assert!(store
+            .search_curated_fts_scoped("sky", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -877,7 +1074,12 @@ mod tests {
         let replay = p.capture(&manual).await;
         assert_eq!(
             store
-                .search_curated_fts("concise release notes", 10)
+                .search_curated_fts_scoped(
+                    "concise release notes",
+                    10,
+                    Some("alice"),
+                    Some("workspace-test"),
+                )
                 .await
                 .len(),
             1
@@ -894,6 +1096,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safe_user_claim_auto_admits_and_identity_is_pinned() {
+        let (p, store) = provider();
+        let result = p
+            .capture(&turn_with_mode(
+                "My name is Alice",
+                "Nice to meet you.",
+                "candidate",
+                "evt-identity",
+            ))
+            .await;
+        assert!(result
+            .record_ids
+            .first()
+            .is_some_and(|id| id.starts_with("m_")));
+
+        let hits = store
+            .search_curated_fts_scoped("Alice", 10, Some("alice"), Some("workspace-test"))
+            .await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.kind, MemoryKind::Persona);
+        assert_eq!(hits[0].record.metadata["pinned"], true);
+        assert!(hits[0].record.exempt_from_decay);
+        assert_eq!(
+            store
+                .list_candidates(Some("alice"), Some("workspace-test"), Some("accepted"), 10)
+                .unwrap()[0]
+                .reason,
+            "auto_identity_claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_claim_and_sensitive_user_claim_do_not_auto_admit() {
+        let (p, store) = provider();
+        p.capture(&turn_with_mode(
+            "",
+            "My name is Alice",
+            "candidate",
+            "evt-assistant-identity",
+        ))
+        .await;
+        p.capture(&turn_with_mode(
+            "My API key is a sensitive value",
+            "",
+            "candidate",
+            "evt-sensitive",
+        ))
+        .await;
+
+        assert!(store
+            .search_curated_fts_scoped("Alice sensitive", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn temporary_fixture_is_rejected_and_not_recallable() {
         let (p, store) = provider();
         let candidate = turn_with_mode(
@@ -903,10 +1168,17 @@ mod tests {
             "evt-temp",
         );
         p.capture(&candidate).await;
-        assert!(store
-            .search_curated_fts("permission test", 10)
-            .await
-            .is_empty());
+        assert!(
+            store
+                .search_curated_fts_scoped(
+                    "permission test",
+                    10,
+                    Some("alice"),
+                    Some("workspace-test"),
+                )
+                .await
+                .is_empty()
+        );
         let rejected = store
             .list_candidates(Some("alice"), Some("workspace-test"), Some("rejected"), 10)
             .unwrap();
@@ -924,7 +1196,10 @@ mod tests {
         let mut global = turn("scope must not be global", "it is not global");
         global.workspace_id = "global".into();
         assert_eq!(p.capture(&global).await.providers_failed, 1);
-        assert!(store.search_raw_fts("scope", 10).await.is_empty());
+        assert!(store
+            .search_raw_fts_scoped("scope", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -956,7 +1231,12 @@ mod tests {
             .iter()
             .any(|candidate| candidate.reason == "assistant_process_narration"));
         assert!(store
-            .search_curated_fts("conversation repository", 10)
+            .search_curated_fts_scoped(
+                "conversation repository",
+                10,
+                Some("alice"),
+                Some("workspace-test"),
+            )
             .await
             .is_empty());
     }

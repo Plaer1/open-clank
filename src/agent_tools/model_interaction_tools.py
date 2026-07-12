@@ -56,6 +56,8 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
             [{"role": "user", "content": message}],
             headers=headers,
             timeout=AI_CHAT_TIMEOUT,
+            owner=owner,
+            session_id=session_id,
         )
         # Truncate very long responses
         if len(response) > 10000:
@@ -103,6 +105,8 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
             ],
             headers=headers,
             timeout=AI_CHAT_TIMEOUT,
+            owner=owner,
+            session_id=session_id,
         )
         if len(response) > 8000:
             response = response[:8000] + "\n... (truncated)"

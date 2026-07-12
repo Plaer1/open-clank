@@ -1504,6 +1504,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       try { window.documentModule.clearSelection(); } catch {}
     }
     currentSessionId = id;
+    document.dispatchEvent(new CustomEvent('odysseus:session-selected', { detail: { sessionId: id } }));
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
     // URL hash — the user complained that coming back to Odysseus kept
@@ -1713,6 +1714,9 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       if (window.chatModule && window.chatModule.checkBackgroundStream) {
         window.chatModule.checkBackgroundStream(id);
       }
+      if (window.chatModule && window.chatModule.restoreSessionState) {
+        window.chatModule.restoreSessionState(id);
+      }
     } catch (e) {
       console.warn('checkBackgroundStream error:', e);
     }
@@ -1838,6 +1842,9 @@ export async function materializePendingSession() {
   if (pending.endpointId) {
     fd.append('endpoint_id', pending.endpointId);
   }
+  if (isIncognito) {
+    fd.append('incognito', 'true');
+  }
 
   let res;
   try {
@@ -1868,6 +1875,7 @@ export async function materializePendingSession() {
     try { window.documentModule.clearSelection(); } catch {}
   }
   currentSessionId = payload.id;
+  document.dispatchEvent(new CustomEvent('odysseus:session-selected', { detail: { sessionId: payload.id } }));
   Storage.set('lastSessionId', payload.id);
   history.replaceState(null, '', '#' + payload.id);
 
@@ -1908,6 +1916,7 @@ export function getCurrentEndpointUrl() {
 export function setCurrentSessionId(id) {
   _sessionNavToken++;
   currentSessionId = id;
+  document.dispatchEvent(new CustomEvent('odysseus:session-selected', { detail: { sessionId: id } }));
   if (!id) {
     Storage.remove('lastSessionId');
     history.replaceState(null, '', window.location.pathname);

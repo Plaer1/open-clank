@@ -1042,6 +1042,11 @@
     })();
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
+    <aside id="mimo-plan-dock" class="mimo-plan-dock" aria-label="MiMo plan" hidden>
+      <div class="mimo-plan-head"><strong>MiMo Plan</strong><span data-plan-revision></span></div>
+      <pre data-plan-text></pre>
+      <ol data-plan-todos></ol>
+    </aside>
 
     <!-- Attachments strip -->
     <div id="attach-strip" class="attach-strip"></div>
@@ -1075,6 +1080,7 @@
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
         </div>
+        <select id="mimo-mode-select" class="model-picker-btn hidden" aria-label="MiMo mode" title="MiMo session mode"></select>
       </div>
       <div id="pinned-tools-bar"></div>
       <div class="chat-input-bottom" style="visibility:hidden">
@@ -1480,6 +1486,12 @@
           </div>
           <div id="mimo-provider-flow"></div>
           <div id="mimo-provider-list"></div>
+          <div class="admin-card" style="margin-top:12px">
+            <h2>Persistent permissions</h2>
+            <div class="admin-toggle-sub">Owner/session/workspace-scoped MiMo grants. One-time approvals are never stored.</div>
+            <div id="mimo-permission-grants-status" role="status" aria-live="polite"></div>
+            <div id="mimo-permission-grants"></div>
+          </div>
         </div>
 
         <!-- ═══ AI TAB ═══ -->
@@ -2353,6 +2365,13 @@
 
         <!-- ═══ SYSTEM TAB ═══ -->
         <div data-settings-panel="system" class="hidden">
+
+          <div class="admin-card">
+            <h2>Stack health</h2>
+            <div class="admin-toggle-sub">Current Odysseus, Frankenmemory, MiMo, provider, and integration state.</div>
+            <button type="button" class="admin-btn-sm" id="settings-stack-health-refresh">Refresh</button>
+            <div id="settings-stack-health" role="status" aria-live="polite"></div>
+          </div>
 
           <div class="admin-card" id="settings-system-logs-card">
             <h2>

@@ -315,6 +315,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                     return prompt[:50].strip()
                 url, model = recent.endpoint_url, recent.model
                 headers = recent.headers or {}
+                source_session_id = recent.id
             finally:
                 db.close()
 
@@ -327,6 +328,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 max_tokens=20,
                 headers=headers,
                 timeout=15,
+                owner=owner,
+                session_id=source_session_id,
             )
             title = result.strip().strip('"\'').strip()
             return title[:60] if title else prompt[:50].strip()
@@ -1123,6 +1126,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 messages=[{"role": "system", "content": sys},
                           {"role": "user", "content": desc[:1000]}],
                 temperature=0.2, max_tokens=400, headers=headers, timeout=45,
+                owner=user or None,
             )
             text = _strip_think(raw or "", prose=False, prompt_echo=False).strip()
             if text.startswith("```"):

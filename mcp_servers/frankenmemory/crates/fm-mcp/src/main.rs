@@ -4,11 +4,11 @@ use std::sync::Arc;
 use fm_core::config::FmConfig;
 use fm_core::embed::{EmbeddingClient, HttpEmbeddingClient, NoopEmbeddingClient};
 use fm_core::provider::native::NativeProvider;
-use fm_core::provider::{MemoryProvider, GroomOpArgs};
+use fm_core::provider::{GroomOpArgs, MemoryProvider};
 use fm_core::record::*;
 use fm_core::store::sqlite::SqliteStore;
 use rmcp::{
-    handler::server::{tool::Parameters, ServerHandler, tool::ToolCallContext},
+    handler::server::{tool::Parameters, tool::ToolCallContext, ServerHandler},
     model::*,
     service::RequestContext,
     tool, tool_router,
@@ -25,6 +25,64 @@ struct FrankenmemoryServer {
     /// on the MemoryStore trait).
     graph_store: Arc<SqliteStore>,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
+}
+
+fn request_scope(
+    owner: Option<String>,
+    workspace_id: Option<String>,
+    include_global: bool,
+) -> Result<fm_core::graph::GraphScope, rmcp::ErrorData> {
+    let env_owner = std::env::var("FM_OWNER")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let env_workspace = std::env::var("FM_WORKSPACE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let trusted_caller = std::env::var("FM_SCOPE_AUTHORITY")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("trusted-caller"));
+    let legacy = std::env::var("FM_LEGACY_SINGLE_USER")
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+
+    let (owner, workspace_id) = if let (Some(env_owner), Some(env_workspace)) =
+        (env_owner, env_workspace)
+    {
+        if owner
+            .as_deref()
+            .is_some_and(|value| value.trim() != env_owner)
+            || workspace_id
+                .as_deref()
+                .is_some_and(|value| value.trim() != env_workspace)
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                "request scope conflicts with authenticated process scope",
+                None,
+            ));
+        }
+        (env_owner, env_workspace)
+    } else if trusted_caller {
+        (
+            owner.ok_or_else(|| {
+                rmcp::ErrorData::invalid_params("authenticated owner is required", None)
+            })?,
+            workspace_id
+                .ok_or_else(|| rmcp::ErrorData::invalid_params("workspace_id is required", None))?,
+        )
+    } else if legacy {
+        (
+            owner.unwrap_or_else(|| "legacy".into()),
+            workspace_id.unwrap_or_else(|| "global".into()),
+        )
+    } else {
+        return Err(rmcp::ErrorData::invalid_params(
+            "fm-mcp requires FM_OWNER+FM_WORKSPACE_ID or FM_SCOPE_AUTHORITY=trusted-caller",
+            None,
+        ));
+    };
+
+    let mut scope = fm_core::graph::GraphScope::new(owner, workspace_id)
+        .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+    scope.include_global = include_global;
+    Ok(scope)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -103,6 +161,8 @@ struct SearchParams {
 struct GroomParams {
     op: String,
     #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
     workspace_id: Option<String>,
     #[serde(default)]
     dry_run: Option<bool>,
@@ -114,7 +174,39 @@ struct MemoryMutationParams {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
     pinned: Option<bool>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryGetParams {
+    id: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryListParams {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryAccessParams {
+    ids: Vec<String>,
     #[serde(default)]
     owner: Option<String>,
     #[serde(default)]
@@ -149,6 +241,17 @@ struct MemoryQualityParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct OwnerLifecycleParams {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    new_owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct QuarantineMigrationParams {
     #[serde(default = "default_true")]
     dry_run: bool,
@@ -160,8 +263,25 @@ fn default_true() -> bool {
     true
 }
 
+fn parse_memory_kind(value: &str) -> Option<MemoryKind> {
+    match value {
+        "persona" | "identity" => Some(MemoryKind::Persona),
+        "episodic" | "event" => Some(MemoryKind::Episodic),
+        "instruction" | "preference" => Some(MemoryKind::Instruction),
+        "fact" | "contact" | "project" | "goal" => Some(MemoryKind::Fact),
+        "fabric" => Some(MemoryKind::Fabric),
+        "wiki" | "reference" => Some(MemoryKind::Wiki),
+        "raw" => Some(MemoryKind::Raw),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphUpsertParams {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
     #[serde(default)]
     nodes: Vec<fm_core::graph::GraphNodeInput>,
     #[serde(default)]
@@ -174,6 +294,12 @@ struct GraphUpsertParams {
 struct GraphWalkParams {
     /// One of: cues | tags | expand | fetch | trace | rank
     op: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default = "default_true")]
+    include_global: bool,
     /// For op=cues: free text to match against cue keywords.
     #[serde(default)]
     query: Option<String>,
@@ -199,6 +325,10 @@ struct GraphWalkParams {
 struct CodeIndexParams {
     /// index | status | stale | remove | impact
     action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
     /// Absolute path of the codebase root (the opt-in namespace).
     path: String,
     /// For action=impact: file path relative to the codebase root.
@@ -222,28 +352,39 @@ impl FrankenmemoryServer {
         name = "capture",
         description = "Capture one complete conversation turn. Automatic callers use user_text+assistant_text with capture_mode=raw_only, owner, workspace_id, source_event_id, and source_message_ids. Deliberate remember operations use capture_mode=manual."
     )]
-    async fn capture(&self, Parameters(params): Parameters<CaptureParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn capture(
+        &self,
+        Parameters(params): Parameters<CaptureParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let explicit_turn = params.user_text.is_some() || params.assistant_text.is_some();
         let legacy_content = params.content.unwrap_or_default();
         let (user_text, assistant_text) = if explicit_turn {
-            (params.user_text.unwrap_or_default(), params.assistant_text.unwrap_or_default())
+            (
+                params.user_text.unwrap_or_default(),
+                params.assistant_text.unwrap_or_default(),
+            )
         } else {
             match params.role.as_deref() {
                 Some("assistant") => (String::new(), legacy_content),
                 _ => (legacy_content, String::new()),
             }
         };
-        let capture_mode = params
-            .capture_mode
-            .unwrap_or_else(|| if explicit_turn { "raw_only".into() } else { "candidate".into() });
+        let capture_mode = params.capture_mode.unwrap_or_else(|| {
+            if explicit_turn {
+                "raw_only".into()
+            } else {
+                "candidate".into()
+            }
+        });
         if !matches!(capture_mode.as_str(), "raw_only" | "candidate" | "manual") {
-            return Err(rmcp::ErrorData::invalid_params("capture_mode must be raw_only|candidate|manual", None));
+            return Err(rmcp::ErrorData::invalid_params(
+                "capture_mode must be raw_only|candidate|manual",
+                None,
+            ));
         }
-        let owner = params.owner.or_else(|| std::env::var("FM_OWNER").ok());
-        let workspace_id = params
-            .workspace_id
-            .or_else(|| std::env::var("FM_WORKSPACE_ID").ok())
-            .unwrap_or_else(|| "global".to_string());
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        let owner = Some(scope.owner.clone());
+        let workspace_id = scope.workspace_id;
         if capture_mode == "raw_only"
             && (owner.as_deref().unwrap_or_default().trim().is_empty()
                 || workspace_id.trim().is_empty()
@@ -255,16 +396,24 @@ impl FrankenmemoryServer {
             ));
         }
         let mut metadata = match params.metadata.unwrap_or_else(|| serde_json::json!({})) {
-            serde_json::Value::String(value) => serde_json::from_str(&value).unwrap_or_else(|_| serde_json::json!({})),
+            serde_json::Value::String(value) => {
+                serde_json::from_str(&value).unwrap_or_else(|_| serde_json::json!({}))
+            }
             value if value.is_object() => value,
             _ => serde_json::json!({}),
         };
         if let Some(object) = metadata.as_object_mut() {
             object.insert("capture_mode".into(), capture_mode.into());
+            if let Some(category) = params.category.as_deref() {
+                object.insert("category".into(), category.into());
+            }
             if let Some(event_id) = params.source_event_id {
                 object.insert("source_event_id".into(), event_id.into());
             }
-            object.insert("source_message_ids".into(), serde_json::json!(params.source_message_ids));
+            object.insert(
+                "source_message_ids".into(),
+                serde_json::json!(params.source_message_ids),
+            );
         }
         let turn = CompletedTurn {
             user_text,
@@ -298,14 +447,16 @@ impl FrankenmemoryServer {
         name = "list_candidates",
         description = "List admission candidates in an owner/workspace scope. status may be pending, accepted, rejected, or quarantined."
     )]
-    async fn list_candidates(&self, Parameters(params): Parameters<CandidateListParams>) -> Result<CallToolResult, rmcp::ErrorData> {
-        let owner = params.owner.or_else(|| std::env::var("FM_OWNER").ok());
-        let workspace_id = params.workspace_id.or_else(|| std::env::var("FM_WORKSPACE_ID").ok());
+    async fn list_candidates(
+        &self,
+        Parameters(params): Parameters<CandidateListParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
         let rows = self
             .provider
             .list_candidates(
-                owner.as_deref(),
-                workspace_id.as_deref(),
+                Some(&scope.owner),
+                Some(&scope.workspace_id),
                 params.status.as_deref(),
                 params.limit.unwrap_or(100).min(1000),
             )
@@ -319,18 +470,19 @@ impl FrankenmemoryServer {
         name = "review_candidate",
         description = "Accept or reject one candidate. Owner and workspace are mandatory; acceptance creates the only curated record and embedding."
     )]
-    async fn review_candidate(&self, Parameters(params): Parameters<CandidateReviewParams>) -> Result<CallToolResult, rmcp::ErrorData> {
-        if params.owner.trim().is_empty() || params.workspace_id.trim().is_empty() {
-            return Err(rmcp::ErrorData::invalid_params("owner and workspace_id are required", None));
-        }
+    async fn review_candidate(
+        &self,
+        Parameters(params): Parameters<CandidateReviewParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(Some(params.owner), Some(params.workspace_id), false)?;
         let curated_id = self
             .provider
             .review_candidate(
                 &params.id,
                 params.accept,
                 &params.reason,
-                &params.owner,
-                &params.workspace_id,
+                &scope.owner,
+                &scope.workspace_id,
             )
             .await
             .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
@@ -343,26 +495,68 @@ impl FrankenmemoryServer {
         name = "memory_quality",
         description = "Return memory admission counters and graph/base FTS integrity. Set rebuild_graph_fts=true to repair cue index parity."
     )]
-    async fn memory_quality(&self, Parameters(params): Parameters<MemoryQualityParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn memory_quality(
+        &self,
+        Parameters(params): Parameters<MemoryQualityParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = if params.rebuild_graph_fts.unwrap_or(false) {
             self.provider.rebuild_graph_cue_fts()
         } else {
             self.provider.quality_status()
         }
         .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "owner_lifecycle",
+        description = "Privileged owner-scoped lifecycle operation. action=stats counts every memory tier; action=purge atomically removes the authenticated owner's tiers and graph; action=rename atomically moves them to new_owner."
+    )]
+    async fn owner_lifecycle(
+        &self,
+        Parameters(params): Parameters<OwnerLifecycleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = match params.action.as_str() {
+            "stats" => self.graph_store.owner_counts(&scope.owner),
+            "purge" => self.graph_store.purge_owner(&scope.owner),
+            "rename" => {
+                let new_owner = params.new_owner.as_deref().ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("rename requires new_owner", None)
+                })?;
+                self.graph_store.rename_owner(&scope.owner, new_owner)
+            }
+            _ => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "action must be stats|purge|rename",
+                    None,
+                ));
+            }
+        }
+        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
         name = "list_quarantine",
         description = "List quarantined memory/graph evidence in an owner/workspace scope."
     )]
-    async fn list_quarantine(&self, Parameters(params): Parameters<CandidateListParams>) -> Result<CallToolResult, rmcp::ErrorData> {
-        let owner = params.owner.or_else(|| std::env::var("FM_OWNER").ok());
-        let workspace_id = params.workspace_id.or_else(|| std::env::var("FM_WORKSPACE_ID").ok());
+    async fn list_quarantine(
+        &self,
+        Parameters(params): Parameters<CandidateListParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
         let rows = self
             .provider
-            .list_quarantine(owner.as_deref(), workspace_id.as_deref(), params.limit.unwrap_or(100).min(1000))
+            .list_quarantine(
+                Some(&scope.owner),
+                Some(&scope.workspace_id),
+                params.limit.unwrap_or(100).min(1000),
+            )
             .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({"quarantine": rows}).to_string(),
@@ -373,22 +567,34 @@ impl FrankenmemoryServer {
         name = "quarantine_legacy_state",
         description = "Dry-run or execute the one-time quarantine of pre-admission curated and semantic graph state. Defaults to dry_run=true."
     )]
-    async fn quarantine_legacy_state(&self, Parameters(params): Parameters<QuarantineMigrationParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn quarantine_legacy_state(
+        &self,
+        Parameters(params): Parameters<QuarantineMigrationParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let result = self
             .provider
             .quarantine_legacy_state(
                 params.dry_run,
-                params.reason.as_deref().unwrap_or("pre_admission_pipeline_untrusted"),
+                params
+                    .reason
+                    .as_deref()
+                    .unwrap_or("pre_admission_pipeline_untrusted"),
             )
             .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(
         name = "recall",
         description = "Recall memories relevant to a query. Returns GT-tagged, provenance-tagged results. mode toggles between layer_a and layer_b. workspace_id biases ranking: current workspace boosted, global always participates."
     )]
-    async fn recall(&self, Parameters(params): Parameters<RecallParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn recall(
+        &self,
+        Parameters(params): Parameters<RecallParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
         let mode = match params.mode.as_deref() {
             Some("layer_b") => RecallMode::LayerB,
             _ => RecallMode::LayerA,
@@ -401,10 +607,10 @@ impl FrankenmemoryServer {
         let query = RecallQuery {
             query: params.query,
             mode,
-            workspace_id: params.workspace_id,
+            workspace_id: Some(scope.workspace_id),
             top_k: params.top_k.unwrap_or(10),
             tier,
-            owner: params.owner,
+            owner: Some(scope.owner),
             router: false,
             rerank: false,
         };
@@ -419,7 +625,8 @@ impl FrankenmemoryServer {
             .memories
             .iter()
             .map(|m| {
-                let mut v = serde_json::to_value(&m.record).unwrap_or_else(|_| serde_json::json!({}));
+                let mut v =
+                    serde_json::to_value(&m.record).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("score".into(), serde_json::json!(m.score));
                     obj.insert("source_label".into(), serde_json::json!(m.source_label));
@@ -434,28 +641,25 @@ impl FrankenmemoryServer {
             "prepend_context": result.prepend_context,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(
         name = "search",
         description = "Raw search over a tier (curated/raw). No GT framing. Returns matching memories."
     )]
-    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
         let tier = match params.tier.as_deref() {
             Some("raw") => Tier::Raw,
             _ => Tier::Curated,
         };
-        let kind = params.kind.and_then(|k| match k.as_str() {
-            "persona" => Some(MemoryKind::Persona),
-            "episodic" => Some(MemoryKind::Episodic),
-            "instruction" => Some(MemoryKind::Instruction),
-            "fact" => Some(MemoryKind::Fact),
-            "fabric" => Some(MemoryKind::Fabric),
-            "wiki" => Some(MemoryKind::Wiki),
-            "raw" => Some(MemoryKind::Raw),
-            _ => None,
-        });
+        let kind = params.kind.as_deref().and_then(parse_memory_kind);
 
         let search_params = fm_core::record::SearchParams {
             query: params.query,
@@ -463,8 +667,8 @@ impl FrankenmemoryServer {
             scene: params.scene,
             tier,
             limit: params.limit.unwrap_or(10),
-            workspace_id: params.workspace_id,
-            owner: params.owner.or_else(|| std::env::var("FM_OWNER").ok()),
+            workspace_id: Some(scope.workspace_id),
+            owner: Some(scope.owner),
         };
 
         let result = self.provider.search(&search_params).await;
@@ -475,19 +679,101 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "get_memory",
+        description = "Read one curated memory by exact stable id in the authenticated owner/workspace scope."
+    )]
+    async fn get_memory(
+        &self,
+        Parameters(params): Parameters<MemoryGetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        let record = self
+            .provider
+            .get_curated_record(&params.id, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"record": record}).to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "list_memories",
+        description = "List curated memories with an opaque numeric cursor in the authenticated owner/workspace scope."
+    )]
+    async fn list_memories(
+        &self,
+        Parameters(params): Parameters<MemoryListParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+        let offset = params
+            .cursor
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<usize>()
+            .map_err(|_| rmcp::ErrorData::invalid_params("invalid memory cursor", None))?;
+        let records = self
+            .provider
+            .list_curated_records(&scope.owner, &scope.workspace_id, limit, offset)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        let next_cursor = (records.len() == limit).then(|| (offset + records.len()).to_string());
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"records": records, "next_cursor": next_cursor}).to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "record_memory_access",
+        description = "Increment usage once for curated memories actually injected into a response."
+    )]
+    async fn record_memory_access(
+        &self,
+        Parameters(params): Parameters<MemoryAccessParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        if params.ids.len() > 1000 {
+            return Err(rmcp::ErrorData::invalid_params(
+                "at most 1000 memory ids may be accounted",
+                None,
+            ));
+        }
+        let updated = self
+            .provider
+            .record_curated_access(&params.ids, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"updated": updated}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "update_memory",
         description = "Update one curated memory's content and/or pinned metadata. The id and owner/workspace scope are required for safe mutation."
     )]
-    async fn update_memory(&self, Parameters(params): Parameters<MemoryMutationParams>) -> Result<CallToolResult, rmcp::ErrorData> {
-        let owner = params.owner.or_else(|| std::env::var("FM_OWNER").ok());
-        let workspace_id = params.workspace_id.or_else(|| std::env::var("FM_WORKSPACE_ID").ok());
-        let updated = self.provider.update_curated_record(
-            &params.id,
-            params.content.as_deref(),
-            params.pinned,
-            owner.as_deref(),
-            workspace_id.as_deref(),
-        ).await;
+    async fn update_memory(
+        &self,
+        Parameters(params): Parameters<MemoryMutationParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let kind = params.category.as_deref().and_then(parse_memory_kind);
+        if params.category.is_some() && kind.is_none() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "unsupported memory category",
+                None,
+            ));
+        }
+        let updated = self
+            .provider
+            .update_curated_record(
+                &params.id,
+                params.content.as_deref(),
+                kind,
+                params.category.as_deref(),
+                params.pinned,
+                Some(&scope.owner),
+                Some(&scope.workspace_id),
+            )
+            .await;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({"id": params.id, "updated": updated}).to_string(),
         )]))
@@ -497,14 +783,15 @@ impl FrankenmemoryServer {
         name = "delete_memory",
         description = "Delete one curated memory by id within the owner/workspace scope."
     )]
-    async fn delete_memory(&self, Parameters(params): Parameters<MemoryMutationParams>) -> Result<CallToolResult, rmcp::ErrorData> {
-        let owner = params.owner.or_else(|| std::env::var("FM_OWNER").ok());
-        let workspace_id = params.workspace_id.or_else(|| std::env::var("FM_WORKSPACE_ID").ok());
-        let deleted = self.provider.delete_curated_record(
-            &params.id,
-            owner.as_deref(),
-            workspace_id.as_deref(),
-        ).await;
+    async fn delete_memory(
+        &self,
+        Parameters(params): Parameters<MemoryMutationParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let deleted = self
+            .provider
+            .delete_curated_record(&params.id, Some(&scope.owner), Some(&scope.workspace_id))
+            .await;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({"id": params.id, "deleted": deleted}).to_string(),
         )]))
@@ -514,16 +801,19 @@ impl FrankenmemoryServer {
         name = "graph_upsert",
         description = "Insert or update graph memory: nodes {kind,name,label?,layer?}, edges {src:{kind,name},tag,dst:{kind,name},fact?}, cues {cue,node:{kind,name}}. Idempotent: node identity is deterministic from kind+name, so re-sending the same entities merges instead of duplicating. Edge facts are stored as searchable one-sentence statements."
     )]
-    async fn graph_upsert(&self, Parameters(params): Parameters<GraphUpsertParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn graph_upsert(
+        &self,
+        Parameters(params): Parameters<GraphUpsertParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
         let input = fm_core::graph::GraphUpsertInput {
             nodes: params.nodes,
             edges: params.edges,
             cues: params.cues,
         };
-        let result = self
-            .graph_store
-            .graph_upsert(&input)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("graph_upsert failed: {e}"), None))?;
+        let result = self.graph_store.graph_upsert(&scope, &input).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("graph_upsert failed: {e}"), None)
+        })?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&result).unwrap_or_default(),
         )]))
@@ -533,26 +823,36 @@ impl FrankenmemoryServer {
         name = "graph_walk",
         description = "Walk graph memory one step at a time. Reconstruct answers instead of retrieving: start with op=cues (query text -> entry nodes), read op=tags on a node BEFORE expanding to see which relations exist cheaply, then op=expand (optionally filtered by tag/direction) to get neighbors with their edge facts, op=fetch for one node's full detail, op=trace for a path between two nodes. Fetch only what survives your pruning."
     )]
-    async fn graph_walk(&self, Parameters(params): Parameters<GraphWalkParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn graph_walk(
+        &self,
+        Parameters(params): Parameters<GraphWalkParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, params.include_global)?;
         let limit = params.limit.unwrap_or(10);
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let payload = match params.op.as_str() {
             "cues" => {
-                let q = params.query.ok_or_else(|| err("op=cues requires 'query'".into()))?;
+                let q = params
+                    .query
+                    .ok_or_else(|| err("op=cues requires 'query'".into()))?;
                 let mut hits = self
                     .graph_store
-                    .graph_cues(&q, limit)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("cues failed: {e}"), None))?;
+                    .graph_cues(&scope, &q, limit)
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("cues failed: {e}"), None)
+                    })?;
                 // Structural re-rank (RWR): well-connected candidates beat
                 // lexically-equal but isolated ones. FTS order breaks ties.
                 if hits.len() > 1 {
                     let seeds: Vec<String> = hits.iter().map(|h| h.node.id.clone()).collect();
-                    if let Ok(scores) = self.graph_store.graph_rwr(&seeds, 0.25, 20) {
+                    if let Ok(scores) = self.graph_store.graph_rwr(&scope, &seeds, 0.25, 20) {
                         let mut indexed: Vec<(usize, _)> = hits.drain(..).enumerate().collect();
                         indexed.sort_by(|(ia, a), (ib, b)| {
                             let sa = scores.get(&a.node.id).copied().unwrap_or(0.0);
                             let sb = scores.get(&b.node.id).copied().unwrap_or(0.0);
-                            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal).then(ia.cmp(ib))
+                            sb.partial_cmp(&sa)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(ia.cmp(ib))
                         });
                         hits = indexed.into_iter().map(|(_, h)| h).collect();
                     }
@@ -566,50 +866,78 @@ impl FrankenmemoryServer {
                     .chain(params.dst_id.into_iter())
                     .collect();
                 if seeds.is_empty() {
-                    return Err(err("op=rank requires 'node_id' (and optionally 'dst_id') as seeds".into()));
+                    return Err(err(
+                        "op=rank requires 'node_id' (and optionally 'dst_id') as seeds".into(),
+                    ));
                 }
                 let scores = self
                     .graph_store
-                    .graph_rwr(&seeds, 0.25, 20)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("rank failed: {e}"), None))?;
+                    .graph_rwr(&scope, &seeds, 0.25, 20)
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("rank failed: {e}"), None)
+                    })?;
                 let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
                 ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 ranked.truncate(limit);
                 serde_json::json!({ "op": "rank", "scores": ranked })
             }
             "tags" => {
-                let n = params.node_id.ok_or_else(|| err("op=tags requires 'node_id'".into()))?;
-                let tags = self
-                    .graph_store
-                    .graph_tags(&n)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("tags failed: {e}"), None))?;
+                let n = params
+                    .node_id
+                    .ok_or_else(|| err("op=tags requires 'node_id'".into()))?;
+                let tags = self.graph_store.graph_tags(&scope, &n).map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("tags failed: {e}"), None)
+                })?;
                 serde_json::json!({ "op": "tags", "node_id": n, "tags": tags })
             }
             "expand" => {
-                let n = params.node_id.ok_or_else(|| err("op=expand requires 'node_id'".into()))?;
+                let n = params
+                    .node_id
+                    .ok_or_else(|| err("op=expand requires 'node_id'".into()))?;
                 let hits = self
                     .graph_store
-                    .graph_expand(&n, params.tag.as_deref(), params.direction.as_deref(), limit)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("expand failed: {e}"), None))?;
+                    .graph_expand(
+                        &scope,
+                        &n,
+                        params.tag.as_deref(),
+                        params.direction.as_deref(),
+                        limit,
+                    )
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("expand failed: {e}"), None)
+                    })?;
                 serde_json::json!({ "op": "expand", "node_id": n, "hits": hits })
             }
             "fetch" => {
-                let n = params.node_id.ok_or_else(|| err("op=fetch requires 'node_id'".into()))?;
-                let hit = self
-                    .graph_store
-                    .graph_fetch(&n)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("fetch failed: {e}"), None))?;
+                let n = params
+                    .node_id
+                    .ok_or_else(|| err("op=fetch requires 'node_id'".into()))?;
+                let hit = self.graph_store.graph_fetch(&scope, &n).map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("fetch failed: {e}"), None)
+                })?;
                 match hit {
-                    Some((node, content)) => serde_json::json!({ "op": "fetch", "node": node, "ref_content": content }),
+                    Some((node, content)) => {
+                        serde_json::json!({ "op": "fetch", "node": node, "ref_content": content })
+                    }
                     None => serde_json::json!({ "op": "fetch", "node": null }),
                 }
             }
             "trace" => {
-                let n = params.node_id.ok_or_else(|| err("op=trace requires 'node_id'".into()))?;
+                let n = params
+                    .node_id
+                    .ok_or_else(|| err("op=trace requires 'node_id'".into()))?;
                 let paths = self
                     .graph_store
-                    .graph_trace(&n, params.dst_id.as_deref(), params.max_depth.unwrap_or(4), limit)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("trace failed: {e}"), None))?;
+                    .graph_trace(
+                        &scope,
+                        &n,
+                        params.dst_id.as_deref(),
+                        params.max_depth.unwrap_or(4),
+                        limit,
+                    )
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("trace failed: {e}"), None)
+                    })?;
                 serde_json::json!({ "op": "trace", "paths": paths })
             }
             other => {
@@ -618,50 +946,62 @@ impl FrankenmemoryServer {
                 )))
             }
         };
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(
         name = "code_index",
         description = "OPT-IN code graph. action=index parses a codebase (Rust/Python/TypeScript) into symbols, imports and name-matched call edges — nothing is ever indexed without this explicit call. action=status reports file/symbol counts, action=remove deletes the codebase's entire namespace, action=impact lists files transitively importing rel_path (blast radius). Explore results with graph_walk."
     )]
-    async fn code_index(&self, Parameters(params): Parameters<CodeIndexParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn code_index(
+        &self,
+        Parameters(params): Parameters<CodeIndexParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let ierr = |m: String| rmcp::ErrorData::internal_error(m, None);
         let payload = match params.action.as_str() {
             "index" => {
                 let root = std::path::Path::new(&params.path);
                 if !root.is_absolute() || !root.is_dir() {
-                    return Err(err(format!("path must be an existing absolute directory, got {}", params.path)));
+                    return Err(err(format!(
+                        "path must be an existing absolute directory, got {}",
+                        params.path
+                    )));
                 }
                 let result = self
                     .graph_store
-                    .code_index(root)
+                    .code_index(&scope, root)
                     .map_err(|e| ierr(format!("code index failed: {e}")))?;
                 serde_json::to_value(&result).unwrap_or_default()
             }
             "status" => {
                 let (files, symbols, last) = self
                     .graph_store
-                    .code_status(&params.path)
+                    .code_status(&scope, &params.path)
                     .map_err(|e| ierr(format!("status failed: {e}")))?;
                 serde_json::json!({ "codebase": params.path, "files": files, "symbols": symbols, "last_indexed": last })
             }
             "stale" => {
                 let root = std::path::Path::new(&params.path);
                 if !root.is_absolute() || !root.is_dir() {
-                    return Err(err(format!("path must be an existing absolute directory, got {}", params.path)));
+                    return Err(err(format!(
+                        "path must be an existing absolute directory, got {}",
+                        params.path
+                    )));
                 }
                 let result = self
                     .graph_store
-                    .code_stale(root)
+                    .code_stale(&scope, root)
                     .map_err(|e| ierr(format!("stale check failed: {e}")))?;
                 serde_json::to_value(&result).unwrap_or_default()
             }
             "remove" => {
                 let removed = self
                     .graph_store
-                    .code_remove(&params.path)
+                    .code_remove(&scope, &params.path)
                     .map_err(|e| ierr(format!("remove failed: {e}")))?;
                 serde_json::json!({ "codebase": params.path, "files_removed": removed })
             }
@@ -671,20 +1011,30 @@ impl FrankenmemoryServer {
                     .ok_or_else(|| err("action=impact requires 'rel_path'".into()))?;
                 let impacted = self
                     .graph_store
-                    .code_impact(&params.path, &rel, params.max_depth.unwrap_or(4))
+                    .code_impact(&scope, &params.path, &rel, params.max_depth.unwrap_or(4))
                     .map_err(|e| ierr(format!("impact failed: {e}")))?;
                 serde_json::json!({ "codebase": params.path, "rel_path": rel, "impacted_files": impacted })
             }
-            other => return Err(err(format!("unknown action '{other}' — expected index|status|stale|remove|impact"))),
+            other => {
+                return Err(err(format!(
+                    "unknown action '{other}' — expected index|status|stale|remove|impact"
+                )))
+            }
         };
-        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            payload.to_string(),
+        )]))
     }
 
     #[tool(
         name = "groom",
         description = "Curation dispatcher. Operations: decay (archive aged records), dedup (merge near-duplicates), reflect (adjust confidence)."
     )]
-    async fn groom(&self, Parameters(params): Parameters<GroomParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn groom(
+        &self,
+        Parameters(params): Parameters<GroomParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
         let op = match params.op.as_str() {
             "decay" => GroomOp::Decay,
             "dedup" => GroomOp::Dedup,
@@ -700,7 +1050,8 @@ impl FrankenmemoryServer {
 
         let args = GroomOpArgs {
             op,
-            workspace_id: params.workspace_id,
+            owner: Some(scope.owner),
+            workspace_id: Some(scope.workspace_id),
             dry_run: params.dry_run.unwrap_or(false),
         };
 
@@ -781,7 +1132,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = FmConfig::default();
-    let store = Arc::new(SqliteStore::new(&config.db_path, config.embedding.dimensions)?);
+    let db_path = std::path::Path::new(&config.db_path);
+    if !db_path.is_absolute() {
+        return Err(format!("FM_DB_PATH must be absolute: {}", config.db_path).into());
+    }
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let store = Arc::new(SqliteStore::new(
+        &config.db_path,
+        config.embedding.dimensions,
+    )?);
+    let (database_id, schema_version) = store.database_identity()?;
+    if let Ok(expected) = std::env::var("FM_DB_ID") {
+        if !expected.trim().is_empty() && expected.trim() != database_id {
+            return Err(format!(
+                "frankenmemory database identity mismatch: expected {}, opened {}",
+                expected.trim(),
+                database_id
+            )
+            .into());
+        }
+    }
+    tracing::info!(database_id, schema_version, path = %config.db_path, "frankenmemory database ready");
     // Real embeddings by DEFAULT: unset FM_EMBED_API_BASE means the local
     // ollama endpoint baked into EmbeddingConfig::default(). If that isn't
     // running, per-call embed errors degrade gracefully to vectorless

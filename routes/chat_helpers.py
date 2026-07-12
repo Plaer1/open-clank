@@ -224,6 +224,8 @@ async def auto_name_session(session_manager, sess):
             max_tokens=4096,
             headers=t_headers,
             timeout=60,
+            owner=owner,
+            session_id=sess.id,
         )
 
         title = title.strip().strip('"\'').strip()
@@ -347,6 +349,7 @@ async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
     allow_tool_preprocessing: bool = True,
+    structured_resources: bool = False,
 ) -> PreprocessedMessage:
     """Run chat_handler.preprocess_message and wrap the result."""
     enhanced, user_content, text_ctx, yt_transcripts, att_meta = (
@@ -356,6 +359,7 @@ async def preprocess(
             sess,
             auto_opened_docs=auto_opened_docs,
             allow_tool_preprocessing=allow_tool_preprocessing,
+            structured_resources=structured_resources,
         )
     )
     return PreprocessedMessage(
@@ -372,7 +376,12 @@ def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, inco
     In incognito mode, still add to in-memory history (for conversation context)
     but skip session name update (which would persist)."""
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
-    sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
+    message = ChatMessage("user", preprocessed.user_content, metadata=user_meta)
+    if incognito:
+        sess.history.append(message)
+        sess.message_count = len(sess.history)
+    else:
+        sess.add_message(message)
     if not incognito:
         chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
@@ -583,6 +592,7 @@ async def build_chat_context(
     use_enhanced_message: bool = False,
     agent_mode: bool = False,
     allow_tool_preprocessing: bool = True,
+    structured_resources: bool = False,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -601,6 +611,7 @@ async def build_chat_context(
         chat_handler, message, att_ids or [], sess,
         auto_opened_docs=auto_opened_docs,
         allow_tool_preprocessing=allow_tool_preprocessing,
+        structured_resources=structured_resources,
     )
 
     # Add user message to history
@@ -989,7 +1000,12 @@ def save_assistant_response(
         _content = _think_info["reply"]
     else:
         _content = full_response
-    sess.add_message(ChatMessage("assistant", _content, metadata=md))
+    message = ChatMessage("assistant", _content, metadata=md)
+    if incognito:
+        sess.history.append(message)
+        sess.message_count = len(sess.history)
+    else:
+        sess.add_message(message)
 
     if not incognito:
         from core.database import update_session_last_accessed

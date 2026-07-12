@@ -311,7 +311,10 @@ def _normalize_chat_endpoint(url: str) -> str:
     # repair.
     from urllib.parse import urlparse
     from src.endpoint_resolver import normalize_base, build_chat_url
-    path = (urlparse(url).path or "").rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme.lower() == "mimo":
+        return url
+    path = (parsed.path or "").rstrip("/")
     if path == "/api" or path.startswith("/api/"):
         return url  # native Ollama — handled by the native path downstream
     if path.endswith(("/chat/completions", "/messages", "/responses", "/completions")):
@@ -348,16 +351,7 @@ class TaskScheduler:
         self._task_handles = {}
 
     async def _mint_session_id(self) -> str:
-        """Return a mimo ses_… ID when available, else a uuid4."""
-        import os as _os
-        if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo" and self._mimo_supervisor:
-            sup = self._mimo_supervisor
-            if sup.is_alive() and sup.bridge:
-                cwd = _os.environ.get("OPENTHESIUS_GLOBAL_CWD", "")
-                try:
-                    return await sup.bridge.open_session(cwd or None)
-                except Exception:
-                    pass
+        """Return a scheduler-local ID; ACP creates and cleans its own session."""
         return str(uuid.uuid4())
 
     def _set_run_progress(self, run_id: str, message: str):
@@ -1731,13 +1725,8 @@ class TaskScheduler:
                               relevant_tools: set | None = None,
                               override_user_message: str | None = None) -> str:
         """Run the full agent loop with tool access, collecting the final text."""
-        import os as _os
-        from src.agent_loop import stream_agent_loop
-
-        # ── openthesius: scheduled tasks must be re-pointed to ACP ──
-        if _os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-            logger.warning("[openthesius] _run_agent_loop skipped — agent loop disabled under OPENTHESIUS_DRIVE=mimo")
-            return "(task scheduler disabled under openthesius/ACP)"
+        from src.endpoint_resolver import resolve_model_target
+        from src.model_dispatch import stream_agent_target
 
         system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         user_content = override_user_message or task.prompt
@@ -1784,14 +1773,19 @@ class TaskScheduler:
             )[1:]
         except Exception:
             _task_fallbacks = []
-        async for event_str in stream_agent_loop(
-            endpoint_url=endpoint_url,
-            model=model,
+        target = resolve_model_target(
+            endpoint_url,
+            model,
+            headers,
+            lifecycle="ephemeral",
+        )
+        async for event_str in stream_agent_target(
+            target,
             messages=messages,
+            supervisor=self._mimo_supervisor,
             max_rounds=_task_max_rounds,
             session_id=session_id,
             owner=task.owner,
-            headers=headers,
             disabled_tools=disabled_tools,
             relevant_tools=relevant_tools,
             fallbacks=_task_fallbacks,
@@ -1914,6 +1908,8 @@ class TaskScheduler:
             max_report_tokens=max_tokens,
             extraction_timeout=extraction_timeout,
             extraction_concurrency=extraction_concurrency,
+            owner=task.owner or None,
+            session_id=task.session_id or f"task-research-{task.id}",
         )
 
         started_ts = time.time()

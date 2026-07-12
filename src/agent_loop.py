@@ -1773,10 +1773,8 @@ def _compute_final_metrics(
 # Tools whose effects produce a checkable artifact. A turn that used one of
 # these is "effectful" and worth an independent completion check; pure
 # read-only / Q&A turns are not.
-# NOTE: Under openthesius (OPENTHESIUS_DRIVE=mimo), the verifier is dead —
-# mimo's goal-gate + task stop-gate replace it. The setting
-# `agent_verifier_subagent` becomes inert. Do not resurrect; no code path
-# should reach _run_verifier_subagent when the agent loop itself is guarded.
+# ACP turns use MiMo's own completion gates; this verifier remains available
+# to HTTP agent targets selected in the same application.
 _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file",
@@ -1805,6 +1803,8 @@ def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
 async def _run_verifier_subagent(
     instruction: str, actions_snapshot: str,
     *, endpoint_url: str, model: str, headers: dict,
+    owner: Optional[str] = None, session_id: Optional[str] = None,
+    workspace: Optional[str] = None,
 ) -> list:
     """Fresh-context completion verifier. A second model instance with NO
     shared history reads the user's request + a record of what the agent did
@@ -1837,6 +1837,7 @@ async def _run_verifier_subagent(
             url=endpoint_url, model=model,
             messages=[{"role": "user", "content": prompt}],
             headers=headers, temperature=0.0, max_tokens=600, timeout=60,
+            owner=owner, session_id=session_id, cwd=workspace,
         )
     except Exception as e:
         logger.warning(f"[agent] verifier subagent failed: {e}")
@@ -1960,17 +1961,6 @@ async def stream_agent_loop(
     forced_tools: Optional[Set[str]] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
-    # ── openthesius guard ──
-    # When OPENTHESIUS_DRIVE=mimo, no live agent turn should enter this loop.
-    # All callers are expected to route through the ACP path instead.
-    # This guard is a tripwire — if you see this warning, a caller was missed.
-    import os as _os_guard
-    if _os_guard.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-        logger.warning(
-            "[openthesius] stream_agent_loop called while OPENTHESIUS_DRIVE=mimo — "
-            "this caller should route through the ACP bridge instead"
-        )
-
     """Streaming agent loop generator.
 
     Yields SSE events:
@@ -2052,6 +2042,8 @@ async def stream_agent_loop(
                 tools=None,
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
+                owner=owner,
+                cwd=workspace,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -2606,6 +2598,8 @@ async def stream_agent_loop(
             tools=all_tool_schemas if all_tool_schemas else None,
             timeout=agent_stream_timeout,
             session_id=session_id,
+            owner=owner,
+            cwd=workspace,
         ):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
@@ -2834,6 +2828,7 @@ async def stream_agent_loop(
                     _raw = await llm_call_async(
                         url=endpoint_url, model=model, messages=_synth_messages,
                         headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
+                        owner=owner, session_id=session_id, cwd=workspace,
                     )
                     _synth = _THINK_RE.sub("", strip_tool_blocks(_raw or "")).strip()
                 except Exception as _e:
@@ -2912,6 +2907,7 @@ async def stream_agent_loop(
                     _verifier_instruction,
                     _build_actions_snapshot(tool_events),
                     endpoint_url=endpoint_url, model=model, headers=headers,
+                    owner=owner, session_id=session_id, workspace=workspace,
                 )
                 if _vfail:
                     _verifier_rounds += 1
@@ -3491,6 +3487,8 @@ async def stream_agent_loop(
                 student_tool_events=tool_events,
                 student_reply=full_response,
                 owner=owner,
+                session_id=session_id,
+                workspace=workspace,
             ):
                 yield evt
         except Exception as _esc_err:

@@ -2,11 +2,12 @@
 """Initialize all application components and dependencies."""
 import os
 import logging
+import sqlite3
 from typing import Dict, Any
 
 from src.constants import (
     DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR,
-    SESSIONS_FILE, DEFAULT_HOST, OPENAI_API_KEY
+    SESSIONS_FILE, DEFAULT_HOST, OPENAI_API_KEY, FM_DB_PATH
 )
 from src.memory import MemoryManager
 from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
@@ -30,6 +31,28 @@ def create_directories():
     """Create necessary directories if they don't exist."""
     for directory in (DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR):
         os.makedirs(directory, exist_ok=True)
+
+
+def prepare_frankenmemory_database() -> str:
+    """Create/read the durable DB identity inherited by every fm-mcp child."""
+    os.makedirs(os.path.dirname(FM_DB_PATH), exist_ok=True)
+    with sqlite3.connect(FM_DB_PATH) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS fm_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO fm_meta(key,value) VALUES ('database_id', lower(hex(randomblob(16))))"
+        )
+        database_id = connection.execute(
+            "SELECT value FROM fm_meta WHERE key='database_id'"
+        ).fetchone()[0]
+    expected = os.environ.get("FM_DB_ID", "").strip()
+    if expected and expected != database_id:
+        raise RuntimeError(
+            f"frankenmemory database identity mismatch: expected {expected}, opened {database_id}"
+        )
+    os.environ["FM_DB_ID"] = database_id
+    return database_id
         
 def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     """
@@ -83,9 +106,18 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     # Register memory providers
     memory_provider = os.environ.get("MEMORY_PROVIDER", "frankenmemory")
     if memory_provider == "frankenmemory":
+        database_id = prepare_frankenmemory_database()
         fm_command = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
-        fm_workspace = os.environ.get("FM_WORKSPACE_ID", "global")
-        fm = FrankenmemoryProvider(command=fm_command, workspace_id=fm_workspace)
+        fm_workspace = os.environ.get("FM_WORKSPACE_ID") or os.path.abspath(base_dir)
+        fm = FrankenmemoryProvider(
+            command=fm_command,
+            workspace_id=fm_workspace,
+            env={
+                "FM_DB_PATH": FM_DB_PATH,
+                "FM_DB_ID": database_id,
+                "FM_SCOPE_AUTHORITY": "trusted-caller",
+            },
+        )
         native = NativeMemoryProvider(memory_manager, memory_vector)
         native.enabled = False
         memory_provider_registry = MemoryProviderRegistry([fm, native])

@@ -14,12 +14,16 @@ from pydantic import ValidationError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
-from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
-from src.agent_loop import stream_agent_loop
+from src.llm_core import stream_llm
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import (
+    build_chat_url,
+    normalize_base as _normalize_base,
+    resolve_model_target,
+)
+from src.model_dispatch import call_model_target, stream_agent_target, stream_chat_target
 from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
@@ -50,6 +54,20 @@ _active_streams: Dict[str, dict] = {}
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
 
 
+def _resolved_session_target(sess):
+    try:
+        return resolve_model_target(
+            sess.endpoint_url,
+            sess.model,
+            sess.headers,
+            lifecycle="ephemeral" if str(sess.endpoint_url).startswith("mimo://") else "persistent",
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 def _stream_set(session_id: str, **fields) -> None:
     """Update fields on the active-stream entry for `session_id`, or
     no-op if the entry has already been popped. Using .get() avoids a
@@ -61,6 +79,85 @@ def _stream_set(session_id: str, **fields) -> None:
     if rec is None:
         return
     rec.update(fields)
+
+
+def _transcript_revision(session_id: str) -> int:
+    db = SessionLocal()
+    try:
+        row = db.query(DBSession.transcript_revision).filter(DBSession.id == session_id).first()
+        return int(row.transcript_revision or 0) if row else 0
+    finally:
+        db.close()
+
+
+def _request_owner_is_admin(request: Request, owner: str | None) -> bool:
+    check = getattr(getattr(request.app.state, "auth_manager", None), "is_admin", None)
+    if not owner or not callable(check):
+        return False
+    try:
+        return bool(check(owner))
+    except Exception:
+        return False
+
+
+def _turn_envelope(
+    *,
+    session_id: str,
+    owner: str | None,
+    workspace: str,
+    model: str,
+    mode: str,
+    incognito: bool,
+    disabled_tools=(),
+    forced_tools=(),
+    max_tool_calls: int = 0,
+    max_rounds: int = 0,
+    preset=None,
+    active_document=None,
+    active_email=None,
+    no_memory: bool = False,
+    compare_mode: bool = False,
+    is_admin: bool = False,
+) -> dict:
+    document = None
+    if active_document is not None:
+        document = {
+            "id": getattr(active_document, "id", ""),
+            "title": getattr(active_document, "title", ""),
+            "language": getattr(active_document, "language", ""),
+            "version": getattr(active_document, "version_count", 0),
+        }
+    return {
+        "transcript_revision": 0 if incognito else _transcript_revision(session_id),
+        "owner": owner or "",
+        "workspace": workspace or "",
+        "model": model,
+        "mode": mode or "chat",
+        "incognito": bool(incognito),
+        "no_memory": bool(no_memory),
+        "compare_mode": bool(compare_mode),
+        "is_admin": bool(is_admin),
+        "disabled_tools": sorted(str(name) for name in (disabled_tools or ())),
+        "forced_tools": sorted(str(name) for name in (forced_tools or ())),
+        "max_tool_calls": max(0, int(max_tool_calls or 0)),
+        "max_rounds": max(0, int(max_rounds or 0)),
+        "system_prompt": getattr(preset, "system_prompt", "") if preset else "",
+        "persona": getattr(preset, "character_name", "") if preset else "",
+        "active_resources": {
+            "document": document,
+            "email": dict(active_email) if active_email else None,
+        },
+    }
+
+
+def _insert_acp_resource_context(messages: list[dict], label: str, value: str) -> None:
+    if not value:
+        return
+    index = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
+        len(messages),
+    )
+    messages.insert(index, untrusted_context_message(label, value))
 
 
 def _resolve_request_workspace(request, raw_value) -> tuple:
@@ -359,6 +456,7 @@ def setup_chat_routes(
         use_research = chat_request.use_research
         time_filter = chat_request.time_filter
         preset_id = chat_request.preset_id
+        incognito = bool(getattr(chat_request, "incognito", False))
 
         # Verify the caller owns this session before loading it.
         # Without this, any authenticated user can post into another user's chat.
@@ -385,14 +483,25 @@ def setup_chat_routes(
         # Same allowed_models + daily-cap gate as chat_stream (mirror so the
         # non-streaming path can't be used to bypass).
         _enforce_chat_privileges(request, sess)
+        resolve_session_auth(sess, session, owner=owner)
+        model_target = _resolved_session_target(sess)
 
         tool_policy = build_effective_tool_policy(last_user_message=message)
-        allow_tool_preprocessing = not tool_policy.block_all_tool_calls
+        allow_tool_preprocessing = not incognito and not tool_policy.block_all_tool_calls
 
         # Inline memory command
         memory_response = None
         if not tool_policy.blocks("manage_memory"):
-            memory_response = await chat_handler.handle_memory_command(sess, message)
+            is_memory_cmd, _ = memory_manager.process_inline_memory_command(message)
+            if is_memory_cmd:
+                from src.auth_helpers import require_privilege
+                require_privilege(request, "can_manage_memory")
+            memory_response = await chat_handler.handle_memory_command(
+                sess,
+                message,
+                owner=owner,
+                incognito=incognito,
+            )
         if memory_response:
             return {"response": memory_response}
 
@@ -405,8 +514,10 @@ def setup_chat_routes(
             att_ids=att_ids,
             use_web=use_web,
             time_filter=time_filter,
+            incognito=incognito,
             webhook_manager=webhook_manager,
             allow_tool_preprocessing=allow_tool_preprocessing,
+            structured_resources=model_target.transport == "acp",
         )
 
         # Research injection
@@ -414,11 +525,16 @@ def setup_chat_routes(
             tool_policy.blocks("trigger_research")
             or tool_policy.blocks("manage_research")
         )
-        if use_research and not research_blocked_by_policy:
+        if use_research and not incognito and not research_blocked_by_policy:
             try:
                 _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
                 research_ctx = await research_handler.call_research_service(
-                    message, _r_ep, _r_model, llm_headers=_r_headers
+                    message,
+                    _r_ep,
+                    _r_model,
+                    llm_headers=_r_headers,
+                    owner=owner or "",
+                    session_id=session,
                 )
                 ctx.messages.insert(
                     len(ctx.preface),
@@ -427,22 +543,35 @@ def setup_chat_routes(
             except Exception as e:
                 logger.error(f"Research failed: {e}")
 
-        reply = await llm_call_async(
-            sess.endpoint_url,
-            sess.model,
+        reply = await call_model_target(
+            model_target,
             ctx.messages,
-            headers=sess.headers,
+            session_id=session,
+            owner=owner,
+            supervisor=getattr(request.app.state, "mimo_supervisor", None),
             temperature=ctx.preset.temperature,
             max_tokens=ctx.preset.max_tokens,
             prompt_type=preset_id,
-            session_id=session,
+            turn_envelope=_turn_envelope(
+                session_id=session,
+                owner=owner,
+                workspace="",
+                model=sess.model,
+                mode="chat",
+                incognito=incognito,
+                preset=ctx.preset,
+                is_admin=_request_owner_is_admin(request, owner),
+            ),
         )
         _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
-        sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
-
-        from core.database import update_session_last_accessed
-        update_session_last_accessed(session)
-        session_manager.save_sessions()
+        if incognito:
+            sess.history.append(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
+            sess.message_count = len(sess.history)
+        else:
+            sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
+            from core.database import update_session_last_accessed
+            update_session_last_accessed(session)
+            session_manager.save_sessions()
 
         # Background tasks (memory, webhook, auto-name)
         run_post_response_tasks(
@@ -450,7 +579,11 @@ def setup_chat_routes(
             ctx.uprefs, memory_manager, memory_vector, webhook_manager,
             character_name=ctx.preset.character_name,
             owner=ctx.user,
-            allow_background_extraction=not tool_policy.block_all_tool_calls,
+            incognito=incognito,
+            allow_background_extraction=(
+                not tool_policy.block_all_tool_calls
+                and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
+            ),
         )
 
         return {"response": reply}
@@ -640,6 +773,7 @@ def setup_chat_routes(
 
         # Ensure session has auth headers
         resolve_session_auth(sess, session, owner=effective_user(request))
+        model_target = _resolved_session_target(sess)
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"
@@ -661,7 +795,23 @@ def setup_chat_routes(
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
-        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
+        allow_tool_preprocessing = not incognito and not pre_context_tool_policy.block_all_tool_calls
+
+        memory_response = None
+        if not pre_context_tool_policy.blocks("manage_memory"):
+            is_memory_cmd, _ = memory_manager.process_inline_memory_command(message)
+            if is_memory_cmd:
+                from src.auth_helpers import require_privilege
+                require_privilege(request, "can_manage_memory")
+            memory_response = await chat_handler.handle_memory_command(
+                sess, message, owner=owner, incognito=incognito
+            )
+        if memory_response:
+            async def inline_memory_stream():
+                yield f'data: {json.dumps({"delta": memory_response})}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(inline_memory_stream(), media_type="text/event-stream")
 
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
@@ -684,6 +834,7 @@ def setup_chat_routes(
             # index would be useless / unwanted noise.
             agent_mode=(chat_mode == "agent"),
             allow_tool_preprocessing=allow_tool_preprocessing,
+            structured_resources=model_target.transport == "acp",
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
@@ -1052,7 +1203,27 @@ def setup_chat_routes(
                     _active_streams.pop(session, None)
                     return
 
-            messages = ctx.messages
+            messages = list(ctx.messages)
+            if model_target.transport == "acp":
+                if active_doc is not None:
+                    _insert_acp_resource_context(
+                        messages,
+                        "active document",
+                        json.dumps({
+                            "id": getattr(active_doc, "id", ""),
+                            "title": getattr(active_doc, "title", ""),
+                            "language": getattr(active_doc, "language", ""),
+                            "content": getattr(active_doc, "current_content", "") or "",
+                        }, ensure_ascii=False),
+                    )
+                if active_email_ctx:
+                    _insert_acp_resource_context(
+                        messages,
+                        "active email",
+                        json.dumps(active_email_ctx, ensure_ascii=False),
+                    )
+                if approved_plan:
+                    _insert_acp_resource_context(messages, "approved plan", approved_plan)
 
             # Auto-compact notification
             if ctx.was_compacted:
@@ -1125,10 +1296,29 @@ def setup_chat_routes(
                 _actual_model = None
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
                 try:
-                    _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
-                    async for chunk in stream_llm_with_fallback(
-                        _chat_candidates,
+                    _chat_envelope = _turn_envelope(
+                        session_id=session,
+                        owner=_user,
+                        workspace=workspace,
+                        model=sess.model,
+                        mode="chat",
+                        incognito=incognito,
+                        disabled_tools=disabled_tools,
+                        preset=ctx.preset,
+                        active_document=active_doc,
+                        active_email=active_email_ctx,
+                        no_memory=no_memory,
+                        compare_mode=compare_mode,
+                        is_admin=_request_owner_is_admin(request, _user),
+                    )
+                    async for chunk in stream_chat_target(
+                        model_target,
                         messages,
+                        session_id=session,
+                        owner=_user,
+                        cwd=workspace or None,
+                        supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                        fallbacks=_fallback_candidates,
                         temperature=ctx.preset.temperature,
                         # Respect the preset; 0/unset = let the server decide (no
                         # cap), matching agent mode. The old hard 4096 fallback
@@ -1138,7 +1328,7 @@ def setup_chat_routes(
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
                         tools=None,
-                        session_id=session,
+                        turn_envelope=_chat_envelope,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1151,6 +1341,14 @@ def setup_chat_routes(
                                     if not data.get("thinking"):
                                         full_response += data["delta"]
                                         _stream_set(session, partial=full_response)
+                                    yield chunk
+                                elif data.get("type") in (
+                                    "tool_start", "tool_progress", "tool_output",
+                                    "user_replay", "ask_user", "plan_update",
+                                    "permission_request", "commands_update",
+                                    "mode_update", "config_update", "session_info",
+                                    "protocol_error", "config_error", "rounds_exhausted",
+                                ):
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -1228,7 +1426,10 @@ def setup_chat_routes(
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
-                                    allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    allow_background_extraction=(
+                                        not tool_policy.block_all_tool_calls
+                                        and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
+                                    ),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1243,8 +1444,11 @@ def setup_chat_routes(
                                 "requested_model": _requested_model,
                             },
                         )
-                        sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
-                        if not incognito:
+                        if incognito:
+                            sess.history.append(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
+                            sess.message_count = len(sess.history)
+                        else:
+                            sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
                             session_manager.save_sessions()
                     raise
                 finally:
@@ -1253,6 +1457,7 @@ def setup_chat_routes(
                 # ── Agent mode: full agent loop with tools ──
                 _agent_rounds = 0
                 _agent_tool_calls = 0
+                _agent_tool_events = []
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
@@ -1272,48 +1477,48 @@ def setup_chat_routes(
                     if allow_web_search is not None and str(allow_web_search).lower() == "true":
                         _forced_tools = {"web_search", "web_fetch"}
 
-                    # ── openthesius: route to mimo ACP if flag is set ──
-                    if os.environ.get("OPENTHESIUS_DRIVE") == "mimo":
-                        import sys as _sys
-                        _openthesius_src = os.environ.get("OPENTHESIUS_SRC", "/home/e/sauce/ai/openclanker/src")
-                        if _openthesius_src not in _sys.path:
-                            _sys.path.insert(0, _openthesius_src)
-                        _mimo_sup = getattr(request.app.state, "mimo_supervisor", None)
-                        if _mimo_sup and _mimo_sup.bridge:
-                            _chunk_source = _mimo_sup.bridge.run_turn(
-                                session, messages, model=sess.model,
-                                cwd=workspace or None,
-                                owner=_user,
-                            )
-                        else:
-                            async def _mimo_unavailable():
-                                yield f'event: error\ndata: {json.dumps({"error": "mimo supervisor not available", "status": 503})}\n\n'
-                                yield "data: [DONE]\n\n"
-                            _chunk_source = _mimo_unavailable()
-                    else:
-                        _chunk_source = stream_agent_loop(
-                            sess.endpoint_url,
-                            sess.model,
-                            messages,
-                            headers=sess.headers,
-                            temperature=ctx.preset.temperature,
-                            max_tokens=ctx.preset.max_tokens,
-                            prompt_type=preset_id,
-                            max_tool_calls=_tool_budget,
-                            max_rounds=_max_rounds,
-                            context_length=ctx.context_length,
-                            active_document=active_doc,
-                            active_email=active_email_ctx,
-                            session_id=session,
-                            disabled_tools=disabled_tools if disabled_tools else None,
-                            tool_policy=tool_policy,
-                            owner=_user,
-                            fallbacks=_fallback_candidates,
-                            plan_mode=plan_mode,
-                            approved_plan=approved_plan or None,
-                            workspace=workspace or None,
-                            forced_tools=_forced_tools,
-                        )
+                    _agent_envelope = _turn_envelope(
+                        session_id=session,
+                        owner=_user,
+                        workspace=workspace,
+                        model=sess.model,
+                        mode="plan" if plan_mode else "agent",
+                        incognito=incognito,
+                        disabled_tools=disabled_tools,
+                        forced_tools=_forced_tools,
+                        max_tool_calls=_tool_budget,
+                        max_rounds=_max_rounds,
+                        preset=ctx.preset,
+                        active_document=active_doc,
+                        active_email=active_email_ctx,
+                        no_memory=no_memory,
+                        compare_mode=compare_mode,
+                        is_admin=_request_owner_is_admin(request, _user),
+                    )
+
+                    _chunk_source = stream_agent_target(
+                        model_target,
+                        messages,
+                        session_id=session,
+                        owner=_user,
+                        cwd=workspace or None,
+                        supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                        fallbacks=_fallback_candidates,
+                        temperature=ctx.preset.temperature,
+                        max_tokens=ctx.preset.max_tokens,
+                        prompt_type=preset_id,
+                        max_tool_calls=_tool_budget,
+                        max_rounds=_max_rounds,
+                        context_length=ctx.context_length,
+                        active_document=active_doc,
+                        active_email=active_email_ctx,
+                        disabled_tools=disabled_tools if disabled_tools else None,
+                        tool_policy=tool_policy,
+                        plan_mode=plan_mode,
+                        approved_plan=approved_plan or None,
+                        forced_tools=_forced_tools,
+                        turn_envelope=_agent_envelope,
+                    )
                     async for chunk in _chunk_source:
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1330,18 +1535,48 @@ def setup_chat_routes(
                                     web_sources = data.get("data", [])
                                     yield chunk
                                 elif data.get("type") in (
-                                    "tool_start", "tool_output", "agent_step",
+                                    "tool_start", "tool_progress", "tool_output", "agent_step",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted",
                                     "ask_user",
                                     "plan_update",
                                     "permission_request",
+                                    "user_replay", "usage", "commands_update",
+                                    "mode_update", "config_update", "session_info",
+                                    "protocol_error", "config_error",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif model_target.transport == "acp" and data.get("type") == "tool_output":
+                                        raw = data.get("data") if isinstance(data.get("data"), dict) else {}
+                                        raw_input = raw.get("rawInput")
+                                        event = {
+                                            "round": max(1, _agent_rounds or 1),
+                                            "tool": data.get("tool") or raw.get("title") or "tool",
+                                            "command": json.dumps(raw_input, ensure_ascii=False) if raw_input else "",
+                                            "output": data.get("output") or "",
+                                            "exit_code": 0 if data.get("status") == "completed" else 1,
+                                            "structured": raw,
+                                        }
+                                        for block in raw.get("content") or []:
+                                            if isinstance(block, dict) and block.get("type") == "diff":
+                                                event["diff"] = {
+                                                    "file": block.get("path") or "diff",
+                                                    "text": block.get("newText") or "",
+                                                }
+                                                break
+                                        _agent_tool_events.append(event)
+                                    elif model_target.transport == "acp" and data.get("type") == "ask_user":
+                                        _agent_tool_events.append({
+                                            "round": max(1, _agent_rounds or 1),
+                                            "tool": "question",
+                                            "output": "",
+                                            "exit_code": 0,
+                                            "ask_user": data.get("data") or {},
+                                        })
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -1367,13 +1602,14 @@ def setup_chat_routes(
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
-                            if full_response:
+                            if full_response or _agent_tool_events:
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, full_response, last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
+                                    tool_events=_agent_tool_events or None,
                                     incognito=incognito,
                                 )
                                 if _saved_id:
@@ -1388,7 +1624,10 @@ def setup_chat_routes(
                                     skills_manager=skills_manager,
                                     owner=_user,
                                     extract_skills=user_requested_agent,
-                                    allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    allow_background_extraction=(
+                                        not tool_policy.block_all_tool_calls
+                                        and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
+                                    ),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1410,8 +1649,11 @@ def setup_chat_routes(
                                     "requested_model": _requested_model,
                                 },
                             )
-                            sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
-                            if not incognito:
+                            if incognito:
+                                sess.history.append(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
+                                sess.message_count = len(sess.history)
+                            else:
+                                sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                                 session_manager.save_sessions()
                     except Exception:
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
@@ -1461,9 +1703,17 @@ def setup_chat_routes(
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
         _verify_session_owner(request, session_id)
-        if not agent_runs.is_active(session_id):
-            raise HTTPException(404, "No active run for this session")
-        return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
+        if agent_runs.get_status(session_id) is None:
+            raise HTTPException(404, "No retained run for this session")
+        raw_cursor = request.headers.get("last-event-id") or request.query_params.get("after") or "0"
+        try:
+            cursor = max(0, int(raw_cursor))
+        except ValueError:
+            raise HTTPException(400, "Invalid stream cursor")
+        return StreamingResponse(
+            agent_runs.subscribe(session_id, after_seq=cursor),
+            media_type="text/event-stream",
+        )
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -1492,11 +1742,72 @@ def setup_chat_routes(
         if option_id not in ("once", "always", "reject"):
             raise HTTPException(400, "option_id must be once|always|reject")
         sup = getattr(request.app.state, "mimo_supervisor", None)
-        handler = getattr(sup, "permission_handler", None) if sup else None
+        owner = effective_user(request)
+        if sup and hasattr(sup, "permission_handler_for"):
+            handler = sup.permission_handler_for(owner)
+        else:
+            handler = getattr(sup, "permission_handler", None) if sup else None
         if handler is None:
             raise HTTPException(503, "permission handler not available")
-        if not handler.resolve(request_id, option_id):
-            raise HTTPException(404, "no pending permission request with that id")
+        owner = effective_user(request) or ""
+        if hasattr(handler, "resolve_for"):
+            resolved = handler.resolve_for(
+                request_id,
+                option_id,
+                owner=owner,
+                session_id=session_id,
+            )
+        else:
+            resolved = handler.resolve(request_id, option_id)
+        if not resolved:
+            raise HTTPException(409, "permission request is stale, foreign, or already answered")
+        return {"ok": True}
+
+    @router.get("/api/mimo/permission-grants")
+    async def list_permission_grants(request: Request) -> Dict[str, Any]:
+        owner = effective_user(request) or ""
+        sup = getattr(request.app.state, "mimo_supervisor", None)
+        if sup and hasattr(sup, "for_owner"):
+            await sup.for_owner(owner)
+        store = sup.grant_store_for(owner) if sup and hasattr(sup, "grant_store_for") else getattr(sup, "grant_store", None)
+        if store is None:
+            raise HTTPException(503, "permission grant store unavailable")
+        return {"grants": store.list_records(owner=owner)}
+
+    @router.post("/api/session/{session_id}/question")
+    async def resolve_mimo_question(request: Request, session_id: str) -> Dict[str, Any]:
+        _verify_session_owner(request, session_id)
+        body = await request.json()
+        request_id = str(body.get("request_id") or "")
+        rejected = bool(body.get("rejected"))
+        answers = body.get("answers")
+        owner = effective_user(request) or ""
+        sup = getattr(request.app.state, "mimo_supervisor", None)
+        if sup and hasattr(sup, "question_handler_for"):
+            handler = sup.question_handler_for(owner)
+        else:
+            handler = getattr(sup, "question_handler", None) if sup else None
+        if handler is None:
+            raise HTTPException(503, "question handler not available")
+        if not handler.resolve(
+            request_id,
+            owner=owner,
+            session_id=session_id,
+            answers=answers,
+            rejected=rejected,
+        ):
+            raise HTTPException(409, "question is stale, invalid, or already answered")
+        return {"ok": True}
+
+    @router.delete("/api/mimo/permission-grants/{grant_id}")
+    async def revoke_permission_grant(request: Request, grant_id: int) -> Dict[str, Any]:
+        owner = effective_user(request) or ""
+        sup = getattr(request.app.state, "mimo_supervisor", None)
+        store = sup.grant_store_for(owner) if sup and hasattr(sup, "grant_store_for") else getattr(sup, "grant_store", None)
+        if store is None:
+            raise HTTPException(503, "permission grant store unavailable")
+        if not store.revoke(grant_id, owner=owner):
+            raise HTTPException(404, "permission grant not found")
         return {"ok": True}
 
     # ------------------------------------------------------------------ #
