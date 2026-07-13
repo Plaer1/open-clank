@@ -54,6 +54,12 @@ const FILES = new Set([
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
 
+export function sanitizeShellEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => !/(KEY|TOKEN|SECRET|PASSWORD)/i.test(name)),
+  )
+}
+
 // Irreversible file/directory removal commands. Names are matched
 // case-insensitively for PowerShell; bash is case-sensitive.
 const DELETE_COMMANDS = new Set([
@@ -503,14 +509,14 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
+      return sanitizeShellEnvironment({
         ...process.env,
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
         ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
         ...extra.env,
-      }
+      })
     })
 
     const run = Effect.fn("BashTool.run")(function* (

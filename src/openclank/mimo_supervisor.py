@@ -40,6 +40,128 @@ _RESTART_DELAY_MULTIPLIER = 2.0
 _MAX_RESTART_ATTEMPTS = 10
 _RESTART_WINDOW = 60.0  # reset attempt counter after this many seconds of stability
 
+_OPENCLAW_PROVIDER_ADAPTERS = {
+    "openai-completions": "@ai-sdk/openai-compatible",
+    "anthropic-messages": "@ai-sdk/anthropic",
+}
+_OPENCLAW_PROVIDER_ENV = {
+    "xiaomi": "XIAOMI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
+_MAX_PROVIDER_KEY_LENGTH = 1024
+
+
+def _mimo_child_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("MIMOCODE_PROVIDER_AUTH_FD", None)
+    for env_name in list(env):
+        if any(marker in env_name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            env.pop(env_name, None)
+    return env
+
+
+def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, str]]:
+    """Translate the operator's Xiaomi/DeepSeek config without copying its keys."""
+    source = path or Path(
+        os.environ.get("OPENCLAW_CONFIG_PATH", "~/entities/<agent>/openclaw.json")
+    ).expanduser()
+    if not source.is_file():
+        return {}, {}
+    try:
+        payload = json.loads(source.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("unable to load OpenClaw model providers from %s: %s", source, exc)
+        return {}, {}
+
+    if not isinstance(payload, dict):
+        return {}, {}
+    source_models = payload.get("models")
+    if not isinstance(source_models, dict):
+        return {}, {}
+    source_providers = source_models.get("providers")
+    if not isinstance(source_providers, dict):
+        return {}, {}
+    providers: dict[str, dict] = {}
+    credentials: dict[str, str] = {}
+    for provider_id, env_name in _OPENCLAW_PROVIDER_ENV.items():
+        provider = source_providers.get(provider_id)
+        if not isinstance(provider, dict):
+            continue
+        base_url = provider.get("baseUrl")
+        adapter = _OPENCLAW_PROVIDER_ADAPTERS.get(provider.get("api"))
+        if not isinstance(base_url, str) or not base_url or adapter is None:
+            logger.warning("OpenClaw provider %s has no supported API configuration", provider_id)
+            continue
+
+        models: dict[str, dict] = {}
+        source_model_list = provider.get("models")
+        if not isinstance(source_model_list, list):
+            continue
+        for model in source_model_list:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            item: dict = {
+                "id": model_id,
+                "name": model.get("name") or model_id,
+                "provider": {"npm": adapter, "api": base_url},
+            }
+            if isinstance(model.get("reasoning"), bool):
+                item["reasoning"] = model["reasoning"]
+            inputs = model.get("input")
+            if isinstance(inputs, list):
+                inputs = [kind for kind in inputs if kind in {"text", "audio", "image", "video", "pdf"}]
+                if inputs:
+                    item["modalities"] = {"input": inputs, "output": ["text"]}
+                    item["attachment"] = any(kind != "text" for kind in inputs)
+            context = model.get("contextWindow")
+            output = model.get("maxTokens")
+            if isinstance(context, (int, float)) and isinstance(output, (int, float)):
+                item["limit"] = {"context": context, "output": output}
+            cost = model.get("cost")
+            if isinstance(cost, dict):
+                item["cost"] = {
+                    "input": cost.get("input", 0),
+                    "output": cost.get("output", 0),
+                    "cache_read": cost.get("cacheRead", 0),
+                    "cache_write": cost.get("cacheWrite", 0),
+                }
+            models[model_id] = item
+        if not models:
+            continue
+
+        options = {"baseURL": base_url}
+        timeout = provider.get("timeoutSeconds")
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            options["timeout"] = int(timeout * 1000)
+        providers[provider_id] = {
+            "name": provider_id.title(),
+            "env": [env_name],
+            "npm": adapter,
+            "api": base_url,
+            "options": options,
+            "models": models,
+            "only_configured_models": True,
+        }
+        api_key = provider.get("apiKey")
+        if isinstance(api_key, str) and 0 < len(api_key) <= _MAX_PROVIDER_KEY_LENGTH:
+            credentials[provider_id] = api_key
+
+    return ({"provider": providers} if providers else {}), credentials
+
+
+def _select_host_provider_owner(
+    admin_owners: list[str],
+    explicit_owner: str = "",
+) -> str:
+    admins = {str(owner).strip().lower() for owner in admin_owners if str(owner).strip()}
+    explicit = explicit_owner.strip().lower()
+    if explicit:
+        return explicit if explicit in admins else ""
+    return next(iter(admins)) if len(admins) == 1 else ""
+
 
 def _loopback_port(explicit: str | None = None) -> int:
     """Return a valid configured port or reserve an ephemeral loopback port."""
@@ -71,6 +193,7 @@ class MimoSupervisor:
         safe_dirs: list[str] | None = None,
         runtime_home: Path | None = None,
         partitioned: bool = False,
+        inherit_host_providers: bool = False,
         grant_store=None,
     ) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -88,6 +211,7 @@ class MimoSupervisor:
         self._grant_store = grant_store
         self._runtime_home = runtime_home
         self._partitioned = partitioned
+        self._inherit_host_providers = inherit_host_providers
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Odysseus can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
@@ -117,7 +241,8 @@ class MimoSupervisor:
         # the same frankenmemory db as the thesius parent. All spawners
         # (thesius-provider, mimo-capture, bridged-tool) share one db
         # because they all fork from this inherited env.
-        env = os.environ.copy()
+        env = _mimo_child_environment()
+        provider_auth_fd: int | None = None
         # Server directory-containment check (middleware.ts:24-29): when no
         # server password is set, the server requires requested directories to
         # be within its CWD. Change the child's CWD to /home/e so all user
@@ -163,28 +288,53 @@ class MimoSupervisor:
             else:
                 _data_dir = os.environ.get("ODYSSEUS_DATA_DIR", str(REPO_ROOT / "data"))
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
+        if self._inherit_host_providers:
+            provider_config, provider_credentials = _load_openclaw_providers()
+            if provider_config:
+                config_content = json.loads(env.get("MIMOCODE_CONFIG_CONTENT", "{}"))
+                config_content.setdefault("provider", {}).update(
+                    provider_config["provider"]
+                )
+                env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
+                if provider_credentials:
+                    provider_auth_fd, write_fd = os.pipe()
+                    try:
+                        payload = json.dumps(provider_credentials).encode()
+                        if os.write(write_fd, payload) != len(payload):
+                            raise RuntimeError("incomplete MiMo provider credential handoff")
+                    finally:
+                        os.close(write_fd)
+                    env["MIMOCODE_PROVIDER_AUTH_FD"] = str(provider_auth_fd)
+                logger.info(
+                    "injected host model providers for owner %s: %s",
+                    self._owner,
+                    ", ".join(sorted(provider_config["provider"])),
+                )
         env["MIMOCODE_ENABLE_QUESTION_TOOL"] = "1"
         logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
         try:
+            spawn_options = {
+                "stdin": asyncio.subprocess.PIPE,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+                "env": env,
+                "cwd": "/home/e",
+            }
+            if provider_auth_fd is not None:
+                spawn_options["pass_fds"] = (provider_auth_fd,)
             self._proc = await asyncio.create_subprocess_exec(
-                str(MIMO_BIN),
-                "acp",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-                str(self._http_port),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd="/home/e",
+                str(MIMO_BIN), "acp", "--hostname", "127.0.0.1", "--port", str(self._http_port),
+                **spawn_options,
             )
         except NotImplementedError as exc:
             # A synchronous fallback cannot safely provide the asyncio stream
             # objects ACPClient requires; the old fallback also leaked a first
             # untracked child before spawning a second one.
             raise RuntimeError("async subprocess support is required for mimo ACP") from exc
+        finally:
+            if provider_auth_fd is not None:
+                os.close(provider_auth_fd)
 
         logger.info("mimo child started (pid %d)", self._proc.pid)
         self._stderr_task = asyncio.create_task(self._drain_stderr())
@@ -579,6 +729,7 @@ class MimoSupervisorPool:
         safe_dirs: list[str] | None = None,
         auth_enabled: bool = True,
         initial_owner: str = "",
+        host_provider_owner: str = "",
         data_dir: Path | None = None,
         grant_store=None,
     ) -> None:
@@ -586,6 +737,7 @@ class MimoSupervisorPool:
         self._safe_dirs = safe_dirs
         self._auth_enabled = auth_enabled
         self._initial_owner = self._key(initial_owner) if initial_owner else ""
+        self._host_provider_owner = self._key(host_provider_owner) if host_provider_owner else ""
         self._workers: dict[str, MimoSupervisor] = {}
         self._lock = asyncio.Lock()
         from src.constants import DATA_DIR
@@ -606,8 +758,16 @@ class MimoSupervisorPool:
     async def start(self) -> None:
         if not self._auth_enabled:
             await self.for_owner("")
-        elif self._initial_owner:
-            await self.for_owner(self._initial_owner)
+            return
+        owners = {self._initial_owner, self._host_provider_owner} - {""}
+        results = await asyncio.gather(
+            *(self.for_owner(owner) for owner in owners),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            await self.stop()
+            raise errors[0]
 
     async def for_owner(self, owner: str | None) -> MimoSupervisor:
         key = self._key(owner)
@@ -628,6 +788,9 @@ class MimoSupervisorPool:
                 safe_dirs=self._safe_dirs,
                 runtime_home=self._runtime_home(key) if self._auth_enabled else None,
                 partitioned=self._auth_enabled,
+                inherit_host_providers=(
+                    not self._auth_enabled or key == self._host_provider_owner
+                ),
                 grant_store=self._grant_store,
             )
             self._workers[key] = worker
@@ -635,6 +798,7 @@ class MimoSupervisorPool:
                 await worker.start()
             except Exception:
                 self._workers.pop(key, None)
+                await worker.stop()
                 raise
             return worker
 
@@ -770,6 +934,8 @@ class MimoSupervisorPool:
             old_path.rename(new_path)
         if self._initial_owner == old_key:
             self._initial_owner = new_key
+        if self._host_provider_owner == old_key:
+            self._host_provider_owner = new_key
 
     async def purge_owner(self, owner: str) -> None:
         key = self._key(owner)

@@ -87,13 +87,14 @@ export const providerHandlers = Layer.unwrap(
         }
       }
       const connected = yield* provider.list()
-      const providers = Object.assign(
+      const internal = Object.assign(
         mapValues(filtered, (item) => Provider.fromModelsDevProvider(item)),
         connected,
       )
+      const providers = mapValues(internal, Provider.publicInfo)
       return {
         all: Object.values(providers),
-        default: Provider.defaultModelIDs(providers),
+        default: Provider.defaultModelIDs(internal),
         connected: Object.keys(connected),
       }
     })

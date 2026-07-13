@@ -1282,20 +1282,29 @@ async def _startup_event():
 
                 _auth_enabled = bool(getattr(auth_manager, "is_configured", False))
                 _initial_owner = ""
+                _host_provider_owner = ""
                 if _auth_enabled:
-                    _initial_owner = next(
-                        (
-                            str(name)
-                            for name, record in getattr(auth_manager, "users", {}).items()
-                            if isinstance(record, dict) and record.get("is_admin") is True
-                        ),
-                        "",
+                    _admin_owners = [
+                        str(name)
+                        for name, record in getattr(auth_manager, "users", {}).items()
+                        if isinstance(record, dict) and record.get("is_admin") is True
+                    ]
+                    _initial_owner = _admin_owners[0] if _admin_owners else ""
+                    from src.openclank.mimo_supervisor import _select_host_provider_owner
+                    _host_provider_owner = _select_host_provider_owner(
+                        _admin_owners,
+                        os.environ.get("OPENCLANK_HOST_PROVIDER_OWNER", ""),
                     )
+                    if _admin_owners and not _host_provider_owner:
+                        logger.warning(
+                            "host model providers disabled: configure OPENCLANK_HOST_PROVIDER_OWNER when multiple admins exist"
+                        )
                 _sup = MimoSupervisorPool(
                     memory_provider=memory_provider,
                     safe_dirs=_safe_dirs,
                     auth_enabled=_auth_enabled,
                     initial_owner=_initial_owner,
+                    host_provider_owner=_host_provider_owner,
                 )
                 await _sup.start()
                 app.state.mimo_supervisor = _sup

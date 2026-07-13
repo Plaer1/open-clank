@@ -4,7 +4,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import { Shell } from "../../src/shell/shell"
-import { BashTool } from "../../src/tool/bash"
+import { BashTool, sanitizeShellEnvironment } from "../../src/tool/bash"
 import { Instance } from "../../src/project/instance"
 import { Filesystem } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
@@ -70,6 +70,16 @@ const ps = shells.filter((item) => PS.has(item.label))
 
 const sh = () => Shell.name(Shell.acceptable())
 const evalarg = (text: string) => (sh() === "cmd" ? quote(text) : squote(text))
+
+test("shell subprocess environment strips secret-shaped names", () => {
+  expect(sanitizeShellEnvironment({
+    PATH: "/bin",
+    XIAOMI_API_KEY: "secret",
+    FM_TEST_DEEPSEEK_API_KEY: "duplicate",
+    ACCESS_TOKEN: "token",
+    SMTP_PASSWORD: "password",
+  })).toEqual({ PATH: "/bin" })
+})
 
 const fill = (mode: "lines" | "bytes", n: number) => {
   const code =

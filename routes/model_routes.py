@@ -566,6 +566,7 @@ def _mimo_catalog(supervisor, owner: str | None = None):
     except Exception:
         return [], [], [], 0
     original_count = len(models)
+    models = [model_id for model_id in models if _is_chat_model(model_id)]
     hidden = {item.strip() for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",") if item.strip()}
     if hidden:
         models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]

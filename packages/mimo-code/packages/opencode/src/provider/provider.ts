@@ -26,6 +26,7 @@ import { InstanceState } from "@/effect"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { isRecord } from "@/util/record"
 import { withStatics } from "@/util/schema"
+import { closeSync, readFileSync } from "node:fs"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
@@ -37,6 +38,29 @@ const DEFAULT_CONTEXT_WINDOW = 1_000_000
 const BUILTIN_TIERS = new Set(["ultra", "standard", "lite"])
 // F41: warn once per (providerID, modelID) when limit.context falls back to default
 const warnedContextDefaults = new Set<string>()
+
+export function consumeInheritedProviderCredentials(fdValue?: string): Record<string, string> {
+  const rawFD = fdValue ?? process.env["MIMOCODE_PROVIDER_AUTH_FD"]
+  delete process.env["MIMOCODE_PROVIDER_AUTH_FD"]
+  if (!rawFD || !/^\d+$/.test(rawFD)) return {}
+  const fd = Number(rawFD)
+  if (fd < 3) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(fd, "utf8"))
+    if (!isRecord(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""),
+    )
+  } catch {
+    return {}
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {}
+  }
+}
+
+const inheritedProviderCredentials = consumeInheritedProviderCredentials()
 
 export const DEFAULT_CHUNK_TIMEOUT = 480_000 // 8 minutes — bounds single-attempt SSE stall.
 // Tuned for mimo-v2.5-pro on MiMo Router whose cold-path TTFT after context
@@ -921,17 +945,40 @@ export const Info = Schema.Struct({
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
 
+export const PublicInfo = Schema.Struct({
+  id: ProviderID,
+  name: Schema.String,
+  source: Schema.Literals(["env", "config", "custom", "api"]),
+  env: Schema.Array(Schema.String),
+  options: Schema.Record(Schema.String, Schema.Any),
+  models: Schema.Record(Schema.String, Model),
+})
+  .annotate({ identifier: "PublicProvider" })
+  .pipe(withStatics((s) => ({ zod: zod(s) })))
+export type PublicInfo = Types.DeepMutable<Schema.Schema.Type<typeof PublicInfo>>
+
+export function publicInfo(provider: Info): PublicInfo {
+  return {
+    id: provider.id,
+    name: provider.name,
+    source: provider.source,
+    env: [...provider.env],
+    options: {},
+    models: mapValues(provider.models, (model) => ({ ...model, options: {}, headers: {} })),
+  }
+}
+
 const DefaultModelIDs = Schema.Record(Schema.String, Schema.String)
 
 export const ListResult = Schema.Struct({
-  all: Schema.Array(Info),
+  all: Schema.Array(PublicInfo),
   default: DefaultModelIDs,
   connected: Schema.Array(Schema.String),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type ListResult = Types.DeepMutable<Schema.Schema.Type<typeof ListResult>>
 
 export const ConfigProvidersResult = Schema.Struct({
-  providers: Schema.Array(Info),
+  providers: Schema.Array(PublicInfo),
   default: DefaultModelIDs,
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type ConfigProvidersResult = Types.DeepMutable<Schema.Schema.Type<typeof ConfigProvidersResult>>
@@ -1290,6 +1337,14 @@ const layer: Layer.Layer<
               key: provider.key,
             })
           }
+        }
+
+        // OpenClank sends operator-owned provider keys through a one-shot fd.
+        // Consume and close it before any model tool subprocess can inherit it.
+        for (const [id, key] of Object.entries(inheritedProviderCredentials)) {
+          const providerID = ProviderID.make(id)
+          if (disabled.has(providerID)) continue
+          mergeProvider(providerID, { source: "api", key })
         }
 
         // plugin auth loader - database now has entries for config providers

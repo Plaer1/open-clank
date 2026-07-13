@@ -233,6 +233,17 @@ class TestGetContextLength:
         assert second == 200000
         assert len(calls) == 1
 
+    def test_mimo_virtual_endpoint_never_uses_http_discovery(self, monkeypatch):
+        from src import endpoint_resolver
+
+        def fail(*_args, **_kwargs):
+            raise AssertionError("virtual ACP endpoint reached HTTP discovery")
+
+        monkeypatch.setattr(endpoint_resolver, "build_models_url", fail)
+        monkeypatch.setattr(model_context.httpx, "get", fail)
+
+        assert model_context.get_context_length("mimo://acp", "unknown-mimo-model") == model_context.DEFAULT_CONTEXT
+
     def test_configured_proxy_uses_default_without_model_listing(self, monkeypatch):
         _install_endpoint_db(monkeypatch, [
             types.SimpleNamespace(

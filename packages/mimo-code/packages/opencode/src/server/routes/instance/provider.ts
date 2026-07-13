@@ -46,13 +46,14 @@ export const ProviderRoutes = lazy(() =>
             }
           }
           const connected = yield* svc.list()
-          const providers = Object.assign(
+          const internal = Object.assign(
             mapValues(filtered, (x) => Provider.fromModelsDevProvider(x)),
             connected,
           )
+          const providers = mapValues(internal, Provider.publicInfo)
           return {
             all: Object.values(providers),
-            default: Provider.defaultModelIDs(providers),
+            default: Provider.defaultModelIDs(internal),
             connected: Object.keys(connected),
           }
         }),

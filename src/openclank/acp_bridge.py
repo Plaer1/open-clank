@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import os
-import shutil
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -44,13 +44,12 @@ def lifetools_mcp_descriptor(
     Returns a dict matching the ACP McpServerStdio shape:
     {name, command, args, env:[{name,value}]}
     """
-    python = shutil.which("python3") or shutil.which("python") or "python3"
     scope = hashlib.sha256(
         f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
     ).hexdigest()[:12]
     return {
         "name": f"lifetools_{scope}",
-        "command": python,
+        "command": sys.executable,
         "args": [str(_LIFETOOLS_SERVER)],
         "env": [
             {"name": "OWNER", "value": owner},
