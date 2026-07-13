@@ -135,7 +135,7 @@ DEFAULT_SETTINGS = {
     "task_endpoint_id": "",
     "task_model": "",
     "default_endpoint_id": "mimo",
-    "default_model": "xiaomi/mimo-v2.5-pro-ultraspeed",
+    "default_model": "xiaomi/mimo-v2.5-pro",
     # Optional prose style used only for normal document writing/editing.
     # Email replies use email_writing_style instead because greetings,
     # signatures, and mailbox identity rules are medium-specific.
