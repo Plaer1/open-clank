@@ -1,3 +1,4 @@
+import asyncio
 """Regression tests for #4547 — chat-mode web search query sanitization.
 
 Chat-mode web search (``use_web``) selects a search query via the
@@ -141,13 +142,13 @@ def test_generated_query_is_used_and_sanitized(monkeypatch):
     _patch_flow(monkeypatch, "capital of `France`", captured)
 
     processor = ChatProcessor(memory_manager=_Memory(), personal_docs_manager=_Docs())
-    preface, _, _ = processor.build_context_preface(
+    preface, _, _ = asyncio.run(processor.build_context_preface(
         message=_MESSY,
         session=_Session(),
         use_web=True,
         use_memory=False,
         use_rag=False,
-    )
+    ))
 
     assert "query" in captured, "comprehensive_web_search was not called"
 
@@ -171,13 +172,13 @@ def test_falls_back_to_sanitized_first_line_when_llm_raises(monkeypatch):
     _patch_flow(monkeypatch, RuntimeError("LLM endpoint down"), captured)
 
     processor = ChatProcessor(memory_manager=_Memory(), personal_docs_manager=_Docs())
-    processor.build_context_preface(
+    asyncio.run(processor.build_context_preface(
         message=_MESSY,
         session=_Session(),
         use_web=True,
         use_memory=False,
         use_rag=False,
-    )
+    ))
 
     assert "query" in captured, "comprehensive_web_search was not called"
     # Fallback was the first line ("Is `git reset` safe?"), sanitized.
@@ -195,13 +196,13 @@ def test_falls_back_to_sanitized_first_line_when_llm_returns_empty(monkeypatch):
     _patch_flow(monkeypatch, "   ", captured)
 
     processor = ChatProcessor(memory_manager=_Memory(), personal_docs_manager=_Docs())
-    processor.build_context_preface(
+    asyncio.run(processor.build_context_preface(
         message=_MESSY,
         session=_Session(),
         use_web=True,
         use_memory=False,
         use_rag=False,
-    )
+    ))
 
     assert "query" in captured, "comprehensive_web_search was not called"
     assert captured["query"] == _SANITIZED_FALLBACK

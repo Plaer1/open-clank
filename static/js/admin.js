@@ -1424,7 +1424,7 @@ function initEndpointForm() {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      return await fetch(url, { ...opts, signal: ctrl.signal });
+      return await checkedFetch(url, { ...opts, signal: ctrl.signal });
     } finally {
       clearTimeout(timer);
     }
@@ -1435,7 +1435,7 @@ function initEndpointForm() {
       .filter(Boolean);
     if (domIds.length) return Array.from(new Set(domIds));
     try {
-      const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+      const res = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
       const data = await res.json().catch(() => []);
       return (Array.isArray(data) ? data : []).map(ep => ep && ep.id).filter(Boolean);
     } catch (_) {

@@ -47,8 +47,11 @@ async def test_scheduler_agent_loop_path(monkeypatch):
 
     captured = {}
 
-    async def _stub_stream(**kwargs):
-        captured["messages"] = list(kwargs.get("messages", []))
+    async def _stub_stream(*args, **kwargs):
+        # Reached via model_dispatch.stream_agent_target, which passes
+        # (endpoint_url, model_id, messages) positionally.
+        messages = args[2] if len(args) > 2 else kwargs.get("messages", [])
+        captured["messages"] = list(messages)
         return
         yield  # async generator
 

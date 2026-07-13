@@ -3220,7 +3220,7 @@ async function initEmailSettings() {
 
   const loadWritingStyle = async () => {
     try {
-      const res = await fetch('/api/email/style');
+      const res = await checkedFetch('/api/email/style');
       const data = await res.json();
       const style = data.style || '';
       if (styleEl) styleEl.value = style;
