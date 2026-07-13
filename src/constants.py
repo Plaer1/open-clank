@@ -58,7 +58,6 @@ os.environ["FM_DB_PATH"] = FM_DB_PATH
 # re-deriving paths from __file__ or a relative "data" literal.
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
-MEMORY_DOC = os.path.join(DATA_DIR, "memory_doc.md")
 PERSONAL_DIR = os.path.join(DATA_DIR, "personal_docs")
 RUNBOOK_DIR = os.path.join(PERSONAL_DIR, "runbook")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")

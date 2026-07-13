@@ -4,6 +4,7 @@ python-multipart
 python-dotenv
 PyYAML>=6.0
 httpx
+httpcore>=1.0,<2.0
 pydantic>=2.13.4
 pydantic-settings>=2.14.1
 SQLAlchemy
