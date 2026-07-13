@@ -1,6 +1,7 @@
 import { Config } from "@/config"
 import { Provider } from "@/provider"
 import { Effect, Layer } from "effect"
+import { mapValues } from "remeda"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 
 const root = "/config"
@@ -41,7 +42,7 @@ export const configHandlers = Layer.unwrap(
     const providers = Effect.fn("ConfigHttpApi.providers")(function* () {
       const providers = yield* svc.list()
       return {
-        providers: Object.values(providers),
+        providers: Object.values(mapValues(providers, Provider.publicInfo)),
         default: Provider.defaultModelIDs(providers),
       }
     })

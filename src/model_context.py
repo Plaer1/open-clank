@@ -317,6 +317,11 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
     known = _lookup_known(model)
     api_ctx = None
+
+    # ACP is an in-process virtual transport, not an HTTP model endpoint.
+    if endpoint_url == "mimo://acp":
+        return (known, True) if known else (DEFAULT_CONTEXT, False)
+
     configured_kind = _configured_endpoint_kind(endpoint_url)
 
     # Large OpenAI-compatible proxies can make /models expensive. If the

@@ -1092,6 +1092,7 @@ def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
         {"modelId": "openai/gpt-5"},
         {"modelId": "openai/gpt-5/low"},
         {"modelId": "openai/hidden"},
+        {"modelId": "xiaomi/mimo-v2.5-tts"},
     ])
 
     models, base, variants, hidden_count = _mimo_catalog(supervisor)
@@ -1099,7 +1100,7 @@ def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
     assert models == ["openai/gpt-5", "openai/gpt-5/low"]
     assert base == ["openai/gpt-5"]
     assert variants == ["openai/gpt-5/low"]
-    assert hidden_count == 1
+    assert hidden_count == 2
 
 
 def test_mimo_display_names_keep_model_name_and_reasoning_effort():

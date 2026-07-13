@@ -1,21 +1,8 @@
 # MEATBAGS.md — Known issues and observations
 
-make brain menu look better-er.
-those two weird deepseek show up still; maybe need disabled in mimo-code somehow, lets trace them.
 
 
-## Status: 2026-06-27
+treehouse needs some sample classes; create some some stuff to click through to learn about how to use copal and the different parts of it
 
-### Resolved
-- mimo doesn't un-delegate sometimes (bad completion signal from sub agents) — investigated in ses_0f53d15b5ffe, runLoop at prompt.ts:1628-3855 identified as the critical code path. Root cause: preStop/postStop ReAct loops (MAX_PRE_REACT=3, MAX_POST_REACT=3) in actor/spawn.ts can force re-entry. TaskGate.decide may also force re-entry on incomplete tasks. Not yet fixed but diagnosed.
-
-### Active
-- chronology and workspace highest signal for relevance of auto-insert memory — addressed by workspace-aware memory design (Phase 4a, workspace tag on records, recall priority boost)
-- rest api retrieval of memes — not yet implemented (Phase 6?)
-
-### Config requirements for deployment
-- `dream.auto: false` — prevents double-consolidation with engine's groom("reflect")
-- `distill.auto: false` — same
-- `memory.provider: "frankenmemory"` — selects frankenmemory over native FTS
-- `MEMORY_VECTOR_ENABLED=0` — disables Chroma vector path
-- `FM_MCP_COMMAND` — env var to fm-mcp binary path if not in PATH
+2026-07-11 03:02:20,926 - src.model_discovery - INFO - Scanning 2 hosts for models: ['http://localhost:11434/v1', 'host.docker.internal']
+2026-07-11 03:02:20,992 - src.model_discovery - INFO - Discovered 0 model endpoints across 2 hosts

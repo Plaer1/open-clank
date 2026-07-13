@@ -3,6 +3,7 @@ import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { Config } from "@/config"
 import { Provider } from "@/provider"
+import { mapValues } from "remeda"
 import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
 import { jsonRequest } from "./trace"
@@ -81,7 +82,7 @@ export const ConfigRoutes = lazy(() =>
           const svc = yield* Provider.Service
           const providers = yield* svc.list()
           return {
-            providers: Object.values(providers),
+            providers: Object.values(mapValues(providers, Provider.publicInfo)),
             default: Provider.defaultModelIDs(providers),
           }
         }),

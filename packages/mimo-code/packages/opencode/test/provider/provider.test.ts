@@ -12,9 +12,57 @@ import { Env } from "../../src/env"
 import { Effect } from "effect"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { makeRuntime } from "../../src/effect/run-service"
+import { openSync, readFileSync } from "node:fs"
+import { consumeInheritedProviderCredentials } from "../../src/provider/provider"
 
 const env = makeRuntime(Env.Service, Env.defaultLayer)
 const set = (k: string, v: string) => env.runSync((svc) => svc.set(k, v))
+
+test("inherited provider credentials are consumed once and removed from env", async () => {
+  await using tmp = await tmpdir()
+  const authPath = path.join(tmp.path, "provider-auth.json")
+  await Bun.write(authPath, JSON.stringify({ xiaomi: "test-xiaomi", deepseek: "test-deepseek" }))
+  const fd = openSync(authPath, "r")
+  process.env["MIMOCODE_PROVIDER_AUTH_FD"] = String(fd)
+
+  expect(consumeInheritedProviderCredentials()).toEqual({
+    xiaomi: "test-xiaomi",
+    deepseek: "test-deepseek",
+  })
+  expect(process.env["MIMOCODE_PROVIDER_AUTH_FD"]).toBeUndefined()
+  expect(() => readFileSync(fd)).toThrow()
+})
+
+test("public provider projection strips credentials and model headers", () => {
+  const publicProvider = Provider.publicInfo({
+    id: ProviderID.make("sentinel-provider"),
+    name: "Sentinel",
+    source: "api",
+    env: ["SENTINEL_API_KEY"],
+    key: "top-level-sentinel",
+    options: { apiKey: "option-sentinel", headers: { authorization: "header-sentinel" } },
+    models: {
+      model: {
+        id: ModelID.make("model"),
+        providerID: ProviderID.make("sentinel-provider"),
+        options: { apiKey: "model-option-sentinel" },
+        headers: { authorization: "model-header-sentinel" },
+      },
+    },
+  } as unknown as Provider.Info)
+
+  const serialized = JSON.stringify(publicProvider)
+  for (const secret of [
+    "top-level-sentinel",
+    "option-sentinel",
+    "header-sentinel",
+    "model-option-sentinel",
+    "model-header-sentinel",
+  ]) {
+    expect(serialized).not.toContain(secret)
+  }
+  expect(publicProvider.name).toBe("Sentinel")
+})
 
 async function run<A, E>(fn: (provider: Provider.Interface) => Effect.Effect<A, E, never>) {
   return AppRuntime.runPromise(

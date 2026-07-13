@@ -1,4 +1,5 @@
 import json
+import sys
 import uuid
 from types import SimpleNamespace
 
@@ -310,6 +311,7 @@ async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch
             self.bridge = None
             self.permission_handler = None
             self.grant_store = kwargs["grant_store"]
+            self.inherit_host_providers = kwargs["inherit_host_providers"]
             created.append(self)
 
         async def start(self):
@@ -327,6 +329,8 @@ async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch
     monkeypatch.setattr(module, "MimoSupervisor", Worker)
     pool = module.MimoSupervisorPool(
         auth_enabled=True,
+        initial_owner="Alice",
+        host_provider_owner="Alice",
         data_dir=tmp_path,
     )
     alice_a, alice_b = await __import__("asyncio").gather(
@@ -337,8 +341,207 @@ async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch
     assert alice_a is alice_b
     assert bob is not alice_a
     assert alice_a.runtime_home != bob.runtime_home
+    assert alice_a.inherit_host_providers is True
+    assert bob.inherit_host_providers is False
     assert len(created) == 2
+
+    await pool.rename_owner("Alice", "Alice2")
+    renamed = await pool.for_owner("Alice2")
+    assert renamed.inherit_host_providers is True
     await pool.stop()
+
+    single_pool = module.MimoSupervisorPool(
+        auth_enabled=False,
+        data_dir=tmp_path,
+    )
+    single = await single_pool.for_owner(None)
+    assert single.inherit_host_providers is True
+    await single_pool.stop()
+
+
+async def test_pool_starts_initial_and_explicit_host_provider_owners(monkeypatch, tmp_path):
+    import src.openclank.mimo_supervisor as module
+
+    created = []
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.owner = kwargs["owner"]
+            self.inherit_host_providers = kwargs["inherit_host_providers"]
+            self.bridge = None
+            self.permission_handler = None
+            self.started = False
+            created.append(self)
+
+        async def start(self):
+            self.started = True
+
+        async def stop(self):
+            self.started = False
+
+        def is_alive(self):
+            return self.started
+
+        def available_models(self):
+            return []
+
+    monkeypatch.setattr(module, "MimoSupervisor", Worker)
+    pool = module.MimoSupervisorPool(
+        auth_enabled=True,
+        initial_owner="alice",
+        host_provider_owner="bob",
+        data_dir=tmp_path,
+    )
+
+    await pool.start()
+
+    assert {worker.owner for worker in created} == {"alice", "bob"}
+    assert next(worker for worker in created if worker.owner == "bob").inherit_host_providers is True
+    assert next(worker for worker in created if worker.owner == "alice").inherit_host_providers is False
+    await pool.stop()
+
+
+async def test_pool_rolls_back_sibling_when_multi_owner_start_fails(monkeypatch, tmp_path):
+    import src.openclank.mimo_supervisor as module
+
+    created = []
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.owner = kwargs["owner"]
+            self.started = False
+            created.append(self)
+
+        async def start(self):
+            self.started = True
+            if self.owner == "bob":
+                raise RuntimeError("boom")
+
+        async def stop(self):
+            self.started = False
+
+        def is_alive(self):
+            return self.started
+
+    monkeypatch.setattr(module, "MimoSupervisor", Worker)
+    pool = module.MimoSupervisorPool(
+        auth_enabled=True,
+        initial_owner="alice",
+        host_provider_owner="bob",
+        data_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await pool.start()
+
+    assert created
+    assert all(worker.started is False for worker in created)
+    assert pool._workers == {}
+
+
+def test_openclaw_provider_import_maps_models_without_embedding_keys(tmp_path, caplog):
+    import src.openclank.mimo_supervisor as module
+
+    source = tmp_path / "openclaw.json"
+    source.write_text(json.dumps({
+        "models": {"providers": {
+            "xiaomi": {
+                "baseUrl": "https://xiaomi.example/v1",
+                "api": "openai-completions",
+                "apiKey": "xiaomi-sentinel",
+                "models": [{
+                    "id": "mimo-test",
+                    "reasoning": True,
+                    "input": ["text", "image"],
+                    "contextWindow": 1000,
+                    "maxTokens": 100,
+                }],
+            },
+            "deepseek": {
+                "baseUrl": "https://deepseek.example/anthropic",
+                "api": "anthropic-messages",
+                "apiKey": "deepseek-sentinel",
+                "models": [{"id": "deepseek-test", "name": "DeepSeek Test"}],
+            },
+        }},
+    }))
+
+    config, credentials = module._load_openclaw_providers(source)
+
+    assert set(config["provider"]) == {"xiaomi", "deepseek"}
+    assert set(config["provider"]["xiaomi"]["models"]) == {"mimo-test"}
+    assert set(config["provider"]["deepseek"]["models"]) == {"deepseek-test"}
+    assert config["provider"]["xiaomi"]["npm"] == "@ai-sdk/openai-compatible"
+    assert config["provider"]["deepseek"]["npm"] == "@ai-sdk/anthropic"
+    assert "sentinel" not in json.dumps(config)
+    assert credentials == {
+        "xiaomi": "xiaomi-sentinel",
+        "deepseek": "deepseek-sentinel",
+    }
+    assert "sentinel" not in caplog.text
+
+
+
+def test_host_provider_owner_requires_unique_or_explicit_admin():
+    from src.openclank.mimo_supervisor import _select_host_provider_owner
+
+    assert _select_host_provider_owner(["Alice"]) == "alice"
+    assert _select_host_provider_owner(["Alice", "Bob"]) == ""
+    assert _select_host_provider_owner(["Alice", "Bob"], "BOB") == "bob"
+    assert _select_host_provider_owner(["Alice"], "Mallory") == ""
+
+
+def test_mimo_child_environment_strips_provider_credentials(monkeypatch):
+    from src.openclank.mimo_supervisor import _mimo_child_environment
+
+    monkeypatch.setenv("XIAOMI_API_KEY", "xiaomi-sentinel")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-sentinel")
+    monkeypatch.setenv("FM_TEST_DEEPSEEK_API_KEY", "duplicate-sentinel")
+    monkeypatch.setenv("MIMOCODE_PROVIDER_AUTH_FD", "99")
+    monkeypatch.setenv("SAFE_SETTING", "kept")
+
+    child_env = _mimo_child_environment()
+
+    assert "XIAOMI_API_KEY" not in child_env
+    assert "DEEPSEEK_API_KEY" not in child_env
+    assert "FM_TEST_DEEPSEEK_API_KEY" not in child_env
+    assert "MIMOCODE_PROVIDER_AUTH_FD" not in child_env
+    assert child_env["SAFE_SETTING"] == "kept"
+
+
+@pytest.mark.parametrize("content", ["{", "[]", '{"models": null}'])
+def test_openclaw_provider_import_fails_closed_for_malformed_config(tmp_path, content):
+    import src.openclank.mimo_supervisor as module
+
+    source = tmp_path / "openclaw.json"
+    source.write_text(content)
+
+    assert module._load_openclaw_providers(source) == ({}, {})
+
+
+def test_openclaw_provider_import_rejects_oversized_key(tmp_path):
+    import src.openclank.mimo_supervisor as module
+
+    source = tmp_path / "openclaw.json"
+    source.write_text(json.dumps({
+        "models": {"providers": {"xiaomi": {
+            "baseUrl": "https://xiaomi.example/v1",
+            "api": "openai-completions",
+            "apiKey": "x" * (module._MAX_PROVIDER_KEY_LENGTH + 1),
+            "models": [{"id": "mimo-test"}],
+        }}},
+    }))
+
+    config, credentials = module._load_openclaw_providers(source)
+
+    assert "xiaomi" in config["provider"]
+    assert credentials == {}
+
+
+def test_lifetools_descriptor_uses_running_python():
+    from src.openclank.acp_bridge import lifetools_mcp_descriptor
+
+    assert lifetools_mcp_descriptor()["command"] == sys.executable
 
 
 async def test_mimo_question_is_owner_revision_bound_and_single_use():
