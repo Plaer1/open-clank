@@ -330,6 +330,7 @@ function _initModelPickerDropdown() {
     'stepfun-ai': 'stepfun', 'ai21labs': 'ai21', 'ibm-granite': 'ibm',
     'bytedance-seed': 'bytedance', '~anthropic': 'anthropic',
     '~google': 'google', '~moonshotai': 'moonshotai', '~openai': 'openai',
+    '~mimo': 'MiMo',
   };
   function _providerDisplayName(slug) {
     return _PROVIDER_NAMES[slug] || slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, ' ');
@@ -338,6 +339,11 @@ function _initModelPickerDropdown() {
     const slash = mid.indexOf('/');
     let slug = slash > 0 ? mid.substring(0, slash) : 'other';
     return _PROVIDER_ALIAS[slug] || slug;
+  }
+  // MiMo-served models present as one native catalog: the upstream provider
+  // (xiaomi, deepseek, …) is an operator detail users must not see.
+  function _groupSlug(m) {
+    return m.endpointId === 'mimo' ? '~mimo' : _providerSlug(m.mid);
   }
   const _collapsedProviders = new Set(_loadList('odysseus-model-collapsed'));
   let _justExpandedProvider = null;
@@ -453,8 +459,9 @@ function _initModelPickerDropdown() {
     // ── Search mode: flat, filtered results across the whole catalog ──
     if (q) {
       const matches = all.filter(m => {
-        const provName = _providerDisplayName(_providerSlug(m.mid)).toLowerCase();
-        return [m.mid, m.display, m.epName, m.providerText, provName]
+        const provName = _providerDisplayName(_groupSlug(m)).toLowerCase();
+        const searchId = m.endpointId === 'mimo' ? m.display : m.mid;
+        return [searchId, m.display, m.epName, m.providerText, provName]
           .filter(Boolean).join(' ').toLowerCase().includes(q);
       });
       if (matches.length === 0) _addEmpty('No matching models');
@@ -504,7 +511,7 @@ function _initModelPickerDropdown() {
       const rest = all.filter(m => !shown.has(m.mid));
       const groups = new Map();
       rest.forEach(m => {
-        const slug = _providerSlug(m.mid);
+        const slug = _groupSlug(m);
         if (!groups.has(slug)) groups.set(slug, []);
         groups.get(slug).push(m);
       });

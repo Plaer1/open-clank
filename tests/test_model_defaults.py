@@ -171,3 +171,62 @@ def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults(m
 
     assert test_data["endpoint_id"] == "fallback-ep", \
         "Should get global endpoint_id"
+
+def test_get_default_chat_mimo_stale_model_falls_back_to_chat_base_model(monkeypatch):
+    """A stale mimo default_model must fall back to the first BASE chat model
+    from the filtered catalog — never a TTS model or whatever provider happens
+    to come first in the raw handshake order."""
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
+        "default_endpoint_id": "mimo",
+        "default_model": "xiaomi/mimo-v2.5-pro-ultraspeed",  # no longer exists
+    })
+
+    supervisor = MagicMock()
+    supervisor.available_models = lambda owner=None: [
+        {"modelId": "deepseek/deepseek-v4-flash"},
+        {"modelId": "xiaomi/mimo-v2.5-tts"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "xiaomi/mimo-v2.5-pro/low"},
+    ]
+
+    fake_auth_manager = MagicMock()
+    fake_auth_manager.is_admin = lambda user: True
+    fake_auth_manager.get_privileges = lambda user: {}
+
+    router = model_routes.setup_model_routes(model_discovery=None)
+    get_default_chat = _get_default_chat_route(router)
+    request = _make_request(user="e", auth_manager=fake_auth_manager)
+    request.app.state.mimo_supervisor = supervisor
+
+    result = get_default_chat(request)
+
+    assert result["endpoint_id"] == "mimo"
+    assert result["endpoint_url"] == "mimo://acp"
+    assert result["model"] == "deepseek/deepseek-v4-flash", \
+        "should pick the first chat-capable BASE model from the filtered catalog"
+
+
+def test_get_default_chat_mimo_valid_model_kept(monkeypatch):
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
+        "default_endpoint_id": "mimo",
+        "default_model": "xiaomi/mimo-v2.5-pro",
+    })
+
+    supervisor = MagicMock()
+    supervisor.available_models = lambda owner=None: [
+        {"modelId": "deepseek/deepseek-v4-flash"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+    ]
+
+    fake_auth_manager = MagicMock()
+    fake_auth_manager.is_admin = lambda user: True
+    fake_auth_manager.get_privileges = lambda user: {}
+
+    router = model_routes.setup_model_routes(model_discovery=None)
+    get_default_chat = _get_default_chat_route(router)
+    request = _make_request(user="e", auth_manager=fake_auth_manager)
+    request.app.state.mimo_supervisor = supervisor
+
+    result = get_default_chat(request)
+
+    assert result["model"] == "xiaomi/mimo-v2.5-pro"

@@ -2599,19 +2599,14 @@ def setup_model_routes(model_discovery):
 
         if ep_id == "mimo":
             _sup = getattr(request.app.state, "mimo_supervisor", None)
-            _catalog = []
-            if _sup is not None:
-                try:
-                    _catalog = [
-                        m.get("modelId", "")
-                        for m in _sup.available_models(owner=_user)
-                        if m.get("modelId")
-                    ]
-                except Exception:
-                    _catalog = []
+            # Chat-filtered catalog (same filter as the picker): a stale
+            # configured default must never fall back to a TTS model or to
+            # whatever provider happens to sort first in the raw handshake.
+            _catalog, _catalog_base, _, _ = _mimo_catalog(_sup, _user)
             _allowed = _allowed_model_ids(request, _user)
             if _allowed is not None:
                 _catalog = [item for item in _catalog if item in _allowed]
+                _catalog_base = [item for item in _catalog_base if item in _allowed]
             if not _catalog:
                 eligible_configured = model if _allowed is None or model in _allowed else ""
                 return {
@@ -2620,7 +2615,7 @@ def setup_model_routes(model_discovery):
                     "model": eligible_configured,
                 }
             if not model or model not in _catalog:
-                model = _catalog[0]
+                model = (_catalog_base or _catalog)[0]
             return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
 
         db = SessionLocal()
