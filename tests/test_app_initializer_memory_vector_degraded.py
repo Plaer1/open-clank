@@ -44,6 +44,14 @@ def _neutralize_collaborators(monkeypatch):
 
 
 def test_failed_memory_vector_init_is_kept_not_discarded(monkeypatch, tmp_path):
+    # The vector path is gated off by default (frankenmemory replaces Chroma);
+    # enable it so the degraded-object handling under test is reachable.
+    monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "1")
+    # Keep the frankenmemory branch out of this test: it writes the repo's
+    # real frankenmemory.db and exports FM_DB_ID into os.environ, which
+    # poisons the fm-mcp handshake for every later transport test.
+    monkeypatch.setenv("MEMORY_PROVIDER", "native")
+    monkeypatch.delenv("FM_DB_ID", raising=False)
     _neutralize_collaborators(monkeypatch)
     # initialize_managers does `from src.memory_vector import MemoryVectorStore`
     # at call time, so patch it on the source module.
