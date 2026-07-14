@@ -669,14 +669,23 @@ def _mimo_model_families(model_ids) -> dict[str, str]:
     return families
 
 
-def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None) -> set[str]:
-    """MiMo provider prefixes already served by an enabled direct endpoint.
+def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None) -> dict[str, dict]:
+    """Map mimo provider prefixes to the enabled direct endpoint covering them.
 
     MiMo fills gaps only: a provider Odysseus reaches natively must not show
-    up a second time through the agent transport (e's no-duplicates rule)."""
+    up a second time through the agent transport (e's no-duplicates rule).
+    The returned map records WHICH endpoint won, so Settings can show the
+    suppression instead of making providers silently vanish."""
     if not mimo_prefixes:
-        return set()
-    covered: set[str] = set()
+        return {}
+    covered: dict[str, dict] = {}
+
+    def _claim(prefix: str, ep) -> None:
+        covered.setdefault(prefix, {
+            "endpoint_id": getattr(ep, "id", ""),
+            "endpoint_name": getattr(ep, "name", "") or getattr(ep, "id", ""),
+        })
+
     try:
         db = SessionLocal()
         try:
@@ -690,17 +699,55 @@ def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None)
                 provider = _safe_detect_provider(base).lower()
                 provider = _DIRECT_PROVIDER_TO_MIMO.get(provider, provider)
                 if provider in mimo_prefixes:
-                    covered.add(provider)
+                    _claim(provider, ep)
                 host = (urlparse(base).hostname or "").lower()
                 for prefix in mimo_prefixes:
                     if prefix and prefix in host:
-                        covered.add(prefix)
+                        _claim(prefix, ep)
         finally:
             db.close()
     except Exception as exc:
         logger.debug("Direct-provider coverage check failed: %s", exc)
-        return set()
+        return {}
     return covered
+
+
+def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]:
+    """Per-provider integration state for Settings: what mimo has configured,
+    what it actually serves, and what a direct endpoint suppressed."""
+    if supervisor is None:
+        return []
+    try:
+        try:
+            catalog = supervisor.available_models(owner=owner)
+        except TypeError:
+            catalog = supervisor.available_models()
+        model_ids = [m.get("modelId", "") for m in catalog if m.get("modelId")]
+    except Exception:
+        return []
+    prefixes: dict[str, dict] = {}
+    for model_id in model_ids:
+        if "/" not in model_id:
+            continue
+        prefix = model_id.split("/", 1)[0]
+        stats = prefixes.setdefault(prefix, {"models": 0, "chat_models": 0})
+        stats["models"] += 1
+        if _is_chat_model(model_id):
+            stats["chat_models"] += 1
+    covered = _covered_direct_providers(set(prefixes), owner)
+    families = _mimo_model_families([f"{prefix}/x" for prefix in prefixes])
+    breakdown = []
+    for prefix in sorted(prefixes):
+        suppressed = covered.get(prefix)
+        breakdown.append({
+            "id": prefix,
+            "family": families.get(f"{prefix}/x") or prefix.capitalize(),
+            "models": prefixes[prefix]["models"],
+            "chat_models": prefixes[prefix]["chat_models"],
+            "active": suppressed is None,
+            "served_by": suppressed,
+        })
+    return breakdown
 
 
 def _mimo_catalog(supervisor, owner: str | None = None):
@@ -2135,7 +2182,11 @@ def setup_model_routes(model_discovery):
             _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(
                 _sup, effective_user(request)
             )
-            if _mimo_models:
+            _providers_breakdown = _mimo_provider_breakdown(_sup, effective_user(request))
+            # The Settings row must exist even when every mimo provider is
+            # suppressed by a direct endpoint — that state is exactly what the
+            # admin needs to SEE, not infer from absence.
+            if _mimo_models or _providers_breakdown:
                 _mimo_displays = _mimo_display_names(_base, _variants)
                 results.append({
                     "id": "mimo",
@@ -2175,6 +2226,7 @@ def setup_model_routes(model_discovery):
                     "read_only": True,
                     "actions": ["configure_providers"],
                     "settings_tab": "mimo-providers",
+                    "providers": _providers_breakdown,
                 })
             return results
         finally:

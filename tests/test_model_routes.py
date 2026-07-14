@@ -1148,10 +1148,10 @@ def test_covered_direct_providers_matches_detection_and_hostname(monkeypatch):
         pass
 
     endpoints = [
-        _Ep(base_url="https://api.deepseek.com/v1", model_type="llm"),
-        _Ep(base_url="https://chatgpt.com/backend-api", model_type="llm"),
-        _Ep(base_url="http://localhost:11434/v1", model_type="llm"),
-        _Ep(base_url="https://api.xiaomi.example/v1", model_type="embedding"),
+        _Ep(id="a2c233cc", name="DeepSeek", base_url="https://api.deepseek.com/v1", model_type="llm"),
+        _Ep(id="2e6939b5", name="ChatGPT Subscription", base_url="https://chatgpt.com/backend-api", model_type="llm"),
+        _Ep(id="local-1", name="Local", base_url="http://localhost:11434/v1", model_type="llm"),
+        _Ep(id="emb-1", name="Embedder", base_url="https://api.xiaomi.example/v1", model_type="embedding"),
     ]
 
     class _Q:
@@ -1172,8 +1172,37 @@ def test_covered_direct_providers_matches_detection_and_hostname(monkeypatch):
     covered = _covered_direct_providers({"deepseek", "openai", "xiaomi"})
 
     # deepseek matched by hostname, openai via chatgpt-subscription mapping;
-    # xiaomi endpoint is not model_type=llm so it does not count.
-    assert covered == {"deepseek", "openai"}
+    # xiaomi endpoint is not model_type=llm so it does not count. The map
+    # records WHICH endpoint claimed each provider so Settings can say so.
+    assert set(covered) == {"deepseek", "openai"}
+    assert covered["deepseek"]["endpoint_name"] == "DeepSeek"
+    assert covered["openai"]["endpoint_name"] == "ChatGPT Subscription"
+
+
+def test_mimo_provider_breakdown_reports_live_and_suppressed(monkeypatch):
+    monkeypatch.setattr(
+        model_routes, "_covered_direct_providers",
+        lambda prefixes, owner=None: {
+            "deepseek": {"endpoint_id": "a2c233cc", "endpoint_name": "DeepSeek"},
+        } if "deepseek" in prefixes else {},
+    )
+    supervisor = SimpleNamespace(available_models=lambda: [
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "xiaomi/mimo-v2.5-pro/high"},
+        {"modelId": "xiaomi/mimo-v2.5-tts"},
+        {"modelId": "deepseek/deepseek-v4-flash"},
+    ])
+
+    breakdown = model_routes._mimo_provider_breakdown(supervisor)
+
+    by_id = {entry["id"]: entry for entry in breakdown}
+    assert by_id["xiaomi"]["family"] == "MiMo"
+    assert by_id["xiaomi"]["active"] is True
+    assert by_id["xiaomi"]["served_by"] is None
+    assert by_id["xiaomi"]["chat_models"] == 2  # tts filtered from chat count
+    assert by_id["xiaomi"]["models"] == 3
+    assert by_id["deepseek"]["active"] is False
+    assert by_id["deepseek"]["served_by"]["endpoint_name"] == "DeepSeek"
 
 
 def test_mimo_model_families_map_operator_prefixes_to_public_brands():

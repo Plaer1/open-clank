@@ -177,6 +177,17 @@ def setup_mimo_provider_routes() -> APIRouter:
         supervisor = await _owner_supervisor(request)
         providers, methods = await _catalog(supervisor)
         connected = set(providers.get("connected") or [])
+        # Integration state from the catalog boundary: model counts and which
+        # direct endpoint (if any) suppresses each connected provider.
+        from routes.model_routes import _mimo_provider_breakdown
+        from src.auth_helpers import effective_user
+        try:
+            breakdown = {
+                entry["id"]: entry
+                for entry in _mimo_provider_breakdown(supervisor, effective_user(request))
+            }
+        except Exception:
+            breakdown = {}
         clean = []
         for item in providers.get("all") or []:
             if not isinstance(item, dict):
@@ -187,11 +198,16 @@ def setup_mimo_provider_routes() -> APIRouter:
             native_methods = _sanitize_methods(methods.get(provider_id))
             if not native_methods:
                 native_methods = [{"index": 0, "type": "api", "label": "API key"}]
+            state = breakdown.get(provider_id) or {}
             clean.append({
                 "id": provider_id,
                 "name": _bounded(item.get("name") or provider_id),
                 "connected": provider_id in connected,
                 "methods": native_methods,
+                "family": state.get("family"),
+                "chat_models": state.get("chat_models", 0),
+                "active": state.get("active", provider_id in connected),
+                "served_by": state.get("served_by"),
             })
         clean.sort(key=lambda value: (not value["connected"], value["name"].casefold()))
         return {
