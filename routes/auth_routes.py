@@ -72,8 +72,8 @@ def _validate_model_settings_update(body: dict, current: dict, request: Request,
                 raise HTTPException(400, f"{fallback_key} entries must be objects")
             endpoint_id = str(fallback.get("endpoint_id") or "").strip()
             model_id = str(fallback.get("model") or "").strip()
-            if fallback_key == "vision_model_fallbacks" and endpoint_id == "mimo":
-                raise HTTPException(400, "MiMo does not advertise vision input")
+            if fallback_key == "vision_model_fallbacks" and (endpoint_id == "mimo" or endpoint_id.startswith("mimo:")):
+                raise HTTPException(400, "This provider does not advertise vision input")
             if endpoint_id and resolve_endpoint_by_id(endpoint_id, model_id, owner=owner) is None:
                 raise HTTPException(400, f"Unavailable model in {fallback_key}")
 

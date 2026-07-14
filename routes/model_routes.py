@@ -659,6 +659,18 @@ _MIMO_FAMILY_NAMES = {
 }
 
 
+def _mimo_endpoint_provider(ep_id) -> tuple[bool, str]:
+    """(is_mimo, provider_prefix) for the runtime's endpoint ids.
+
+    "mimo" is the legacy whole-runtime id; "mimo:<provider>" is one of the
+    per-provider Settings rows. Both dispatch over mimo://acp."""
+    if ep_id == "mimo":
+        return True, ""
+    if isinstance(ep_id, str) and ep_id.startswith("mimo:"):
+        return True, ep_id.split(":", 1)[1]
+    return False, ""
+
+
 def _mimo_model_families(model_ids) -> dict[str, str]:
     families: dict[str, str] = {}
     for model_id in model_ids:
@@ -2195,35 +2207,52 @@ def setup_model_routes(model_discovery):
                 _sup, effective_user(request)
             )
             _providers_breakdown = _mimo_provider_breakdown(_sup, effective_user(request))
-            # The Settings row must exist even when every mimo provider is
-            # suppressed by a direct endpoint — that state is exactly what the
-            # admin needs to SEE, not infer from absence.
-            if _mimo_models or _providers_breakdown:
-                _mimo_displays = _mimo_display_names(_base, _variants)
+            # One ordinary-looking endpoint row PER ACTIVE provider — the
+            # runtime itself is plumbing and never appears as a thing. A user
+            # must not be able to tell these rows from direct endpoints.
+            # Suppressed providers are visible in the Connect-a-provider
+            # section (served_by state), never as rows: their models already
+            # have a real endpoint row above.
+            _provider_apis = {}
+            try:
+                _provider_apis = _sup.provider_apis(owner=effective_user(request)) if _sup else {}
+            except Exception:
+                _provider_apis = {}
+            _mimo_displays = _mimo_display_names(_base, _variants)
+            _families = _mimo_model_families(_mimo_models)
+            for _entry in _providers_breakdown:
+                if not _entry.get("active"):
+                    continue
+                _pid = _entry["id"]
+                _p_models = [m for m in _mimo_models if m.split("/", 1)[0] == _pid]
+                if not _p_models:
+                    continue
+                _p_base = [m for m in _base if m.split("/", 1)[0] == _pid]
+                _p_variants = [m for m in _variants if m.split("/", 1)[0] == _pid]
                 results.append({
-                    "id": "mimo",
-                    "name": "MiMo runtime",
-                    "base_url": "mimo://acp",
+                    "id": f"mimo:{_pid}",
+                    "name": _entry.get("family") or _pid.capitalize(),
+                    "base_url": _provider_apis.get(_pid, ""),
                     "has_key": False,
                     "api_key_fingerprint": None,
                     "is_enabled": True,
-                    "models": _mimo_models,
-                    "models_primary": _base,
-                    "models_extra": _variants,
+                    "models": _p_models,
+                    "models_primary": _p_base,
+                    "models_extra": _p_variants,
                     "catalog": build_model_catalog(
-                        endpoint_id="mimo",
+                        endpoint_id=f"mimo:{_pid}",
                         endpoint_url="mimo://acp",
-                        model_ids=_mimo_models,
-                        primary_ids=_base,
-                        extra_ids=_variants,
+                        model_ids=_p_models,
+                        primary_ids=_p_base,
+                        extra_ids=_p_variants,
                         display_names=_mimo_displays,
-                        families=_mimo_model_families(_mimo_models),
+                        families=_families,
                         discovered=True,
                         entitled=True,
                         capabilities={"chat": True, "tools": True, "vision": None},
                     ),
                     "pinned_models": [],
-                    "hidden_count": _hidden_count,
+                    "hidden_count": 0,
                     "online": True,
                     "status": "online",
                     "ping_error": None,
@@ -2231,14 +2260,11 @@ def setup_model_routes(model_discovery):
                     "supports_tools": True,
                     "endpoint_kind": "auto",
                     "category": "api",
-                    "model_refresh_mode": "manual",
+                    "model_refresh_mode": "auto",
                     "model_refresh_interval": None,
                     "model_refresh_timeout": None,
-                    "virtual": True,
                     "read_only": True,
-                    "actions": ["configure_providers"],
-                    "settings_tab": "added-models",
-                    "providers": _providers_breakdown,
+                    "provider_row": _pid,
                 })
             return results
         finally:
@@ -2512,8 +2538,8 @@ def setup_model_routes(model_discovery):
     def probe_endpoint_models(ep_id: str, request: Request):
         """Re-probe all models on an endpoint. Updates hidden_models and streams SSE results."""
         require_admin(request)
-        if ep_id == "mimo":
-            raise HTTPException(409, "Refresh MiMo models from MiMo Providers")
+        if _mimo_endpoint_provider(ep_id)[0]:
+            raise HTTPException(409, "These models refresh automatically with the provider connection")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2570,9 +2596,12 @@ def setup_model_routes(model_discovery):
     ):
         """List all discovered models for an endpoint with hidden/visible state."""
         require_admin(request)
-        if ep_id == "mimo":
+        _is_mimo, _mimo_pid = _mimo_endpoint_provider(ep_id)
+        if _is_mimo:
             supervisor = getattr(request.app.state, "mimo_supervisor", None)
             models, _, _, _ = _mimo_catalog(supervisor, effective_user(request))
+            if _mimo_pid:
+                models = [m for m in models if m.split("/", 1)[0] == _mimo_pid]
             return [
                 {
                     "id": model_id,
@@ -2634,8 +2663,8 @@ def setup_model_routes(model_discovery):
         without clobbering the other.
         """
         require_admin(request)
-        if ep_id == "mimo":
-            raise HTTPException(409, "MiMo model visibility is managed by MiMo Providers")
+        if _mimo_endpoint_provider(ep_id)[0]:
+            raise HTTPException(409, "Model visibility for this provider is managed by its connection")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2710,12 +2739,16 @@ def setup_model_routes(model_discovery):
             model = settings.get("default_model", "")
             _fallbacks = settings.get("default_model_fallbacks") or []
 
-        if ep_id == "mimo":
+        _is_mimo, _mimo_pid = _mimo_endpoint_provider(ep_id)
+        if _is_mimo:
             _sup = getattr(request.app.state, "mimo_supervisor", None)
             # Chat-filtered catalog (same filter as the picker): a stale
             # configured default must never fall back to a TTS model or to
             # whatever provider happens to sort first in the raw handshake.
             _catalog, _catalog_base, _, _ = _mimo_catalog(_sup, _user)
+            if _mimo_pid:
+                _catalog = [m for m in _catalog if m.split("/", 1)[0] == _mimo_pid]
+                _catalog_base = [m for m in _catalog_base if m.split("/", 1)[0] == _mimo_pid]
             _allowed = _allowed_model_ids(request, _user)
             if _allowed is not None:
                 _catalog = [item for item in _catalog if item in _allowed]
@@ -2723,7 +2756,7 @@ def setup_model_routes(model_discovery):
             if not _catalog:
                 eligible_configured = model if _allowed is None or model in _allowed else ""
                 return {
-                    "endpoint_id": "mimo",
+                    "endpoint_id": ep_id,
                     "endpoint_url": "mimo://acp",
                     "model": eligible_configured,
                 }
@@ -2735,7 +2768,7 @@ def setup_model_routes(model_discovery):
                     (m for m in pool if m.rsplit("/", 1)[-1] in ("mimo-auto", "auto")),
                     pool[0],
                 )
-            return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
+            return {"endpoint_id": ep_id, "endpoint_url": "mimo://acp", "model": model}
 
         db = SessionLocal()
         try:
@@ -2806,8 +2839,8 @@ def setup_model_routes(model_discovery):
     @router.patch("/model-endpoints/{ep_id}")
     async def toggle_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
-        if ep_id == "mimo":
-            raise HTTPException(409, "MiMo is a read-only virtual endpoint; use MiMo Providers")
+        if _mimo_endpoint_provider(ep_id)[0]:
+            raise HTTPException(409, "This provider is managed through its connection in Added Models")
         # Optional JSON body for field-targeted updates. No body → toggle is_enabled (legacy behaviour).
         body: Dict[str, Any] = {}
         try:
@@ -2965,8 +2998,8 @@ def setup_model_routes(model_discovery):
     @router.delete("/model-endpoints/{ep_id}")
     def delete_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
-        if ep_id == "mimo":
-            raise HTTPException(409, "MiMo is a read-only virtual endpoint; use MiMo Providers")
+        if _mimo_endpoint_provider(ep_id)[0]:
+            raise HTTPException(409, "Disconnect this provider instead of deleting it")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
