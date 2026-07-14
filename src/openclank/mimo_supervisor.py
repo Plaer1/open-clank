@@ -222,6 +222,7 @@ class MimoSupervisor:
         self._runtime_home = runtime_home
         self._partitioned = partitioned
         self._inherit_host_providers = inherit_host_providers
+        self._provider_apis: dict[str, str] = {}
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Odysseus can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
@@ -306,6 +307,12 @@ class MimoSupervisor:
                     provider_config["provider"]
                 )
                 env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
+                # Remember each provider's API base so Settings can render
+                # these as ordinary endpoint rows (URL and all).
+                self._provider_apis = {
+                    pid: cfg.get("api", "")
+                    for pid, cfg in provider_config["provider"].items()
+                }
                 if provider_credentials:
                     provider_auth_fd, write_fd = os.pipe()
                     try:
@@ -629,6 +636,10 @@ class MimoSupervisor:
         """mimo's model catalog ({modelId, name} dicts) from the last handshake."""
         return list(self._bridge.available_models) if self._bridge else []
 
+    def provider_apis(self, owner: str | None = None) -> dict[str, str]:
+        """Injected provider id → API base URL (for Settings endpoint rows)."""
+        return dict(self._provider_apis)
+
     @property
     def grant_store(self):
         return self._grant_store
@@ -845,6 +856,15 @@ class MimoSupervisorPool:
                 if model_id:
                     merged[model_id] = model
         return list(merged.values())
+
+    def provider_apis(self, owner: str | None = None) -> dict[str, str]:
+        worker = self.worker_for_owner(owner) if owner else self._default_worker()
+        if worker:
+            return worker.provider_apis()
+        merged: dict[str, str] = {}
+        for item in self._workers.values():
+            merged.update(item.provider_apis())
+        return merged
 
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         return await (await self.for_owner(owner)).refresh_model_catalog()

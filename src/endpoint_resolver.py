@@ -447,7 +447,7 @@ def resolve_endpoint(
     if not ep_id:
         return fallback_url, fallback_model, fallback_headers
 
-    if ep_id == "mimo":
+    if ep_id == "mimo" or ep_id.startswith("mimo:"):
         return "mimo://acp", model or fallback_model, fallback_headers or {}
 
     db = SessionLocal()
@@ -502,7 +502,8 @@ def resolve_endpoint_by_id(
     """
     if not ep_id:
         return None
-    if ep_id == "mimo":
+    if ep_id == "mimo" or ep_id.startswith("mimo:"):
+        provider_prefix = ep_id.split(":", 1)[1] if ":" in ep_id else ""
         selected = (model or "").strip()
         try:
             from src.model_dispatch import get_mimo_supervisor
@@ -517,6 +518,11 @@ def resolve_endpoint_by_id(
                 for item in catalog
                 if item.get("modelId")
             ]
+            if provider_prefix:
+                available = [
+                    mid for mid in available
+                    if mid.split("/", 1)[0] == provider_prefix
+                ]
             if available:
                 if selected and selected not in available:
                     return None

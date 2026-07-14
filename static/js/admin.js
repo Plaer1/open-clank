@@ -535,25 +535,19 @@ async function loadEndpoints() {
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
               ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
               ${statusBadge}
-              ${readOnly ? '<span class="admin-badge">virtual · read-only</span>' : ''}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">${readOnly ? 'Click to view models' : 'Click to manage models'}</span>` : ''}
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
-              ${readOnly
-                ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>'
-                : `<button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button><button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>`}
+              ${ep.provider_row
+                ? `<button class="admin-btn-delete" data-adm-disconnect-provider="${esc(ep.provider_row)}" data-adm-provider-name="${esc(ep.name)}">Disconnect</button>`
+                : (readOnly
+                  ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>'
+                  : `<button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button><button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>`)}
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
           </div>
           <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
-          ${Array.isArray(ep.providers) && ep.providers.length ? `<div class="admin-ep-detail" style="display:flex;flex-wrap:wrap;gap:4px 10px;">${ep.providers.map(p => {
-            const label = esc(p.family || p.id);
-            if (p.served_by && p.served_by.endpoint_name) {
-              return `<span title="Configured in MiMo; “${esc(p.served_by.endpoint_name)}” serves these models directly, so MiMo's copy stands by.">${label}: <span style="opacity:0.55;">standing by — served by ${esc(p.served_by.endpoint_name)}</span></span>`;
-            }
-            return `<span>${label}: <span style="opacity:0.8;">${p.chat_models} chat model${p.chat_models === 1 ? '' : 's'} live</span></span>`;
-          }).join('')}</div>` : ''}
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });
@@ -597,6 +591,23 @@ async function loadEndpoints() {
         e.stopPropagation();
         document.querySelector('[data-settings-tab="added-models"]')?.click();
         document.getElementById('mimo-providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+    queryAll('[data-adm-disconnect-provider]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const pid = btn.dataset.admDisconnectProvider;
+        const name = btn.dataset.admProviderName || pid;
+        if (!window.confirm(`Disconnect ${name}? Its models leave the picker until you reconnect.`)) return;
+        btn.disabled = true;
+        try {
+          await checkedFetch(`/api/mimo/providers/${encodeURIComponent(pid)}`, { method: 'DELETE', credentials: 'same-origin' });
+        } catch (err) {
+          if (uiModule && uiModule.showToast) uiModule.showToast(`Disconnect failed: ${err.message}`, 2600);
+        } finally {
+          btn.disabled = false;
+          loadEndpoints();
+        }
       });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {

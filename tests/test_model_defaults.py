@@ -260,3 +260,35 @@ def test_get_default_chat_mimo_unconfigured_prefers_auto(monkeypatch):
     result = get_default_chat(request)
 
     assert result["model"] == "xiaomi/mimo-auto"
+
+
+def test_get_default_chat_provider_scoped_mimo_endpoint(monkeypatch):
+    """Per-provider Settings rows (mimo:<provider>) resolve like normal
+    endpoints: catalog scoped to that provider, id echoed back."""
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
+        "default_endpoint_id": "mimo:xiaomi",
+        "default_model": "",
+    })
+    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
+
+    supervisor = MagicMock()
+    supervisor.available_models = lambda owner=None: [
+        {"modelId": "deepseek/deepseek-v4-flash"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "xiaomi/mimo-auto"},
+    ]
+
+    fake_auth_manager = MagicMock()
+    fake_auth_manager.is_admin = lambda user: True
+    fake_auth_manager.get_privileges = lambda user: {}
+
+    router = model_routes.setup_model_routes(model_discovery=None)
+    get_default_chat = _get_default_chat_route(router)
+    request = _make_request(user="e", auth_manager=fake_auth_manager)
+    request.app.state.mimo_supervisor = supervisor
+
+    result = get_default_chat(request)
+
+    assert result["endpoint_id"] == "mimo:xiaomi"
+    assert result["endpoint_url"] == "mimo://acp"
+    assert result["model"] == "xiaomi/mimo-auto"
