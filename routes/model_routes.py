@@ -1756,7 +1756,7 @@ def setup_model_routes(model_discovery):
                     capabilities={"chat": True, "tools": True, "vision": None},
                 ),
                 "endpoint_id": "mimo",
-                "endpoint_name": "MiMo (agent)",
+                "endpoint_name": "MiMo runtime",
                 "category": "local",
                 "endpoint_kind": "local",
                 "model_type": "llm",
@@ -2190,7 +2190,7 @@ def setup_model_routes(model_discovery):
                 _mimo_displays = _mimo_display_names(_base, _variants)
                 results.append({
                     "id": "mimo",
-                    "name": "MiMo (agent)",
+                    "name": "MiMo runtime",
                     "base_url": "mimo://acp",
                     "has_key": False,
                     "api_key_fingerprint": None,

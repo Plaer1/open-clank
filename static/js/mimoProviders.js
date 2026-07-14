@@ -240,7 +240,7 @@ export async function load() {
   try {
     const data = await request('');
     providers = Array.isArray(data.providers) ? data.providers : [];
-    setStatus(`${providers.length} native providers · credentials belong to MiMo (agent)`);
+    setStatus(`${providers.length} native providers · credentials live in the MiMo runtime`);
     render();
   } catch (error) {
     providers = [];
