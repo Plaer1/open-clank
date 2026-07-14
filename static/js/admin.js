@@ -547,6 +547,13 @@ async function loadEndpoints() {
             </div>
           </div>
           <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
+          ${Array.isArray(ep.providers) && ep.providers.length ? `<div class="admin-ep-detail" style="display:flex;flex-wrap:wrap;gap:4px 10px;">${ep.providers.map(p => {
+            const label = esc(p.family || p.id);
+            if (p.served_by && p.served_by.endpoint_name) {
+              return `<span title="Configured in MiMo; “${esc(p.served_by.endpoint_name)}” serves these models directly, so MiMo's copy stands by.">${label}: <span style="opacity:0.55;">standing by — served by ${esc(p.served_by.endpoint_name)}</span></span>`;
+            }
+            return `<span>${label}: <span style="opacity:0.8;">${p.chat_models} chat model${p.chat_models === 1 ? '' : 's'} live</span></span>`;
+          }).join('')}</div>` : ''}
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });

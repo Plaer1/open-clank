@@ -74,6 +74,10 @@ async def test_list_sanitizes_native_provider_payload(monkeypatch):
             {"index": 0, "type": "oauth", "label": "ChatGPT Plus"},
             {"index": 1, "type": "api", "label": "API key"},
         ],
+        "family": None,
+        "chat_models": 0,
+        "active": False,
+        "served_by": None,
     }]
     assert "models" not in result["providers"][0]
 

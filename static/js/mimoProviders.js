@@ -204,8 +204,18 @@ function render() {
   list.replaceChildren();
   providers.filter(provider => !query || `${provider.name} ${provider.id}`.toLowerCase().includes(query)).forEach(provider => {
     const card = node('div', { class: 'admin-card' });
-    const title = node('h2', {}, provider.name);
-    const status = node('span', { class: 'admin-toggle-sub' }, provider.connected ? 'Connected' : provider.id);
+    const title = node('h2', {}, provider.family ? `${provider.name} — serves “${provider.family}” models` : provider.name);
+    let statusText = provider.id;
+    if (provider.connected) {
+      statusText = 'Connected';
+      if (provider.chat_models) statusText += ` · ${provider.chat_models} chat model${provider.chat_models === 1 ? '' : 's'}`;
+      if (provider.served_by && provider.served_by.endpoint_name) {
+        statusText += ` · standing by — “${provider.served_by.endpoint_name}” serves these models directly`;
+      } else if (provider.active) {
+        statusText += ' · live in the model picker';
+      }
+    }
+    const status = node('span', { class: 'admin-toggle-sub' }, statusText);
     const actions = node('div', { class: 'settings-row' });
     if (provider.connected) {
       const remove = node('button', { type: 'button', class: 'btn secondary' }, 'Disconnect');
