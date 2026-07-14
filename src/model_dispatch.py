@@ -87,6 +87,9 @@ async def stream_chat_target(
 
     from src.llm_core import stream_llm_with_fallback
 
+    # ACP-only concepts stop at the transport fork: the HTTP leg's stream_llm
+    # has no turn envelope and must not receive one.
+    kwargs.pop("turn_envelope", None)
     async for chunk in stream_llm_with_fallback(
         _validated_candidates(target, fallbacks),
         messages,
@@ -125,6 +128,8 @@ async def stream_agent_target(
 
     from src.agent_loop import stream_agent_loop
 
+    # ACP-only concepts stop at the transport fork (see stream_chat_target).
+    kwargs.pop("turn_envelope", None)
     async for chunk in stream_agent_loop(
         target.endpoint_url,
         target.model_id,
