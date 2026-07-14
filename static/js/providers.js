@@ -1,6 +1,7 @@
 // AI provider logo SVGs — regex-based matching for self-hosted model names
 // Uses official logos from Simple Icons where available, custom minimal SVGs otherwise
 // All SVGs use viewBox="0 0 24 24" fill="currentColor"
+import { PROVIDER_SPRITE_IDS, PROVIDER_SPRITE_URL } from './providerSprite.js';
 
 const _PROVIDERS = [
   // Ollama
@@ -94,6 +95,22 @@ export function providerLogo(modelId) {
   if (!modelId) return null;
   for (const [re, svg] of _PROVIDERS) {
     if (re.test(modelId)) return svg;
+  }
+  return spriteLogo(modelId);
+}
+
+// Fallback: the vendored provider-icon sprite (98 providers). Matches the
+// provider prefix of "provider/model" ids, then the whole id, then a
+// lowercased name — covers providers the inline list above never knew
+// (xiaomi, zhipu, stepfun, ...).
+export function spriteLogo(idOrName) {
+  if (!idOrName) return null;
+  const raw = String(idOrName).toLowerCase();
+  const candidates = [raw.includes('/') ? raw.split('/')[0] : raw, raw.replace(/\s+/g, '-')];
+  for (const candidate of candidates) {
+    if (PROVIDER_SPRITE_IDS.has(candidate)) {
+      return `<svg viewBox="0 0 24 24" fill="currentColor"><use href="${PROVIDER_SPRITE_URL}#${candidate}" width="24" height="24"/></svg>`;
+    }
   }
   return null;
 }

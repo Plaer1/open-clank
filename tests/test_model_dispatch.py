@@ -1117,3 +1117,72 @@ async def test_http_transport_drops_acp_only_turn_envelope(monkeypatch):
     ):
         pass
     assert "turn_envelope" not in captured
+
+
+def _auth_sup(module, tmp_path, monkeypatch, stored=None, stored_at=0.0):
+    sup = module.MimoSupervisor(None)
+    sup._mimocode_home = str(tmp_path / "mimocode")
+    sup._owner = "e"
+    written = {}
+    monkeypatch.setattr(module, "_load_stored_auth", lambda owner: (stored, stored_at))
+    monkeypatch.setattr(module, "_store_auth", lambda owner, payload: written.update({owner: payload}))
+    return sup, written
+
+
+def test_auth_store_seeded_from_db_when_runtime_home_is_fresh(tmp_path, monkeypatch):
+    """Wipe data/mimocode entirely: provider connections come back from app.db."""
+    import src.openclank.mimo_supervisor as module
+
+    payload = json.dumps({"openai": {"type": "oauth"}})
+    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=payload, stored_at=9e12)
+
+    sup._reconcile_auth_store()
+
+    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
+    assert auth_file.read_text() == payload
+    assert (auth_file.stat().st_mode & 0o777) == 0o600
+    assert written == {}
+
+
+def test_auth_store_adopts_legacy_file_into_db(tmp_path, monkeypatch):
+    import src.openclank.mimo_supervisor as module
+
+    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=None)
+    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text(json.dumps({"xiaomi": {"type": "api"}}))
+
+    sup._reconcile_auth_store()
+
+    assert written == {"e": json.dumps({"xiaomi": {"type": "api"}})}
+
+
+def test_auth_store_fresher_file_wins_and_mirrors_back(tmp_path, monkeypatch):
+    """OAuth refresh written by the child after the last mirror must not be
+    clobbered by a stale DB copy."""
+    import src.openclank.mimo_supervisor as module
+
+    stale = json.dumps({"openai": {"type": "oauth", "token": "old"}})
+    fresh = json.dumps({"openai": {"type": "oauth", "token": "new"}})
+    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=stale, stored_at=1.0)
+    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text(fresh)
+
+    sup._reconcile_auth_store()
+
+    assert auth_file.read_text() == fresh
+    assert written == {"e": fresh}
+
+
+def test_sync_auth_to_db_mirrors_changes(tmp_path, monkeypatch):
+    import src.openclank.mimo_supervisor as module
+
+    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored="{}")
+    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text(json.dumps({"deepseek": {"type": "api"}}))
+
+    sup.sync_auth_to_db()
+
+    assert written == {"e": json.dumps({"deepseek": {"type": "api"}})}
