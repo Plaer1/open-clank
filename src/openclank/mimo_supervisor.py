@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 from pathlib import Path
 from typing import Optional
@@ -320,6 +321,12 @@ class MimoSupervisor:
                 "stderr": asyncio.subprocess.PIPE,
                 "env": env,
                 "cwd": "/home/e",
+                # Detach from the terminal's process group: Ctrl+C must reach
+                # only the server. Otherwise the child dies on the operator's
+                # SIGINT before the shutdown event runs, and the health
+                # monitor "helpfully" respawns it mid-shutdown, blocking exit.
+                # Shutdown is owned by stop(): stdin EOF, then kill.
+                "start_new_session": True,
             }
             if provider_auth_fd is not None:
                 spawn_options["pass_fds"] = (provider_auth_fd,)
@@ -437,7 +444,7 @@ class MimoSupervisor:
                     break
                 if self._proc.returncode is not None:
                     logger.warning("mimo child exited (code %d)", self._proc.returncode)
-                    await self._handle_crash()
+                    await self._handle_crash(self._proc.returncode)
                     return
                 if self._client and self._client.is_closed:
                     logger.warning("ACP client closed (child likely crashed)")
@@ -446,10 +453,17 @@ class MimoSupervisor:
         except asyncio.CancelledError:
             pass
 
-    async def _handle_crash(self) -> None:
+    async def _handle_crash(self, returncode: int | None = None) -> None:
         """Handle child crash: fail in-flight requests, restart with backoff, reconcile."""
         if self._stopping:
             return
+        # SIGINT/SIGTERM death usually means host shutdown (systemd kills the
+        # whole cgroup before our shutdown event runs). Give stop() a moment
+        # to raise the flag before treating it as a crash worth restarting.
+        if returncode in (-signal.SIGINT, -signal.SIGTERM):
+            await asyncio.sleep(2.0)
+            if self._stopping:
+                return
 
         # Fail all pending requests on the old client
         if self._client:
