@@ -344,10 +344,14 @@ function _initModelPickerDropdown() {
     let slug = slash > 0 ? mid.substring(0, slash) : 'other';
     return _PROVIDER_ALIAS[slug] || slug;
   }
-  // Group label: catalog-boundary rows carry a display-ready `family` from the
-  // backend; everything else falls back to slug-derived provider names.
+  // Group label: catalog-boundary rows carry a display-ready `family` from
+  // the backend; prefixed ids ("provider/model") use the provider name; bare
+  // ids (direct endpoints, local servers) group under their endpoint's name
+  // instead of all piling into "Other".
   function _groupLabel(m) {
-    return m.family || _providerDisplayName(_providerSlug(m.mid));
+    if (m.family) return m.family;
+    if (m.mid.indexOf('/') > 0) return _providerDisplayName(_providerSlug(m.mid));
+    return m.epName || 'Other';
   }
   const _collapsedProviders = new Set(_loadList('odysseus-model-collapsed'));
   let _justExpandedProvider = null;
