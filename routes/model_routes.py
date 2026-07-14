@@ -995,10 +995,19 @@ def _classify_endpoint(base_url: str, endpoint_kind: str = "auto") -> str:
 
 def _effective_endpoint_kind(ep: Any, base_url: str) -> str:
     """Return explicit kind, with a legacy proxy heuristic for keyed /v1 URLs."""
+    from src.model_context import is_first_party_api_host
+
     kind = _endpoint_kind(ep)
     if kind != "auto":
         return kind
-    if getattr(ep, "api_key", None) and not _is_ollama_base(base_url):
+    if (
+        getattr(ep, "api_key", None)
+        and not _is_ollama_base(base_url)
+        # A vendor's own API is not a multi-provider gateway, no matter how
+        # its URL is shaped (api.deepseek.com/v1 was getting a PROXY badge,
+        # manual refresh mode, and degraded context discovery).
+        and not is_first_party_api_host(base_url)
+    ):
         try:
             path = (urlparse(base_url).path or "").rstrip("/")
             if path.endswith("/v1") or "/openai" in path:
