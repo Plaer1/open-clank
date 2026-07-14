@@ -1757,8 +1757,11 @@ def setup_model_routes(model_discovery):
                 ),
                 "endpoint_id": "mimo",
                 "endpoint_name": "MiMo runtime",
-                "category": "local",
-                "endpoint_kind": "local",
+                # The runtime aggregates cloud provider APIs — classifying it
+                # "local" put it in the Local endpoints section with a LOCAL
+                # badge. "auto" kind renders no badge at all.
+                "category": "api",
+                "endpoint_kind": "auto",
                 "model_type": "llm",
                 "virtual": True,
                 "read_only": True,
@@ -2217,8 +2220,8 @@ def setup_model_routes(model_discovery):
                     "ping_error": None,
                     "model_type": "llm",
                     "supports_tools": True,
-                    "endpoint_kind": "local",
-                    "category": "local",
+                    "endpoint_kind": "auto",
+                    "category": "api",
                     "model_refresh_mode": "manual",
                     "model_refresh_interval": None,
                     "model_refresh_timeout": None,
