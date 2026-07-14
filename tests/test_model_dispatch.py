@@ -469,7 +469,10 @@ def test_openclaw_provider_import_maps_models_without_embedding_keys(tmp_path, c
     config, credentials = module._load_openclaw_providers(source)
 
     assert set(config["provider"]) == {"xiaomi", "deepseek"}
-    assert set(config["provider"]["xiaomi"]["models"]) == {"mimo-test"}
+    # mimo-auto is synthesized: the router's per-request routing alias is
+    # never in operator configs but must be selectable.
+    assert set(config["provider"]["xiaomi"]["models"]) == {"mimo-test", "mimo-auto"}
+    assert config["provider"]["xiaomi"]["models"]["mimo-auto"]["name"] == "MiMo Auto"
     assert set(config["provider"]["deepseek"]["models"]) == {"deepseek-test"}
     assert config["provider"]["xiaomi"]["npm"] == "@ai-sdk/openai-compatible"
     assert config["provider"]["deepseek"]["npm"] == "@ai-sdk/anthropic"
