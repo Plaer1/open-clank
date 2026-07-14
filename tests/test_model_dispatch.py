@@ -1070,3 +1070,47 @@ async def test_signal_death_grace_lets_shutdown_win_over_restart(monkeypatch):
     monkeypatch.setattr(module.asyncio, "sleep", _instant_sleep)
     await sup2._handle_crash(-_signal.SIGTERM)
     assert restarts2 == [True], "external kill without shutdown should self-heal"
+
+
+async def test_http_transport_drops_acp_only_turn_envelope(monkeypatch):
+    """Regression: chat passes turn_envelope for the ACP leg; the HTTP leg
+    (direct endpoints, e.g. deepseek post-dedup) must consume it at the
+    transport fork instead of exploding stream_llm with a 500."""
+    import src.model_dispatch as module
+    from src.endpoint_resolver import ResolvedModelTarget
+
+    captured = {}
+
+    async def fake_stream(candidates, messages, **kwargs):
+        captured.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    async def fake_agent_stream(url, model, messages, **kwargs):
+        captured.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.llm_core as llm_core
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(llm_core, "stream_llm_with_fallback", fake_stream)
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_agent_stream)
+
+    target = ResolvedModelTarget(
+        transport="http",
+        endpoint_url="https://api.deepseek.com/v1/chat/completions",
+        model_id="deepseek-v4-flash",
+    )
+
+    async for _ in module.stream_chat_target(
+        target, [{"role": "user", "content": "hi"}],
+        session_id="s1", turn_envelope={"owner": "e"},
+    ):
+        pass
+    assert "turn_envelope" not in captured
+
+    captured.clear()
+    async for _ in module.stream_agent_target(
+        target, [{"role": "user", "content": "hi"}],
+        session_id="s1", turn_envelope={"owner": "e"},
+    ):
+        pass
+    assert "turn_envelope" not in captured
