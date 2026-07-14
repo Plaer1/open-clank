@@ -76,7 +76,14 @@ class FrankenmemoryProvider(MemoryProvider):
                     args=[],
                     env={**os.environ, **(self._env or {})},
                 )
-                read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
+                # fm-mcp stderr goes to a log file, never the operator's
+                # terminal — inherited stderr kept printing after server exit.
+                from src.constants import DATA_DIR
+                _errlog_path = os.path.join(DATA_DIR, "logs", "fm-mcp.stderr.log")
+                os.makedirs(os.path.dirname(_errlog_path), exist_ok=True)
+                errlog = open(_errlog_path, "a", encoding="utf-8")
+                stack.callback(errlog.close)
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 await session.initialize()
                 health = await session.call_tool("memory_quality", {"rebuild_graph_fts": False})

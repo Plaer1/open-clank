@@ -17,6 +17,15 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
+
+def _mcp_child_stderr_log(server_id: str):
+    from src.constants import DATA_DIR
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(server_id))[:64] or "server"
+    path = os.path.join(DATA_DIR, "logs", f"mcp-{safe}.stderr.log")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, "a", encoding="utf-8")
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
@@ -197,7 +206,11 @@ class McpManager:
             registered = False
 
             try:
-                transport = await stack.enter_async_context(stdio_client(server_params))
+                # Child stderr goes to a log file, never the operator's
+                # terminal — inherited stderr kept spamming after exit.
+                errlog = _mcp_child_stderr_log(server_id)
+                stack.callback(errlog.close)
+                transport = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
 
