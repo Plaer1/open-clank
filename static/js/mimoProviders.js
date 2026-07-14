@@ -250,7 +250,7 @@ export async function load() {
 }
 
 export function init(options = {}) {
-  root = document.querySelector('[data-settings-panel="mimo-providers"]');
+  root = document.getElementById('mimo-providers-section');
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
   onCatalogChanged = options.onCatalogChanged || onCatalogChanged;

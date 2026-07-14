@@ -1412,10 +1412,6 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             <span>Added Models</span>
           </button>
-          <button class="settings-nav-item" data-settings-tab="mimo-providers">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            <span>MiMo Providers</span>
-          </button>
           <button class="settings-nav-item" data-settings-tab="ai">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/></svg>
             <span>AI Defaults</span>
@@ -1473,26 +1469,6 @@
         </div>
         <div class="settings-panels">
 
-        <!-- ═══ MIMO PROVIDERS ═══ -->
-        <div data-settings-panel="mimo-providers" class="hidden">
-          <div class="admin-card">
-            <h2>MiMo Providers</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:10px">Connect the native providers served by the <strong>MiMo runtime</strong>. Credentials stay in MiMo's isolated MIMOCODE_HOME and never duplicate a direct Odysseus endpoint — direct endpoints always win.</div>
-            <div class="settings-row">
-              <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search providers…" autocomplete="off">
-              <button id="mimo-provider-refresh" type="button" class="btn secondary">Refresh</button>
-            </div>
-            <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
-          </div>
-          <div id="mimo-provider-flow"></div>
-          <div id="mimo-provider-list"></div>
-          <div class="admin-card" style="margin-top:12px">
-            <h2>Persistent permissions</h2>
-            <div class="admin-toggle-sub">Owner/session/workspace-scoped MiMo grants. One-time approvals are never stored.</div>
-            <div id="mimo-permission-grants-status" role="status" aria-live="polite"></div>
-            <div id="mimo-permission-grants"></div>
-          </div>
-        </div>
 
         <!-- ═══ AI TAB ═══ -->
 
@@ -2317,6 +2293,25 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
               </div>
               <div id="adm-epList-api"><div class="admin-empty">No API endpoints yet.</div></div>
+            </div>
+          </div>
+          <div id="mimo-providers-section" class="admin-only">
+            <div class="admin-card" style="margin-top:12px">
+              <h2>Connect a provider</h2>
+              <div class="admin-toggle-sub" style="margin-bottom:10px">Sign in or add an API key for built-in providers. A connection never duplicates an endpoint you've added above — direct endpoints always win.</div>
+              <div class="settings-row">
+                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search providers…" autocomplete="off">
+                <button id="mimo-provider-refresh" type="button" class="btn secondary">Refresh</button>
+              </div>
+              <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+            </div>
+            <div id="mimo-provider-flow"></div>
+            <div id="mimo-provider-list"></div>
+            <div class="admin-card" style="margin-top:12px">
+              <h2>Persistent permissions</h2>
+              <div class="admin-toggle-sub">Owner/session/workspace-scoped agent grants. One-time approvals are never stored.</div>
+              <div id="mimo-permission-grants-status" role="status" aria-live="polite"></div>
+              <div id="mimo-permission-grants"></div>
             </div>
           </div>
         </div>
