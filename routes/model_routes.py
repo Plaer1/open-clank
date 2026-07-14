@@ -2728,7 +2728,13 @@ def setup_model_routes(model_discovery):
                     "model": eligible_configured,
                 }
             if not model or model not in _catalog:
-                model = (_catalog_base or _catalog)[0]
+                # Nothing (valid) configured: prefer the router's auto mode —
+                # it picks a model per request — before any specific model.
+                pool = _catalog_base or _catalog
+                model = next(
+                    (m for m in pool if m.rsplit("/", 1)[-1] in ("mimo-auto", "auto")),
+                    pool[0],
+                )
             return {"endpoint_id": "mimo", "endpoint_url": "mimo://acp", "model": model}
 
         db = SessionLocal()

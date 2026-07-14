@@ -414,6 +414,33 @@ function _initModelPickerDropdown() {
       // a redundant "offline" pill on top of that just added clutter.
       // (Class kept on `row` so the opacity rule still applies; the text
       // badge is gone.)
+      // Thinking-level chips: a base model whose effort tiers exist as
+      // catalog variants gets them inline — the row name picks the model's
+      // default; a chip picks that tier. This replaced the old UX where
+      // tiers were only reachable as separate "(low)" rows.
+      const _tiers = m.family && !m.extra
+        ? all.filter(v => v.extra && v.mid.startsWith(m.mid + '/'))
+        : [];
+      if (_tiers.length) {
+        const chips = document.createElement('span');
+        chips.className = 'mp-tier-chips';
+        chips.style.cssText = 'display:inline-flex;gap:3px;margin-left:6px;flex-shrink:0;';
+        _tiers.forEach(v => {
+          const tier = v.mid.slice(m.mid.length + 1);
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'mp-tier-chip';
+          chip.textContent = tier;
+          chip.title = `${m.display} — ${tier} thinking`;
+          chip.style.cssText = 'font-size:9px;padding:1px 5px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--fg);opacity:0.65;cursor:pointer;line-height:1.4;';
+          chip.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _pick(v);
+          });
+          chips.appendChild(chip);
+        });
+        row.appendChild(chips);
+      }
       const epSpan = document.createElement('span');
       epSpan.className = 'model-switch-ep';
       // Don't show endpoint name if it matches the model name (local self-hosted)

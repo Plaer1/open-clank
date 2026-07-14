@@ -230,3 +230,33 @@ def test_get_default_chat_mimo_valid_model_kept(monkeypatch):
     result = get_default_chat(request)
 
     assert result["model"] == "xiaomi/mimo-v2.5-pro"
+
+
+def test_get_default_chat_mimo_unconfigured_prefers_auto(monkeypatch):
+    """e's rule: when nothing (valid) is configured, fall back to the
+    router's auto mode before any specific model."""
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
+        "default_endpoint_id": "mimo",
+        "default_model": "",
+    })
+    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
+
+    supervisor = MagicMock()
+    supervisor.available_models = lambda owner=None: [
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "xiaomi/mimo-auto"},
+        {"modelId": "deepseek/deepseek-v4-flash"},
+    ]
+
+    fake_auth_manager = MagicMock()
+    fake_auth_manager.is_admin = lambda user: True
+    fake_auth_manager.get_privileges = lambda user: {}
+
+    router = model_routes.setup_model_routes(model_discovery=None)
+    get_default_chat = _get_default_chat_route(router)
+    request = _make_request(user="e", auth_manager=fake_auth_manager)
+    request.app.state.mimo_supervisor = supervisor
+
+    result = get_default_chat(request)
+
+    assert result["model"] == "xiaomi/mimo-auto"

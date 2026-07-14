@@ -132,6 +132,15 @@ def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, 
             models[model_id] = item
         if not models:
             continue
+        # MiMo Router ships a built-in routing alias that picks the model per
+        # request ("auto" mode). It's absent from operator configs because it
+        # isn't a real model row; synthesize it so users can turn it on.
+        if provider_id == "xiaomi" and not any("auto" in mid for mid in models):
+            models["mimo-auto"] = {
+                "id": "mimo-auto",
+                "name": "MiMo Auto",
+                "provider": {"npm": adapter, "api": base_url},
+            }
 
         options = {"baseURL": base_url}
         timeout = provider.get("timeoutSeconds")
