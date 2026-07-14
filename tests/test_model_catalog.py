@@ -10,6 +10,7 @@ def test_catalog_keeps_state_capabilities_and_legacy_projection_metadata():
         primary_ids=["openai/gpt-5"],
         extra_ids=["openai/gpt-5/low"],
         entitled=True,
+        families={"openai/gpt-5": "OpenAI"},
         capabilities={"chat": True, "tools": True, "vision": None},
     )
 
@@ -19,6 +20,7 @@ def test_catalog_keeps_state_capabilities_and_legacy_projection_metadata():
             "endpoint_url": "mimo://acp",
             "model_id": "openai/gpt-5",
             "display_name": "openai/gpt-5",
+            "family": "OpenAI",
             "discovered": True,
             "entitled": True,
             "compatible": True,
@@ -34,6 +36,7 @@ def test_catalog_keeps_state_capabilities_and_legacy_projection_metadata():
             "endpoint_url": "mimo://acp",
             "model_id": "openai/gpt-5/low",
             "display_name": "openai/gpt-5/low",
+            "family": None,
             "discovered": True,
             "entitled": True,
             "compatible": True,

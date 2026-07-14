@@ -17,6 +17,7 @@ def build_model_catalog(
     stale: bool = False,
     hidden_ids: Iterable[str] = (),
     display_names: Optional[Mapping[str, str]] = None,
+    families: Optional[Mapping[str, str]] = None,
     capabilities: Optional[dict[str, Optional[bool]]] = None,
     compatibility: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
@@ -29,6 +30,7 @@ def build_model_catalog(
     extras = set(extra_ids)
     hidden = set(hidden_ids)
     displays = dict(display_names or {})
+    family_map = dict(families or {})
     caps = dict(capabilities or {})
     compat = dict(compatibility or {})
     result = []
@@ -44,6 +46,7 @@ def build_model_catalog(
             "endpoint_url": endpoint_url,
             "model_id": model_id,
             "display_name": displays.get(model_id, model_id),
+            "family": family_map.get(model_id),
             "discovered": bool(discovered),
             "entitled": entitled,
             "compatible": is_compatible,

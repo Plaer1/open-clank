@@ -8,6 +8,7 @@ export function catalogEntries(item) {
       .map(entry => ({
         mid: entry.model_id,
         displayName: entry.display_name || entry.model_id,
+        family: entry.family || null,
         extra: entry.curated === false,
         stale: entry.stale === true,
         entitled: entry.entitled,
