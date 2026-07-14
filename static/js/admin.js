@@ -541,7 +541,7 @@ async function loadEndpoints() {
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
               ${readOnly
-                ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Configure providers</button>'
+                ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>'
                 : `<button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button><button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>`}
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
@@ -595,7 +595,8 @@ async function loadEndpoints() {
     queryAll('[data-adm-open-mimo-providers]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        document.querySelector('[data-settings-tab="mimo-providers"]')?.click();
+        document.querySelector('[data-settings-tab="added-models"]')?.click();
+        document.getElementById('mimo-providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {
@@ -690,10 +691,11 @@ async function loadEndpoints() {
             const sortedModels = sortModelObjects(models);
             const warningHtml = warning ? `<div class="admin-error" style="font-size:11px;margin:6px 0;">${esc(warning)}</div>` : '';
             if (readOnly) {
-              panel.innerHTML = `<div class="mcp-tools-header"><span>Models</span><span class="mcp-tools-count">${sortedModels.length} available</span></div>${warningHtml}<div class="mcp-tools-list">${sortedModels.map(m => `<div class="adm-model-row" title="${esc(m.id)}"><span>${esc(m.display)}</span></div>`).join('')}</div><button type="button" class="admin-btn-sm" data-adm-open-mimo-providers>Configure MiMo providers</button>`;
+              panel.innerHTML = `<div class="mcp-tools-header"><span>Models</span><span class="mcp-tools-count">${sortedModels.length} available</span></div>${warningHtml}<div class="mcp-tools-list">${sortedModels.map(m => `<div class="adm-model-row" title="${esc(m.id)}"><span>${esc(m.display)}</span></div>`).join('')}</div><button type="button" class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>`;
               panel.querySelector('[data-adm-open-mimo-providers]')?.addEventListener('click', (event) => {
                 event.stopPropagation();
-                document.querySelector('[data-settings-tab="mimo-providers"]')?.click();
+                document.querySelector('[data-settings-tab="added-models"]')?.click();
+                document.getElementById('mimo-providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
               });
               return;
             }

@@ -35,7 +35,6 @@ function safeRasterDataUrl(raw) {
 const SETTINGS_OWNERSHIP = Object.freeze({
   services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
   'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
-  'mimo-providers': { scope: 'sidecar-native', api: '/api/mimo/providers', consumer: 'owner-partitioned MiMo runtime', admin: true },
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
   search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
   integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
@@ -107,8 +106,8 @@ function initTabs() {
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
       if (tab === 'ai') refreshAiModelEndpoints();
-      if (tab === 'mimo-providers') mimoProviders.load();
-      if (tab === 'mimo-providers') loadPermissionGrants();
+      if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
+      if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
     });
   });
 }
@@ -5872,8 +5871,8 @@ export function open(tab) {
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
   if (activeTab === 'ai') refreshAiModelEndpoints();
-  if (activeTab === 'mimo-providers') mimoProviders.load();
-  if (activeTab === 'mimo-providers') loadPermissionGrants();
+  if (activeTab === 'added-models' && window._isAdmin) mimoProviders.load();
+  if (activeTab === 'added-models' && window._isAdmin) loadPermissionGrants();
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }

@@ -1763,7 +1763,7 @@ def setup_model_routes(model_discovery):
                 "virtual": True,
                 "read_only": True,
                 "actions": ["configure_providers"],
-                "settings_tab": "mimo-providers",
+                "settings_tab": "added-models",
             })
         result = _filter_catalog_for_allowed_models(result, _allowed_models)
         _models_cache[_cache_key] = {"data": result, "time": now}
@@ -2225,7 +2225,7 @@ def setup_model_routes(model_discovery):
                     "virtual": True,
                     "read_only": True,
                     "actions": ["configure_providers"],
-                    "settings_tab": "mimo-providers",
+                    "settings_tab": "added-models",
                     "providers": _providers_breakdown,
                 })
             return results
