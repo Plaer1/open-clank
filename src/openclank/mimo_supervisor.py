@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import socket
+from datetime import timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -162,6 +163,38 @@ def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, 
     return ({"provider": providers} if providers else {}), credentials
 
 
+def _load_stored_auth(owner: str) -> tuple[str | None, float]:
+    """(payload_json, updated_at_epoch) for an owner's provider credentials."""
+    from core.database import SessionLocal, MimoAuthStore
+
+    db = SessionLocal()
+    try:
+        row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == (owner or "")).first()
+        if row is None or not row.payload:
+            return None, 0.0
+        updated = getattr(row, "updated_at", None)
+        epoch = updated.replace(tzinfo=timezone.utc).timestamp() if updated else 0.0
+        return row.payload, epoch
+    finally:
+        db.close()
+
+
+def _store_auth(owner: str, payload: str) -> None:
+    from core.database import SessionLocal, MimoAuthStore
+
+    db = SessionLocal()
+    try:
+        row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == (owner or "")).first()
+        if row is None:
+            row = MimoAuthStore(owner=owner or "", payload=payload)
+            db.add(row)
+        else:
+            row.payload = payload
+        db.commit()
+    finally:
+        db.close()
+
+
 def _select_host_provider_owner(
     admin_owners: list[str],
     explicit_owner: str = "",
@@ -223,6 +256,7 @@ class MimoSupervisor:
         self._partitioned = partitioned
         self._inherit_host_providers = inherit_host_providers
         self._provider_apis: dict[str, str] = {}
+        self._mimocode_home: str | None = None
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Odysseus can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
@@ -299,6 +333,8 @@ class MimoSupervisor:
             else:
                 _data_dir = os.environ.get("ODYSSEUS_DATA_DIR", str(REPO_ROOT / "data"))
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
+        self._mimocode_home = env["MIMOCODE_HOME"]
+        self._reconcile_auth_store()
         if self._inherit_host_providers:
             provider_config, provider_credentials = _load_openclaw_providers()
             if provider_config:
@@ -625,6 +661,9 @@ class MimoSupervisor:
             proc.kill()
             await proc.wait()
 
+        # Child is down; its auth store is final — capture OAuth refreshes.
+        self.sync_auth_to_db()
+
         if self._stderr_task and not self._stderr_task.done():
             self._stderr_task.cancel()
             try:
@@ -639,6 +678,63 @@ class MimoSupervisor:
     def provider_apis(self, owner: str | None = None) -> dict[str, str]:
         """Injected provider id → API base URL (for Settings endpoint rows)."""
         return dict(self._provider_apis)
+
+    def _auth_file(self) -> Path | None:
+        home = getattr(self, "_mimocode_home", None)
+        return Path(home) / "data" / "auth.json" if home else None
+
+    def _reconcile_auth_store(self) -> None:
+        """Sync provider credentials between app.db (source of truth) and the
+        runtime's on-disk auth.json (regenerable cache), newest side wins.
+
+        Runs before every spawn: seeds a fresh/wiped runtime home from the DB;
+        adopts a file the DB has never seen (legacy stores); and recovers
+        OAuth refreshes written to the file after the last mirror."""
+        path = self._auth_file()
+        if path is None:
+            return
+        try:
+            stored, stored_at = _load_stored_auth(self._owner)
+        except Exception as exc:
+            logger.warning("provider credential store unavailable: %s", exc)
+            return
+        file_text: str | None = None
+        file_at = 0.0
+        try:
+            if path.is_file():
+                file_text = path.read_text(encoding="utf-8")
+                json.loads(file_text)
+                file_at = path.stat().st_mtime
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("unreadable runtime auth store %s: %s", path, exc)
+            file_text = None
+        try:
+            if file_text and (stored is None or file_at > stored_at):
+                if file_text != stored:
+                    _store_auth(self._owner, file_text)
+                    logger.info("provider credentials mirrored to app.db for owner %r", self._owner)
+            elif stored and stored != file_text:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(stored)
+                logger.info("provider credentials restored from app.db for owner %r", self._owner)
+        except Exception as exc:
+            logger.warning("provider credential reconcile failed: %s", exc)
+
+    def sync_auth_to_db(self) -> None:
+        """Mirror the runtime's auth store into app.db (after mutations)."""
+        path = self._auth_file()
+        if path is None or not path.is_file():
+            return
+        try:
+            file_text = path.read_text(encoding="utf-8")
+            json.loads(file_text)
+            stored, _ = _load_stored_auth(self._owner)
+            if file_text != stored:
+                _store_auth(self._owner, file_text)
+        except Exception as exc:
+            logger.warning("provider credential mirror failed: %s", exc)
 
     @property
     def grant_store(self):
@@ -979,6 +1075,19 @@ class MimoSupervisorPool:
             self._initial_owner = new_key
         if self._host_provider_owner == old_key:
             self._host_provider_owner = new_key
+        try:
+            from core.database import SessionLocal, MimoAuthStore
+            db = SessionLocal()
+            try:
+                row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == old_key).first()
+                if row is not None:
+                    db.query(MimoAuthStore).filter(MimoAuthStore.owner == new_key).delete()
+                    row.owner = new_key
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("provider credential rename failed: %s", exc)
 
     async def purge_owner(self, owner: str) -> None:
         key = self._key(owner)
@@ -989,3 +1098,13 @@ class MimoSupervisorPool:
         path = self._runtime_home(key)
         if path.exists():
             shutil.rmtree(path)
+        try:
+            from core.database import SessionLocal, MimoAuthStore
+            db = SessionLocal()
+            try:
+                db.query(MimoAuthStore).filter(MimoAuthStore.owner == key).delete()
+                db.commit()
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("provider credential purge failed: %s", exc)

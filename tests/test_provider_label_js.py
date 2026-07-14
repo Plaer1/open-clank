@@ -26,6 +26,12 @@ def _provider_label(url: str) -> str | None:
     # Strip the `export` keyword so the module runs standalone.
     src_runnable = src.replace("export function providerLabel", "function providerLabel")
     src_runnable = src_runnable.replace("export default {", "const _default = {")
+    # The stdin module evaluates from the repo root, so the sprite import's
+    # relative path would miss — stub it; providerLabel doesn't use it.
+    src_runnable = src_runnable.replace(
+        "import { PROVIDER_SPRITE_IDS, PROVIDER_SPRITE_URL } from './providerSprite.js';",
+        "const PROVIDER_SPRITE_IDS = new Set(); const PROVIDER_SPRITE_URL = '';",
+    )
     js = src_runnable + f"\nconsole.log(JSON.stringify(providerLabel({json.dumps(url)})));"
     proc = subprocess.run(
         ["node", "--input-type=module"],

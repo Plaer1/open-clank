@@ -532,6 +532,19 @@ class ProviderAuthSession(TimestampMixin, Base):
     auth_mode = Column(String, nullable=True)
     account_id = Column(String, nullable=True, index=True)
 
+
+class MimoAuthStore(TimestampMixin, Base):
+    """Odysseus-owned provider connection credentials (per owner, encrypted).
+
+    Source of truth for the agent runtime's provider auth: the runtime's
+    on-disk auth.json is a regenerable cache seeded from this row at spawn
+    and mirrored back after connect/disconnect and OAuth token refreshes."""
+    __tablename__ = "mimo_auth_store"
+
+    owner = Column(String, primary_key=True, default="")
+    payload = Column(EncryptedText, nullable=True)  # JSON auth store contents
+
+
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
     __tablename__ = "mcp_servers"

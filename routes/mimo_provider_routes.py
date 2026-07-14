@@ -161,6 +161,14 @@ def _check_method(index: int, provider_methods: list, expected: str) -> None:
 
 
 async def _refresh(supervisor) -> bool:
+    # Every connect/disconnect ends here: mirror the runtime's auth store
+    # into app.db so Odysseus owns the credentials, not the child's files.
+    try:
+        sync = getattr(supervisor, "sync_auth_to_db", None)
+        if callable(sync):
+            sync()
+    except Exception:
+        pass
     try:
         await supervisor.refresh_model_catalog()
         return True
