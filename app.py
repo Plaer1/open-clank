@@ -1414,6 +1414,57 @@ async def _startup_event():
 
     logger.info("Application startup complete")
 
+def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
+    """Best-effort SIGTERM→SIGKILL for direct children still alive at shutdown.
+
+    The MCP stdio stack can fail to exit its cancel scopes when closed from a
+    different task than entered them ("Attempted to exit cancel scope…"),
+    which skips child termination entirely — orphaned servers then outlive
+    uvicorn and keep writing to the operator's terminal. Linux-only (/proc);
+    silently a no-op elsewhere."""
+    import signal as _signal
+    import time as _time
+
+    me = os.getpid()
+
+    def _live_children() -> list[int]:
+        pids = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return pids
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "r") as fh:
+                    tail = fh.read().rsplit(")", 1)[1].split()
+                state, ppid = tail[0], int(tail[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            if ppid == me and state != "Z":
+                pids.append(int(entry))
+        return pids
+
+    victims = _live_children()
+    if not victims:
+        return
+    logger.warning("reaping %d orphaned child process(es) at shutdown: %s", len(victims), victims)
+    for pid in victims:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = _time.time() + grace_seconds
+    while _time.time() < deadline and _live_children():
+        _time.sleep(0.1)
+    for pid in _live_children():
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 async def _shutdown_event():
     logger.info("Application shutting down...")
     _copal_bridge = getattr(app.state, "copal_bridge", None)
@@ -1460,6 +1511,13 @@ async def _shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    # Anything still alive under us at this point is a leak (typically MCP
+    # stdio children whose cancel scopes failed to close) — reap it so the
+    # operator gets their terminal back.
+    try:
+        await asyncio.to_thread(_reap_orphaned_children)
+    except Exception as e:
+        logger.warning(f"Child reaper error: {e}")
     logger.info("Application shutdown complete")
 
 
