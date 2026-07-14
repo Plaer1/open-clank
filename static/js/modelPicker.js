@@ -269,13 +269,18 @@ function _initModelPickerDropdown() {
         // when the same model is exposed by both.
         if (seen.has(mid)) return;
         seen.add(mid);
+        // Catalog-boundary rows (entry.family set) carry their own public
+        // identity: the transport/endpoint behind them is invisible to users.
+        const boundary = !!entry.family;
         result.push({
           mid,
           display: (entry.displayName || mid).split('/').pop(),
+          family: entry.family || null,
+          extra: !!entry.extra,
           url: item.url,
           endpointId: item.endpoint_id,
-          epName: item.endpoint_name || '',
-          providerText: [
+          epName: boundary ? '' : (item.endpoint_name || ''),
+          providerText: boundary ? (entry.family || '') : [
             item.endpoint_name || '',
             item.category || '',
             item.host || '',
@@ -330,7 +335,6 @@ function _initModelPickerDropdown() {
     'stepfun-ai': 'stepfun', 'ai21labs': 'ai21', 'ibm-granite': 'ibm',
     'bytedance-seed': 'bytedance', '~anthropic': 'anthropic',
     '~google': 'google', '~moonshotai': 'moonshotai', '~openai': 'openai',
-    '~mimo': 'MiMo',
   };
   function _providerDisplayName(slug) {
     return _PROVIDER_NAMES[slug] || slug.charAt(0).toUpperCase() + slug.slice(1).replace(/-/g, ' ');
@@ -340,10 +344,10 @@ function _initModelPickerDropdown() {
     let slug = slash > 0 ? mid.substring(0, slash) : 'other';
     return _PROVIDER_ALIAS[slug] || slug;
   }
-  // MiMo-served models present as one native catalog: the upstream provider
-  // (xiaomi, deepseek, …) is an operator detail users must not see.
-  function _groupSlug(m) {
-    return m.endpointId === 'mimo' ? '~mimo' : _providerSlug(m.mid);
+  // Group label: catalog-boundary rows carry a display-ready `family` from the
+  // backend; everything else falls back to slug-derived provider names.
+  function _groupLabel(m) {
+    return m.family || _providerDisplayName(_providerSlug(m.mid));
   }
   const _collapsedProviders = new Set(_loadList('odysseus-model-collapsed'));
   let _justExpandedProvider = null;
@@ -459,9 +463,9 @@ function _initModelPickerDropdown() {
     // ── Search mode: flat, filtered results across the whole catalog ──
     if (q) {
       const matches = all.filter(m => {
-        const provName = _providerDisplayName(_groupSlug(m)).toLowerCase();
-        const searchId = m.endpointId === 'mimo' ? m.display : m.mid;
-        return [searchId, m.display, m.epName, m.providerText, provName]
+        const label = _groupLabel(m).toLowerCase();
+        const searchId = m.family ? m.display : m.mid;
+        return [searchId, m.display, m.epName, m.providerText, label]
           .filter(Boolean).join(' ').toLowerCase().includes(q);
       });
       if (matches.length === 0) _addEmpty('No matching models');
@@ -478,6 +482,11 @@ function _initModelPickerDropdown() {
     //      section entirely — when there's only ~10 models, the whole
     //      list fits below as "All models" and a separate Recent
     //      section just duplicates rows.
+    // Browse hides effort-tier variants of catalog-boundary models — the row
+    // count should reflect real models, not the tier multiplication. Variants
+    // stay reachable through search and the composer's effort control.
+    const browsable = all.filter(m => !(m.family && m.extra));
+
     const shown = new Set();
     const favModels = favs.map(id => byId.get(id)).filter(Boolean);
     if (favModels.length) {
@@ -487,7 +496,7 @@ function _initModelPickerDropdown() {
     // Recent: only render when the catalog is big enough that surfacing
     // a recency shortlist is actually useful, AND only models that
     // aren't already in Favorites (dedupe).
-    if (all.length > BROWSE_ALL_LIMIT) {
+    if (browsable.length > BROWSE_ALL_LIMIT) {
       const recentModels = _loadRecent()
         .map(id => byId.get(id))
         .filter(Boolean)
@@ -500,23 +509,22 @@ function _initModelPickerDropdown() {
     }
 
     // Small catalogs: still list everything so users aren't forced to search.
-    if (all.length <= BROWSE_ALL_LIMIT) {
-      const rest = all.filter(m => !shown.has(m.mid));
+    if (browsable.length <= BROWSE_ALL_LIMIT) {
+      const rest = browsable.filter(m => !shown.has(m.mid));
       if (rest.length) {
         if (shown.size) _addSection('All models');
         rest.forEach(_addRow);
       }
     } else {
-      // Large catalog: show provider groups with collapsible sections.
-      const rest = all.filter(m => !shown.has(m.mid));
+      // Large catalog: collapsible family/provider groups.
+      const rest = browsable.filter(m => !shown.has(m.mid));
       const groups = new Map();
       rest.forEach(m => {
-        const slug = _groupSlug(m);
-        if (!groups.has(slug)) groups.set(slug, []);
-        groups.get(slug).push(m);
+        const label = _groupLabel(m);
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(m);
       });
-      const sorted = [...groups.keys()].sort((a, b) =>
-        _providerDisplayName(a).localeCompare(_providerDisplayName(b)));
+      const sorted = [...groups.keys()].sort((a, b) => a.localeCompare(b));
 
       sorted.forEach(provider => {
         const models = groups.get(provider);
@@ -525,7 +533,7 @@ function _initModelPickerDropdown() {
         header.className = 'mp-provider-header';
         header.innerHTML =
           `<svg class="mp-provider-chevron${isCollapsed ? ' collapsed' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`
-          + `<span class="mp-provider-name">${_providerDisplayName(provider)}</span>`
+          + `<span class="mp-provider-name">${provider}</span>`
           + `<span class="mp-provider-count">${models.length}</span>`;
         header.addEventListener('click', (e) => {
           e.stopPropagation();

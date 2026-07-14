@@ -57,7 +57,8 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _default_endpoint_needs_assignment,
         _mimo_catalog,
         _mimo_display_names,
-        _is_shadowed_model_item,
+        _mimo_model_families,
+        _covered_direct_providers,
         _PROVIDER_CURATED,
     )
     from src.llm_core import ANTHROPIC_MODELS
@@ -1088,6 +1089,7 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
 
 def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
     monkeypatch.setenv("MIMO_HIDDEN_MODELS", "openai/hidden")
+    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: set())
     supervisor = SimpleNamespace(available_models=lambda: [
         {"modelId": "openai/gpt-5"},
         {"modelId": "openai/gpt-5/low"},
@@ -1103,6 +1105,30 @@ def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
     assert hidden_count == 2
 
 
+def test_mimo_catalog_drops_providers_direct_endpoints_already_cover(monkeypatch):
+    """e's no-duplicates rule: mimo only fills gaps. A provider reachable via
+    an enabled direct endpoint disappears from the mimo catalog entirely."""
+    monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
+    monkeypatch.setattr(
+        model_routes, "_covered_direct_providers",
+        lambda prefixes, owner=None: {"openai", "deepseek"} & prefixes,
+    )
+    supervisor = SimpleNamespace(available_models=lambda: [
+        {"modelId": "openai/gpt-5"},
+        {"modelId": "openai/gpt-5/low"},
+        {"modelId": "deepseek/deepseek-v4-flash"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "xiaomi/mimo-v2.5-pro/high"},
+    ])
+
+    models, base, variants, hidden_count = _mimo_catalog(supervisor)
+
+    assert models == ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro/high"]
+    assert base == ["xiaomi/mimo-v2.5-pro"]
+    assert variants == ["xiaomi/mimo-v2.5-pro/high"]
+    assert hidden_count == 3
+
+
 def test_mimo_display_names_keep_model_name_and_reasoning_effort():
     displays = _mimo_display_names(
         ["xiaomi/mimo-v2"],
@@ -1115,10 +1141,57 @@ def test_mimo_display_names_keep_model_name_and_reasoning_effort():
     }
 
 
-def test_shadowing_matches_provider_name_in_generic_openai_endpoint_host():
-    item = {"url": "https://api.deepseek.com/v1/chat/completions"}
+def test_covered_direct_providers_matches_detection_and_hostname(monkeypatch):
+    _mr = model_routes
 
-    assert _is_shadowed_model_item(item, {"deepseek"}) is True
+    class _Ep(SimpleNamespace):
+        pass
+
+    endpoints = [
+        _Ep(base_url="https://api.deepseek.com/v1", model_type="llm"),
+        _Ep(base_url="https://chatgpt.com/backend-api", model_type="llm"),
+        _Ep(base_url="http://localhost:11434/v1", model_type="llm"),
+        _Ep(base_url="https://api.xiaomi.example/v1", model_type="embedding"),
+    ]
+
+    class _Q:
+        def filter(self, *a):
+            return self
+
+        def all(self):
+            return endpoints
+
+    monkeypatch.setattr(_mr, "SessionLocal", lambda: SimpleNamespace(
+        query=lambda *_a: _Q(), close=lambda: None,
+    ))
+    monkeypatch.setattr(
+        _mr, "_safe_detect_provider",
+        lambda base: "chatgpt-subscription" if "chatgpt" in base else "",
+    )
+
+    covered = _covered_direct_providers({"deepseek", "openai", "xiaomi"})
+
+    # deepseek matched by hostname, openai via chatgpt-subscription mapping;
+    # xiaomi endpoint is not model_type=llm so it does not count.
+    assert covered == {"deepseek", "openai"}
+
+
+def test_mimo_model_families_map_operator_prefixes_to_public_brands():
+    families = _mimo_model_families([
+        "xiaomi/mimo-v2.5-pro",
+        "xiaomi/mimo-v2.5-pro/high",
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-5",
+        "somevendor/custom-model",
+        "bare-model-no-prefix",
+    ])
+
+    assert families["xiaomi/mimo-v2.5-pro"] == "MiMo"
+    assert families["xiaomi/mimo-v2.5-pro/high"] == "MiMo"
+    assert families["deepseek/deepseek-v4-flash"] == "DeepSeek"
+    assert families["openai/gpt-5"] == "OpenAI"
+    assert families["somevendor/custom-model"] == "Somevendor"
+    assert "bare-model-no-prefix" not in families
 
 
 def test_post_creates_endpoint_with_pinned_models(monkeypatch):

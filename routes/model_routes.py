@@ -639,6 +639,70 @@ def _is_chat_model(model_id: str) -> bool:
     return True
 
 
+# Direct-endpoint provider detection name → the provider id mimo uses for the
+# same upstream. Everything not listed maps to itself.
+_DIRECT_PROVIDER_TO_MIMO = {
+    "chatgpt-subscription": "openai",
+}
+
+# Provider prefix → the model-family label users see. The upstream/operator
+# provider is an admin detail; the family is the product identity.
+_MIMO_FAMILY_NAMES = {
+    "xiaomi": "MiMo",
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "moonshotai": "Moonshot",
+    "z-ai": "Zhipu",
+    "zai": "Zhipu",
+}
+
+
+def _mimo_model_families(model_ids) -> dict[str, str]:
+    families: dict[str, str] = {}
+    for model_id in model_ids:
+        if "/" not in model_id:
+            continue
+        prefix = model_id.split("/", 1)[0]
+        families[model_id] = _MIMO_FAMILY_NAMES.get(prefix) or prefix.capitalize()
+    return families
+
+
+def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None) -> set[str]:
+    """MiMo provider prefixes already served by an enabled direct endpoint.
+
+    MiMo fills gaps only: a provider Odysseus reaches natively must not show
+    up a second time through the agent transport (e's no-duplicates rule)."""
+    if not mimo_prefixes:
+        return set()
+    covered: set[str] = set()
+    try:
+        db = SessionLocal()
+        try:
+            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner:
+                q = owner_filter(q, ModelEndpoint, owner)
+            for ep in q.all():
+                if (getattr(ep, "model_type", None) or "llm") != "llm":
+                    continue
+                base = getattr(ep, "base_url", "") or ""
+                provider = _safe_detect_provider(base).lower()
+                provider = _DIRECT_PROVIDER_TO_MIMO.get(provider, provider)
+                if provider in mimo_prefixes:
+                    covered.add(provider)
+                host = (urlparse(base).hostname or "").lower()
+                for prefix in mimo_prefixes:
+                    if prefix and prefix in host:
+                        covered.add(prefix)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("Direct-provider coverage check failed: %s", exc)
+        return set()
+    return covered
+
+
 def _mimo_catalog(supervisor, owner: str | None = None):
     """Return one filtered Mimo catalog for every model-list consumer."""
     if supervisor is None:
@@ -656,6 +720,11 @@ def _mimo_catalog(supervisor, owner: str | None = None):
     hidden = {item.strip() for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",") if item.strip()}
     if hidden:
         models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]
+    covered = _covered_direct_providers(
+        {m.split("/", 1)[0] for m in models if "/" in m}, owner
+    )
+    if covered:
+        models = [m for m in models if m.split("/", 1)[0] not in covered]
     model_set = set(models)
     base = [m for m in models if "/" not in m or m.rsplit("/", 1)[0] not in model_set]
     variants = [m for m in models if "/" in m and m.rsplit("/", 1)[0] in model_set]
@@ -738,15 +807,6 @@ def _safe_detect_provider(base_url: str) -> str:
     except Exception as exc:
         logger.debug("Provider detection failed for %s: %s", base_url, exc)
         return ""
-
-
-def _is_shadowed_model_item(item: dict, shadowed: set[str]) -> bool:
-    """Recognize a shadowed provider even when generic OpenAI detection wins."""
-    url = item.get("url", "")
-    if _safe_detect_provider(url).lower() in shadowed:
-        return True
-    host = (urlparse(url).hostname or "").lower()
-    return any(provider and provider in host for provider in shadowed)
 
 
 def _safe_build_models_url(base_url: str) -> str:
@@ -1620,23 +1680,10 @@ def setup_model_routes(model_discovery):
         _sup = getattr(request.app.state, "mimo_supervisor", None)
         _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup, owner)
         if _mimo_models:
-            # A direct endpoint row can expose the same provider's public
-            # API catalog (notably DeepSeek) beside Mimo's subscription
-            # catalog. Suppress that duplicate picker group at the
-            # catalog boundary; the admin endpoint remains editable in
-            # Settings. Operators can opt out with an empty setting.
-            shadowed = {
-                provider.strip().lower()
-                for provider in os.environ.get("MIMO_SHADOW_ENDPOINT_PROVIDERS", "deepseek").split(",")
-                if provider.strip()
-            }
-            if shadowed:
-                result["items"] = [
-                    item for item in result["items"]
-                    if item.get("endpoint_id") == "mimo"
-                    or not _is_shadowed_model_item(item, shadowed)
-                ]
-
+            # Duplicate suppression happens inside _mimo_catalog: any provider
+            # a direct endpoint already serves is dropped from the mimo
+            # catalog, so direct endpoints always win and mimo only fills
+            # gaps. Nothing to shadow on the direct side anymore.
             _mimo_displays = _mimo_display_names(_base, _variants)
 
             result["items"].append({
@@ -1656,6 +1703,7 @@ def setup_model_routes(model_discovery):
                     primary_ids=_base,
                     extra_ids=_variants,
                     display_names=_mimo_displays,
+                    families=_mimo_model_families(_mimo_models),
                     discovered=True,
                     entitled=True,
                     capabilities={"chat": True, "tools": True, "vision": None},
@@ -2106,6 +2154,7 @@ def setup_model_routes(model_discovery):
                         primary_ids=_base,
                         extra_ids=_variants,
                         display_names=_mimo_displays,
+                        families=_mimo_model_families(_mimo_models),
                         discovered=True,
                         entitled=True,
                         capabilities={"chat": True, "tools": True, "vision": None},
