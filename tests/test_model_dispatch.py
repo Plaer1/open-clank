@@ -1022,3 +1022,51 @@ async def test_handshake_modes_config_and_commands_persist_owner_scoped(monkeypa
         db.query(database.Session).filter_by(id=session_id).delete()
         db.commit()
         db.close()
+
+
+async def test_signal_death_grace_lets_shutdown_win_over_restart(monkeypatch):
+    import signal as _signal
+    import src.openclank.mimo_supervisor as module
+
+    sup = module.MimoSupervisor(None)
+    restarts = []
+
+    async def _noop():
+        return None
+
+    async def _record_restart():
+        restarts.append(True)
+
+    sup._client = None
+    sup._teardown_child = _noop
+    sup._reconcile_sessions = _noop
+    sup._restart_with_backoff = _record_restart
+
+    # stop() flips the flag while the grace sleep is in flight
+    async def _sleep_then_stopping(_seconds):
+        sup._stopping = True
+
+    monkeypatch.setattr(module.asyncio, "sleep", _sleep_then_stopping)
+    await sup._handle_crash(-_signal.SIGINT)
+    assert restarts == [], "SIGINT death during shutdown must not respawn the child"
+
+    # same signal death but nobody is shutting down: restart proceeds
+    sup2 = module.MimoSupervisor(None)
+    restarts2 = []
+
+    async def _record_restart2():
+        restarts2.append(True)
+        sup2._client = None
+        sup2._bridge = None
+
+    sup2._client = None
+    sup2._teardown_child = _noop
+    sup2._reconcile_sessions = _noop
+    sup2._restart_with_backoff = _record_restart2
+
+    async def _instant_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(module.asyncio, "sleep", _instant_sleep)
+    await sup2._handle_crash(-_signal.SIGTERM)
+    assert restarts2 == [True], "external kill without shutdown should self-heal"
