@@ -463,6 +463,28 @@ class TestClassifyEndpoint:
         ep = SimpleNamespace(endpoint_kind="auto", api_key="fake-key")
         assert _effective_endpoint_kind(ep, "http://100.117.136.97:34521/v1") == "proxy"
 
+    def test_first_party_keyed_v1_endpoint_is_not_a_proxy(self):
+        """A vendor's own API (api.deepseek.com/v1 etc.) must not inherit the
+        multi-provider-gateway heuristic: it was getting a PROXY badge, manual
+        refresh mode, and degraded context discovery."""
+        ep = SimpleNamespace(endpoint_kind="auto", api_key="fake-key")
+        for base in (
+            "https://api.deepseek.com/v1",
+            "https://api.openai.com/v1",
+            "https://api.mistral.ai/v1",
+            "https://api.x.ai/v1",
+        ):
+            assert _effective_endpoint_kind(ep, base) == "auto", base
+        # aggregators keep the proxy heuristic
+        assert _effective_endpoint_kind(ep, "https://openrouter.ai/api/v1") == "proxy"
+
+    def test_first_party_exemption_applies_to_context_kind_lookup(self):
+        from src.model_context import is_first_party_api_host
+
+        assert is_first_party_api_host("https://api.deepseek.com/v1") is True
+        assert is_first_party_api_host("https://deepseek.com.evil.example/v1") is False
+        assert is_first_party_api_host("https://openrouter.ai/api/v1") is False
+
     def test_proxy_refresh_mode_defaults_manual(self):
         assert _normalize_refresh_mode("", "proxy") == "manual"
         assert _normalize_refresh_mode("auto", "proxy") == "manual"

@@ -53,6 +53,23 @@ def _normalize_base_for_compare(url: str) -> str:
     return url
 
 
+# Single-vendor first-party APIs. A keyed /v1 URL on these hosts is the
+# vendor's own API, not a multi-provider gateway — the legacy proxy
+# heuristic must not claim it (proxy = manual refresh + no context
+# discovery). Aggregators (openrouter.ai, opencode.ai, LiteLLM hosts)
+# deliberately stay out of this set.
+_FIRST_PARTY_API_HOSTS = (
+    "openai.com", "deepseek.com", "anthropic.com", "mistral.ai",
+    "groq.com", "x.ai", "moonshot.ai", "moonshot.cn", "cerebras.ai",
+    "nvidia.com",
+)
+
+
+def is_first_party_api_host(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return any(host == domain or host.endswith("." + domain) for domain in _FIRST_PARTY_API_HOSTS)
+
+
 def _configured_endpoint_kind(url: str) -> Optional[str]:
     """Return configured endpoint kind for a chat/base URL when available."""
     target = _normalize_base_for_compare(url)
@@ -74,7 +91,7 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
                 kind = (getattr(ep, "endpoint_kind", None) or "auto").strip().lower()
                 if kind in ("local", "api", "proxy"):
                     return kind
-                if getattr(ep, "api_key", None):
+                if getattr(ep, "api_key", None) and not is_first_party_api_host(base):
                     parsed = urlparse(base)
                     host = (parsed.hostname or "").lower()
                     path = (parsed.path or "").rstrip("/")
