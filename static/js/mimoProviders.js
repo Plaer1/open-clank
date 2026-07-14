@@ -30,7 +30,7 @@ async function request(path, options = {}) {
     ...options,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || 'MiMo provider operation failed');
+  if (!response.ok) throw new Error(data.detail || 'Provider operation failed');
   return data;
 }
 
@@ -166,7 +166,7 @@ function beginApiKey(provider) {
   row.append(node('span', { class: 'settings-label' }, 'API key'));
   const key = node('input', { class: 'settings-input', type: 'password', autocomplete: 'off' });
   row.append(key);
-  body.append(row, node('p', { class: 'admin-toggle-sub' }, 'Saved by MiMo in its isolated MIMOCODE_HOME. Odysseus never displays it again.'));
+  body.append(row, node('p', { class: 'admin-toggle-sub' }, 'Stored securely and never shown again.'));
   const save = node('button', { type: 'button', class: 'btn primary' }, 'Connect');
   actions.prepend(save);
   save.addEventListener('click', async () => {
@@ -236,11 +236,11 @@ function render() {
 
 export async function load() {
   if (!root) return;
-  setStatus('Loading MiMo providers…');
+  setStatus('Loading providers…');
   try {
     const data = await request('');
     providers = Array.isArray(data.providers) ? data.providers : [];
-    setStatus(`${providers.length} native providers · credentials live in the MiMo runtime`);
+    setStatus(`${providers.length} provider${providers.length === 1 ? '' : 's'} available`);
     render();
   } catch (error) {
     providers = [];
