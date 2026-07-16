@@ -656,10 +656,9 @@ def setup_chat_routes(
             character_name=ctx.preset.character_name,
             owner=ctx.user,
             incognito=incognito,
-            allow_background_extraction=(
-                not tool_policy.block_all_tool_calls
-                and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
-            ),
+            allow_background_extraction=(not tool_policy.block_all_tool_calls),
+            memory_provider=chat_processor.memory_provider,
+            captured_by_runtime=(model_target.transport == "acp"),
         )
 
         return {"response": reply}
@@ -1555,10 +1554,9 @@ def setup_chat_routes(
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
-                                    allow_background_extraction=(
-                                        not tool_policy.block_all_tool_calls
-                                        and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
-                                    ),
+                                    allow_background_extraction=(not tool_policy.block_all_tool_calls),
+                                    memory_provider=chat_processor.memory_provider,
+                                    captured_by_runtime=(model_target.transport == "acp"),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1776,10 +1774,9 @@ def setup_chat_routes(
                                     skills_manager=skills_manager,
                                     owner=_user,
                                     extract_skills=user_requested_agent,
-                                    allow_background_extraction=(
-                                        not tool_policy.block_all_tool_calls
-                                        and getattr(chat_processor.memory_provider, "provider_id", "native") == "native"
-                                    ),
+                                    allow_background_extraction=(not tool_policy.block_all_tool_calls),
+                                    memory_provider=chat_processor.memory_provider,
+                                    captured_by_runtime=(model_target.transport == "acp"),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
