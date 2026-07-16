@@ -1567,3 +1567,50 @@ it.live(
     ),
   30_000,
 )
+
+// Identity metaplan Slice 05: the caller's per-prompt tool map is a complete
+// policy REVISION — replace, never accumulate. An answer-only turn's
+// {"*": false} must not persist into a later tool-bearing turn whose policy
+// statement is an empty map; `undefined` (no statement) leaves permissions
+// untouched.
+it.live("prompt tool maps replace, clear, and preserve session permissions", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "policy revision" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        noReply: true,
+        tools: { "*": false },
+        parts: [{ type: "text", text: "chat turn" }],
+      })
+      let info = yield* sessions.get(session.id)
+      expect(info.permission).toEqual([{ permission: "*", action: "deny", pattern: "*" }])
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        noReply: true,
+        tools: {},
+        parts: [{ type: "text", text: "agent turn" }],
+      })
+      info = yield* sessions.get(session.id)
+      expect(info.permission ?? []).toEqual([])
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        noReply: true,
+        tools: { bash: false },
+        parts: [{ type: "text", text: "restricted turn" }],
+      })
+      yield* prompt.prompt({
+        sessionID: session.id,
+        noReply: true,
+        parts: [{ type: "text", text: "silent turn" }],
+      })
+      info = yield* sessions.get(session.id)
+      expect(info.permission).toEqual([{ permission: "bash", action: "deny", pattern: "*" }])
+    }),
+  ),
+)
