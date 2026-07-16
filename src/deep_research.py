@@ -740,6 +740,23 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     # FINAL REPORT
     # ------------------------------------------------------------------
+    def _persona_voice_message(self) -> list:
+        """User-visible research output speaks as the default persona (R15).
+
+        The research role prompts stay mechanical; only the report-writing
+        voice comes from the owner's synced default persona. Fail-open: no
+        record, no message.
+        """
+        try:
+            from src.default_persona import get_default_persona
+            record = get_default_persona(self.owner or "")
+            return [{
+                "role": "system",
+                "content": f"You are {record['name']}. {record['system_prompt']}",
+            }]
+        except Exception:
+            return []
+
     async def _final_report(self, question: str, report: str) -> str:
         """LLM writes a polished final report, retrying if too short."""
         prompt = FINAL_REPORT_PROMPT.format(
@@ -752,7 +769,8 @@ class DeepResearcher:
 
         try:
             result = await self._llm(
-                [{"role": "user", "content": prompt}],
+                self._persona_voice_message()
+                + [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=self.max_report_tokens,
                 timeout=180,

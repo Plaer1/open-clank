@@ -223,10 +223,21 @@ async def auto_name_session(session_manager, sess):
         # plus the actual title — 200 used to clip them mid-reasoning
         # so strip_think left an empty string and no rename happened.
         # Timeout matches: 60s gives slow local reasoners room to finish.
+        # Titles are user-visible, so they carry the default persona's voice
+        # (identity ruling R15); the format instruction stays mechanical.
+        try:
+            from src.default_persona import get_default_persona
+            _record = get_default_persona(owner or "")
+            _voice = [{
+                "role": "system",
+                "content": f"You are {_record['name']}. {_record['system_prompt']}",
+            }]
+        except Exception:
+            _voice = []
         title = await llm_call_async(
             t_url,
             t_model,
-            [
+            _voice + [
                 {"role": "system", "content": "Generate a short title (3-6 words, no quotes) for a conversation that starts with this message. Reply with ONLY the title, nothing else. Do NOT include any thinking, reasoning, or explanation — just the title."},
                 {"role": "user", "content": first_msg},
             ],
