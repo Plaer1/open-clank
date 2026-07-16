@@ -73,6 +73,24 @@ export const PROMPT_TEMPLATES = [
 
 let userTemplates = [];
 
+// The synced default persona (identity ruling R10): a real, editable
+// identity — never a pretend-blank. Loaded from the server; edits made on
+// the "Default" entry save back to it (and sync assistant + reminders).
+let defaultPersona = null;
+
+async function loadDefaultPersona() {
+  try {
+    const res = await fetch(`${API_BASE}/api/presets/default-persona`);
+    if (res.ok) {
+      defaultPersona = await res.json();
+      _populateCharSelect();
+    }
+  } catch (e) { /* factory fallbacks apply */ }
+}
+
+function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Odysseus'; }
+function _defaultPersonaPrompt() { return (defaultPersona && defaultPersona.system_prompt) || ''; }
+
 /**
  * Initialize with dependencies
  */
@@ -86,6 +104,7 @@ export function init(apiBase) {
   initExpandButton();
   initPersistentChat();
   loadUserTemplates();
+  loadDefaultPersona();
 }
 
 function initCharTabs() {
@@ -194,7 +213,11 @@ function initNameDropdown() {
     newBtn.addEventListener('click', () => {
       select.value = '__default__';
       select.dispatchEvent(new Event('change'));
+      // New character = genuinely blank form (the change handler prefills
+      // the default persona; a NEW character starts from nothing).
       const nameInput = document.getElementById('custom-character-name');
+      const promptInput = document.getElementById('custom-system-prompt');
+      if (promptInput) promptInput.value = '';
       if (nameInput) { nameInput.value = ''; nameInput.focus(); }
     });
   }
@@ -202,15 +225,17 @@ function initNameDropdown() {
   select.addEventListener('change', () => {
     const val = select.value;
     if (!val || val === '__default__') {
-      // "Default" or "New character..." — reset all fields
+      // The Default entry is the REAL default persona (ruling R10): show its
+      // actual name + prompt, editable in place. Saving writes back to the
+      // synced record — never a pretend-blank.
       const nameInput = document.getElementById('custom-character-name');
       const promptInput = document.getElementById('custom-system-prompt');
       const tempInput = document.getElementById('custom-temperature');
       const tempValue = document.getElementById('temp-value');
       const tokensInput = document.getElementById('custom-max-tokens');
       const tokensValue = document.getElementById('tokens-value');
-      if (nameInput) nameInput.value = '';
-      if (promptInput) promptInput.value = '';
+      if (nameInput) nameInput.value = _defaultPersonaName();
+      if (promptInput) promptInput.value = _defaultPersonaPrompt();
       const nameRow = document.getElementById('char-name-row');
       if (nameRow) nameRow.style.display = '';
       if (tempInput) { tempInput.value = 1.0; if (tempValue) tempValue.textContent = '1.0'; tempInput.dispatchEvent(new Event('input')); }
@@ -314,7 +339,13 @@ function _populateCharSelect() {
   const select = document.getElementById('char-template-select');
   if (!select) return;
   const currentVal = select.value;
-  select.innerHTML = '<option value="__default__">Default (no persona)</option>';
+  select.innerHTML = '';
+  {
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '__default__';
+    defaultOpt.textContent = `Default (${_defaultPersonaName()})`;
+    select.appendChild(defaultOpt);
+  }
 
   const savedNames = new Set(userTemplates.map(t => t.name));
   if (userTemplates.length) {
@@ -561,7 +592,7 @@ export function openCustomPresetModal() {
   const modal = document.getElementById('custom-preset-modal');
   if (!modal) return;
 
-  const savedConfig = presets.custom || {
+  let savedConfig = presets.custom || {
     character_name: "",
     temperature: 1.0,
     max_tokens: 0,
@@ -584,6 +615,12 @@ export function openCustomPresetModal() {
       if (charSelect.value !== charName) charSelect.value = '';
     } else {
       charSelect.value = '__default__';
+      // Ruling R10: the Default entry shows the real default persona,
+      // editable — never a blank form.
+      if (!savedConfig.character_name && !savedConfig.system_prompt) {
+        if (nameInput) nameInput.value = _defaultPersonaName();
+        savedConfig = { ...savedConfig, system_prompt: _defaultPersonaPrompt() };
+      }
     }
   }
   if (tempInput) {
@@ -768,6 +805,44 @@ export async function saveCustomPreset(showToast, showError) {
   // ignore them here or the chat would launch in-character.
   const _activeTab = document.querySelector('.preset-tab.active')?.dataset.chartab || 'character';
   const _isInjectStart = _activeTab === 'inject';
+
+  // Persona tab with the Default entry selected = editing the DEFAULT
+  // persona in place (ruling R10). Save to the synced record — assistant
+  // and reminder voices follow (R13) — and clear any custom-persona
+  // override so the default actually speaks.
+  const _selVal0 = document.getElementById('char-template-select')?.value || '__default__';
+  if (!_isInjectStart && _selVal0 === '__default__') {
+    const dpName = (nameInput ? nameInput.value.trim() : '') || _defaultPersonaName();
+    const dpPrompt = (promptInput.value || '').trim() || _defaultPersonaPrompt();
+    try {
+      const res = await fetch(`${API_BASE}/api/presets/default-persona`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: dpName, system_prompt: dpPrompt }),
+      });
+      const out = await res.json();
+      if (out && out.success) {
+        defaultPersona = { name: out.name, system_prompt: out.system_prompt, is_factory: false };
+        _populateCharSelect();
+        deactivateCharacter();
+        // Persist the deactivation so a reload doesn't resurrect a stale
+        // custom persona over the default (mirrors the Cancel handler).
+        if (presets.custom && presets.custom.character_name) {
+          fetch(`${API_BASE}/api/presets/custom`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...(presets.custom || {}), name: presets.custom.character_name || '', enabled: false }),
+          }).catch(() => {});
+        }
+        if (showToast) showToast(`Default persona "${out.name}" saved`);
+      } else if (showError) {
+        showError('Failed to save default persona');
+      }
+    } catch (e) {
+      console.error('Default persona save failed:', e);
+      if (showError) showError('Failed to save default persona');
+    }
+    return;
+  }
 
   const name = _isInjectStart ? '' : (nameInput ? nameInput.value.trim() : '');
   const temperature = parseFloat(tempInput.value);

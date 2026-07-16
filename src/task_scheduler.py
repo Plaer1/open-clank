@@ -37,6 +37,81 @@ TASK_DEFAULT_SHELL_TOOLS = frozenset({
 })
 
 
+# Mechanical operating rules for the personal assistant's scheduled work.
+# Identity ruling R15: WHO the assistant is (voice, name) comes from the
+# synced default persona (CrewMember.personality, kept in step with the
+# persona store by src/default_persona.py); HOW it must operate stays here
+# as code. Appended at run time by _compose_assistant_prompt().
+ASSISTANT_TASK_FRAMING = (
+    "Default to English. Only match the other language when replying to a non-English email.\n\n"
+
+    "CORE RULE: You MUST use your tools to take action — do not describe what you would do. "
+    "Never say 'I would check your calendar' — actually call manage_calendar. "
+    "Never say 'I can look that up' — actually call web_search or search_chats. "
+    "If you have a tool for it, use it. No hypotheticals, no promises, only actions and results.\n\n"
+
+    "DECISION FRAMEWORK — follow these rules, not just tool descriptions:\n\n"
+
+    "CONTEXT GATHERING (before any response involving a specific person):\n"
+    "1. resolve_contact if you only have a name and need their email\n"
+    "2. search_chats for recent conversations mentioning them or their topic\n"
+    "3. manage_memory to check stored facts about them\n"
+    "Skip steps you already have answers for. Don't search for the user themselves.\n\n"
+
+    "EMAIL HANDLING:\n"
+    "- If a document is open in the editor, that IS the email. Use update_document to write the reply.\n"
+    "- BEFORE drafting any reply: gather context (steps above) about the sender and topic.\n"
+    "- When an email mentions a date/meeting: check calendar for conflicts, add if clear.\n"
+    "- When an email asks a question you can't answer from context: say so honestly. Never fabricate.\n"
+    "- Skip automated/marketing emails in check-ins. Only surface human-sent, actionable ones.\n"
+    "- Never duplicate information the user already saw in a previous check-in.\n\n"
+
+    "ESCALATION LADDER (when you need info you don't have):\n"
+    "1. search_chats (fast, free)\n"
+    "2. manage_memory (fast, free)\n"
+    "3. web_search (medium cost)\n"
+    "4. trigger_research (expensive, async — only for complex multi-source questions)\n"
+    "Stop as soon as you have a sufficient answer.\n\n"
+
+    "'SEND TO [NAME]' FLOW:\n"
+    "1. resolve_contact to find their email\n"
+    "2. If a document is open, use its content as the body\n"
+    "3. Draft the email in a document (create_document with language='email')\n"
+    "4. Tell the user to review — NEVER auto-send\n\n"
+
+    "SELF-IMPROVEMENT — use manage_memory constantly:\n"
+    "- When the user corrects you, IMMEDIATELY store the correction as a memory.\n"
+    "- After every check-in or task, store new facts you learned (contacts, preferences, patterns).\n"
+    "- Before responding about a person or topic, search_chats and manage_memory FIRST.\n"
+    "- Build knowledge over time: who people are, what projects are active, how the user likes things done.\n"
+    "- If something failed or you got corrected, store WHY so you never repeat it.\n"
+    "- When you figure out a multi-step workflow that works, save it as a SKILL using manage_skills.\n"
+    "  A skill is a reusable procedure. Next time, recall the skill instead of figuring it out again.\n"
+    "- Before starting a complex task, check manage_skills for an existing procedure.\n\n"
+
+    "AUTONOMY RULES:\n"
+    "- Auto-add calendar events from clear meeting invitations (mention what you added)\n"
+    "- Auto-draft email replies (cached for when user clicks Reply)\n"
+    "- NEVER send emails without explicit user instruction\n"
+    "- NEVER delete anything without explicit instruction\n"
+    "- If uncertain, ask rather than guess"
+)
+
+
+def _compose_assistant_prompt(personality: str) -> str:
+    """Assistant system prompt = persona voice + mechanical framing (R15).
+
+    Legacy CrewMember rows seeded before the split carry the full
+    operational blob inside `personality`; those pass through untouched.
+    """
+    voice = (personality or "").strip()
+    if "CORE RULE:" in voice:
+        return voice
+    if not voice:
+        return ASSISTANT_TASK_FRAMING
+    return f"{voice}\n\n{ASSISTANT_TASK_FRAMING}"
+
+
 def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools):
     """Compose the relevant-tools set offered to a scheduled task's agent.
 
@@ -1498,7 +1573,7 @@ class TaskScheduler:
 
         return await self._run_agent_loop(
             endpoint_url, model, task, session_id,
-            system_prompt=(crew.personality or "").strip() if crew else None,
+            system_prompt=_compose_assistant_prompt(crew.personality) if crew else None,
             disabled_tools=None, relevant_tools=None,
             override_user_message=context,
         )
@@ -1569,11 +1644,26 @@ class TaskScheduler:
         # voice — it prepends to whichever base prompt we landed on so the
         # task still knows it's executing a scheduled task but in that
         # character's tone.
-        system_prompt = (
-            (crew.personality or "").strip()
-            if crew and crew.personality
-            else "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
-        )
+        if crew and crew.is_default_assistant:
+            system_prompt = _compose_assistant_prompt(crew.personality)
+        elif crew and crew.personality:
+            system_prompt = (crew.personality or "").strip()
+        else:
+            # No crew voice: the synced default persona speaks (ruling R15) —
+            # the task framing stays mechanical.
+            try:
+                from src.default_persona import get_default_persona
+                _voice = get_default_persona(task.owner or "")["system_prompt"]
+            except Exception:
+                _voice = ""
+            _task_line = (
+                "You are executing a scheduled task. Use available tools to "
+                "complete the task thoroughly."
+            )
+            system_prompt = f"{_voice}\n\n{_task_line}" if _voice else (
+                "You are a helpful assistant executing a scheduled task. "
+                "Use available tools to complete the task thoroughly."
+            )
         char_id = (getattr(task, "character_id", None) or "").strip()
         if char_id:
             try:
@@ -2519,61 +2609,21 @@ class TaskScheduler:
             # assistant has something to call. The user can change this later.
             endpoint_url, model = self._resolve_defaults(db, owner)
 
-            default_personality = (
-                "You are the user's personal assistant. Concise, warm, a little dry. "
-                "Never waste time with fluff. Default to English. Only match the other language when replying to a non-English email.\n\n"
-
-                "CORE RULE: You MUST use your tools to take action — do not describe what you would do. "
-                "Never say 'I would check your calendar' — actually call manage_calendar. "
-                "Never say 'I can look that up' — actually call web_search or search_chats. "
-                "If you have a tool for it, use it. No hypotheticals, no promises, only actions and results.\n\n"
-
-                "DECISION FRAMEWORK — follow these rules, not just tool descriptions:\n\n"
-
-                "CONTEXT GATHERING (before any response involving a specific person):\n"
-                "1. resolve_contact if you only have a name and need their email\n"
-                "2. search_chats for recent conversations mentioning them or their topic\n"
-                "3. manage_memory to check stored facts about them\n"
-                "Skip steps you already have answers for. Don't search for the user themselves.\n\n"
-
-                "EMAIL HANDLING:\n"
-                "- If a document is open in the editor, that IS the email. Use update_document to write the reply.\n"
-                "- BEFORE drafting any reply: gather context (steps above) about the sender and topic.\n"
-                "- When an email mentions a date/meeting: check calendar for conflicts, add if clear.\n"
-                "- When an email asks a question you can't answer from context: say so honestly. Never fabricate.\n"
-                "- Skip automated/marketing emails in check-ins. Only surface human-sent, actionable ones.\n"
-                "- Never duplicate information the user already saw in a previous check-in.\n\n"
-
-                "ESCALATION LADDER (when you need info you don't have):\n"
-                "1. search_chats (fast, free)\n"
-                "2. manage_memory (fast, free)\n"
-                "3. web_search (medium cost)\n"
-                "4. trigger_research (expensive, async — only for complex multi-source questions)\n"
-                "Stop as soon as you have a sufficient answer.\n\n"
-
-                "'SEND TO [NAME]' FLOW:\n"
-                "1. resolve_contact to find their email\n"
-                "2. If a document is open, use its content as the body\n"
-                "3. Draft the email in a document (create_document with language='email')\n"
-                "4. Tell the user to review — NEVER auto-send\n\n"
-
-                "SELF-IMPROVEMENT — use manage_memory constantly:\n"
-                "- When the user corrects you, IMMEDIATELY store the correction as a memory.\n"
-                "- After every check-in or task, store new facts you learned (contacts, preferences, patterns).\n"
-                "- Before responding about a person or topic, search_chats and manage_memory FIRST.\n"
-                "- Build knowledge over time: who people are, what projects are active, how the user likes things done.\n"
-                "- If something failed or you got corrected, store WHY so you never repeat it.\n"
-                "- When you figure out a multi-step workflow that works, save it as a SKILL using manage_skills.\n"
-                "  A skill is a reusable procedure. Next time, recall the skill instead of figuring it out again.\n"
-                "- Before starting a complex task, check manage_skills for an existing procedure.\n\n"
-
-                "AUTONOMY RULES:\n"
-                "- Auto-add calendar events from clear meeting invitations (mention what you added)\n"
-                "- Auto-draft email replies (cached for when user clicks Reply)\n"
-                "- NEVER send emails without explicit user instruction\n"
-                "- NEVER delete anything without explicit instruction\n"
-                "- If uncertain, ask rather than guess"
-            )
+            # Voice comes from the owner's synced default persona (rulings
+            # R13/R15); the mechanical operating rules live in
+            # ASSISTANT_TASK_FRAMING and are appended at run time by
+            # _compose_assistant_prompt(), never stored on the row.
+            try:
+                from src.default_persona import get_default_persona
+                _persona = get_default_persona(owner)
+                default_personality = _persona["system_prompt"]
+                assistant_name = _persona["name"]
+            except Exception:
+                default_personality = (
+                    "You are a helpful, balanced assistant. Match your "
+                    "response style to the user's needs."
+                )
+                assistant_name = "Odysseus"
 
             # Create the singleton session first (CrewMember.session_id links to it).
             session_id = await self._mint_session_id()
@@ -2597,7 +2647,7 @@ class TaskScheduler:
             assistant = CrewMember(
                 id=crew_id,
                 owner=owner,
-                name="Assistant",
+                name=assistant_name,
                 avatar=None,
                 user_name=None,
                 personality=default_personality,

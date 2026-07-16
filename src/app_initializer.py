@@ -80,6 +80,10 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, rag_manager)
     api_key_manager = APIKeyManager(DATA_DIR)
     preset_manager = PresetManager(DATA_DIR)
+    # Default persona (identity rulings R10/R12/R13): the preset store is
+    # the canonical home of the one synced default identity.
+    from src.default_persona import configure as configure_default_persona
+    configure_default_persona(preset_manager)
 
     # Initialize memory vector store (share embedding model with RAG if available)
     # Gate behind MEMORY_VECTOR_ENABLED: Chroma vector path is retired when

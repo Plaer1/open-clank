@@ -58,21 +58,34 @@ _DEFAULT_SYNTHESIS_TONE = (
 )
 
 
-def synthesis_system_prompt(persona_id: str) -> str:
+_SYNTHESIS_INSTRUCTION = (
+    "You are now writing a single one-line reminder for the user. "
+    "Keep it under 18 words and in the voice above."
+)
+
+
+def synthesis_system_prompt(persona_id: str, owner: str = "") -> str:
     """Return the system prompt for reminder synthesis given a persona id.
 
-    Falls back to the warm-neutral baseline when the id is empty, unknown,
-    or refers to a custom (client-only) character we don't have on file.
+    An explicit novelty/custom persona keeps its own voice. When no persona
+    is selected, the owner's synced DEFAULT persona speaks (identity rulings
+    R13/R15) — the warm-neutral baseline survives only as the last-resort
+    fallback when the default-persona store is unavailable.
     """
     persona = (persona_id or "").strip().lower()
     persona_prompt = PERSONAS.get(persona)
     if persona_prompt:
         # Persona drives the voice; the synthesis-instruction stays attached
         # so the model knows it's writing a short reminder, not a chat reply.
+        return persona_prompt + "\n\n" + _SYNTHESIS_INSTRUCTION
+    try:
+        from src.default_persona import get_default_persona
+
+        record = get_default_persona(owner or "")
         return (
-            persona_prompt
+            f"You are {record['name']}. {record['system_prompt']}"
             + "\n\n"
-            + "You are now writing a single one-line reminder for the user. "
-              "Keep it under 18 words and in the voice above."
+            + _SYNTHESIS_INSTRUCTION
         )
-    return _DEFAULT_SYNTHESIS_TONE
+    except Exception:
+        return _DEFAULT_SYNTHESIS_TONE

@@ -64,7 +64,7 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
             attachment_meta=[],
         )
 
-    def fake_extract_preset(chat_handler, preset_id):
+    def fake_extract_preset(chat_handler, preset_id, owner=""):
         return chat_helpers.PresetInfo(
             temperature=0.7, max_tokens=1024, system_prompt="You are Odysseus.", character_name=None,
         )
