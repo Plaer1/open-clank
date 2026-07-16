@@ -406,12 +406,10 @@ impl MemoryProvider for NativeProvider {
         };
         let workspace_id = turn.workspace_id.trim();
         let owner = turn.owner.as_deref().unwrap_or_default().trim();
-        if capture_mode != "manual"
-            && (owner.is_empty() || workspace_id.is_empty() || workspace_id == "global")
-        {
-            tracing::warn!(
-                "automatic capture rejected: owner and non-global workspace are required"
-            );
+        // Conversational memory writes to the "global" workspace by
+        // convention; only a missing owner disqualifies automatic capture.
+        if capture_mode != "manual" && owner.is_empty() {
+            tracing::warn!("automatic capture rejected: owner is required");
             return CaptureResult {
                 records_captured: 0,
                 record_ids: vec![],
@@ -1187,19 +1185,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_capture_requires_owned_non_global_scope() {
+    async fn automatic_capture_requires_owner_and_accepts_global_workspace() {
         let (p, store) = provider();
         let mut unowned = turn("scope must be explicit", "it is explicit");
         unowned.owner = None;
         assert_eq!(p.capture(&unowned).await.providers_failed, 1);
 
-        let mut global = turn("scope must not be global", "it is not global");
+        // Canonical chat convention: automatic capture lands in "global".
+        let mut global = turn("the lighthouse keeps a spare lens", "noted");
         global.workspace_id = "global".into();
-        assert_eq!(p.capture(&global).await.providers_failed, 1);
-        assert!(store
-            .search_raw_fts_scoped("scope", 10, Some("alice"), Some("workspace-test"))
-            .await
-            .is_empty());
+        let result = p.capture(&global).await;
+        assert_eq!(result.providers_failed, 0);
+        assert_eq!(result.records_captured, 2);
+        let raws = store
+            .search_raw_fts_scoped("lighthouse", 10, Some("alice"), Some("global"))
+            .await;
+        assert!(!raws.is_empty());
+        assert!(raws.iter().all(|hit| hit.turn.workspace_id == "global"));
     }
 
     #[tokio::test]
