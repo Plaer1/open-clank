@@ -927,6 +927,7 @@ class ACPBridge:
             messages,
             turn_id=turn_id,
             workspace=cwd or self._cwd,
+            authoritative_system=str(envelope.get("system_prompt") or ""),
         )
         prompt_meta = {"odysseus": envelope}
         prompt_meta["odysseus"]["tools"] = _mimo_tool_policy(envelope)
@@ -1341,8 +1342,15 @@ def _build_prompt_parts(
     *,
     turn_id: str = "",
     workspace: str = "",
+    authoritative_system: str = "",
 ) -> list:
-    """Compile canonical roles and structured content into valid ACP parts."""
+    """Compile canonical roles and structured content into valid ACP parts.
+
+    authoritative_system: the persona/system prompt that crosses the seam as
+    TRUE system authority (envelope → child PromptInput.system, identity
+    ruling R1). Any context message carrying that exact text is skipped here
+    so the persona never ALSO arrives demoted to synthetic prompt text.
+    """
     if not messages:
         return []
     current_index = next(
@@ -1351,11 +1359,18 @@ def _build_prompt_parts(
     )
     parts: list[dict] = []
     annotations = {"audience": ["assistant"]}
+    authority = (authoritative_system or "").strip()
     for index, message in enumerate(messages[:current_index]):
         metadata = message.get("metadata") or {}
         message_id = metadata.get("_db_id") or f"context-{index}"
         role = str(message.get("role") or "unknown").lower()
         text = _content_text(message.get("content"))
+        if (
+            authority
+            and role == "system"
+            and text.strip() == authority
+        ):
+            continue
         trust = "untrusted" if "<untrusted_context" in text else "canonical"
         parts.append({
             "type": "text",
