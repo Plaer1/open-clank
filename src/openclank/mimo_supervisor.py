@@ -64,9 +64,13 @@ def _mimo_child_environment() -> dict[str, str]:
 
 def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, str]]:
     """Translate the operator's Xiaomi/DeepSeek config without copying its keys."""
-    source = path or Path(
-        os.environ.get("OPENCLAW_CONFIG_PATH", "~/entities/<agent>/openclaw.json")
-    ).expanduser()
+    if path is None:
+        configured = os.environ.get("OPENCLAW_CONFIG_PATH", "")
+        if not configured:
+            return {}, {}
+        source = Path(configured).expanduser()
+    else:
+        source = path
     if not source.is_file():
         return {}, {}
     try:
