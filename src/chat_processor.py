@@ -1,4 +1,5 @@
 # src/chat_processor.py
+import asyncio
 import logging
 import math
 import re
@@ -90,6 +91,16 @@ class ChatProcessor:
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
+
+    _digest_warned_at: float = 0.0
+
+    def _warn_digest_failure(self, error: Exception) -> None:
+        """Digest failures degrade to "no index card" — chat must proceed.
+        Warn at most once a minute so a down engine doesn't spam the log."""
+        now = time.monotonic()
+        if now - self._digest_warned_at >= 60.0:
+            self._digest_warned_at = now
+            logger.warning("Memory digest unavailable, continuing without index card: %s", error)
 
     def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
         """Retrieve memories relevant to the message.
@@ -246,8 +257,27 @@ class ChatProcessor:
         # Memory: pinned (always included) + extended (provider recall or native)
         self._last_used_memories = []  # track what was injected
         if use_memory:
-            if self.memory_provider:
-                # Provider path (frankenmemory or any external provider)
+            if self.memory_provider and hasattr(self.memory_provider, "digest"):
+                # Provider index card: what the bank HOLDS, never contents.
+                # Replaces push-recall entirely — the model pulls details
+                # through the memory search tool when a listed topic matters.
+                # Not a "used memory": no record_access, no used_memories
+                # bookkeeping (it's an index, not retrieval).
+                try:
+                    from src.memory_digest import render_digest
+
+                    digest = await asyncio.wait_for(
+                        self.memory_provider.digest(owner=owner), timeout=0.25
+                    )
+                    block = render_digest(digest)
+                    if block:
+                        preface.append(untrusted_context_message(
+                            "saved memory: bank index", block,
+                        ))
+                except Exception as e:
+                    self._warn_digest_failure(e)
+            elif self.memory_provider:
+                # Provider without digest support: legacy push-recall.
                 try:
                     hits = await self.memory_provider.recall(message, owner=owner, top_k=3)
                     if hits:
