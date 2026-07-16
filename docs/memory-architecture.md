@@ -22,16 +22,26 @@ bank. The axis stays reserved for future genuinely project-scoped memory;
 `code_index` already uses it per repo. Never spell the literal — import the
 symbol.
 
-## Capture — every chat path writes
+## Capture — every chat path writes, one owner
 
-- **Direct-endpoint chats** (DeepSeek row, subscription rows): after each
-  saved turn, `run_post_response_tasks` calls
+Turn capture is **Odysseus-owned and transport-blind**: mimo is a provider
+leg, not a separate memory system — every dispatched turn (direct endpoint
+or `mimo://acp`) passes through the same post-response seam, and only that
+seam knows the full policy context (incognito, compare mode, the user's
+auto-memory preference).
+
+- After each saved turn, `run_post_response_tasks` runs
+  `capture_turn_and_enrich` (`services/memory/graph_extractor.py`):
   `FrankenmemoryProvider.capture()` → fm `capture` with
-  `capture_mode="candidate"` — the same admission pipeline mimo uses.
-  Heuristic prefilter, no LLM call, so it runs per turn.
-- **MiMo-transport turns**: the child's own `capture.ts` captures them;
-  Odysseus skips those (`captured_by_runtime`, i.e. the dispatch went over
-  `mimo://acp`) so nothing double-stores.
+  `capture_mode="candidate"` (heuristic admission, no LLM), then — when the
+  turn was admitted as a candidate — LLM graph enrichment on the task
+  endpoint (entities/edges/cues → `graph_upsert`; same prompt, tag
+  vocabulary, throttle policy, and forgiving wire schema as mimo's former
+  child-side extractor). Extraction failures never touch the captured
+  record. Throttle knobs: settings key `memory_graph`
+  (`every_n_turns`, `min_interval_seconds`, `enabled`).
+- The mimo child no longer captures turns; its `capture.ts` owns only the
+  memory session-scope lifecycle.
 - **Agent-authored MEMORY.md files**: mimo's reconcile pass projects every
   mimo-root MEMORY-type file into fm through `ingest_authored` — one wiki
   record per `##` section, idempotent by content hash, deletions wipe the

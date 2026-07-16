@@ -658,7 +658,6 @@ def setup_chat_routes(
             incognito=incognito,
             allow_background_extraction=(not tool_policy.block_all_tool_calls),
             memory_provider=chat_processor.memory_provider,
-            captured_by_runtime=(model_target.transport == "acp"),
         )
 
         return {"response": reply}
@@ -1556,7 +1555,6 @@ def setup_chat_routes(
                                     owner=_user,
                                     allow_background_extraction=(not tool_policy.block_all_tool_calls),
                                     memory_provider=chat_processor.memory_provider,
-                                    captured_by_runtime=(model_target.transport == "acp"),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1776,7 +1774,6 @@ def setup_chat_routes(
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=(not tool_policy.block_all_tool_calls),
                                     memory_provider=chat_processor.memory_provider,
-                                    captured_by_runtime=(model_target.transport == "acp"),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
