@@ -382,19 +382,12 @@ impl FrankenmemoryServer {
                 None,
             ));
         }
+        // request_scope guarantees a non-empty owner on every successful
+        // path; automatic capture into the "global" workspace is the
+        // canonical convention for conversational memory, not an error.
         let scope = request_scope(params.owner, params.workspace_id, true)?;
         let owner = Some(scope.owner.clone());
         let workspace_id = scope.workspace_id;
-        if capture_mode == "raw_only"
-            && (owner.as_deref().unwrap_or_default().trim().is_empty()
-                || workspace_id.trim().is_empty()
-                || workspace_id == "global")
-        {
-            return Err(rmcp::ErrorData::invalid_params(
-                "automatic raw capture requires owner and a non-global workspace_id",
-                None,
-            ));
-        }
         let mut metadata = match params.metadata.unwrap_or_else(|| serde_json::json!({})) {
             serde_json::Value::String(value) => {
                 serde_json::from_str(&value).unwrap_or_else(|_| serde_json::json!({}))

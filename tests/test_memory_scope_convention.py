@@ -100,6 +100,38 @@ async def test_chat_writes_carry_canonical_workspace(tmp_path):
 
 
 @needs_fm
+async def test_automatic_capture_accepts_canonical_workspace(tmp_path):
+    """The engine's old guard rejected automatic capture into "global" —
+    exactly what every mimo turn sends under the canonical convention. This
+    is the shape capture.ts produces; it must land, not bounce."""
+    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    await asyncio.create_task(provider.initialize())
+    try:
+        result = await provider._call_tool(
+            "capture",
+            {
+                "user_text": "remember the observatory code is 7741",
+                "assistant_text": "Noted: observatory code 7741.",
+                "capture_mode": "candidate",
+                "session_key": "ses_mimo",
+                "session_id": "ses_mimo",
+                "workspace_id": CHAT_WORKSPACE,
+                "owner": "alice",
+                "source_event_id": "ses_mimo:u1:a1",
+                "source_message_ids": ["u1", "a1"],
+                "source": "mimo",
+            },
+        )
+        assert result.get("record_ids"), f"capture bounced: {result}"
+
+        raw_rows = await provider.inspect_tier("raw", owner="alice")
+        assert raw_rows
+        assert all(row.get("workspace_id") == CHAT_WORKSPACE for row in raw_rows)
+    finally:
+        await asyncio.create_task(provider.shutdown())
+
+
+@needs_fm
 async def test_cross_entry_point_round_trip(tmp_path):
     """Write through the Odysseus provider (canonical workspace); read the way
     a mimo session does — its own session workspace, include_global union on
