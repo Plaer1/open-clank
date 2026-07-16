@@ -36,6 +36,7 @@ const SETTINGS_OWNERSHIP = Object.freeze({
   services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
   'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
+  personas: { scope: 'per-user', api: '/api/presets/default-persona', consumer: 'chat default, personal assistant, reminder voice, background work' },
   search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
   integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
@@ -106,6 +107,7 @@ function initTabs() {
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
       if (tab === 'ai') refreshAiModelEndpoints();
+      if (tab === 'personas') loadDefaultPersonaPanel();
       if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
       if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
     });
@@ -515,6 +517,77 @@ function _bindFallbackWidget(opts) {
     setInitial: function(list) { current = (list || []).slice(); render(); },
     refresh: render,
   };
+}
+
+/* ── Default persona (identity rulings R10/R11/R13) ──
+   One synced identity: edits here update chat defaults, the personal
+   assistant, and the reminder voice together. */
+let _personasPanelWired = false;
+async function loadDefaultPersonaPanel() {
+  const nameEl = el('default-persona-name');
+  const promptEl = el('default-persona-prompt');
+  const statusEl = el('default-persona-status');
+  if (!nameEl || !promptEl) return;
+
+  function setStatus(text) {
+    if (statusEl) {
+      statusEl.textContent = text;
+      if (text) setTimeout(() => { if (statusEl.textContent === text) statusEl.textContent = ''; }, 4000);
+    }
+  }
+
+  async function refresh() {
+    try {
+      const res = await checkedFetch('/api/presets/default-persona', { credentials: 'same-origin', cache: 'no-store' });
+      const data = await res.json();
+      nameEl.value = data.name || 'Odysseus';
+      promptEl.value = data.system_prompt || '';
+    } catch (e) {
+      setStatus('Could not load persona');
+    }
+  }
+
+  if (!_personasPanelWired) {
+    _personasPanelWired = true;
+    const saveBtn = el('default-persona-save');
+    const resetBtn = el('default-persona-reset');
+    if (saveBtn) saveBtn.addEventListener('click', async () => {
+      const name = (nameEl.value || '').trim();
+      const system_prompt = (promptEl.value || '').trim();
+      if (!name || !system_prompt) { setStatus('Name and prompt are required'); return; }
+      try {
+        const res = await checkedFetch('/api/presets/default-persona', {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, system_prompt }),
+        });
+        const out = await res.json();
+        if (out && out.success) {
+          setStatus('Saved — chat, assistant, and reminders updated');
+          window.dispatchEvent(new CustomEvent('default-persona-changed', {
+            detail: { name: out.name, system_prompt: out.system_prompt, is_factory: false },
+          }));
+        } else setStatus('Save failed');
+      } catch (e) { setStatus('Save failed'); }
+    });
+    if (resetBtn) resetBtn.addEventListener('click', async () => {
+      try {
+        const res = await checkedFetch('/api/presets/default-persona/reset', {
+          method: 'POST', credentials: 'same-origin',
+        });
+        const out = await res.json();
+        if (out && out.success) {
+          nameEl.value = out.name; promptEl.value = out.system_prompt;
+          setStatus('Factory default restored');
+          window.dispatchEvent(new CustomEvent('default-persona-changed', {
+            detail: { name: out.name, system_prompt: out.system_prompt, is_factory: false },
+          }));
+        } else setStatus('Reset failed');
+      } catch (e) { setStatus('Reset failed'); }
+    });
+  }
+
+  await refresh();
 }
 
 /* ── Default Chat Model ── */

@@ -84,12 +84,56 @@ async function loadDefaultPersona() {
     if (res.ok) {
       defaultPersona = await res.json();
       _populateCharSelect();
+      applyAgentName();
     }
   } catch (e) { /* factory fallbacks apply */ }
 }
 
 function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Odysseus'; }
 function _defaultPersonaPrompt() { return (defaultPersona && defaultPersona.system_prompt) || ''; }
+
+function _activeAgentName() {
+  if (presets.custom && presets.custom.enabled && presets.custom.character_name) {
+    return presets.custom.character_name;
+  }
+  return _defaultPersonaName();
+}
+
+/**
+ * Ruling R10: the enabled persona's name populates every UX surface that
+ * used to hardcode "Odysseus" — sidebar brand, welcome screen, composer
+ * placeholder, chat header, tab title, and message role labels (renderers
+ * read window.__agentName at render time).
+ */
+export function applyAgentName() {
+  const name = _activeAgentName();
+  const previous = window.__agentName || 'Odysseus';
+  window.__agentName = name;
+  const brand = document.querySelector('.sidebar-brand-title');
+  if (brand && (brand.textContent === previous || brand.textContent === 'Odysseus')) brand.textContent = name;
+  const welcome = document.querySelector('.welcome-name');
+  if (welcome) {
+    const last = welcome.lastChild;
+    if (last && last.nodeType === Node.TEXT_NODE) last.textContent = name;
+  }
+  const msg = document.getElementById('message');
+  if (msg && /^Message .*\.\.\.$/.test(msg.placeholder || '')) msg.placeholder = `Message ${name}...`;
+  const meta = document.getElementById('current-meta');
+  if (meta && (meta.textContent === `${previous} Chat` || meta.textContent === 'Odysseus Chat')) {
+    meta.textContent = `${name} Chat`;
+  }
+  if (document.title === `${previous} Chat` || document.title === 'Odysseus Chat') {
+    document.title = `${name} Chat`;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('default-persona-changed', (e) => {
+    if (e.detail && e.detail.name) defaultPersona = e.detail;
+    _populateCharSelect();
+    applyAgentName();
+  });
+}
 
 /**
  * Initialize with dependencies
@@ -825,6 +869,7 @@ export async function saveCustomPreset(showToast, showError) {
         defaultPersona = { name: out.name, system_prompt: out.system_prompt, is_factory: false };
         _populateCharSelect();
         deactivateCharacter();
+        applyAgentName();
         // Persist the deactivation so a reload doesn't resurrect a stale
         // custom persona over the default (mirrors the Cancel handler).
         if (presets.custom && presets.custom.character_name) {
@@ -900,6 +945,7 @@ export async function saveCustomPreset(showToast, showError) {
       }
 
       setTimeout(() => { _syncCharIndicator(); }, 0);
+      applyAgentName();
 
       // Auto-save to templates (non-blocking) — skip built-in presets
       const _selVal = document.getElementById('char-template-select')?.value || '';
@@ -1035,6 +1081,7 @@ export function deactivateCharacter() {
   if (charInd) { charInd.style.display = 'none'; charInd.classList.remove('active'); }
   const miniBtn = document.getElementById('overflow-preset-btn');
   if (miniBtn) miniBtn.classList.remove('active');
+  applyAgentName();
 }
 
 /**
