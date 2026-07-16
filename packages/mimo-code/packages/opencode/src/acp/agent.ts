@@ -1337,9 +1337,21 @@ export class Agent implements ACPAgent {
   }
 
   async prompt(params: PromptRequest) {
+    // Host context seam (identity ruling R1): the host's envelope is the
+    // authority for tool policy AND for who the agent IS. system_prompt is
+    // the resolved persona — it rides the true system tier of the prompt,
+    // never demoted to synthetic user text.
     const odysseus = (params as PromptRequest & {
-      _meta?: { odysseus?: { tools?: Record<string, boolean> } }
+      _meta?: {
+        odysseus?: {
+          tools?: Record<string, boolean>
+          system_prompt?: string
+          persona?: string
+          mode?: string
+        }
+      }
     })._meta?.odysseus
+    const hostSystem = odysseus?.system_prompt?.trim() || undefined
     const sessionID = params.sessionId
     const session = this.sessionManager.get(sessionID)
     const directory = session.cwd
@@ -1468,6 +1480,7 @@ export class Agent implements ACPAgent {
         agent,
         directory,
         tools: odysseus?.tools,
+        system: hostSystem,
       })
       const msg = response.data?.info
 
@@ -1484,6 +1497,8 @@ export class Agent implements ACPAgent {
       .list({ directory }, { throwOnError: true })
       .then((x) => x.data!.find((c) => c.name === cmd.name))
     if (command) {
+      // session.command has no system-override input; command templates keep
+      // their own framing. Persona authority applies to ordinary prompts.
       const response = await this.sdk.session.command({
         sessionID,
         command: command.name,
