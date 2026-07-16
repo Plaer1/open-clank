@@ -55,6 +55,90 @@ impl NativeProvider {
             .await
     }
 
+    /// Idempotent projection of an agent-authored memory file into curated
+    /// records, one per section. The file stays the source of truth: records
+    /// carry (authored_path, anchor, content_hash) in metadata, unchanged
+    /// sections are skipped by hash, edited sections replace their old
+    /// record, and sections gone from the file (or the whole file, via an
+    /// empty `sections`) delete theirs. Authored records are exempt from
+    /// decay and dedup — the reconcile pass is their only lifecycle.
+    pub async fn ingest_authored(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        source_path: &str,
+        sections: &[(String, String)],
+    ) -> Result<serde_json::Value, String> {
+        if owner.trim().is_empty() {
+            return Err("owner is required".into());
+        }
+        if source_path.trim().is_empty() {
+            return Err("source_path is required".into());
+        }
+        let sqlite = self
+            .store
+            .as_sqlite()
+            .ok_or_else(|| "authored ingest requires SQLite".to_string())?;
+        let existing = sqlite.authored_records(owner, workspace_id, source_path)?;
+
+        let mut desired: std::collections::HashMap<String, (&str, &str)> =
+            std::collections::HashMap::new();
+        for (anchor, content) in sections {
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let hash = blake3::hash(content.as_bytes()).to_hex()[..24].to_string();
+            desired.entry(hash).or_insert((anchor.as_str(), content));
+        }
+
+        let existing_hashes: std::collections::HashSet<&str> =
+            existing.iter().map(|(_, hash)| hash.as_str()).collect();
+        let mut upserted = 0usize;
+        let mut unchanged = 0usize;
+        for (hash, (anchor, content)) in &desired {
+            if existing_hashes.contains(hash.as_str()) {
+                unchanged += 1;
+                continue;
+            }
+            let mut record = MemoryRecord::new(*content);
+            record.id = stable_id("authored", &[owner, workspace_id, source_path, hash]);
+            record.kind = MemoryKind::Wiki;
+            record.owner = Some(owner.to_string());
+            record.workspace_id = workspace_id.to_string();
+            record.source = "authored".into();
+            record.source_type = SourceType::Ai;
+            record.exempt_from_decay = true;
+            record.exempt_from_dedup = true;
+            record.metadata = serde_json::json!({
+                "authored_path": source_path,
+                "anchor": anchor,
+                "content_hash": hash,
+            });
+            self.store.upsert_curated(&record, None).await;
+            upserted += 1;
+        }
+
+        let mut deleted = 0usize;
+        for (id, hash) in &existing {
+            if !desired.contains_key(hash) {
+                if self
+                    .delete_curated_record(id, Some(owner), Some(workspace_id))
+                    .await
+                {
+                    deleted += 1;
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "upserted": upserted,
+            "unchanged": unchanged,
+            "deleted": deleted,
+            "total": desired.len(),
+        }))
+    }
+
     pub fn get_curated_record(
         &self,
         id: &str,
@@ -1182,6 +1266,106 @@ mod tests {
             .unwrap();
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].reason, "temporary_fixture");
+    }
+
+    fn sections(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(anchor, content)| (anchor.to_string(), content.to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn authored_ingest_lifecycle_is_idempotent() {
+        let (p, store) = provider();
+        let path = "/data/memory/global/MEMORY.md";
+        let v1 = sections(&[
+            ("Preferences", "e prefers green tea over coffee"),
+            ("Build", "the build needs FM_DB_PATH set"),
+        ]);
+
+        let first = p.ingest_authored("alice", "global", path, &v1).await.unwrap();
+        assert_eq!(first["upserted"], 2);
+        assert_eq!(first["deleted"], 0);
+
+        // Re-ingest unchanged → no writes, no dupes.
+        let second = p.ingest_authored("alice", "global", path, &v1).await.unwrap();
+        assert_eq!(second["upserted"], 0);
+        assert_eq!(second["unchanged"], 2);
+        let hits = store
+            .search_curated_fts_scoped("green tea", 10, Some("alice"), Some("global"))
+            .await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.source, "authored");
+        assert!(hits[0].record.exempt_from_decay);
+
+        // Edit one section → replaced (old gone, new present), other kept.
+        let v2 = sections(&[
+            ("Preferences", "e prefers oolong tea over coffee"),
+            ("Build", "the build needs FM_DB_PATH set"),
+        ]);
+        let third = p.ingest_authored("alice", "global", path, &v2).await.unwrap();
+        assert_eq!(third["upserted"], 1);
+        assert_eq!(third["deleted"], 1);
+        assert!(store
+            .search_curated_fts_scoped("green", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .search_curated_fts_scoped("oolong", 10, Some("alice"), Some("global"))
+                .await
+                .len(),
+            1
+        );
+
+        // File deleted → empty sections wipe the projection, nothing else.
+        let wipe = p.ingest_authored("alice", "global", path, &[]).await.unwrap();
+        assert_eq!(wipe["deleted"], 2);
+        assert!(store
+            .search_curated_fts_scoped("oolong", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn authored_ingest_scopes_by_owner_and_path() {
+        let (p, store) = provider();
+        p.ingest_authored(
+            "alice",
+            "global",
+            "/data/a/MEMORY.md",
+            &sections(&[("", "alice keeps the amber ledger")]),
+        )
+        .await
+        .unwrap();
+        p.ingest_authored(
+            "bob",
+            "global",
+            "/data/b/MEMORY.md",
+            &sections(&[("", "bob keeps the cobalt ledger")]),
+        )
+        .await
+        .unwrap();
+
+        // Wiping alice's file must not touch bob's projection.
+        p.ingest_authored("alice", "global", "/data/a/MEMORY.md", &[])
+            .await
+            .unwrap();
+        assert!(store
+            .search_curated_fts_scoped("amber", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .search_curated_fts_scoped("cobalt", 10, Some("bob"), Some("global"))
+                .await
+                .len(),
+            1
+        );
+
+        assert!(p.ingest_authored("", "global", "/x.md", &[]).await.is_err());
+        assert!(p.ingest_authored("alice", "global", " ", &[]).await.is_err());
     }
 
     #[tokio::test]

@@ -904,6 +904,34 @@ impl SqliteStore {
         }))
     }
 
+    /// Ledger lookup for authored-file ingest: every curated record whose
+    /// metadata marks it as originating from `source_path`, as
+    /// (id, content_hash) pairs. The ledger lives in the records themselves,
+    /// so ingest is idempotent with no caller-side state.
+    pub fn authored_records(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        source_path: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(json_extract(metadata, '$.content_hash'), '')
+                 FROM curated
+                 WHERE owner = ?1 AND workspace_id = ?2
+                   AND json_extract(metadata, '$.authored_path') = ?3",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![owner, workspace_id, source_path], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn owner_counts(&self, owner: &str) -> Result<serde_json::Value, String> {
         if owner.trim().is_empty() {
             return Err("owner is required".into());

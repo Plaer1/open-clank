@@ -37,6 +37,13 @@ export function memorySessionScope(sessionID: string) {
   return scopes.get(sessionID)
 }
 
+// Scope for session-less maintenance work (reconcile-time ingest). Every
+// session in a child shares one owner — the embedder partitions runtimes
+// per owner — so any registered scope carries the right identity.
+export function anyMemorySessionScope(): MemorySessionScope | undefined {
+  return scopes.values().next().value
+}
+
 export function unregisterMemorySessionScope(sessionID: string) {
   scopes.delete(sessionID)
   if (scopes.size === 0) {
