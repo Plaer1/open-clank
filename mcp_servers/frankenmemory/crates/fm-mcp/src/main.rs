@@ -235,6 +235,14 @@ struct CandidateReviewParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DigestParams {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct MemoryQualityParams {
     #[serde(default)]
     rebuild_graph_fts: Option<bool>,
@@ -481,6 +489,24 @@ impl FrankenmemoryServer {
             .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({"reviewed": true, "accepted": params.accept, "curated_id": curated_id}).to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "digest",
+        description = "Return a small index-card digest of the memory bank for the caller's scope: tier/kind counts, pinned headlines, top relationship clusters, and newest cue topics. Read-only and cheap — meant for per-turn injection; follow up with recall/search for depth."
+    )]
+    async fn digest(
+        &self,
+        Parameters(params): Parameters<DigestParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        let result = self
+            .graph_store
+            .digest(&scope.owner, &scope.workspace_id, scope.include_global)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
         )]))
     }
 

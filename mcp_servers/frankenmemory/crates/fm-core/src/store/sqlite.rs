@@ -739,6 +739,171 @@ impl SqliteStore {
         Ok((id, version))
     }
 
+    /// Index-card digest of the bank for (owner, workspace ∪ global):
+    /// counts, pinned headlines, top relationship clusters, newest cue
+    /// topics. Bounded by item counts, never token budgets. Computed
+    /// directly — every query is a covered scan over scoped indexes, so
+    /// there is no cache to invalidate and writes are visible immediately.
+    pub fn digest(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        include_global: bool,
+    ) -> Result<serde_json::Value, String> {
+        const PINNED_MAX: usize = 5;
+        const CLUSTERS_MAX: usize = 6;
+        const RECENT_MAX: usize = 5;
+
+        if owner.trim().is_empty() {
+            return Err("owner is required".into());
+        }
+        let conn = self.conn.lock().unwrap();
+        let scope_params = params![owner, workspace_id, include_global];
+
+        let mut by_kind = serde_json::Map::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT kind, COUNT(*) FROM curated
+                     WHERE archived = 0 AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                     GROUP BY kind",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(scope_params, |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (kind, count) = row.map_err(|error| error.to_string())?;
+                by_kind.insert(kind, count.into());
+            }
+        }
+
+        let scoped_count = |sql: &str| -> Result<i64, String> {
+            conn.query_row(sql, scope_params, |row| row.get(0))
+                .map_err(|error| error.to_string())
+        };
+        let curated_total = scoped_count(
+            "SELECT COUNT(*) FROM curated
+             WHERE archived = 0 AND owner = ?1
+               AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))",
+        )?;
+        let raw_total = scoped_count(
+            "SELECT COUNT(*) FROM raw
+             WHERE owner = ?1
+               AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))",
+        )?;
+        let candidates_pending = scoped_count(
+            "SELECT COUNT(*) FROM candidates
+             WHERE status = 'pending' AND owner = ?1
+               AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))",
+        )?;
+
+        let mut pinned = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT substr(content, 1, 80), kind FROM curated
+                     WHERE archived = 0 AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                       AND (kind = 'persona'
+                            OR COALESCE(json_extract(metadata, '$.pinned'), 0) IN (1, 'true'))
+                     ORDER BY updated_at DESC
+                     LIMIT ?4",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(
+                    params![owner, workspace_id, include_global, PINNED_MAX as i64],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "headline": row.get::<_, String>(0)?,
+                            "kind": row.get::<_, String>(1)?,
+                        }))
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                pinned.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+
+        let mut clusters = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT tag, COUNT(*), MAX(last_seen) FROM graph_edges
+                     WHERE status = 'active' AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                     GROUP BY tag
+                     ORDER BY COUNT(*) DESC, MAX(last_seen) DESC
+                     LIMIT ?4",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(
+                    params![owner, workspace_id, include_global, CLUSTERS_MAX as i64],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "label": row.get::<_, String>(0)?,
+                            "size": row.get::<_, i64>(1)?,
+                            "last_touched": row.get::<_, String>(2)?,
+                        }))
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                clusters.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+
+        let mut recent = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT cue, MAX(created_at) FROM graph_cues
+                     WHERE status = 'active' AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                     GROUP BY cue
+                     ORDER BY MAX(created_at) DESC
+                     LIMIT ?4",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(
+                    params![owner, workspace_id, include_global, RECENT_MAX as i64],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "topic": row.get::<_, String>(0)?,
+                            "at": row.get::<_, String>(1)?,
+                        }))
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                recent.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+
+        Ok(serde_json::json!({
+            "counts": {
+                "by_kind": by_kind,
+                "by_tier": {
+                    "raw": raw_total,
+                    "curated": curated_total,
+                    "candidates_pending": candidates_pending,
+                },
+                "candidates_pending": candidates_pending,
+            },
+            "pinned": pinned,
+            "clusters": clusters,
+            "recent": recent,
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+        }))
+    }
+
     pub fn owner_counts(&self, owner: &str) -> Result<serde_json::Value, String> {
         if owner.trim().is_empty() {
             return Err("owner is required".into());
@@ -1993,6 +2158,66 @@ mod tests {
         r.owner = Some("alice".into());
         r.workspace_id = "global".into();
         r
+    }
+
+    #[tokio::test]
+    async fn digest_empty_bank_is_valid_shape() {
+        let store = SqliteStore::memory(4).unwrap();
+        let d = store.digest("alice", "global", true).unwrap();
+        assert!(d["pinned"].as_array().unwrap().is_empty());
+        assert!(d["clusters"].as_array().unwrap().is_empty());
+        assert!(d["recent"].as_array().unwrap().is_empty());
+        assert_eq!(d["counts"]["by_tier"]["curated"], 0);
+        assert_eq!(d["counts"]["by_tier"]["raw"], 0);
+        assert_eq!(d["counts"]["candidates_pending"], 0);
+        assert!(d["generated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn digest_requires_owner() {
+        let store = SqliteStore::memory(4).unwrap();
+        assert!(store.digest("", "global", true).is_err());
+    }
+
+    #[tokio::test]
+    async fn digest_reflects_writes_immediately_and_scopes_by_owner() {
+        let store = SqliteStore::memory(4).unwrap();
+        let mut persona = test_record("keeper of the amber greenhouse ledger");
+        persona.kind = MemoryKind::Persona;
+        store.upsert_curated(&persona, None).await;
+        store
+            .upsert_curated(&test_record("prefers green tea in the mornings"), None)
+            .await;
+
+        let d = store.digest("alice", "global", true).unwrap();
+        assert_eq!(d["counts"]["by_tier"]["curated"], 2);
+        assert_eq!(d["counts"]["by_kind"]["persona"], 1);
+        let pinned = d["pinned"].as_array().unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert!(pinned[0]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("amber greenhouse"));
+
+        let bob = store.digest("bob", "global", true).unwrap();
+        assert_eq!(bob["counts"]["by_tier"]["curated"], 0);
+        assert!(bob["pinned"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn digest_unions_workspace_and_global() {
+        let store = SqliteStore::memory(4).unwrap();
+        let mut scoped = test_record("repo-local build quirk");
+        scoped.workspace_id = "repo-x".into();
+        store.upsert_curated(&scoped, None).await;
+        store
+            .upsert_curated(&test_record("global tea preference"), None)
+            .await;
+
+        let d = store.digest("alice", "repo-x", true).unwrap();
+        assert_eq!(d["counts"]["by_tier"]["curated"], 2);
+        let strict = store.digest("alice", "repo-x", false).unwrap();
+        assert_eq!(strict["counts"]["by_tier"]["curated"], 1);
     }
 
     #[tokio::test]

@@ -132,6 +132,35 @@ async def test_automatic_capture_accepts_canonical_workspace(tmp_path):
 
 
 @needs_fm
+async def test_digest_round_trip_reflects_bank(tmp_path):
+    """SLICE-03: digest surfaces counts and pinned headlines for the caller's
+    scope immediately after a write, and stays empty-but-valid for a
+    different owner."""
+    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    await asyncio.create_task(provider.initialize())
+    try:
+        empty = await provider.digest(owner="alice")
+        assert empty is not None
+        assert empty["counts"]["by_tier"]["curated"] == 0
+
+        await provider.remember(
+            "Keeper of the amber greenhouse ledger.",
+            owner="alice",
+            category="persona",
+        )
+        after = await provider.digest(owner="alice")
+        assert after["counts"]["by_tier"]["curated"] >= 1
+        assert isinstance(after["pinned"], list)
+        assert isinstance(after["clusters"], list)
+        assert isinstance(after["recent"], list)
+
+        bob = await provider.digest(owner="bob")
+        assert bob["counts"]["by_tier"]["curated"] == 0
+    finally:
+        await asyncio.create_task(provider.shutdown())
+
+
+@needs_fm
 async def test_cross_entry_point_round_trip(tmp_path):
     """Write through the Odysseus provider (canonical workspace); read the way
     a mimo session does — its own session workspace, include_global union on
