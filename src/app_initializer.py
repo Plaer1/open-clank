@@ -12,6 +12,7 @@ from src.constants import (
 from src.memory import MemoryManager
 from src.memory_provider import MemoryProviderRegistry, NativeMemoryProvider
 from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memory_scope import chat_workspace
 from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
 from core.models import set_session_manager
@@ -113,10 +114,9 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     if memory_provider == "frankenmemory":
         database_id = prepare_frankenmemory_database()
         fm_command = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
-        fm_workspace = os.environ.get("FM_WORKSPACE_ID") or os.path.abspath(base_dir)
         fm = FrankenmemoryProvider(
             command=fm_command,
-            workspace_id=fm_workspace,
+            workspace_id=chat_workspace(),
             env={
                 "FM_DB_PATH": FM_DB_PATH,
                 "FM_DB_ID": database_id,

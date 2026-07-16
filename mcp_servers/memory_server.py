@@ -17,6 +17,8 @@ from mcp.types import Tool, TextContent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.memory_scope import CHAT_WORKSPACE  # noqa: E402
+
 server = Server("memory")
 
 # Late-initialized managers (set during first tool call)
@@ -46,7 +48,7 @@ def _configured_workspace() -> str:
         workspace = os.environ.get(key, "").strip()
         if workspace:
             return workspace
-    return str(Path.cwd().resolve())
+    return CHAT_WORKSPACE
 
 
 def _entry_owner(entry: dict) -> str | None:
