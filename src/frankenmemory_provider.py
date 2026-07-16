@@ -17,6 +17,7 @@ from src.memory_provider import (
     MemorySearchHit,
     MemoryTransportError,
 )
+from src.memory_scope import chat_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class FrankenmemoryProvider(MemoryProvider):
         env: Optional[Dict[str, str]] = None,
     ):
         self._command = command or os.environ.get("FM_MCP_COMMAND", "fm-mcp")
-        self._workspace_id = workspace_id or os.environ.get("FM_WORKSPACE_ID") or os.getcwd()
+        self._workspace_id = workspace_id or chat_workspace()
         self._env = {"FM_SCOPE_AUTHORITY": "trusted-caller", **(env or {})}
         # The MCP stdio transport pins anyio cancel scopes to the task that
         # entered them. The server initializes in its startup task and calls

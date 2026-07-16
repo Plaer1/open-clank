@@ -6,7 +6,7 @@ import { Session } from "../session"
 import { Provider } from "../provider"
 import { Log } from "../util"
 import { getSharedMcpClient } from "./mcp-client"
-import { memorySessionScope, unregisterMemorySessionScope } from "./session-scope"
+import { CHAT_WORKSPACE, memorySessionScope, unregisterMemorySessionScope } from "./session-scope"
 import { extractSafely } from "./graph-extract"
 
 const log = Log.create({ service: "memory.capture" })
@@ -127,7 +127,7 @@ export const layer: Layer.Layer<CaptureService, never, Bus.Service | Session.Ser
                 return
               }
               const workspacePath = scope.workspacePath || sessionInfo.directory
-              const workspaceId = scope.workspaceId || sessionInfo.projectID || sessionInfo.directory
+              const workspaceId = scope.workspaceId || CHAT_WORKSPACE
               const accepted = yield* Effect.promise(() =>
                 captureTurn(
                   userText,

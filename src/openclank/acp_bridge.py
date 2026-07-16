@@ -13,6 +13,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional
 
+from src.memory_scope import chat_workspace
 from src.openclank.acp_client import ACPClient, RPCError, TransportError
 from src.openclank.permission_grants import derive_pattern
 
@@ -60,7 +61,7 @@ def lifetools_mcp_descriptor(
 
 
 def frankenmemory_mcp_descriptor(
-    workspace: str = "global",
+    workspace: str = "",
     owner: str = "",
     session_id: str = "",
 ) -> dict:
@@ -68,11 +69,14 @@ def frankenmemory_mcp_descriptor(
 
     Returns a dict matching the ACP McpServerStdio shape.
     fm-mcp tools surface as frankenmemory:recall, frankenmemory:capture, etc.
+
+    workspace defaults to the canonical chat workspace; pass one only for a
+    genuinely workspace-scoped session (never a filesystem path for chat).
     """
     owner = owner.strip()
-    workspace = workspace.strip()
-    if not owner or not workspace:
-        raise ValueError("frankenmemory MCP sessions require authenticated owner and workspace")
+    workspace = workspace.strip() or chat_workspace()
+    if not owner:
+        raise ValueError("frankenmemory MCP sessions require an authenticated owner")
     env_entries = [
         {"name": "FM_WORKSPACE_ID", "value": workspace},
         {"name": "FM_OWNER", "value": owner},
@@ -548,7 +552,6 @@ class ACPBridge:
                 workspace=target_cwd,
             ),
             frankenmemory_mcp_descriptor(
-                workspace=target_cwd,
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
             ),
@@ -611,7 +614,6 @@ class ACPBridge:
                 workspace=cwd or self._cwd,
             ),
             frankenmemory_mcp_descriptor(
-                workspace=cwd or self._cwd,
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
             ),
@@ -675,7 +677,6 @@ class ACPBridge:
                 workspace=self._cwd,
             ),
             frankenmemory_mcp_descriptor(
-                workspace=self._cwd,
                 owner=self._owner,
             ),
         ]

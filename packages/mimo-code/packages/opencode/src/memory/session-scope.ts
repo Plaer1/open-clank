@@ -1,5 +1,10 @@
 import type { McpServer } from "@agentclientprotocol/sdk"
 
+/** Canonical workspace for conversational memory — the engine's own default
+ * scope. The embedder's MCP descriptor may override it per session; nothing
+ * on this side may substitute a filesystem path. */
+export const CHAT_WORKSPACE = "global"
+
 export type MemorySessionScope = {
   owner: string
   workspaceId: string

@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect"
 import { getSharedMcpClient } from "./mcp-client"
 import { Service, type Interface } from "./service"
-import { memorySessionScope } from "./session-scope"
+import { CHAT_WORKSPACE, memorySessionScope } from "./session-scope"
 
 const FLOOR_RATIO = 0.15
 
@@ -79,7 +79,7 @@ async function callSearch(
       path: (rec.id as string) ?? "",
       snippet: (rec.content as string) ?? "",
       score: r.score ?? 0,
-      scope: (rec.workspace_id as string) ?? "global",
+      scope: (rec.workspace_id as string) ?? CHAT_WORKSPACE,
       scope_id: (rec.session_id as string) ?? "",
       type: mapKindToType((rec.kind as string) ?? "episodic"),
       source: r.source_label || ((rec.source as string) ?? "unknown"),
