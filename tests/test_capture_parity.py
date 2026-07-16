@@ -3,10 +3,12 @@
 Under frankenmemory the old gate disabled ALL Odysseus background memory
 extraction (it required provider_id == "native"), so chats on direct
 endpoints produced zero memories. Now run_post_response_tasks routes those
-turns into the provider's capture pipeline — the same candidates-tier flow
-mimo turns take — while mimo-transport turns stay excluded (the child
-captures them itself) and the native path keeps its legacy every-4th-turn
-LLM extraction untouched.
+turns into the provider's capture pipeline. Capture is transport-blind:
+mimo is a provider leg, not a separate memory system — only this seam knows
+the full policy context (incognito, compare, auto_memory), so it owns
+capture for EVERY dispatched turn. The native path keeps its legacy
+every-4th-turn LLM extraction untouched. Graph enrichment rides the same
+job (see tests/test_graph_extractor.py).
 """
 
 import asyncio
@@ -91,7 +93,7 @@ def _sess():
 
 
 def _run(chat_helpers, provider, *, incognito=False, compare_mode=False,
-         captured_by_runtime=False, auto_memory=True, allow=True):
+         auto_memory=True, allow=True):
     chat_helpers.run_post_response_tasks(
         _sess(), SimpleNamespace(save_sessions=lambda: None), "sess-cap",
         "what is the observatory code?", "It is 7741.", None,
@@ -102,7 +104,6 @@ def _run(chat_helpers, provider, *, incognito=False, compare_mode=False,
         owner="alice",
         allow_background_extraction=allow,
         memory_provider=provider,
-        captured_by_runtime=captured_by_runtime,
     )
 
 
@@ -138,13 +139,15 @@ async def test_direct_endpoint_turn_captures_via_provider(harness):
 
 
 @pytest.mark.asyncio
-async def test_mimo_transport_turn_is_captured_child_side_only(harness):
+async def test_acp_transport_turns_capture_exactly_like_direct_ones(harness):
+    """mimo is a provider leg, not a memory system — no transport gate."""
     chat_helpers, calls = harness
     provider = _CaptureProvider()
-    _run(chat_helpers, provider, captured_by_runtime=True)
+    _run(chat_helpers, provider)
+    _run(chat_helpers, provider)
     await asyncio.sleep(0.05)
 
-    assert provider.calls == []
+    assert len(provider.calls) == 2
     assert calls["legacy"] == 0
 
 

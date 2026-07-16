@@ -1180,7 +1180,6 @@ def run_post_response_tasks(
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
     memory_provider=None,
-    captured_by_runtime: bool = False,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1204,24 +1203,33 @@ def run_post_response_tasks(
         and hasattr(memory_provider, "capture")
     )
     if _provider_captures:
-        # Provider-backed capture, every turn — the provider's candidates
-        # tier is the rate-limiter, no LLM call is involved. Turns that were
-        # dispatched through the agent runtime are captured child-side
-        # already (capture.ts); capturing them here too would double-store
-        # every mimo conversation.
+        # Provider-backed capture, every turn, every transport — mimo is a
+        # provider leg, not a separate memory system, and only this seam
+        # knows the full policy context (incognito, compare, auto_memory).
+        # Capture itself is heuristic (no LLM); when the turn is admitted as
+        # a candidate, the same graph enrichment mimo used to run child-side
+        # follows on the task endpoint.
         if (
             allow_background_extraction
             and not incognito
             and not compare_mode
-            and not captured_by_runtime
             and uprefs.get("auto_memory", True)
             and (message or full_response)
         ):
-            _extraction_jobs.append(("memory", memory_provider.capture(
+            from services.memory.graph_extractor import capture_turn_and_enrich
+            from src.task_endpoint import resolve_task_endpoint
+            g_url, g_model, g_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
+            _extraction_jobs.append(("memory", capture_turn_and_enrich(
+                memory_provider,
                 message or "",
                 full_response or "",
-                owner=owner,
                 session_id=session_id,
+                owner=owner,
+                endpoint_url=g_url,
+                model=g_model,
+                headers=g_headers,
             )))
     else:
         # Native-store extraction — only every 4th message pair to avoid
