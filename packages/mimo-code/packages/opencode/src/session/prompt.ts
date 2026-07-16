@@ -1903,11 +1903,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const message = yield* createUserMessage(input)
         yield* sessions.touch(input.sessionID)
 
-        const permissions: Permission.Ruleset = []
-        for (const [t, enabled] of Object.entries(input.tools ?? {})) {
-          permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
-        }
-        if (permissions.length > 0) {
+        // The caller's tool map is a complete per-turn policy REVISION
+        // (identity Slice 05: replace, never accumulate). `undefined` means
+        // "no statement — keep the session's permissions"; a provided map
+        // REPLACES them, and an EMPTY map clears a previous turn's rules —
+        // an answer-only turn's {"*": false} must not leak into the next
+        // tool-bearing turn as a persisted deny-all.
+        if (input.tools !== undefined) {
+          const permissions: Permission.Ruleset = Object.entries(input.tools).map(([t, enabled]) => ({
+            permission: t,
+            action: enabled ? "allow" : "deny",
+            pattern: "*",
+          }))
           session.permission = permissions
           yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
         }
