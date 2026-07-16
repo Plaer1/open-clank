@@ -4,6 +4,7 @@ import pytest
 
 import routes.memory_routes as memory_routes
 from src.memory import MemoryManager
+from src.memory_provider import NativeMemoryProvider
 
 
 @pytest.mark.asyncio
@@ -14,7 +15,9 @@ async def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path
     manager.save([alice_memory, bob_memory])
 
     monkeypatch.setattr(memory_routes, "get_current_user", lambda request: "bob")
-    router = memory_routes.setup_memory_routes(manager, MagicMock())
+    router = memory_routes.setup_memory_routes(
+        manager, MagicMock(), memory_provider=NativeMemoryProvider(manager)
+    )
     search = next(
         route.endpoint
         for route in router.routes

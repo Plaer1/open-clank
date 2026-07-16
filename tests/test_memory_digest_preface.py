@@ -182,12 +182,15 @@ async def test_pull_recall_tool_routes_through_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_native_mode_unchanged():
+async def test_providerless_fixture_gets_no_memory_context():
+    """SLICE-07: the preface's provider-None branch is gone. Real boots
+    always carry a provider (registry yields frankenmemory or native);
+    a None provider is a test fixture and gets no memory context at all —
+    the JSON memory_manager is never consulted from the preface."""
     processor = _processor(None)
-    processor.memory_manager.load.return_value = []
     preface, _, _ = await processor.build_context_preface(
         "hello", SimpleNamespace(history=[]),
         use_web=False, use_rag=False, use_skills=False, owner="alice",
     )
-    processor.memory_manager.load.assert_called_once_with(owner="alice")
-    assert not [m for m in preface if DIGEST_SENTINEL in str(m.get("content", ""))]
+    processor.memory_manager.load.assert_not_called()
+    assert not [m for m in preface if "saved memory" in str(m.get("content", ""))]

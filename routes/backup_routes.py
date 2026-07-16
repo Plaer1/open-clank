@@ -49,31 +49,27 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         memory_owner = user or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
 
         # Memories (filtered by owner when auth is enabled)
-        if memory_provider:
-            memories = []
-            cursor = None
-            while True:
-                page, cursor = await memory_provider.list_page(
-                    owner=memory_owner, limit=1000, cursor=cursor
-                )
-                memories.extend({
-                    "id": record.id,
-                    "text": record.text,
-                    "category": record.category,
-                    "source": record.source,
-                    "owner": record.owner,
-                    "session_id": record.session_id,
-                    "pinned": record.pinned,
-                    "metadata": record.metadata,
-                    "created_at": record.created_at,
-                    "updated_at": record.updated_at,
-                } for record in page)
-                if cursor is None:
-                    break
-            memory_authority = getattr(memory_provider, "provider_id", "unknown")
-        else:
-            memories = memory_manager.load(owner=user)
-            memory_authority = "native"
+        memories = []
+        cursor = None
+        while True:
+            page, cursor = await memory_provider.list_page(
+                owner=memory_owner, limit=1000, cursor=cursor
+            )
+            memories.extend({
+                "id": record.id,
+                "text": record.text,
+                "category": record.category,
+                "source": record.source,
+                "owner": record.owner,
+                "session_id": record.session_id,
+                "pinned": record.pinned,
+                "metadata": record.metadata,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            } for record in page)
+            if cursor is None:
+                break
+        memory_authority = getattr(memory_provider, "provider_id", "unknown")
 
         # Presets (shared across users — export all)
         presets = preset_manager.get_all()
@@ -155,61 +151,39 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
 
         # ── Memories ──
         if "memories" in body and isinstance(body["memories"], list):
-            if memory_provider:
-                existing = []
-                cursor = None
-                while True:
-                    page, cursor = await memory_provider.list_page(
-                        owner=memory_owner, limit=1000, cursor=cursor
-                    )
-                    existing.extend(page)
-                    if cursor is None:
-                        break
-                existing_texts = {record.text.strip().lower() for record in existing}
-                added = 0
-                for mem in body["memories"]:
-                    if not isinstance(mem, dict) or not str(mem.get("text") or "").strip():
-                        continue
-                    text = str(mem["text"]).strip()
-                    if text.lower() in existing_texts:
-                        continue
-                    metadata = dict(mem.get("metadata") or {})
-                    metadata["restored_from_backup"] = True
-                    metadata["original_created_at"] = mem.get("created_at")
-                    record = await memory_provider.remember(
-                        text,
-                        owner=memory_owner,
-                        session_id=mem.get("session_id"),
-                        category=mem.get("category") or "fact",
-                        source=mem.get("source") or "backup_restore",
-                        metadata=metadata,
-                    )
-                    if mem.get("pinned"):
-                        await memory_provider.pin(record.id, True, owner=memory_owner)
-                    existing_texts.add(text.lower())
-                    added += 1
-                imported.append(f"{added} memories")
-            else:
-                existing = memory_manager.load_all()
-            # Dedup against THIS user's own memories only. Using every tenant's
-            # rows (load_all) meant a memory whose text matched any other
-            # user's was silently skipped, so the importing user lost their own
-            # data. The full store is still saved back below.
-                existing_texts = {e.get("text", "").strip().lower()
-                                  for e in existing if e.get("owner") == user}
-                added = 0
-                for mem in body["memories"]:
-                    if not isinstance(mem, dict) or not mem.get("text"):
-                        continue
-                    if mem["text"].strip().lower() in existing_texts:
-                        continue  # skip duplicates
-                    mem = dict(mem)
-                    mem["owner"] = user
-                    existing.append(mem)
-                    existing_texts.add(mem["text"].strip().lower())
-                    added += 1
-                memory_manager.save(existing)
-                imported.append(f"{added} memories")
+            existing = []
+            cursor = None
+            while True:
+                page, cursor = await memory_provider.list_page(
+                    owner=memory_owner, limit=1000, cursor=cursor
+                )
+                existing.extend(page)
+                if cursor is None:
+                    break
+            existing_texts = {record.text.strip().lower() for record in existing}
+            added = 0
+            for mem in body["memories"]:
+                if not isinstance(mem, dict) or not str(mem.get("text") or "").strip():
+                    continue
+                text = str(mem["text"]).strip()
+                if text.lower() in existing_texts:
+                    continue
+                metadata = dict(mem.get("metadata") or {})
+                metadata["restored_from_backup"] = True
+                metadata["original_created_at"] = mem.get("created_at")
+                record = await memory_provider.remember(
+                    text,
+                    owner=memory_owner,
+                    session_id=mem.get("session_id"),
+                    category=mem.get("category") or "fact",
+                    source=mem.get("source") or "backup_restore",
+                    metadata=metadata,
+                )
+                if mem.get("pinned"):
+                    await memory_provider.pin(record.id, True, owner=memory_owner)
+                existing_texts.add(text.lower())
+                added += 1
+            imported.append(f"{added} memories")
 
         # ── Skills ──
         if "skills" in body and isinstance(body["skills"], list):

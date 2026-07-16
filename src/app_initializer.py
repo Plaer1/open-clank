@@ -133,8 +133,11 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         ])
         logger.info("Memory provider: native")
 
-    # Initialize processors
-    active_provider = memory_provider_registry.active()[0] if memory_provider_registry.active() else None
+    # Initialize processors. Provider-always: consumers never see None —
+    # a registry with nothing enabled (can't happen via the branches above)
+    # still yields a native provider.
+    _active = memory_provider_registry.active()
+    active_provider = _active[0] if _active else NativeMemoryProvider(memory_manager, memory_vector)
     chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager, memory_provider=active_provider)
     research_handler = ResearchHandler()
     
@@ -161,6 +164,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         "memory_manager": memory_manager,
         "memory_vector": memory_vector,
         "memory_provider_registry": memory_provider_registry,
+        "memory_provider": active_provider,
         "skills_manager": skills_manager,
         "session_manager": session_manager,
         "upload_handler": upload_handler,

@@ -106,13 +106,10 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
 
             if kind == "memory":
                 owner = get_current_user(request) or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
-                if memory_provider:
-                    try:
-                        provider_result = await memory_provider.purge_owner(owner=owner)
-                    except Exception as exc:
-                        raise HTTPException(503, f"Active memory provider purge failed: {exc}") from exc
-                else:
-                    provider_result = None
+                try:
+                    provider_result = await memory_provider.purge_owner(owner=owner)
+                except Exception as exc:
+                    raise HTTPException(503, f"Active memory provider purge failed: {exc}") from exc
                 count = db.query(Memory).count()
                 db.query(Memory).delete()
                 db.commit()

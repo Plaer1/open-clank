@@ -581,7 +581,8 @@ app.state.session_manager = session_manager
 memory_manager    = components["memory_manager"]
 memory_vector     = components.get("memory_vector")
 memory_provider_registry = components.get("memory_provider_registry")
-memory_provider   = memory_provider_registry.active()[0] if memory_provider_registry and memory_provider_registry.active() else None
+# Provider-always: app_initializer guarantees a provider object (never None).
+memory_provider   = components["memory_provider"]
 app.state.memory_provider = memory_provider
 upload_handler    = components["upload_handler"]
 app.state.upload_handler = upload_handler
@@ -671,7 +672,7 @@ app.include_router(setup_admin_wipe_routes(session_manager, memory_provider=memo
 
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
-memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector, memory_provider=memory_provider)
+memory_router = setup_memory_routes(memory_manager, session_manager, memory_provider=memory_provider)
 app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))

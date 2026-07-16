@@ -27,7 +27,37 @@ def _route(router, path, method):
     raise AssertionError(path)
 
 
-def _router(monkeypatch, caller):
+class _StubProvider:
+    """Provider-always: routes have no native fallback, so every router
+    fixture carries a provider."""
+
+    provider_id = "stub"
+
+    def __init__(self, records=None):
+        self.records = records or []
+        self.remember_calls = []
+
+    async def list_memories(self, *, owner=None, limit=1000):
+        return list(self.records)
+
+    async def recall(self, query, *, owner=None, top_k=20):
+        return []
+
+    async def remember(self, text, **kwargs):
+        self.remember_calls.append((text, kwargs))
+        return SimpleNamespace(id="m_new")
+
+
+def _record(**overrides):
+    base = dict(
+        id="m1", text="Alice note", timestamp=1, category="fact", source="user",
+        owner="alice", session_id=None, pinned=False, metadata={},
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _router(monkeypatch, caller, provider=None):
     monkeypatch.setattr(mr, "get_current_user", lambda request: caller, raising=False)
     monkeypatch.setattr(mr, "require_user", lambda request: caller, raising=False)
     sm = MagicMock()
@@ -39,7 +69,7 @@ def _router(monkeypatch, caller):
     )
     mem = MagicMock()
     mem.load = lambda owner=None: []
-    return mr.setup_memory_routes(mem, sm)
+    return mr.setup_memory_routes(mem, sm, memory_provider=provider or _StubProvider())
 
 
 def _request(user):
@@ -121,7 +151,7 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
     import src.task_endpoint as task_endpoint
 
     memory_manager = MagicMock()
-    memory_vector = MagicMock()
+    provider = _StubProvider()
     session_headers = {"Authorization": "Bearer session"}
     session_manager = MagicMock()
     session_manager.get_session.return_value = SimpleNamespace(
@@ -130,7 +160,7 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
         model="session-model",
         headers=session_headers,
     )
-    router = mr.setup_memory_routes(memory_manager, session_manager, memory_vector)
+    router = mr.setup_memory_routes(memory_manager, session_manager, memory_provider=provider)
     audit_route = _route(router, "/api/memory/audit", "POST")
 
     resolver_calls = []
@@ -147,8 +177,8 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
             return fallback_url, fallback_model, fallback_headers
         return None, None, {}
 
-    async def fake_audit_memories(memory_manager_arg, memory_vector_arg, endpoint_url, model, headers, owner=None):
-        audit_calls.append((memory_manager_arg, memory_vector_arg, endpoint_url, model, headers, owner))
+    async def fake_audit_provider_memories(provider_arg, endpoint_url, model, headers, owner=None):
+        audit_calls.append((provider_arg, endpoint_url, model, headers, owner))
         return {"before": 2, "after": 1}
 
     fake_model_routes = types.ModuleType("routes.model_routes")
@@ -161,7 +191,7 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
 
     monkeypatch.setattr(mr, "resolve_task_endpoint", fake_resolve_task_endpoint)
     monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
-    monkeypatch.setattr(mr, "audit_memories", fake_audit_memories)
+    monkeypatch.setattr(mr, "audit_provider_memories", fake_audit_provider_memories)
     monkeypatch.setitem(sys.modules, "routes.model_routes", fake_model_routes)
     monkeypatch.setattr(
         mr,
@@ -178,8 +208,7 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
         "alice",
     )]
     assert audit_calls == [(
-        memory_manager,
-        memory_vector,
+        provider,
         "http://session.example/v1/chat/completions",
         "session-model",
         session_headers,
@@ -192,15 +221,14 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
 def test_add_memory_rejects_other_users_session(monkeypatch):
     memory_manager = MagicMock()
     session_manager = MagicMock()
-    memory_vector = MagicMock(healthy=True)
+    provider = _StubProvider()
     router = mr.setup_memory_routes(
         memory_manager=memory_manager,
         session_manager=session_manager,
-        memory_vector=memory_vector,
+        memory_provider=provider,
     )
     add_memory = _route(router, "/api/memory/add", "POST")
 
-    memory_manager.load.return_value = []
     memory_manager.find_duplicates.return_value = False
     session_manager.get_session.return_value = SimpleNamespace(owner="bob", name="Bob session")
 
@@ -220,9 +248,7 @@ def test_add_memory_rejects_other_users_session(monkeypatch):
     assert exc.value.status_code == 404
     assert exc.value.detail == "Session not found"
     session_manager.get_session.assert_called_once_with("bob-session")
-    memory_manager.add_entry.assert_not_called()
-    memory_manager.save.assert_not_called()
-    memory_vector.add.assert_not_called()
+    assert provider.remember_calls == []
 
 
 def test_timeline_does_not_expose_other_users_session_name():
@@ -230,16 +256,8 @@ def test_timeline_does_not_expose_other_users_session_name():
     session_manager = MagicMock()
     session_manager.sessions = {"bob-session": object()}
     session_manager.get_session.return_value = SimpleNamespace(owner="bob", name="Bob roadmap")
-    memory_manager.load.return_value = [
-        {
-            "id": "m1",
-            "text": "Alice note",
-            "owner": "alice",
-            "session_id": "bob-session",
-            "timestamp": 1,
-        }
-    ]
-    router = mr.setup_memory_routes(memory_manager, session_manager)
+    provider = _StubProvider(records=[_record(session_id="bob-session")])
+    router = mr.setup_memory_routes(memory_manager, session_manager, memory_provider=provider)
     timeline = _route(router, "/api/memory/timeline", "GET")
 
     out = asyncio.run(timeline(request=_request("alice")))
