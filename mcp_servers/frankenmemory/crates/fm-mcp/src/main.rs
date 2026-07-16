@@ -243,6 +243,26 @@ struct DigestParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct AuthoredSection {
+    #[serde(default)]
+    anchor: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IngestAuthoredParams {
+    /// Absolute path of the authored memory file this projection mirrors.
+    source_path: String,
+    /// Current sections of the file; an empty list deletes the projection.
+    #[serde(default)]
+    sections: Vec<AuthoredSection>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct MemoryQualityParams {
     #[serde(default)]
     rebuild_graph_fts: Option<bool>,
@@ -489,6 +509,35 @@ impl FrankenmemoryServer {
             .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({"reviewed": true, "accepted": params.accept, "curated_id": curated_id}).to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "ingest_authored",
+        description = "Project an agent-authored memory file into curated records, one per section. Idempotent: unchanged sections skip by content hash, edited sections replace their record, removed sections (or an empty sections list) delete theirs. The file remains the source of truth."
+    )]
+    async fn ingest_authored(
+        &self,
+        Parameters(params): Parameters<IngestAuthoredParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, true)?;
+        let sections: Vec<(String, String)> = params
+            .sections
+            .into_iter()
+            .map(|section| (section.anchor, section.content))
+            .collect();
+        let result = self
+            .provider
+            .ingest_authored(
+                &scope.owner,
+                &scope.workspace_id,
+                &params.source_path,
+                &sections,
+            )
+            .await
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
         )]))
     }
 

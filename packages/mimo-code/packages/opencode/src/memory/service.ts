@@ -7,7 +7,7 @@ import { Config } from "../config"
 import { reconcileMemory } from "./reconcile"
 import { buildFtsQuery } from "./fts-query"
 import { resolveProjectId } from "./paths"
-import { memorySessionScope } from "./session-scope"
+import { anyMemorySessionScope, memorySessionScope } from "./session-scope"
 
 type SearchRow = {
   path: string
@@ -45,10 +45,19 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
       return root
     })
 
+    // fm projection scope for reconcile-time ingest: only in fm mode and
+    // only when an authenticated session scope exists (same rule as
+    // capture.ts — no owner, no writes).
+    const fmIngestScope = (cfg: { memory?: { provider?: string } }) => {
+      if (cfg.memory?.provider !== "frankenmemory") return undefined
+      const scope = anyMemorySessionScope()
+      return scope?.owner ? { owner: scope.owner, workspaceId: scope.workspaceId } : undefined
+    }
+
     const reconcile = Effect.fn("Memory.reconcile")(function* () {
       const cfg = yield* config.get()
       const cc = cfg.memory?.cc_index ? ccBase : undefined
-      return yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }))
+      return yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg)))
     })
 
     const search = Effect.fn("Memory.search")(function* (input: {
@@ -63,7 +72,7 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
       const cfg = yield* config.get()
       if (cfg.checkpoint?.memory_reconcile_on_search ?? true) {
         const cc = cfg.memory?.cc_index ? ccBase : undefined
-        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }))
+        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg)))
       }
 
       const limit = input.limit ?? 10

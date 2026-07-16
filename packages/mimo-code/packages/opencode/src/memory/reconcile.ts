@@ -93,6 +93,7 @@ export async function indexFromDisk(
 
 export async function reconcileMemory(
   roots: { mimo: string; cc?: string },
+  fmIngest?: import("./authored-ingest").FmIngestScope,
 ): Promise<{ indexed: number; pruned: number }> {
   // Collect disk paths from BOTH roots before pruning. If we pruned per-root,
   // enabling CC indexing on a fresh run would prune all mimo rows (and vice
@@ -112,9 +113,11 @@ export async function reconcileMemory(
 
   // Direction B: prune dead FTS rows (any path not in either walk).
   let pruned = 0
+  const prunedPaths: string[] = []
   for (const p of indexed.keys()) {
     if (!diskPaths.has(p)) {
       Database.use((db) => db.delete(MemoryFtsTable).where(eq(MemoryFtsTable.path, p)).run())
+      prunedPaths.push(p)
       pruned++
     }
   }
@@ -138,6 +141,28 @@ export async function reconcileMemory(
     }
     const result = await indexFromDisk(p, loc, "cc", indexed.get(p))
     if (result === "updated") indexedCount++
+  }
+
+  // fm projection of authored MEMORY.md files — mimo root only (cc files
+  // stay native-search-only), type "memory" only (checkpoints, tasks and
+  // free notes are operational state, not memories). The engine dedups by
+  // section content hash, so re-projecting every reconcile is idempotent
+  // and needs no caller-side ledger.
+  if (fmIngest) {
+    const { ingestAuthoredFile } = await import("./authored-ingest")
+    const mimoPrefix = roots.mimo.endsWith(path.sep) ? roots.mimo : roots.mimo + path.sep
+    for (const p of mimoFiles) {
+      if (parsePath(p)?.type !== "memory") continue
+      const body = await Bun.file(p)
+        .text()
+        .catch(() => null)
+      if (body !== null) await ingestAuthoredFile(p, body, fmIngest)
+    }
+    for (const p of prunedPaths) {
+      if (!p.startsWith(mimoPrefix)) continue
+      if (parsePath(p)?.type !== "memory") continue
+      await ingestAuthoredFile(p, null, fmIngest)
+    }
   }
 
   return { indexed: indexedCount, pruned }
