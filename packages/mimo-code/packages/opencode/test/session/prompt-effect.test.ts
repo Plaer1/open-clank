@@ -475,7 +475,7 @@ it.live("injects orchestrator system prompt for agent 'orchestrator'", () =>
       yield* prompt.loop({ sessionID: session.id })
 
       const inputs = yield* llm.inputs
-      expect(JSON.stringify(inputs)).toContain("MiMoCode Orchestrator")
+      expect(JSON.stringify(inputs)).toContain("You are the Orchestrator")
     }),
     { git: true, config: providerCfg },
   ),
