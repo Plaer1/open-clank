@@ -1179,6 +1179,8 @@ def run_post_response_tasks(
     owner: str = None,
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
+    memory_provider=None,
+    captured_by_runtime: bool = False,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1196,19 +1198,46 @@ def run_post_response_tasks(
     """
     _extraction_jobs: list = []
 
-    # Memory extraction — only every 4th message pair to avoid excess LLM calls
-    _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
-    _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-    if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
-        from services.memory.memory_extractor import extract_and_store
-        from src.task_endpoint import resolve_task_endpoint
-        t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=owner,
-        )
-        _extraction_jobs.append(("memory", extract_and_store(
-            sess, memory_manager, memory_vector,
-            t_url, t_model, t_headers,
-        )))
+    _provider_captures = (
+        memory_provider is not None
+        and getattr(memory_provider, "provider_id", "native") != "native"
+        and hasattr(memory_provider, "capture")
+    )
+    if _provider_captures:
+        # Provider-backed capture, every turn — the provider's candidates
+        # tier is the rate-limiter, no LLM call is involved. Turns that were
+        # dispatched through the agent runtime are captured child-side
+        # already (capture.ts); capturing them here too would double-store
+        # every mimo conversation.
+        if (
+            allow_background_extraction
+            and not incognito
+            and not compare_mode
+            and not captured_by_runtime
+            and uprefs.get("auto_memory", True)
+            and (message or full_response)
+        ):
+            _extraction_jobs.append(("memory", memory_provider.capture(
+                message or "",
+                full_response or "",
+                owner=owner,
+                session_id=session_id,
+            )))
+    else:
+        # Native-store extraction — only every 4th message pair to avoid
+        # excess LLM calls
+        _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
+        _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
+        if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+            from services.memory.memory_extractor import extract_and_store
+            from src.task_endpoint import resolve_task_endpoint
+            t_url, t_model, t_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
+            _extraction_jobs.append(("memory", extract_and_store(
+                sess, memory_manager, memory_vector,
+                t_url, t_model, t_headers,
+            )))
 
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar

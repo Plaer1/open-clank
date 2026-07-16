@@ -193,6 +193,33 @@ class FrankenmemoryProvider(MemoryProvider):
             uses=int(metadata.get("uses", 0) or 0),
         )
 
+    async def capture(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        owner: Optional[str] = None,
+        session_id: Optional[str] = None,
+        source: str = "odysseus",
+    ) -> Dict[str, Any]:
+        """Automatic per-turn capture — the same candidates-tier pipeline
+        mimo's capture.ts feeds. The engine derives a stable event id from
+        (owner, workspace, session, texts), so retried saves dedup."""
+        scope = self._scope(owner, session_id)
+        args: Dict[str, Any] = {
+            "user_text": user_text or "",
+            "assistant_text": assistant_text or "",
+            "capture_mode": "candidate",
+            "workspace_id": scope.workspace_id,
+            "workspace_path": scope.workspace_path,
+            "owner": scope.owner,
+            "source": source,
+        }
+        if session_id:
+            args["session_id"] = session_id
+            args["session_key"] = session_id
+        return await self._call_tool("capture", args)
+
     async def remember(
         self,
         text: str,
