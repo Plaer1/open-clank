@@ -23,6 +23,11 @@ class UserTemplateRequest(BaseModel):
     max_tokens: int = Field(0, ge=0, le=65536)
 
 
+class DefaultPersonaRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    system_prompt: str = Field(..., min_length=1, max_length=10000)
+
+
 def setup_preset_routes(preset_manager) -> APIRouter:
     router = APIRouter(tags=["presets"])
 
@@ -48,6 +53,42 @@ def setup_preset_routes(preset_manager) -> APIRouter:
         except Exception as e:
             logger.error(f"Preset update error: {e}")
             raise HTTPException(500, "Failed to update custom preset")
+
+    def _persona_owner(request: Request) -> str:
+        owner = effective_user(request)
+        if not owner:
+            raise HTTPException(401, "Not authenticated")
+        return owner
+
+    @router.get("/api/presets/default-persona")
+    async def get_default_persona_route(request: Request) -> Dict[str, Any]:
+        """The owner's editable default persona (identity ruling R10)."""
+        from src.default_persona import get_default_persona
+        owner = _persona_owner(request)
+        return get_default_persona(owner, preset_manager=preset_manager)
+
+    @router.put("/api/presets/default-persona")
+    async def set_default_persona_route(
+        payload: DefaultPersonaRequest, request: Request
+    ) -> Dict[str, Any]:
+        """Edit the default persona; syncs assistant + reminder voice (R13)."""
+        from src.default_persona import set_default_persona
+        owner = _persona_owner(request)
+        record = set_default_persona(
+            owner,
+            name=payload.name,
+            system_prompt=payload.system_prompt,
+            preset_manager=preset_manager,
+        )
+        return {"success": True, **record}
+
+    @router.post("/api/presets/default-persona/reset")
+    async def reset_default_persona_route(request: Request) -> Dict[str, Any]:
+        """Restore the factory default persona (seed stays immutable)."""
+        from src.default_persona import reset_default_persona
+        owner = _persona_owner(request)
+        record = reset_default_persona(owner, preset_manager=preset_manager)
+        return {"success": True, **record}
 
     @router.get("/api/presets/templates")
     async def get_user_templates() -> List[Dict]:

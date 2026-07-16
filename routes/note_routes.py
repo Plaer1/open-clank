@@ -216,7 +216,7 @@ async def dispatch_reminder(
                 url, model, headers = resolve_endpoint("default", owner=owner or None)
             if url and model:
                 persona_id = (settings.get("reminder_llm_persona") or "").strip()
-                sys_prompt = synthesis_system_prompt(persona_id)
+                sys_prompt = synthesis_system_prompt(persona_id, owner=owner or "")
                 raw = await llm_call_async(
                     url=url, model=model,
                     messages=[

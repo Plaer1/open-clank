@@ -174,6 +174,16 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                 crew_db.avatar = payload.avatar
             if payload.personality is not None:
                 crew_db.personality = payload.personality
+            # The assistant IS one of the default persona's three synced
+            # stores (ruling R13): a name/personality edit here writes back
+            # to the canonical record so chat + reminders follow.
+            if payload.name is not None or payload.personality is not None:
+                from src.default_persona import sync_from_assistant
+                sync_from_assistant(
+                    owner,
+                    name=(payload.name.strip() if payload.name is not None else None) or None,
+                    personality=payload.personality,
+                )
             if payload.model is not None:
                 crew_db.model = payload.model or None
             if payload.endpoint_url is not None:

@@ -342,10 +342,10 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
     return None
 
 
-def extract_preset(chat_handler, preset_id) -> PresetInfo:
+def extract_preset(chat_handler, preset_id, owner: str = "") -> PresetInfo:
     """Extract preset parameters via chat_handler."""
     temperature, max_tokens, system_prompt, char_name = (
-        chat_handler.validate_and_extract_preset(preset_id)
+        chat_handler.validate_and_extract_preset(preset_id, owner=owner)
     )
     return PresetInfo(
         temperature=temperature,
@@ -665,8 +665,13 @@ async def build_chat_context(
     This is the shared logic between /chat and /chat_stream — preset extraction,
     message preprocessing, memory/RAG/web injection, compaction, normalization.
     """
-    # Preset
-    preset = extract_preset(chat_handler, preset_id)
+    # Preset — owner-resolved so the default persona (R10) is the
+    # requester's own, not another user's edit.
+    preset = extract_preset(
+        chat_handler,
+        preset_id,
+        owner=effective_user(request) or getattr(sess, "owner", "") or "",
+    )
 
     # Preprocess message (CoT, YouTube, VL images, build content). The
     # auto_opened_docs collector captures any docs created server-side

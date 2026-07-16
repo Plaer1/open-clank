@@ -80,7 +80,7 @@ class ChatHandler:
     # Preset helpers
     # ------------------------------------------------------------------
 
-    def validate_and_extract_preset(self, preset_id: Optional[str]) -> tuple:
+    def validate_and_extract_preset(self, preset_id: Optional[str], owner: str = "") -> tuple:
         """Returns (temperature, max_tokens, preset_system_prompt, character_name)."""
         if preset_id and preset_id not in self.preset_manager.presets:
             raise HTTPException(400, f"Invalid preset_id: {preset_id}")
@@ -94,7 +94,7 @@ class ChatHandler:
             preset = self.preset_manager.presets[preset_id]
             if preset.get("enabled") is False:
                 logger.info(f"Preset {preset_id} is disabled, using defaults")
-                return temperature, max_tokens, preset_system_prompt, character_name
+                return self._default_persona_preset(owner, temperature, max_tokens)
             if preset.get("system_prompt"):
                 preset_system_prompt = preset["system_prompt"]
             character_name = preset.get("character_name", "")
@@ -109,8 +109,24 @@ class ChatHandler:
             if "max_tokens" in preset:
                 max_tokens = preset["max_tokens"]
 
+        if preset_system_prompt is None and not character_name:
+            # No explicit persona/preset on this turn: the DEFAULT persona
+            # speaks (ruling R10 — the default is real and editable, never a
+            # pretend-blank).
+            return self._default_persona_preset(owner, temperature, max_tokens)
+
         logger.info(f"Preset {preset_id}: temp={temperature}, max_tokens={max_tokens}")
         return temperature, max_tokens, preset_system_prompt, character_name
+
+    @staticmethod
+    def _default_persona_preset(owner: str, temperature, max_tokens) -> tuple:
+        try:
+            from src.default_persona import get_default_persona
+            persona = get_default_persona(owner or "")
+        except Exception:
+            return temperature, max_tokens, None, ""
+        prompt = f"Your name is {persona['name']}. {persona['system_prompt']}"
+        return temperature, max_tokens, prompt, persona["name"]
 
     def enhance_message_if_needed(self, message: str) -> str:
         """CoT enhancement disabled — modern models reason natively."""
