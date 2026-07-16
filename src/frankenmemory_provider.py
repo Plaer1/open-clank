@@ -365,6 +365,17 @@ class FrankenmemoryProvider(MemoryProvider):
         result = await self._call_tool("search", args)
         return [dict(row.get("record", row)) for row in result.get("results", [])]
 
+    async def digest(self, *, owner: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Index-card digest of the bank for the provider scope: counts,
+        pinned headlines, top clusters, newest topics. Cheap and read-only —
+        meant for per-turn injection, with recall as the deep-dive path."""
+        scope = self._scope(owner)
+        result = await self._call_tool(
+            "digest",
+            {"owner": scope.owner, "workspace_id": scope.workspace_id},
+        )
+        return result if isinstance(result, dict) and "counts" in result else None
+
     async def memory_quality(self, *, rebuild_graph_fts: bool = False) -> Dict[str, Any]:
         return await self._call_tool("memory_quality", {"rebuild_graph_fts": rebuild_graph_fts})
 
