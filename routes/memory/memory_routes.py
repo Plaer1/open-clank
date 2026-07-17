@@ -271,21 +271,31 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
 
     @router.get("/digest-preview")
     async def memory_digest_preview(request: Request):
-        """The EXACT index card injected each turn: raw digest dict + the
-        rendered text (shared renderer — byte-identical to injection, no
-        drift)."""
+        """The EXACT blocks injected each turn: raw digest dict + the
+        trusted/untrusted split rendered with the caller's own trust prefs
+        (shared renderer — byte-identical to injection, no drift)."""
         if not memory_provider or not hasattr(memory_provider, "digest"):
             raise HTTPException(503, "Active memory provider does not expose a digest")
-        from src.memory_digest import render_digest
+        from src.memory_digest import render_digest, render_split
 
+        user = _owner(request)
         try:
-            digest = await memory_provider.digest(owner=_owner(request))
+            digest = await memory_provider.digest(owner=user)
         except Exception as exc:
             logger.warning("Provider digest preview failed: %s", exc)
             raise HTTPException(503, "Active memory provider is unavailable") from exc
+        try:
+            from routes.prefs_routes import _load_for_user
+
+            prefs = _load_for_user(user) or {}
+        except Exception:
+            prefs = {}
+        trusted_block, untrusted_card = render_split(digest, prefs)
         return {
             "digest": digest,
             "rendered": render_digest(digest),
+            "trusted_block": trusted_block,
+            "untrusted_card": untrusted_card,
         }
 
     @router.post("/candidate/{candidate_id}/review")

@@ -8,6 +8,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { topPortalZ } from './toolWindowZOrder.js';
 import { memoryChips, isTrusted, DEFAULT_KIND_TRUST } from './util/memoryTrust.js';
+import { forceLayout, hitTest, tagCounts, mergeExpansion } from './util/memoryGraph.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -923,6 +924,357 @@ function getFilteredMemories() {
   filtered.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
   return filtered;
+}
+
+// ---- Graph tab (T4: canvas-first) ----
+
+const graphState = {
+  nodes: [],
+  edges: [],
+  positions: new Map(),
+  selected: null,
+  tagFilter: null,
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  wired: false,
+  totals: { nodes: 0, edges: 0 },
+};
+
+async function _graphApi(params) {
+  const query = new URLSearchParams(params).toString();
+  const response = await fetch(`/api/memory/graph?${query}`, { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`graph ${params.op} failed`);
+  return response.json();
+}
+
+export async function loadMemoryGraph() {
+  const canvas = document.getElementById('memory-graph-canvas');
+  if (!canvas) return;
+  _wireGraphCanvas(canvas);
+  try {
+    const overview = await _graphApi({ op: 'overview', limit: 120 });
+    graphState.nodes = overview.nodes || [];
+    graphState.edges = overview.edges || [];
+    graphState.totals = { nodes: overview.node_total || 0, edges: overview.edge_total || 0 };
+    graphState.selected = null;
+    graphState.tagFilter = null;
+    _relayoutGraph(canvas);
+    _renderGraphTags();
+    _renderGraphCounts();
+    _renderGraphDetail(null);
+  } catch (error) {
+    const detail = document.getElementById('memory-graph-detail');
+    if (detail) detail.textContent = 'Graph unavailable — is the frankenmemory provider running?';
+  }
+}
+
+function _relayoutGraph(canvas) {
+  graphState.positions = forceLayout(graphState.nodes, graphState.edges, {
+    width: canvas.width, height: canvas.height,
+  });
+  _drawGraph(canvas);
+}
+
+function _graphColors() {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    fg: styles.getPropertyValue('--fg').trim() || '#ccc',
+    accent: (styles.getPropertyValue('--accent') || styles.getPropertyValue('--red')).trim() || '#e06c75',
+    border: styles.getPropertyValue('--border').trim() || '#444',
+  };
+}
+
+const _NODE_KIND_COLORS = {
+  person: '#98c379', project: '#61afef', tool: '#d19a66',
+  place: '#c678dd', organization: '#56b6c2',
+};
+
+function _drawGraph(canvas) {
+  const ctx = canvas.getContext('2d');
+  const colors = _graphColors();
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.translate(graphState.offsetX, graphState.offsetY);
+  ctx.scale(graphState.scale, graphState.scale);
+
+  const visibleEdges = graphState.tagFilter
+    ? graphState.edges.filter((e) => e.tag === graphState.tagFilter)
+    : graphState.edges;
+
+  ctx.lineWidth = 1;
+  for (const edge of visibleEdges) {
+    const a = graphState.positions.get(edge.src_id);
+    const b = graphState.positions.get(edge.dst_id);
+    if (!a || !b) continue;
+    const touchesSelected = graphState.selected
+      && (edge.src_id === graphState.selected || edge.dst_id === graphState.selected);
+    ctx.strokeStyle = touchesSelected ? colors.accent : colors.border;
+    ctx.globalAlpha = touchesSelected ? 0.9 : 0.5;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    if (touchesSelected) {
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = colors.fg;
+      ctx.font = '9px sans-serif';
+      ctx.fillText(edge.tag, (a.x + b.x) / 2 + 4, (a.y + b.y) / 2 - 2);
+    }
+  }
+
+  ctx.globalAlpha = 1;
+  for (const node of graphState.nodes) {
+    const p = graphState.positions.get(node.id);
+    if (!p) continue;
+    const selected = node.id === graphState.selected;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, selected ? 9 : 6, 0, Math.PI * 2);
+    ctx.fillStyle = _NODE_KIND_COLORS[node.kind] || colors.accent;
+    ctx.fill();
+    if (selected) {
+      ctx.strokeStyle = colors.fg;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.fillStyle = colors.fg;
+    ctx.font = '10px sans-serif';
+    ctx.fillText(node.label || node.name, p.x + 10, p.y + 3);
+  }
+  ctx.restore();
+}
+
+function _toGraphCoords(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (clientX - rect.left) * (canvas.width / rect.width);
+  const y = (clientY - rect.top) * (canvas.height / rect.height);
+  return {
+    x: (x - graphState.offsetX) / graphState.scale,
+    y: (y - graphState.offsetY) / graphState.scale,
+  };
+}
+
+function _wireGraphCanvas(canvas) {
+  if (graphState.wired) return;
+  graphState.wired = true;
+
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  let moved = false;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = 'grabbing';
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    graphState.offsetX += dx * (canvas.width / canvas.getBoundingClientRect().width);
+    graphState.offsetY += dy * (canvas.height / canvas.getBoundingClientRect().height);
+    lastX = e.clientX; lastY = e.clientY;
+    _drawGraph(canvas);
+  });
+  canvas.addEventListener('pointerup', async (e) => {
+    dragging = false;
+    canvas.style.cursor = 'grab';
+    if (moved) return; // it was a pan, not a click
+    const point = _toGraphCoords(canvas, e.clientX, e.clientY);
+    const hit = hitTest(graphState.positions, point.x, point.y, 14 / graphState.scale);
+    if (!hit) { graphState.selected = null; _drawGraph(canvas); _renderGraphDetail(null); return; }
+    if (e.shiftKey && graphState.selected && graphState.selected !== hit) {
+      await _traceBetween(graphState.selected, hit);
+      return;
+    }
+    if (graphState.selected === hit) {
+      await _expandNode(hit, canvas);
+      return;
+    }
+    graphState.selected = hit;
+    _drawGraph(canvas);
+    _renderGraphDetail(hit);
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    graphState.scale = Math.max(0.3, Math.min(4, graphState.scale * factor));
+    _drawGraph(canvas);
+  }, { passive: false });
+
+  const search = document.getElementById('memory-graph-search');
+  if (search) {
+    search.addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      const query = search.value.trim();
+      if (!query) return;
+      try {
+        const cues = await _graphApi({ op: 'cues', query, limit: 5 });
+        const first = (cues.hits || [])[0];
+        if (!first) return;
+        let node = first.node;
+        if (!graphState.nodes.some((n) => n.id === node.id)) {
+          graphState.nodes.push(node);
+          _relayoutGraph(canvas);
+        }
+        graphState.selected = node.id;
+        const p = graphState.positions.get(node.id);
+        if (p) {
+          graphState.offsetX = canvas.width / 2 - p.x * graphState.scale;
+          graphState.offsetY = canvas.height / 2 - p.y * graphState.scale;
+        }
+        _drawGraph(canvas);
+        _renderGraphDetail(node.id);
+      } catch { /* leave canvas as-is */ }
+    });
+  }
+}
+
+async function _expandNode(nodeId, canvas) {
+  try {
+    const result = await _graphApi({ op: 'expand', node: nodeId, limit: 25 });
+    mergeExpansion(graphState, result.hits || []);
+    _relayoutGraph(canvas);
+    _renderGraphTags();
+    _renderGraphDetail(nodeId);
+  } catch { /* node stays as-is */ }
+}
+
+async function _traceBetween(fromId, toId) {
+  const detail = document.getElementById('memory-graph-detail');
+  if (!detail) return;
+  try {
+    const result = await _graphApi({ op: 'trace', node: fromId, to_node: toId, limit: 10 });
+    const paths = result.paths || [];
+    detail.innerHTML = '';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:600;margin-bottom:6px;';
+    title.textContent = `Paths: ${_nodeName(fromId)} → ${_nodeName(toId)}`;
+    detail.appendChild(title);
+    if (!paths.length) {
+      detail.appendChild(document.createTextNode('No path found.'));
+      return;
+    }
+    for (const path of paths) {
+      const row = document.createElement('div');
+      row.style.cssText = 'margin-bottom:6px;line-height:1.5;';
+      const names = (path.node_ids || []).map(_nodeName);
+      const hops = [];
+      names.forEach((name, index) => {
+        hops.push(name);
+        if (path.tags && path.tags[index]) hops.push(`—${path.tags[index]}→`);
+      });
+      row.textContent = hops.join(' ');
+      detail.appendChild(row);
+    }
+  } catch {
+    detail.textContent = 'Trace failed.';
+  }
+}
+
+function _nodeName(nodeId) {
+  const node = graphState.nodes.find((n) => n.id === nodeId);
+  return node ? (node.label || node.name) : nodeId;
+}
+
+function _renderGraphDetail(nodeId) {
+  const detail = document.getElementById('memory-graph-detail');
+  if (!detail) return;
+  if (!nodeId) {
+    detail.innerHTML = '<span class="admin-toggle-sub" style="margin:0">Click a node to explore. Click again to expand its neighborhood. Shift-click a second node to trace the paths between them.</span>';
+    return;
+  }
+  const node = graphState.nodes.find((n) => n.id === nodeId);
+  if (!node) return;
+  detail.innerHTML = '';
+  const title = document.createElement('div');
+  title.style.cssText = 'font-weight:600;margin-bottom:4px;';
+  title.textContent = node.label || node.name;
+  detail.appendChild(title);
+  const meta = document.createElement('div');
+  meta.style.cssText = 'opacity:0.6;margin-bottom:8px;';
+  meta.textContent = `${node.kind} · trust ${node.trust} · seen ${node.last_seen || '?'}`;
+  detail.appendChild(meta);
+  const edges = graphState.edges.filter((e) => e.src_id === nodeId || e.dst_id === nodeId);
+  for (const edge of edges) {
+    const row = document.createElement('div');
+    row.style.cssText = 'margin-bottom:4px;line-height:1.4;';
+    const out = edge.src_id === nodeId;
+    const other = _nodeName(out ? edge.dst_id : edge.src_id);
+    row.textContent = out ? `${edge.tag} → ${other}` : `← ${edge.tag} ${other}`;
+    if (edge.fact) row.title = edge.fact;
+    detail.appendChild(row);
+  }
+  if (!edges.length) {
+    const hint = document.createElement('div');
+    hint.style.opacity = '0.6';
+    hint.textContent = 'No edges loaded — click again to expand.';
+    detail.appendChild(hint);
+  }
+}
+
+function _renderGraphTags() {
+  const host = document.getElementById('memory-graph-tags');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const { tag, count } of tagCounts(graphState.edges).slice(0, 8)) {
+    const chip = document.createElement('button');
+    chip.className = 'memory-cat-chip' + (graphState.tagFilter === tag ? ' active' : '');
+    chip.textContent = `${tag} (${count})`;
+    chip.addEventListener('click', () => {
+      graphState.tagFilter = graphState.tagFilter === tag ? null : tag;
+      _renderGraphTags();
+      const canvas = document.getElementById('memory-graph-canvas');
+      if (canvas) _drawGraph(canvas);
+    });
+    host.appendChild(chip);
+  }
+}
+
+function _renderGraphCounts() {
+  const el = document.getElementById('memory-graph-counts');
+  if (!el) return;
+  el.textContent = `showing ${graphState.nodes.length}/${graphState.totals.nodes} nodes · ${graphState.edges.length}/${graphState.totals.edges} edges`;
+}
+
+// ---- Digest tab: byte-identical "what the AI sees" ----
+
+export async function loadDigestPreview() {
+  const trustedEl = document.getElementById('memory-digest-trusted');
+  const untrustedEl = document.getElementById('memory-digest-untrusted');
+  const countsEl = document.getElementById('memory-digest-counts');
+  const clustersEl = document.getElementById('memory-digest-clusters');
+  if (!trustedEl || !untrustedEl) return;
+  try {
+    const response = await fetch('/api/memory/digest-preview', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('digest preview failed');
+    const data = await response.json();
+    trustedEl.textContent = data.trusted_block || '(nothing endorsed yet — write or pin a memory, or enable the trust toggles)';
+    untrustedEl.textContent = data.untrusted_card || '(memory bank is empty)';
+    if (countsEl) countsEl.textContent = JSON.stringify(data.digest?.counts || {}, null, 2);
+    if (clustersEl) {
+      clustersEl.innerHTML = '';
+      for (const cluster of data.digest?.clusters || []) {
+        const chip = document.createElement('button');
+        chip.className = 'memory-cat-chip';
+        chip.textContent = `${cluster.label} (${cluster.size})`;
+        chip.title = 'Open in the graph';
+        chip.addEventListener('click', () => {
+          document.querySelector('.memory-tab[data-memory-tab="graph"]')?.click();
+          graphState.tagFilter = cluster.label;
+          _renderGraphTags();
+          const canvas = document.getElementById('memory-graph-canvas');
+          if (canvas) _drawGraph(canvas);
+        });
+        clustersEl.appendChild(chip);
+      }
+    }
+  } catch (error) {
+    trustedEl.textContent = 'Digest unavailable — is the frankenmemory provider running?';
+    untrustedEl.textContent = '—';
+  }
 }
 
 // ---- Details drawer + signal filters ----
@@ -1854,6 +2206,8 @@ document.addEventListener('DOMContentLoaded', () => {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
       }
       if (target === 'inspect') loadMemoryInspect();
+      if (target === 'graph') loadMemoryGraph();
+      if (target === 'digest') loadDigestPreview();
     });
   });
 

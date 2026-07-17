@@ -257,6 +257,8 @@
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="inspect"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M3 3h18v18H3z"/><path d="M3 9h18M9 21V9"/></svg>Inspect</button>
+          <button class="memory-tab" data-memory-tab="graph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="5" cy="6" r="3"/><circle cx="19" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M7.5 8l3 7M16.5 8l-3 7M8 6h8"/></svg>Graph</button>
+          <button class="memory-tab" data-memory-tab="digest"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>Digest</button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
@@ -332,6 +334,36 @@
             </div>
           </div>
           <div id="memory-inspect-list" class="memory-list" style="min-height:180px"></div>
+        </div>
+        <!-- ── Graph tab (memory-trust metaplan T4: canvas-first) ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="graph">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+            <input type="text" id="memory-graph-search" placeholder="Find an entity…" class="memory-search-input" style="max-width:200px" aria-label="Search graph entities" />
+            <div id="memory-graph-tags" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
+            <span id="memory-graph-counts" class="admin-toggle-sub" style="margin:0 0 0 auto;"></span>
+          </div>
+          <div style="display:flex;gap:10px;align-items:stretch;">
+            <canvas id="memory-graph-canvas" width="640" height="420" style="flex:1;min-width:0;border:1px solid var(--border);border-radius:8px;cursor:grab;touch-action:none;"></canvas>
+            <div id="memory-graph-detail" style="width:220px;flex-shrink:0;border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;overflow-y:auto;max-height:420px;">
+              <span class="admin-toggle-sub" style="margin:0">Click a node to explore. Click again to expand its neighborhood. Shift-click a second node to trace the paths between them.</span>
+            </div>
+          </div>
+        </div>
+        <!-- ── Digest tab: what the AI sees each turn ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="digest">
+          <div class="admin-card">
+            <h2 style="margin:0 0 6px 0;font-size:13px;">Endorsed guidance (injected with real force)</h2>
+            <pre id="memory-digest-trusted" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.9;">—</pre>
+          </div>
+          <div class="admin-card">
+            <h2 style="margin:0 0 6px 0;font-size:13px;">Untrusted index card (behind the firewall)</h2>
+            <pre id="memory-digest-untrusted" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.9;">—</pre>
+          </div>
+          <div class="admin-card">
+            <h2 style="margin:0 0 6px 0;font-size:13px;">Raw counts</h2>
+            <pre id="memory-digest-counts" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.7;">—</pre>
+            <div id="memory-digest-clusters" style="display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;"></div>
+          </div>
         </div>
         <!-- ── Add tab ── -->
         <div class="memory-tab-panel hidden" data-memory-panel="add">
