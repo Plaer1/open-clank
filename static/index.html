@@ -293,6 +293,11 @@
               <div id="memory-category-filters" class="memory-category-filters">
                 <button class="memory-cat-chip active" data-cat="all">all</button>
               </div>
+              <div id="memory-signal-filters" class="memory-category-filters" style="gap:6px;">
+                <select id="memory-filter-kind" class="memory-sort-select" aria-label="Filter by kind" hidden></select>
+                <select id="memory-filter-provenance" class="memory-sort-select" aria-label="Filter by provenance" hidden></select>
+                <select id="memory-filter-trust" class="memory-sort-select" aria-label="Filter by trust" hidden></select>
+              </div>
             </div>
             <div id="memory-bulk-bar" class="memory-bulk-bar hidden">
               <label class="memory-bulk-check-all" style="position:relative;top:0px;"><input type="checkbox" id="memory-select-all" /> All</label>
@@ -440,6 +445,16 @@
               <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="auto-memory-toggle" checked /><span class="admin-slider"></span></label>
             </div>
             <span class="admin-toggle-sub" style="display:block;margin-top:6px">Automatically extract memories from conversations.</span>
+          </div>
+          <div class="admin-card" id="memory-trust-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px">
+              <h2 style="margin:0;display:inline-flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Trust auto-captured memories</h2>
+              <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="memory-trust-auto-toggle" /><span class="admin-slider"></span></label>
+            </div>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Memories you wrote or pinned are ALWAYS trusted — the AI treats them as your standing guidance. Everything captured automatically stays behind a safety firewall (shown to the AI as untrusted reference data) unless you switch this on.</span>
+            <div id="memory-trust-kinds" style="display:flex;flex-direction:column;gap:4px;margin-top:10px;padding-left:10px;border-left:2px solid var(--border);">
+              <span class="admin-toggle-sub" style="margin:0 0 2px 0;opacity:0.7">With the master on, trust these kinds of auto-captured memory:</span>
+            </div>
           </div>
           <div class="admin-card">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px">
