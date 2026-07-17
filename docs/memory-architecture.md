@@ -107,6 +107,40 @@ classifier).
   (everything else stays denied); agent lanes keep the full memory
   manual. The digest tail names the tool per lane.
 
+## Open questions (known-unknowns metaplan, 2026-07-17)
+
+`kind=unknown` is a question the user wants answered ("user's name?"),
+question-form even as a fragment.
+
+- **Human-minted only (U2)**: Brain add or a directed instruction
+  (`manage_memory` add with category `unknown`/`question`). The capture
+  pipeline hard-rejects the kind outside manual admission
+  (`unknown_kind_requires_manual`), so every unknown is
+  `source_type=human` → always trusted, no new toggle. Content
+  normalizes to one trailing `?` on save and update.
+- **Surfacing (U6)**: the digest carries `open_questions` (scoped, cap
+  5); the renderer places them INSIDE the endorsed guidance block with
+  weave-in framing — bring one up when the conversation is already
+  nearby, never interrogate. Human-only entries render (K5
+  defense-in-depth). They recall like any record; `recall_memory`
+  annotates them `[open question]`.
+- **Promotion (U4/U5)**: groom op `promote_unknowns` — the same
+  question open in >= 3 distinct workspaces merges into one global
+  record (earliest copy canonical, idempotent), workspace copies
+  archive with `{merged_into}`. Same-question matching is a
+  deterministic overlap coefficient over stopword-free, lightly
+  stemmed tokens, one conservative threshold (0.6,
+  `fm-core/src/curate/questions.rs`).
+- **Resolution (U7)**: three doors, all landing on the same archive
+  surface (`archived=1` + `{resolved_by, resolved_at}` — never a plain
+  delete): the Brain card's ✓ Resolve, the directed `manage_memory`
+  resolve action, and PASSIVE resolution — every admission (candidate
+  accept, capture direct admission, authored ingest) fuzzy-checks the
+  new content against open questions in scope and closes what it
+  answers. The hook lives at admission sites only, never in
+  `upsert_curated`, so decay/dedup/reflect can never close a question
+  (regression-pinned).
+
 ## Brain surfaces
 
 - `/api/memory` list/get carry the full record (kind, source_type,
