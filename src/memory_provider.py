@@ -10,7 +10,13 @@ from typing import Any, Dict, Iterable, List, Optional
 
 @dataclass
 class MemoryRecord:
-    """Provider-neutral memory entry."""
+    """Provider-neutral memory entry.
+
+    The enrichment fields below default to the values a hand-authored
+    native record would carry (kind="fact", source_type="human", no
+    scores) so NativeMemoryProvider needs no changes and the UI can
+    treat absent signals as "not tracked by this provider".
+    """
 
     id: str
     text: str
@@ -25,6 +31,20 @@ class MemoryRecord:
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     uses: int = 0
+    kind: str = "fact"
+    source_type: str = "human"
+    priority: Optional[int] = None
+    trust_score: Optional[float] = None
+    confidence_score: Optional[float] = None
+    importance_score: Optional[float] = None
+    scene_name: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    source_message_ids: List[str] = field(default_factory=list)
+    workspace_path: Optional[str] = None
+    archived: bool = False
+    exempt_from_decay: bool = False
+    exempt_from_dedup: bool = False
+    last_accessed_at: Optional[str] = None
 
 
 @dataclass

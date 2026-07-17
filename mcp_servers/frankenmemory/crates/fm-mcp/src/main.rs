@@ -320,7 +320,7 @@ struct GraphUpsertParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GraphWalkParams {
-    /// One of: cues | tags | expand | fetch | trace | rank
+    /// One of: overview | cues | tags | expand | fetch | trace | rank
     op: String,
     #[serde(default)]
     owner: Option<String>,
@@ -889,7 +889,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "graph_walk",
-        description = "Walk graph memory one step at a time. Reconstruct answers instead of retrieving: start with op=cues (query text -> entry nodes), read op=tags on a node BEFORE expanding to see which relations exist cheaply, then op=expand (optionally filtered by tag/direction) to get neighbors with their edge facts, op=fetch for one node's full detail, op=trace for a path between two nodes. Fetch only what survives your pruning."
+        description = "Walk graph memory one step at a time. Reconstruct answers instead of retrieving: start with op=cues (query text -> entry nodes), read op=tags on a node BEFORE expanding to see which relations exist cheaply, then op=expand (optionally filtered by tag/direction) to get neighbors with their edge facts, op=fetch for one node's full detail, op=trace for a path between two nodes. op=overview returns a scoped nodes+edges seed (no starting node needed; for UIs/cold starts, not for answering questions). Fetch only what survives your pruning."
     )]
     async fn graph_walk(
         &self,
@@ -899,6 +899,17 @@ impl FrankenmemoryServer {
         let limit = params.limit.unwrap_or(10);
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let payload = match params.op.as_str() {
+            "overview" => {
+                let overview = self.graph_store.graph_overview(&scope, limit).map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("overview failed: {e}"), None)
+                })?;
+                let mut value = serde_json::to_value(&overview)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("op".into(), serde_json::json!("overview"));
+                }
+                value
+            }
             "cues" => {
                 let q = params
                     .query
