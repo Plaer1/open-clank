@@ -290,15 +290,15 @@
                 </div>
                 <button id="memory-tidy-btn" class="memory-toolbar-btn" title="AI tidy: deduplicate and clean up memories"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;color:var(--accent, var(--red));"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Tidy</button>
                 <button id="memory-select-btn" class="memory-toolbar-btn" title="Select multiple memories" style="position:relative;left:-2px;"><svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>Select</button>
+                <span id="memory-signal-filters" style="display:inline-flex;gap:4px;margin-left:auto;">
+                  <select id="memory-filter-kind" class="memory-sort-select memory-filter-select" aria-label="Filter by kind" hidden></select>
+                  <select id="memory-filter-provenance" class="memory-sort-select memory-filter-select" aria-label="Filter by provenance" hidden></select>
+                  <select id="memory-filter-trust" class="memory-sort-select memory-filter-select" aria-label="Filter by trust" hidden></select>
+                </span>
               </div>
               <input type="text" id="memory-search" placeholder="Search memories…" class="memory-search-input" aria-label="Search memories" />
               <div id="memory-category-filters" class="memory-category-filters">
                 <button class="memory-cat-chip active" data-cat="all">all</button>
-              </div>
-              <div id="memory-signal-filters" class="memory-category-filters" style="gap:6px;">
-                <select id="memory-filter-kind" class="memory-sort-select" aria-label="Filter by kind" hidden></select>
-                <select id="memory-filter-provenance" class="memory-sort-select" aria-label="Filter by provenance" hidden></select>
-                <select id="memory-filter-trust" class="memory-sort-select" aria-label="Filter by trust" hidden></select>
               </div>
             </div>
             <div id="memory-bulk-bar" class="memory-bulk-bar hidden">
@@ -351,12 +351,15 @@
         </div>
         <!-- ── Digest tab: what the AI sees each turn ── -->
         <div class="memory-tab-panel hidden" data-memory-panel="digest">
+          <p class="memory-desc doclib-desc" style="margin:0 0 8px 0;">Live from the memory engine — this is exactly what the AI receives about your memories at the start of every chat turn, split the same way it's injected. Nothing here is hardcoded. <span id="memory-digest-stamp" style="opacity:0.6"></span></p>
           <div class="admin-card">
             <h2 style="margin:0 0 6px 0;font-size:13px;">Endorsed guidance (injected with real force)</h2>
+            <span class="admin-toggle-sub" style="display:block;margin:0 0 6px 0;opacity:0.6">Memories you wrote, pinned, or trusted via the toggles. Injected below the persona as standing guidance.</span>
             <pre id="memory-digest-trusted" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.9;">—</pre>
           </div>
           <div class="admin-card">
             <h2 style="margin:0 0 6px 0;font-size:13px;">Untrusted index card (behind the firewall)</h2>
+            <span class="admin-toggle-sub" style="display:block;margin:0 0 6px 0;opacity:0.6">The elevator-pitch index of everything else — headlines only, wrapped as untrusted data. The AI pulls full text with its recall tool when a topic matters.</span>
             <pre id="memory-digest-untrusted" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.9;">—</pre>
           </div>
           <div class="admin-card">

@@ -11974,12 +11974,22 @@ textarea.memory-add-input {
 }
 .memory-signal-score {
   font-variant-numeric: tabular-nums;
+  text-transform: none; /* keep "T:med" legible — no lowercase mush */
   background: color-mix(in srgb, var(--fg) 6%, transparent);
   color: color-mix(in srgb, var(--fg) 45%, transparent);
   cursor: help;
 }
 .memory-signal-score-high { color: #98c379; }
 .memory-signal-score-med { color: #d19a66; }
+
+/* Signal filter selects live in toolbar row 1 — compact, no vertical
+   offset (the sort-select +3px nudge misaligns them next to buttons). */
+.memory-filter-select {
+  top: 0;
+  font-size: 10px;
+  padding: 3px 18px 3px 6px;
+  max-width: 118px;
+}
 
 /* Source and time metadata */
 .memory-item-source,

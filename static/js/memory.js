@@ -1253,10 +1253,24 @@ export async function loadDigestPreview() {
     const data = await response.json();
     trustedEl.textContent = data.trusted_block || '(nothing endorsed yet — write or pin a memory, or enable the trust toggles)';
     untrustedEl.textContent = data.untrusted_card || '(memory bank is empty)';
+    const stamp = document.getElementById('memory-digest-stamp');
+    if (stamp) {
+      const at = data.digest?.generated_at;
+      stamp.textContent = at ? `Generated ${at}.` : '';
+    }
     if (countsEl) countsEl.textContent = JSON.stringify(data.digest?.counts || {}, null, 2);
     if (clustersEl) {
       clustersEl.innerHTML = '';
-      for (const cluster of data.digest?.clusters || []) {
+      const clusters = data.digest?.clusters || [];
+      if (!clusters.length) {
+        const hint = document.createElement('span');
+        hint.className = 'admin-toggle-sub';
+        hint.style.margin = '0';
+        hint.style.opacity = '0.6';
+        hint.textContent = 'No threads yet — clusters appear as the memory graph grows.';
+        clustersEl.appendChild(hint);
+      }
+      for (const cluster of clusters) {
         const chip = document.createElement('button');
         chip.className = 'memory-cat-chip';
         chip.textContent = `${cluster.label} (${cluster.size})`;
@@ -1307,7 +1321,16 @@ function _buildMemoryDetails(memory) {
   }
   if (memory.scene_name) drawer.appendChild(_detailRow('Scene', memory.scene_name));
   if (memory.source) drawer.appendChild(_detailRow('Source', memory.source));
+  if (memory.workspace_id && memory.workspace_id !== 'global') {
+    drawer.appendChild(_detailRow('Workspace', memory.workspace_id));
+  }
   if (memory.workspace_path) drawer.appendChild(_detailRow('Workspace path', memory.workspace_path));
+  const flags = [
+    memory.archived ? 'archived' : null,
+    memory.exempt_from_decay ? 'decay-exempt' : null,
+    memory.exempt_from_dedup ? 'dedup-exempt' : null,
+  ].filter(Boolean);
+  if (flags.length) drawer.appendChild(_detailRow('Flags', flags.join(', ')));
 
   if (memory.session_id) {
     const link = document.createElement('a');
@@ -1479,12 +1502,17 @@ export function renderMemoryList() {
     meta.appendChild(catBadge);
 
     if (memory.source_type) {
-      // Enriched provider record (T2): trust/kind/provenance/workspace/
-      // exemption/score chips from the shared helper. Raw values on hover.
+      // Enriched provider record (T2): trust/kind/provenance/score chips
+      // from the shared helper, raw values on hover. Rare signals
+      // (workspace scope, exemptions, archived) live in the Details
+      // drawer instead of the card — chip soup reads as noise.
+      const CARD_CHIPS = new Set(['trusted', 'reference', 'kind', 'provenance']);
       for (const chip of memoryChips(memory, trustPrefsState)) {
+        const base = chip.cls.split(' ')[0];
+        if (!CARD_CHIPS.has(base) && base !== 'score') continue;
         const chipEl = document.createElement('span');
-        chipEl.className = 'memory-cat-badge memory-signal-' + chip.cls.split(' ')[0];
-        if (chip.cls.startsWith('score')) chipEl.classList.add('memory-signal-' + chip.cls.split(' ')[1]);
+        chipEl.className = 'memory-cat-badge memory-signal-' + base;
+        if (base === 'score') chipEl.classList.add('memory-signal-' + chip.cls.split(' ')[1]);
         chipEl.textContent = chip.label;
         chipEl.title = chip.title;
         meta.appendChild(chipEl);
