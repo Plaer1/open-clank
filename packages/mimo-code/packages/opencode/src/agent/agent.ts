@@ -214,23 +214,27 @@ export const layer = Layer.effect(
             native: true,
           },
           // Chat profile (identity metaplan Slice 02/05, ruling R2): a real
-          // no-tools conversation mode — NOT build with a wildcard deny. Its
+          // conversation mode — NOT build with a wildcard deny. Its
           // prompt replaces the provider coding-agent framing entirely, so a
-          // chat turn is never told it is a CLI coding agent with file/memory
+          // chat turn is never told it is a CLI coding agent with file
           // tools it cannot use. The host persona arrives via
           // PromptInput.system. hardPermission keeps user/session config from
-          // relaxing the no-tools invariant. Registered after build so
-          // defaultAgent() (first visible primary) stays build.
+          // relaxing the invariant: the ONLY model-callable tool is the
+          // read-only memory search (pull affordance, memory-trust metaplan
+          // T8 — the model chooses to recall from the injected index pitch).
+          // Registered after build so defaultAgent() (first visible primary)
+          // stays build.
           chat: {
             name: "chat",
             color: "#8fb8de",
-            description: "Chat mode. Plain conversation — no model-callable tools.",
+            description: "Chat mode. Plain conversation — read-only memory recall is the only tool.",
             options: {},
             prompt: PROMPT_CHAT,
             permission: Permission.merge(defaults, user),
             hardPermission: Permission.fromConfig({
               "*": "deny",
               question: "allow",
+              memory: "allow",
             }),
             mode: "primary",
             native: true,

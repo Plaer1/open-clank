@@ -286,8 +286,11 @@ def test_acp_prompt_compiler_preserves_structured_content_and_path_policy(tmp_pa
 def test_mimo_tool_policy_applies_chat_incognito_and_aliases():
     from src.openclank.acp_bridge import _mimo_tool_policy
 
-    assert _mimo_tool_policy({"mode": "chat"}) == {"*": False}
+    # Chat mode: everything denied EXCEPT the read-only memory recall
+    # (T8 pull affordance). Incognito stays a full deny.
+    assert _mimo_tool_policy({"mode": "chat"}) == {"*": False, "memory": True}
     assert _mimo_tool_policy({"incognito": True}) == {"*": False}
+    assert _mimo_tool_policy({"mode": "chat", "incognito": True}) == {"*": False}
     policy = _mimo_tool_policy({
         "mode": "agent",
         "disabled_tools": ["write_file", "manage_memory"],

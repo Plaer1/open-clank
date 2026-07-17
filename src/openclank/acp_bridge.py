@@ -1455,8 +1455,14 @@ _MIMO_TOOL_ALIASES = {
 
 
 def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
-    if envelope.get("incognito") or envelope.get("mode") == "chat":
+    if envelope.get("incognito"):
         return {"*": False}
+    if envelope.get("mode") == "chat":
+        # T8 pull affordance: the read-only memory search is chat mode's ONE
+        # tool. The chat agent's hardPermission allows it regardless (hard
+        # tier merges last), but the session tier should state the same
+        # intent instead of fighting it. Incognito stays a full deny above.
+        return {"*": False, "memory": True}
     policy: dict[str, bool] = {}
     for raw_name in envelope.get("disabled_tools") or []:
         name = str(raw_name)
@@ -1485,7 +1491,8 @@ def _split_memory_digest(digest, owner) -> tuple:
 
     Untrusted framing comes from the untrusted_context_message wrapper at
     injection, not repeated here. Prefs fail CLOSED (broken prefs file =
-    master off), matching ChatProcessor._trust_prefs."""
+    master off), matching ChatProcessor._trust_prefs. The tail names
+    mimo's native memory tool — the one this lane actually holds (F4)."""
     from src.memory_digest import render_split
 
     try:
@@ -1494,7 +1501,7 @@ def _split_memory_digest(digest, owner) -> tuple:
         prefs = _load_for_user(owner) or {}
     except Exception:
         prefs = {}
-    return render_split(digest, prefs)
+    return render_split(digest, prefs, tool_hint="the memory tool")
 
 
 def _stop_reason_notice(reason: str) -> Optional[str]:

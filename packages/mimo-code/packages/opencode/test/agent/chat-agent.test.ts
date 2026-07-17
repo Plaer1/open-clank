@@ -1,6 +1,7 @@
-// Identity metaplan Slice 02/05 (ruling R2): the chat profile is a REAL
-// no-tools conversation agent — its prompt replaces the coding-agent
-// framing, its hard permission denies every tool, and it never becomes the
+// Identity metaplan Slice 02/05 (ruling R2) + memory-trust metaplan T8:
+// the chat profile is a REAL conversation agent — its prompt replaces the
+// coding-agent framing, its hard permission denies every tool except the
+// read-only memory search (the pull affordance), and it never becomes the
 // default agent (build stays first visible primary).
 import { afterEach, test, expect } from "bun:test"
 import { Effect } from "effect"
@@ -26,9 +27,10 @@ test("chat agent exists, carries its own prompt, and hard-denies tools", async (
       expect(chat).toBeDefined()
       expect(chat!.mode).toBe("primary")
       // Own prompt — replaces the provider coding-agent framing entirely.
-      expect(chat!.prompt).toContain("no model-callable tools")
+      expect(chat!.prompt).toContain("memory search")
       expect(chat!.prompt).not.toMatch(/MiMoCode|Xiaomi/)
-      // Hard no-tools invariant: wildcard deny that user config cannot relax.
+      // Hard invariant user config cannot relax: everything denied except
+      // question + the read-only memory recall (T8 pull affordance).
       const hard = chat!.hardPermission ?? []
       const denied = Permission.evaluate("bash", "*", hard)
       expect(denied.action).toBe("deny")
@@ -36,6 +38,12 @@ test("chat agent exists, carries its own prompt, and hard-denies tools", async (
       expect(edit.action).toBe("deny")
       const question = Permission.evaluate("question", "*", hard)
       expect(question.action).toBe("allow")
+      const memory = Permission.evaluate("memory", "*", hard)
+      expect(memory.action).toBe("allow")
+      // The write-capable surfaces stay dead.
+      for (const tool of ["write", "webfetch", "task"]) {
+        expect(Permission.evaluate(tool, "*", hard).action).toBe("deny")
+      }
     },
   })
 })

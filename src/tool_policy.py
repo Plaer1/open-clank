@@ -99,6 +99,7 @@ _COMMON_TOOL_NAMES = {
     "python",
     "read_email",
     "read_file",
+    "recall_memory",
     "reply_to_email",
     "resolve_contact",
     "search_chats",

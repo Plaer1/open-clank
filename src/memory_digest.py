@@ -31,10 +31,14 @@ TRUST_SENTINEL = "[Endorsed Memory Guidance]"
 _TRUSTED_ENTRY_MAX_CHARS = 600
 
 
+DEFAULT_TOOL_HINT = "the recall_memory tool"
+
+
 def render_digest(
     digest: Optional[Dict[str, Any]],
     *,
     exclude_pinned_ids: Optional[set] = None,
+    tool_hint: str = DEFAULT_TOOL_HINT,
 ) -> str:
     """Digest JSON → index-card text. Empty string when the bank is empty
     or the digest is malformed — callers skip the block entirely.
@@ -85,7 +89,7 @@ def render_digest(
 
     lines.append(
         "This is an index, not the memories. When one of these matters to the "
-        "task, recall details with the memory search tool."
+        f"task, recall details with {tool_hint}."
     )
     return "\n".join(lines)
 
@@ -127,13 +131,18 @@ def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
 
 
 def render_split(
-    digest: Optional[Dict[str, Any]], prefs: Any
+    digest: Optional[Dict[str, Any]],
+    prefs: Any,
+    *,
+    tool_hint: str = DEFAULT_TOOL_HINT,
 ) -> Tuple[str, str]:
     """One call → (trusted_block, untrusted_card).
 
     The pair is the ONLY sanctioned way to render the split: entries in
     the trusted block are excluded from the untrusted card, so a memory
-    never appears on both sides of the firewall."""
+    never appears on both sides of the firewall. tool_hint names the
+    recall tool that actually exists in the receiving lane — never
+    promise a tool the lane lacks (audit F4)."""
     from src.memory_trust import trusted
 
     if not isinstance(digest, dict):
@@ -144,5 +153,7 @@ def render_split(
         if isinstance(p, dict) and p.get("id") and trusted(p, prefs)
     }
     block = render_trusted_block(digest, prefs)
-    card = render_digest(digest, exclude_pinned_ids=trusted_ids)
+    card = render_digest(
+        digest, exclude_pinned_ids=trusted_ids, tool_hint=tool_hint
+    )
     return block, card
