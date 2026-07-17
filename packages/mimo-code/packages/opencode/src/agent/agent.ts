@@ -17,6 +17,7 @@ import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 import PROMPT_ORCHESTRATOR from "../session/prompt/orchestrator.txt"
+import PROMPT_CHAT from "./prompt/chat.txt"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@/global"
@@ -209,6 +210,28 @@ export const layer = Layer.effect(
               }),
               user,
             ),
+            mode: "primary",
+            native: true,
+          },
+          // Chat profile (identity metaplan Slice 02/05, ruling R2): a real
+          // no-tools conversation mode — NOT build with a wildcard deny. Its
+          // prompt replaces the provider coding-agent framing entirely, so a
+          // chat turn is never told it is a CLI coding agent with file/memory
+          // tools it cannot use. The host persona arrives via
+          // PromptInput.system. hardPermission keeps user/session config from
+          // relaxing the no-tools invariant. Registered after build so
+          // defaultAgent() (first visible primary) stays build.
+          chat: {
+            name: "chat",
+            color: "#8fb8de",
+            description: "Chat mode. Plain conversation — no model-callable tools.",
+            options: {},
+            prompt: PROMPT_CHAT,
+            permission: Permission.merge(defaults, user),
+            hardPermission: Permission.fromConfig({
+              "*": "deny",
+              question: "allow",
+            }),
             mode: "primary",
             native: true,
           },
