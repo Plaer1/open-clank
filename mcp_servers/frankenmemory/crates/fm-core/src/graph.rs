@@ -195,6 +195,19 @@ pub struct TracePath {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphOverview {
+    /// Most-recently-seen active nodes in scope (limit-capped).
+    pub nodes: Vec<GraphNodeRow>,
+    /// Active edges whose BOTH endpoints are in `nodes` — the canvas
+    /// seed never contains dangling references.
+    pub edges: Vec<GraphEdgeRow>,
+    /// Total active node count in scope (before the limit).
+    pub node_total: i64,
+    /// Total active edge count in scope (before the limit).
+    pub edge_total: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

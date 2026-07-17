@@ -803,9 +803,17 @@ impl SqliteStore {
 
         let mut pinned = Vec::new();
         {
+            // The trust classifier downstream keys on id/source_type/pinned;
+            // full content rides so endorsed guidance can render whole
+            // (render-time budgets cap it, not SQL truncation). The explicit
+            // `pinned` flag distinguishes a user pin from the persona-kind
+            // auto-inclusion below — array membership alone is NOT an
+            // endorsement.
             let mut stmt = conn
                 .prepare(
-                    "SELECT substr(content, 1, 80), kind FROM curated
+                    "SELECT id, substr(content, 1, 80), content, kind, source_type,
+                            COALESCE(json_extract(metadata, '$.pinned'), 0) IN (1, 'true')
+                     FROM curated
                      WHERE archived = 0 AND owner = ?1
                        AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
                        AND (kind = 'persona'
@@ -819,8 +827,12 @@ impl SqliteStore {
                     params![owner, workspace_id, include_global, PINNED_MAX as i64],
                     |row| {
                         Ok(serde_json::json!({
-                            "headline": row.get::<_, String>(0)?,
-                            "kind": row.get::<_, String>(1)?,
+                            "id": row.get::<_, String>(0)?,
+                            "headline": row.get::<_, String>(1)?,
+                            "content": row.get::<_, String>(2)?,
+                            "kind": row.get::<_, String>(3)?,
+                            "source_type": row.get::<_, String>(4)?,
+                            "pinned": row.get::<_, bool>(5)?,
                         }))
                     },
                 )
@@ -2226,10 +2238,35 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("amber greenhouse"));
+        // Enriched digest (trust classifier inputs): id + full content +
+        // source_type ride along; persona-kind auto-inclusion is NOT an
+        // explicit pin.
+        assert_eq!(pinned[0]["id"], persona.id);
+        assert_eq!(
+            pinned[0]["content"].as_str().unwrap(),
+            "keeper of the amber greenhouse ledger"
+        );
+        assert!(pinned[0]["source_type"].is_string());
+        assert_eq!(pinned[0]["pinned"], false);
 
         let bob = store.digest("bob", "global", true).unwrap();
         assert_eq!(bob["counts"]["by_tier"]["curated"], 0);
         assert!(bob["pinned"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn digest_explicit_pin_flag_survives_for_non_persona_kinds() {
+        let store = SqliteStore::memory(4).unwrap();
+        let mut fact = test_record("the boiler reset code is 4711");
+        fact.kind = MemoryKind::Fact;
+        fact.metadata = serde_json::json!({"pinned": true});
+        store.upsert_curated(&fact, None).await;
+
+        let d = store.digest("alice", "global", true).unwrap();
+        let pinned = d["pinned"].as_array().unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0]["pinned"], true, "explicit user pin is flagged");
+        assert_eq!(pinned[0]["kind"], "fact");
     }
 
     #[tokio::test]

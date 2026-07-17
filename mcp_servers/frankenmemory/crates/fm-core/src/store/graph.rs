@@ -528,6 +528,105 @@ impl SqliteStore {
 
     /// BFS over edges (both directions). With a destination: paths src→dst.
     /// Without: the reachable frontier up to max_depth as single-node paths.
+    /// Canvas seed: the most-recently-seen nodes plus every active edge
+    /// connecting two of them. Unlike expand/trace this needs no starting
+    /// node, so a UI can draw the graph cold.
+    pub fn graph_overview(
+        &self,
+        scope: &GraphScope,
+        limit: usize,
+    ) -> rusqlite::Result<GraphOverview> {
+        let conn = self.conn.lock().unwrap();
+        let mut nodes: Vec<GraphNodeRow> = Vec::new();
+        {
+            let sql = format!(
+                "SELECT {NODE_COLS} FROM graph_nodes
+                 WHERE status='active' AND owner = ?1
+                   AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                 ORDER BY last_seen DESC
+                 LIMIT ?4"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![
+                    scope.owner,
+                    scope.workspace_id,
+                    scope.include_global,
+                    limit as i64,
+                ],
+                row_to_node,
+            )?;
+            for row in rows {
+                nodes.push(row?);
+            }
+        }
+
+        let mut edges: Vec<GraphEdgeRow> = Vec::new();
+        if !nodes.is_empty() {
+            let placeholders = nodes
+                .iter()
+                .enumerate()
+                .map(|(index, _)| format!("?{}", index + 4))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, src_id, tag, dst_id, NULL, weight, traversal_count, trust, workspace_id
+                 FROM graph_edges
+                 WHERE status='active' AND owner = ?1
+                   AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                   AND src_id IN ({placeholders}) AND dst_id IN ({placeholders})
+                 ORDER BY weight DESC, last_seen DESC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![
+                &scope.owner,
+                &scope.workspace_id,
+                &scope.include_global,
+            ];
+            for node in &nodes {
+                bindings.push(&node.id);
+            }
+            let rows = stmt.query_map(bindings.as_slice(), |row| {
+                Ok(GraphEdgeRow {
+                    id: row.get(0)?,
+                    src_id: row.get(1)?,
+                    tag: row.get(2)?,
+                    dst_id: row.get(3)?,
+                    fact: row.get(4)?,
+                    weight: row.get(5)?,
+                    traversal_count: row.get(6)?,
+                    trust: row.get(7)?,
+                    owner: scope.owner.clone(),
+                    workspace_id: row.get(8)?,
+                })
+            })?;
+            for row in rows {
+                edges.push(row?);
+            }
+        }
+
+        let scoped_total = |table: &str| -> rusqlite::Result<i64> {
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table}
+                     WHERE status='active' AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))"
+                ),
+                params![scope.owner, scope.workspace_id, scope.include_global],
+                |row| row.get(0),
+            )
+        };
+        let node_total = scoped_total("graph_nodes")?;
+        let edge_total = scoped_total("graph_edges")?;
+
+        Ok(GraphOverview {
+            nodes,
+            edges,
+            node_total,
+            edge_total,
+        })
+    }
+
     pub fn graph_trace(
         &self,
         scope: &GraphScope,
@@ -1232,6 +1331,37 @@ mod groom_tests {
             )
             .unwrap();
         assert_eq!(stray, 1, "dry run must not rewrite");
+    }
+
+    #[test]
+    fn overview_returns_scoped_nodes_edges_and_totals() {
+        let s = seeded();
+        let o = s.graph_overview(&test_scope(), 25).unwrap();
+        assert_eq!(o.nodes.len(), 3, "e + open-clank + frankenmemory");
+        assert_eq!(o.node_total, 3);
+        assert!(!o.edges.is_empty(), "edges between returned nodes ride");
+        assert_eq!(o.edge_total, o.edges.len() as i64);
+        for edge in &o.edges {
+            assert!(o.nodes.iter().any(|n| n.id == edge.src_id));
+            assert!(o.nodes.iter().any(|n| n.id == edge.dst_id));
+        }
+    }
+
+    #[test]
+    fn overview_is_owner_scoped_and_limit_capped() {
+        let s = seeded();
+        let stranger = GraphScope::new("mallory", "test-workspace").unwrap();
+        let foreign = s.graph_overview(&stranger, 25).unwrap();
+        assert!(foreign.nodes.is_empty());
+        assert_eq!(foreign.node_total, 0);
+
+        let capped = s.graph_overview(&test_scope(), 1).unwrap();
+        assert_eq!(capped.nodes.len(), 1);
+        assert_eq!(capped.node_total, 3, "totals ignore the limit");
+        assert!(
+            capped.edges.is_empty(),
+            "no dangling edges: both endpoints must be in the node set"
+        );
     }
 }
 

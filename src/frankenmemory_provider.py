@@ -177,6 +177,13 @@ class FrankenmemoryProvider(MemoryProvider):
                 timestamp = int(datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp())
             except ValueError:
                 pass
+        def _score(key: str) -> Optional[float]:
+            value = data.get(key)
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
         return MemoryRecord(
             id=data.get("id", ""),
             text=data.get("content", data.get("text", "")),
@@ -191,6 +198,20 @@ class FrankenmemoryProvider(MemoryProvider):
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
             uses=int(metadata.get("uses", 0) or 0),
+            kind=str(data.get("kind") or "fact"),
+            source_type=str(data.get("source_type") or "human"),
+            priority=int(data["priority"]) if isinstance(data.get("priority"), (int, float)) else None,
+            trust_score=_score("trust_score"),
+            confidence_score=_score("confidence_score"),
+            importance_score=_score("importance_score"),
+            scene_name=data.get("scene_name"),
+            tags=[str(t) for t in data.get("tags") or [] if isinstance(t, (str, int))],
+            source_message_ids=[str(m) for m in data.get("source_message_ids") or [] if isinstance(m, (str, int))],
+            workspace_path=data.get("workspace_path"),
+            archived=bool(data.get("archived", False)),
+            exempt_from_decay=bool(data.get("exempt_from_decay", False)),
+            exempt_from_dedup=bool(data.get("exempt_from_dedup", False)),
+            last_accessed_at=data.get("last_accessed_at"),
         )
 
     async def capture(
@@ -375,6 +396,38 @@ class FrankenmemoryProvider(MemoryProvider):
             {"owner": scope.owner, "workspace_id": scope.workspace_id},
         )
         return result if isinstance(result, dict) and "counts" in result else None
+
+    async def graph(
+        self,
+        op: str,
+        *,
+        owner: Optional[str] = None,
+        query: Optional[str] = None,
+        node_id: Optional[str] = None,
+        to_node_id: Optional[str] = None,
+        tag: Optional[str] = None,
+        direction: Optional[str] = None,
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """graph_walk passthrough (ops: overview/cues/rank/tags/expand/fetch/trace)."""
+        scope = self._scope(owner)
+        args: Dict[str, Any] = {
+            "op": op,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
+            "limit": limit,
+        }
+        if query is not None:
+            args["query"] = query
+        if node_id is not None:
+            args["node_id"] = node_id
+        if to_node_id is not None:
+            args["dst_id"] = to_node_id
+        if tag is not None:
+            args["tag"] = tag
+        if direction is not None:
+            args["direction"] = direction
+        return await self._call_tool("graph_walk", args)
 
     async def memory_quality(self, *, rebuild_graph_fts: bool = False) -> Dict[str, Any]:
         return await self._call_tool("memory_quality", {"rebuild_graph_fts": rebuild_graph_fts})

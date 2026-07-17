@@ -57,6 +57,24 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "session_id": record.session_id,
             "pinned": bool(getattr(record, "pinned", False) or metadata.get("pinned", False)),
             "metadata": metadata,
+            "kind": getattr(record, "kind", "fact"),
+            "source_type": getattr(record, "source_type", "human"),
+            "priority": getattr(record, "priority", None),
+            "trust_score": getattr(record, "trust_score", None),
+            "confidence_score": getattr(record, "confidence_score", None),
+            "importance_score": getattr(record, "importance_score", None),
+            "scene_name": getattr(record, "scene_name", None),
+            "tags": list(getattr(record, "tags", None) or []),
+            "source_message_ids": list(getattr(record, "source_message_ids", None) or []),
+            "workspace_id": getattr(record, "workspace_id", None),
+            "workspace_path": getattr(record, "workspace_path", None),
+            "archived": bool(getattr(record, "archived", False)),
+            "exempt_from_decay": bool(getattr(record, "exempt_from_decay", False)),
+            "exempt_from_dedup": bool(getattr(record, "exempt_from_dedup", False)),
+            "last_accessed_at": getattr(record, "last_accessed_at", None),
+            "created_at": getattr(record, "created_at", None),
+            "updated_at": getattr(record, "updated_at", None),
+            "uses": int(getattr(record, "uses", 0) or 0),
         }
 
     async def _all_provider_records(user: Optional[str]) -> list:
@@ -219,6 +237,56 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         except Exception as exc:
             logger.warning("Provider quality check failed: %s", exc)
             raise HTTPException(503, "Active memory provider is unavailable") from exc
+
+    @router.get("/graph")
+    async def memory_graph(
+        request: Request,
+        op: str = Query("overview"),
+        query: Optional[str] = Query(None),
+        node: Optional[str] = Query(None),
+        to_node: Optional[str] = Query(None),
+        tag: Optional[str] = Query(None),
+        direction: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+    ):
+        """Owner-scoped graph_walk passthrough (op=overview|cues|tags|expand|fetch|trace)."""
+        if op not in {"overview", "cues", "rank", "tags", "expand", "fetch", "trace"}:
+            raise HTTPException(400, "invalid graph op")
+        if not memory_provider or not hasattr(memory_provider, "graph"):
+            raise HTTPException(503, "Active memory provider does not expose the graph")
+        try:
+            return await memory_provider.graph(
+                op,
+                owner=_owner(request),
+                query=query,
+                node_id=node,
+                to_node_id=to_node,
+                tag=tag,
+                direction=direction,
+                limit=limit,
+            )
+        except Exception as exc:
+            logger.warning("Provider graph op failed: %s", exc)
+            raise HTTPException(503, "Active memory provider is unavailable") from exc
+
+    @router.get("/digest-preview")
+    async def memory_digest_preview(request: Request):
+        """The EXACT index card injected each turn: raw digest dict + the
+        rendered text (shared renderer — byte-identical to injection, no
+        drift)."""
+        if not memory_provider or not hasattr(memory_provider, "digest"):
+            raise HTTPException(503, "Active memory provider does not expose a digest")
+        from src.memory_digest import render_digest
+
+        try:
+            digest = await memory_provider.digest(owner=_owner(request))
+        except Exception as exc:
+            logger.warning("Provider digest preview failed: %s", exc)
+            raise HTTPException(503, "Active memory provider is unavailable") from exc
+        return {
+            "digest": digest,
+            "rendered": render_digest(digest),
+        }
 
     @router.post("/candidate/{candidate_id}/review")
     async def review_memory_candidate(request: Request, candidate_id: str):
