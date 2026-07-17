@@ -110,6 +110,13 @@ def test_brain_markup_carries_trust_panel_and_filters():
     assert 'id="memory-filter-kind"' in html
     assert 'id="memory-filter-provenance"' in html
     assert 'id="memory-filter-trust"' in html
+    # Filters live INSIDE toolbar row 1 — a fourth toolbar row blows the
+    # .memory-toolbar 120px cap and overlaps the list (e's screenshot).
+    row_start = html.index('class="memory-toolbar-row"')
+    search_at = html.index('id="memory-search"')
+    filters_at = html.index('id="memory-signal-filters"')
+    assert row_start < filters_at < search_at
+    assert 'id="memory-digest-stamp"' in html
 
 
 def test_memory_js_wires_prefs_and_chips():
