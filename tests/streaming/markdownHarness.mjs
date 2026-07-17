@@ -57,10 +57,12 @@ export async function loadMarkdown() {
 // newlines live inside <code> as text (never between a `>` and a `<`). Inline
 // single spaces between tags are left alone. Structural differences (two <ul> vs
 // one, <ol> vs <ul>) survive normalization and still fail, as they must.
-// Mermaid ids embed Date.now(), so they are normalized too.
+// Mermaid ids embed Date.now(), so they are normalized too. Thinking ids
+// additionally carry a per-page sequence counter (duplicate-id fix), so any
+// run of numeric segments collapses.
 export function normalizeRender(html) {
   return String(html)
     .replace(/>\s*\n\s*</g, '><')
     .trim()
-    .replace(/(mermaid|thinking)-\d+-\d+/g, '$1-X');
+    .replace(/(mermaid|thinking)-\d+(?:-\d+)+/g, '$1-X');
 }
