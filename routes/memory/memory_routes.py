@@ -133,11 +133,17 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text=form.get("text"),
                 category=form.get("category", "fact"),
                 source=form.get("source", "user"),
-                session_id=form.get("session_id")
+                session_id=form.get("session_id"),
+                workspace_id=form.get("workspace_id") or None,
             )
 
         user = _owner(request)
         text = (memory_data.text or "").strip()
+        if memory_data.category == "unknown":
+            # Open questions normalize to question form host-side too, so
+            # the duplicate check below compares what the engine will keep.
+            from src.ai_interaction import _normalize_question
+            text = _normalize_question(text)
         if not text:
             raise HTTPException(400, "empty memory")
         try:
@@ -159,6 +165,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             record = await memory_provider.remember(
                 text, owner=user, session_id=memory_data.session_id,
                 category=memory_data.category, source=memory_data.source,
+                workspace_id=memory_data.workspace_id,
             )
             try:
                 from src.event_bus import fire_event
@@ -712,6 +719,33 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             raise
         except Exception as exc:
             logger.warning("Provider memory pin failed: %s", exc)
+            raise HTTPException(503, "Active memory provider is unavailable")
+
+    @router.post("/{memory_id}/resolve")
+    async def resolve_memory_question(
+        request: Request, memory_id: str, resolved_by: Optional[str] = Form(None)
+    ):
+        """Close an open question (kind=unknown): archives with
+        {resolved_by, resolved_at} provenance. Fails on non-unknown
+        kinds — resolution is not deletion."""
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_manage_memory")
+        user = _owner(request)
+        try:
+            resolved = await memory_provider.resolve_question(
+                memory_id, resolved_by=resolved_by or None, owner=user
+            )
+            if not resolved:
+                raise HTTPException(
+                    404, f"Memory {memory_id} is not an open question in scope"
+                )
+            return {"ok": True, "resolved": True}
+        except HTTPException:
+            raise
+        except NotImplementedError:
+            raise HTTPException(501, "Active memory provider cannot resolve questions")
+        except Exception as exc:
+            logger.warning("Provider question resolve failed: %s", exc)
             raise HTTPException(503, "Active memory provider is unavailable")
 
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.

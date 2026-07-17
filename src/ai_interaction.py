@@ -344,6 +344,10 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
 
     def _line(record) -> str:
         kind = getattr(record, "kind", "") or getattr(record, "category", "")
+        if kind == "unknown":
+            # A pulled question must read as a question, not as a fact
+            # of unknown provenance.
+            kind = "open question"
         return f"- [{kind}] {record.text}"
 
     endorsed = [r for r in records if trusted(r, prefs)]
@@ -371,19 +375,35 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     return {"results": "\n\n".join(sections)}
 
 
+def _normalize_question(text: str) -> str:
+    """Mirror of the engine's question normalization (collapse
+    whitespace, one trailing '?') so the record echoed back to the model
+    matches what the store keeps."""
+    collapsed = " ".join(text.split())
+    trimmed = collapsed.rstrip("? ").rstrip()
+    return f"{trimmed}?" if trimmed else ""
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Manage memories: list, add, edit, delete, search.
+    """Manage memories: list, add, edit, delete, search, resolve.
 
     Content format:
-      Line 1: action (list|add|edit|delete|search)
+      Line 1: action (list|add|edit|delete|search|resolve)
       Line 2+: action-specific params
 
     Actions:
       list                    — list all memories (optional line 2: category filter)
-      add                     — line 2: text, optional line 3: category (fact|event|contact|preference)
+      add                     — line 2: text, optional line 3: category
+                                (fact|event|contact|preference|unknown).
+                                category "unknown" (or "question") stores an
+                                OPEN QUESTION the user wants answered later
+                                ("user's name?").
       edit                    — line 2: memory_id, line 3: new text
       delete                  — line 2: memory_id
       search                  — line 2: query
+      resolve                 — line 2: question memory_id, optional line 3:
+                                answering memory_id. Closes an open question
+                                with provenance; never a plain delete.
     """
     if not _memory_provider:
         return {"error": "Memory provider not available"}
@@ -418,6 +438,9 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 return {"error": "Add needs line 2: memory text"}
             text = lines[1].strip()
             category = lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact"
+            if category in ("unknown", "question"):
+                category = "unknown"
+                text = _normalize_question(text)
             if not text:
                 return {"error": "Memory text cannot be empty"}
             try:
@@ -482,8 +505,33 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             except Exception as e:
                 return {"error": f"Provider search failed: {e}"}
 
+        elif action == "resolve":
+            if len(lines) < 2:
+                return {"error": "Resolve needs line 2: question memory_id"}
+            display_id = lines[1].strip()
+            answer_display_id = lines[2].strip() if len(lines) > 2 and lines[2].strip() else None
+            try:
+                memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
+                resolved_by = None
+                if answer_display_id:
+                    resolved_by = await _memory_provider.resolve_id(
+                        answer_display_id, owner=owner
+                    )
+                resolved = await _memory_provider.resolve_question(
+                    memory_id, resolved_by=resolved_by, owner=owner
+                )
+                if not resolved:
+                    return {"error": (
+                        f"Memory '{display_id}' could not be resolved — only "
+                        "open questions (category unknown) resolve"
+                    )}
+                return {"action": "resolve", "memory_id": memory_id,
+                        "results": f"Open question '{memory_id}' resolved"}
+            except Exception as e:
+                return {"error": f"Provider resolve failed: {e}"}
+
         else:
-            return {"error": f"Unknown action '{action}'. Use: list, add, edit, delete, search"}
+            return {"error": f"Unknown action '{action}'. Use: list, add, edit, delete, search, resolve"}
 
     # Provider-always: the app wires the active provider at startup
     # (app.py set_memory_manager(..., provider=...)); the old native

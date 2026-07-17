@@ -39,18 +39,25 @@ class MemoryAddRequest(BaseModel):
     category: str = Field(default="fact", description="Memory category")
     source: str = Field(default="user", description="Memory source")
     session_id: Optional[str] = Field(default=None, description="Associated session ID")
+    workspace_id: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Scope override (U3): open questions may be workspace-bound or global",
+    )
 
     @field_validator('category')
     @classmethod
     def validate_category(cls, v):
-        if v not in ['fact', 'contact', 'task', 'preference', 'identity', 'project', 'goal']:
+        if v == 'question':
+            return 'unknown'  # alias for the open-question kind
+        if v not in ['fact', 'contact', 'task', 'preference', 'identity', 'project', 'goal', 'unknown']:
             return 'fact'  # Default to 'fact' if invalid
         return v
 
 
 class MemoryUpdateRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000, description="Updated memory text")
-    category: Optional[str] = Field(default=None, pattern="^(fact|contact|task|preference|identity|project|goal)$", description="Memory category")
+    category: Optional[str] = Field(default=None, pattern="^(fact|contact|task|preference|identity|project|goal|unknown)$", description="Memory category")
 
 
 class PresetUpdateRequest(BaseModel):
