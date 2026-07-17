@@ -1444,11 +1444,19 @@ def setup_chat_routes(
                         and hasattr(chat_processor.memory_provider, "digest")
                     )
                     if _memory_pull and model_target.transport != "acp":
-                        from src.tool_policy import known_tool_names
+                        from src.tool_policy import CHAT_MODE_TOOL_NOTE, known_tool_names
 
+                        # Lane framing parity with mimo's chat.txt: the model
+                        # knows this is Chat mode with one read-only tool AND
+                        # that the full toolset exists in Agent mode — so it
+                        # points the user there instead of denying the
+                        # capability exists.
+                        _pull_messages = list(messages) + [
+                            {"role": "system", "content": CHAT_MODE_TOOL_NOTE}
+                        ]
                         _chunk_iter = stream_agent_target(
                             model_target,
-                            messages,
+                            _pull_messages,
                             session_id=session,
                             owner=_user,
                             cwd=workspace or None,

@@ -154,6 +154,43 @@ class TestLaneRegistration:
         assert "max_rounds=3" in window
         assert "not incognito" in window and "not no_memory" in window
 
+    def test_chat_leg_carries_lane_note_matching_mimo_chat_txt(self):
+        """Parity with mimo's chat.txt (ONE-app rule): the HTTP chat leg
+        tells the model it is in Chat mode with one read-only tool AND
+        that the full toolset exists in Agent mode — so it points the
+        user there instead of denying the app's capabilities."""
+        import pathlib
+
+        from src.tool_policy import CHAT_MODE_TOOL_NOTE
+
+        assert "recall_memory" in CHAT_MODE_TOOL_NOTE
+        assert "Agent mode" in CHAT_MODE_TOOL_NOTE
+        assert "never pretend" in CHAT_MODE_TOOL_NOTE
+        source = pathlib.Path("routes/chat_routes.py").read_text()
+        assert "CHAT_MODE_TOOL_NOTE" in source
+        pull_at = source.index('relevant_tools={"recall_memory"}')
+        window = source[pull_at - 2000:pull_at]
+        assert "_pull_messages" in window, "lane note rides the pull leg"
+
+    def test_agent_prompt_names_the_rest_of_the_tool_base(self):
+        """Tool-RAG shows a per-request subset; the prompt must say the
+        rest exists (so 'what tools do you have?' isn't answered from
+        the subset) while deliberately-disabled tools stay invisible."""
+        from src.agent_loop import TOOL_SECTIONS, _assemble_prompt, _unexposed_tools_note
+
+        prompt = _assemble_prompt({"bash", "read_file"}, {"send_email"})
+        assert "Rest of the tool base" in prompt
+        assert "`manage_memory`" in prompt
+        assert "send_email" not in prompt.split("Rest of the tool base")[1].split("\n")[1], (
+            "disabled tools must not leak into the note"
+        )
+
+        # Full set → no note; chat lane (everything else disabled) → no note.
+        assert _unexposed_tools_note(set(TOOL_SECTIONS.keys()), set()) == ""
+        assert _unexposed_tools_note(
+            {"recall_memory"}, set(TOOL_SECTIONS.keys()) - {"recall_memory"}
+        ) == ""
+
     def test_digest_tail_names_a_real_tool_per_lane(self):
         from src.memory_digest import render_digest, render_split
 
