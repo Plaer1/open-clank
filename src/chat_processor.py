@@ -71,6 +71,18 @@ class ChatProcessor:
             self._digest_warned_at = now
             logger.warning("Memory digest unavailable, continuing without index card: %s", error)
 
+    @staticmethod
+    def _trust_prefs(owner) -> dict:
+        """Per-user trust toggles for the digest split. Fails CLOSED: any
+        prefs problem reads as master-off, so nothing auto-captured gains
+        force from a broken prefs file."""
+        try:
+            from routes.prefs_routes import _load_for_user
+
+            return _load_for_user(owner) or {}
+        except Exception:
+            return {}
+
     async def build_context_preface(
         self,
         message: str,
@@ -128,15 +140,30 @@ class ChatProcessor:
                 # Not a "used memory": no record_access, no used_memories
                 # bookkeeping (it's an index, not retrieval).
                 try:
-                    from src.memory_digest import render_digest
+                    from src.memory_digest import render_split
 
                     digest = await asyncio.wait_for(
                         self.memory_provider.digest(owner=owner), timeout=0.25
                     )
-                    block = render_digest(digest)
-                    if block:
+                    trusted_block, card = render_split(
+                        digest, self._trust_prefs(owner)
+                    )
+                    if trusted_block:
+                        # T6: endorsed guidance is a system message directly
+                        # below the persona — real force, never wrapped
+                        # untrusted (insert before the policy message).
+                        policy_at = next(
+                            (i for i, m in enumerate(preface)
+                             if m.get("content") == UNTRUSTED_CONTEXT_POLICY),
+                            len(preface),
+                        )
+                        preface.insert(policy_at, {
+                            "role": "system",
+                            "content": trusted_block,
+                        })
+                    if card:
                         preface.append(untrusted_context_message(
-                            "saved memory: bank index", block,
+                            "saved memory: bank index", card,
                         ))
                 except Exception as e:
                     self._warn_digest_failure(e)
