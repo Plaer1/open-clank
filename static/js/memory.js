@@ -7,6 +7,7 @@ import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { topPortalZ } from './toolWindowZOrder.js';
+import { memoryChips, isTrusted, DEFAULT_KIND_TRUST } from './util/memoryTrust.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -18,6 +19,18 @@ let selectedIds = new Set();
 let memoryLoadError = null;
 let memoryProviderStatus = '';
 let inspectedMemories = [];
+// Per-user trust prefs (memory_trust_auto + memory_trust_auto_kinds),
+// loaded with the list so the trusted/reference chip reflects reality.
+let trustPrefsState = {};
+// Signal filters (kind / provenance / trust) — fm-provider only.
+let signalFilters = { kind: 'all', provenance: 'all', trust: 'all' };
+
+async function _loadTrustPrefs() {
+  try {
+    const response = await fetch('/api/prefs', { credentials: 'same-origin' });
+    if (response.ok) trustPrefsState = await response.json() || {};
+  } catch { /* chips fall back to defaults (fail closed) */ }
+}
 
 function _renderMemoryProviderStatus() {
   const el = document.getElementById('memory-provider-status');
@@ -198,6 +211,8 @@ async function syncToggles() {
   // injection (see chat_helpers.py: uprefs.skills_enabled).
   await syncPrefToggle('skills-enabled-header-toggle', 'skills_enabled', 'Skills enabled', 'Skills disabled', false);
   await syncPrefToggle('auto-memory-toggle', 'auto_memory', 'Auto-extract memories enabled', 'Auto-extract memories disabled', false);
+  await syncPrefToggle('memory-trust-auto-toggle', 'memory_trust_auto', 'Auto-captured memories can be trusted (per kind below)', 'Auto-captured memories stay behind the firewall', false);
+  await _wireTrustKindSwitches();
   await syncPrefToggle('auto-skills-toggle', 'auto_skills', 'Auto-extract skills enabled', 'Auto-extract skills disabled', false);
   await syncPrefToggle('auto-approve-skills-toggle', 'auto_approve_skills', 'Auto-approve skills enabled', 'Auto-approve skills disabled', false);
   await syncPrefSlider('skill-confidence-slider', 'skill_min_confidence', 'skill-confidence-label', 0.85);
@@ -234,6 +249,99 @@ async function syncToggles() {
 function reflectMemoryToggleInSidebar(enabled) {
   const btn = document.getElementById('tool-memory-btn');
   if (btn) btn.classList.toggle('tool-disabled', !enabled);
+}
+
+// T7 trust panel: six per-kind switches under the master toggle. Kind
+// switch state persists while the master is off (rows just dim). Human-
+// authored and pinned memories are always trusted; these govern
+// auto-capture only.
+const _TRUST_KIND_COPY = {
+  instruction: 'Instructions — standing orders that steer behavior',
+  persona: 'Persona — facts about who the AI is',
+  fact: 'Facts — knowledge about you and your world',
+  episodic: 'Episodes — records of past events',
+  fabric: 'Fabric — threads connecting chats over time',
+  wiki: 'Wiki — long-form authored notes',
+};
+
+async function _wireTrustKindSwitches() {
+  const host = document.getElementById('memory-trust-kinds');
+  const master = document.getElementById('memory-trust-auto-toggle');
+  if (!host || !master) return;
+
+  let kinds = { ...DEFAULT_KIND_TRUST };
+  try {
+    const response = await fetch('/api/prefs/memory_trust_auto_kinds', { credentials: 'same-origin' });
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.value && typeof data.value === 'object') {
+        for (const key of Object.keys(kinds)) {
+          if (key in data.value) kinds[key] = Boolean(data.value[key]);
+        }
+      }
+    }
+  } catch { /* defaults stand */ }
+
+  const dim = () => { host.style.opacity = master.checked ? '' : '0.4'; };
+  dim();
+  if (!master.dataset.boundTrustDim) {
+    master.dataset.boundTrustDim = '1';
+    master.addEventListener('change', () => {
+      dim();
+      // Chips reflect the new trust state immediately.
+      trustPrefsState.memory_trust_auto = master.checked;
+      renderMemoryList();
+    });
+  }
+
+  if (!host.dataset.built) {
+    host.dataset.built = '1';
+    for (const kind of Object.keys(_TRUST_KIND_COPY)) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;';
+      const label = document.createElement('span');
+      label.className = 'admin-toggle-sub';
+      label.style.margin = '0';
+      label.textContent = _TRUST_KIND_COPY[kind];
+      const wrap = document.createElement('label');
+      wrap.className = 'admin-switch';
+      wrap.style.flexShrink = '0';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.id = `memory-trust-kind-${kind}`;
+      box.checked = kinds[kind];
+      const slider = document.createElement('span');
+      slider.className = 'admin-slider';
+      wrap.appendChild(box);
+      wrap.appendChild(slider);
+      row.appendChild(label);
+      row.appendChild(wrap);
+      host.appendChild(row);
+      box.addEventListener('change', async () => {
+        kinds[kind] = box.checked;
+        try {
+          const response = await fetch('/api/prefs/memory_trust_auto_kinds', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: kinds }),
+          });
+          if (!response.ok) throw new Error('save failed');
+          trustPrefsState.memory_trust_auto_kinds = { ...kinds };
+          renderMemoryList();
+        } catch {
+          box.checked = !box.checked;
+          kinds[kind] = box.checked;
+          showError('Could not save trust setting');
+        }
+      });
+    }
+  } else {
+    for (const kind of Object.keys(_TRUST_KIND_COPY)) {
+      const box = document.getElementById(`memory-trust-kind-${kind}`);
+      if (box) box.checked = kinds[kind];
+    }
+  }
 }
 
 function syncToggleDim(toggle) {
@@ -401,7 +509,7 @@ async function fetchMemoryPages() {
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
   try {
-    const data = await fetchMemoryPages();
+    const [data] = await Promise.all([fetchMemoryPages(), _loadTrustPrefs()]);
     memoryLoadError = null;
     memoryProviderStatus = data?.provider || 'native';
     _renderMemoryProviderStatus();
@@ -415,6 +523,7 @@ export async function loadMemories() {
     }
 
     buildCategoryChips();
+    _syncSignalFilterVisibility();
     renderMemoryList();
     updateMemoryCount();
   } catch (error) {
@@ -440,12 +549,15 @@ function _inspectText(item, tier) {
 function _inspectMeta(item, tier) {
   const meta = item.metadata || item.payload || {};
   const provenance = meta.provenance || {};
+  const sessionId = item.session_id || provenance.session_id;
   const parts = [
     tier === 'raw' ? meta.role : item.status,
     item.kind || item.tier,
+    item.source_type,
     item.owner || 'ownerless legacy',
     item.workspace_id || 'global',
     item.source || provenance.source,
+    sessionId ? `from ${sessionId}` : null,
     item.reason || meta.admission_reason,
   ].filter(Boolean);
   return parts.join(' · ');
@@ -793,6 +905,8 @@ function getFilteredMemories() {
     filtered = filtered.filter(m => (m.category || 'fact') === activeCategory);
   }
 
+  filtered = filtered.filter(_passesSignalFilters);
+
   const sortSelect = document.getElementById('memory-sort');
   const sort = sortSelect ? sortSelect.value : sortOrder;
   if (sort === 'newest') {
@@ -809,6 +923,108 @@ function getFilteredMemories() {
   filtered.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
   return filtered;
+}
+
+// ---- Details drawer + signal filters ----
+
+function _detailRow(label, valueNode) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;font-size:11px;line-height:1.6;';
+  const key = document.createElement('span');
+  key.style.cssText = 'opacity:0.6;min-width:92px;flex-shrink:0;';
+  key.textContent = label;
+  row.appendChild(key);
+  if (typeof valueNode === 'string') {
+    const value = document.createElement('span');
+    value.textContent = valueNode;
+    row.appendChild(value);
+  } else {
+    row.appendChild(valueNode);
+  }
+  return row;
+}
+
+function _buildMemoryDetails(memory) {
+  const drawer = document.createElement('div');
+  drawer.className = 'memory-details-drawer';
+  drawer.style.cssText = 'flex-basis:100%;width:100%;margin-top:6px;padding:8px 10px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:2px;';
+  const metadata = memory.metadata || {};
+
+  if (Array.isArray(memory.tags) && memory.tags.length) {
+    drawer.appendChild(_detailRow('Tags', memory.tags.join(', ')));
+  }
+  if (memory.scene_name) drawer.appendChild(_detailRow('Scene', memory.scene_name));
+  if (memory.source) drawer.appendChild(_detailRow('Source', memory.source));
+  if (memory.workspace_path) drawer.appendChild(_detailRow('Workspace path', memory.workspace_path));
+
+  if (memory.session_id) {
+    const link = document.createElement('a');
+    link.href = '#';
+    link.textContent = memory.session_id;
+    link.title = 'Open the chat this memory came from';
+    link.style.cssText = 'color:var(--accent,var(--red));text-decoration:underline;';
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      import('./sessions.js').then((m) => m.selectSession?.(memory.session_id));
+    });
+    drawer.appendChild(_detailRow('From chat', link));
+  }
+  if (Array.isArray(memory.source_message_ids) && memory.source_message_ids.length) {
+    drawer.appendChild(_detailRow('Messages', memory.source_message_ids.join(', ')));
+  }
+  // Authored ledger (wiki records): where the text lives on disk.
+  const authored = metadata.authored || metadata.authored_ledger;
+  if (authored && typeof authored === 'object') {
+    const spot = [authored.path || authored.file, authored.anchor].filter(Boolean).join(' § ');
+    if (spot) drawer.appendChild(_detailRow('Authored at', spot));
+  }
+  if (memory.priority !== null && memory.priority !== undefined) {
+    drawer.appendChild(_detailRow('Priority', String(memory.priority)));
+  }
+  if (memory.last_accessed_at) drawer.appendChild(_detailRow('Last recalled', memory.last_accessed_at));
+  if (memory.created_at) drawer.appendChild(_detailRow('Created', memory.created_at));
+  if (memory.updated_at) drawer.appendChild(_detailRow('Updated', memory.updated_at));
+  if (!drawer.childNodes.length) drawer.appendChild(_detailRow('Signals', 'None recorded for this memory.'));
+  return drawer;
+}
+
+const _SIGNAL_FILTER_DEFS = [
+  ['memory-filter-kind', 'kind', ['all', 'instruction', 'persona', 'fact', 'episodic', 'fabric', 'wiki', 'raw']],
+  ['memory-filter-provenance', 'provenance', ['all', 'human', 'ai', 'auto_extracted', 'procedural']],
+  ['memory-filter-trust', 'trust', ['all', 'trusted', 'reference']],
+];
+
+function _syncSignalFilterVisibility() {
+  // Signal filters only mean something for the enriched (fm) provider.
+  const enriched = memories.some((m) => m.source_type);
+  for (const [id, key, options] of _SIGNAL_FILTER_DEFS) {
+    const select = document.getElementById(id);
+    if (!select) continue;
+    select.hidden = !enriched;
+    if (!select.options.length) {
+      for (const option of options) {
+        const el = document.createElement('option');
+        el.value = option;
+        el.textContent = option === 'all' ? `${key}: all` : option.replace('_extracted', '');
+        select.appendChild(el);
+      }
+      select.addEventListener('change', () => {
+        signalFilters[key] = select.value;
+        renderMemoryList();
+      });
+    }
+  }
+}
+
+function _passesSignalFilters(memory) {
+  if (signalFilters.kind !== 'all' && String(memory.kind || '') !== signalFilters.kind) return false;
+  if (signalFilters.provenance !== 'all' && String(memory.source_type || '') !== signalFilters.provenance) return false;
+  if (signalFilters.trust !== 'all') {
+    const trusted = isTrusted(memory, trustPrefsState);
+    if (signalFilters.trust === 'trusted' && !trusted) return false;
+    if (signalFilters.trust === 'reference' && trusted) return false;
+  }
+  return true;
 }
 
 // ---- Render ----
@@ -910,10 +1126,23 @@ export function renderMemoryList() {
     catBadge.textContent = cat;
     meta.appendChild(catBadge);
 
-    const srcSpan = document.createElement('span');
-    srcSpan.className = 'memory-item-source';
-    srcSpan.textContent = memory.source === 'auto' ? 'auto' : 'manual';
-    meta.appendChild(srcSpan);
+    if (memory.source_type) {
+      // Enriched provider record (T2): trust/kind/provenance/workspace/
+      // exemption/score chips from the shared helper. Raw values on hover.
+      for (const chip of memoryChips(memory, trustPrefsState)) {
+        const chipEl = document.createElement('span');
+        chipEl.className = 'memory-cat-badge memory-signal-' + chip.cls.split(' ')[0];
+        if (chip.cls.startsWith('score')) chipEl.classList.add('memory-signal-' + chip.cls.split(' ')[1]);
+        chipEl.textContent = chip.label;
+        chipEl.title = chip.title;
+        meta.appendChild(chipEl);
+      }
+    } else {
+      const srcSpan = document.createElement('span');
+      srcSpan.className = 'memory-item-source';
+      srcSpan.textContent = memory.source === 'auto' ? 'auto' : 'manual';
+      meta.appendChild(srcSpan);
+    }
 
     const uses = Number(memory.uses || 0);
     if (uses > 0) {
@@ -974,6 +1203,18 @@ export function renderMemoryList() {
       editItem.textContent = '✎ Edit';
       editItem.addEventListener('click', () => { dropdown.style.display = 'none'; startInlineEdit(item, memory); });
 
+      // Details drawer (T2): every stored signal reachable — tags, scene,
+      // provenance links, authored ledger, access/created/updated times.
+      const detailsItem = document.createElement('div');
+      detailsItem.className = 'dropdown-item-compact';
+      detailsItem.textContent = '☰ Details';
+      detailsItem.addEventListener('click', () => {
+        dropdown.style.display = 'none';
+        const existing = item.querySelector('.memory-details-drawer');
+        if (existing) { existing.remove(); return; }
+        item.appendChild(_buildMemoryDetails(memory));
+      });
+
       const deleteItem = document.createElement('div');
       deleteItem.className = 'dropdown-item-compact memory-dropdown-delete';
       deleteItem.textContent = '✕ Delete';
@@ -1004,6 +1245,7 @@ export function renderMemoryList() {
       dropdown.appendChild(pinItem);
       dropdown.appendChild(selectItem);
       dropdown.appendChild(editItem);
+      dropdown.appendChild(detailsItem);
       dropdown.appendChild(deleteItem);
       dropdown.appendChild(cancelItem);
 

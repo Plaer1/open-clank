@@ -11944,6 +11944,43 @@ textarea.memory-add-input {
   color: var(--red);
 }
 
+/* Signal chips (memory-trust metaplan T2/T5): trust state, kind,
+   provenance, workspace, exemptions, bucketed scores. Raw values ride
+   the title attribute (hover). */
+.memory-signal-trusted {
+  background: color-mix(in srgb, #98c379 18%, transparent);
+  color: #98c379;
+}
+.memory-signal-reference {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.memory-signal-kind {
+  background: color-mix(in srgb, var(--hl-function) 12%, transparent);
+  color: var(--hl-function);
+}
+.memory-signal-provenance {
+  background: color-mix(in srgb, var(--hl-keyword) 12%, transparent);
+  color: var(--hl-keyword);
+}
+.memory-signal-workspace {
+  background: color-mix(in srgb, var(--hl-string) 12%, transparent);
+  color: var(--hl-string);
+}
+.memory-signal-archived,
+.memory-signal-exempt {
+  background: color-mix(in srgb, #d19a66 12%, transparent);
+  color: #d19a66;
+}
+.memory-signal-score {
+  font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  cursor: help;
+}
+.memory-signal-score-high { color: #98c379; }
+.memory-signal-score-med { color: #d19a66; }
+
 /* Source and time metadata */
 .memory-item-source,
 .memory-item-time,
