@@ -115,7 +115,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const actual = actualModel || requestedModel || '';
     let label = _modelRouteLabel(req, actual);
     if (opts.suffix) label += ' (' + opts.suffix + ')';
-    if (opts.characterName) label = opts.characterName;
+    if (opts.characterName) {
+      label = opts.characterName;
+      // Live identity (R17): mark whether this label tracks the chat's own
+      // persona or the global default, so a default-persona rename can
+      // rebrand it in place.
+      roleEl.dataset.agentName =
+        (window.__sessionPersonaName && opts.characterName === window.__sessionPersonaName)
+          ? 'session' : 'default';
+    } else {
+      delete roleEl.dataset.agentName;
+    }
     roleEl.textContent = label + ' ';
     _applyModelColor(roleEl, actual || req);
     if (req && actual && !_sameModelName(req, actual)) {

@@ -103,6 +103,13 @@ function _activeAgentName() {
 // The current chat's persona (chat-specific), synced from the session row.
 let sessionPersona = null;
 
+function _setSessionPersonaState(record) {
+  sessionPersona = record || null;
+  if (typeof window !== 'undefined') {
+    window.__sessionPersonaName = (record && record.character_name) || '';
+  }
+}
+
 async function _putSessionPersona(record) {
   const sessions = await import('./sessions.js');
   const sid = sessions.getCurrentSessionId ? sessions.getCurrentSessionId() : sessions.default.getCurrentSessionId();
@@ -114,7 +121,7 @@ async function _putSessionPersona(record) {
   });
   const out = await res.json();
   if (!out || !out.success) throw new Error('persona save failed');
-  sessionPersona = out.persona;
+  _setSessionPersonaState(out.persona);
   return out.persona;
 }
 
@@ -125,7 +132,7 @@ async function _deleteSessionPersona() {
   try {
     await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/persona`, { method: 'DELETE' });
   } catch (e) { /* best effort */ }
-  sessionPersona = null;
+  _setSessionPersonaState(null);
 }
 
 /** Pull THIS chat's persona from the session list (server-side record). */
@@ -133,7 +140,7 @@ function _syncSessionPersona(sessionId) {
   import('./sessions.js').then((sessions) => {
     const list = sessions.getSessions ? sessions.getSessions() : sessions.default.getSessions();
     const row = (list || []).find(s => s.id === sessionId);
-    sessionPersona = (row && row.persona) || null;
+    _setSessionPersonaState((row && row.persona) || null);
     _syncCharIndicator();
   }).catch(() => {});
 }
@@ -164,6 +171,16 @@ export function applyAgentName() {
   if (document.title === `${previous} Chat` || document.title === 'Odysseus Chat') {
     document.title = `${name} Chat`;
   }
+  // Live rebrand of already-rendered message labels (R17): every role
+  // label that tracks the DEFAULT persona updates in place. Labels bound
+  // to a chat-specific persona (data-agent-name="session") stay put.
+  document.querySelectorAll('.role[data-agent-name="default"]').forEach((labelEl) => {
+    const first = labelEl.firstChild;
+    if (first && first.nodeType === Node.TEXT_NODE) {
+      const hadTrailingSpace = /\s$/.test(first.textContent || '');
+      first.textContent = hadTrailingSpace ? `${name} ` : name;
+    }
+  });
 }
 
 if (typeof window !== 'undefined') {
@@ -1183,7 +1200,7 @@ export function deactivateCharacter() {
   // Chat-specific persona: turning the character off clears it from THIS
   // session; the default persona speaks again.
   if (sessionPersona) _deleteSessionPersona().then(() => _syncCharIndicator()).catch(() => {});
-  sessionPersona = null;
+  _setSessionPersonaState(null);
   const charInd = document.getElementById('character-indicator-btn');
   if (charInd) { charInd.style.display = 'none'; charInd.classList.remove('active'); }
   const miniBtn = document.getElementById('overflow-preset-btn');
@@ -1302,7 +1319,7 @@ let _prevSessionId = null;
 export function onSessionSwitch(sessionId) {
   // Server-side chat persona (the canonical per-chat mechanism): sync the
   // indicator/modal to THIS session's persona record.
-  sessionPersona = null;
+  _setSessionPersonaState(null);
   _syncSessionPersona(sessionId);
 
   const charSessions = loadStoredObject('odysseus-char-sessions');
