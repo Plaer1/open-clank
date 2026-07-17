@@ -332,8 +332,13 @@ export function extractThinkingBlocks(text) {
 /**
  * Create a collapsible thinking section
  */
+let _thinkingSectionSeq = 0;
 function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) {
-  const id = `thinking-${Date.now()}-${index}`;
+  // Date.now() alone collides when several messages render in the same
+  // millisecond (history rerender) — the duplicate ids made a toggle
+  // open a DIFFERENT message's thinking block. The counter guarantees
+  // per-page uniqueness.
+  const id = `thinking-${Date.now()}-${index}-${++_thinkingSectionSeq}`;
   const timeHtml = thinkingTime ? `<span style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;">${thinkingTime}s</span>` : '';
   return `
     <div class="thinking-section">
