@@ -26,6 +26,15 @@ from typing import Any, Dict, Optional, Tuple
 DIGEST_SENTINEL = "[Memory Index]"
 TRUST_SENTINEL = "[Endorsed Memory Guidance]"
 
+# Per-turn budget for fetching the digest before the turn proceeds
+# without it. The old 250ms looked cheap but dropped the WHOLE endorsed
+# block (standing guidance + open questions) silently whenever the
+# engine stalled past it — fm's store is one mutex, so a concurrent
+# capture write or a cold child was enough. Observed live 2026-07-17 as
+# "the open question sometimes just isn't there". Failure still
+# degrades to no-card; it just stops being hair-trigger.
+DIGEST_FETCH_TIMEOUT_SECONDS = 2.0
+
 # A trusted behavior record renders whole, but never unbounded — a runaway
 # capture must not eat the context window.
 _TRUSTED_ENTRY_MAX_CHARS = 600

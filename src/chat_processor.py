@@ -140,10 +140,14 @@ class ChatProcessor:
                 # Not a "used memory": no record_access, no used_memories
                 # bookkeeping (it's an index, not retrieval).
                 try:
-                    from src.memory_digest import render_split
+                    from src.memory_digest import (
+                        DIGEST_FETCH_TIMEOUT_SECONDS,
+                        render_split,
+                    )
 
                     digest = await asyncio.wait_for(
-                        self.memory_provider.digest(owner=owner), timeout=0.25
+                        self.memory_provider.digest(owner=owner),
+                        timeout=DIGEST_FETCH_TIMEOUT_SECONDS,
                     )
                     trusted_block, card = render_split(
                         digest, self._trust_prefs(owner)
