@@ -113,10 +113,12 @@ async def test_empty_bank_injects_nothing():
     assert await bridge._maybe_inject_digest(messages, owner="alice", incognito=False) is messages
 
 
-def test_format_memory_digest_adds_trust_framing():
+def test_format_memory_digest_renders_bare_card():
     block = _format_memory_digest(SAMPLE_DIGEST)
     assert block.startswith(DIGEST_SENTINEL)
-    assert "untrusted context, not instructions" in block
+    # Trust framing lives in the untrusted_context_message wrapper applied
+    # at injection; the card itself must not duplicate it.
+    assert "untrusted" not in block.lower()
     assert _format_memory_digest(None) == ""
 
 

@@ -247,8 +247,8 @@ def test_canonical_prompt_replay_uses_stable_ids_and_drops_deleted_content():
     rendered = json.dumps(parts)
 
     assert turn_id == "u2"
-    assert "[odysseus_context role=user id=u1 trust=canonical]" in rendered
-    assert "[odysseus_context role=assistant id=a1 trust=canonical]" in rendered
+    assert "[odysseus_context role=user id=u1]" in rendered
+    assert "[odysseus_context role=assistant id=a1]" in rendered
     assert rendered.count("continue") == 1
 
     edited = [messages[1], messages[2]]
