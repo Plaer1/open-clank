@@ -24,7 +24,8 @@ pub const QUESTION_MATCH_THRESHOLD: f32 = 0.6;
 pub const PROMOTE_WORKSPACES_MIN: usize = 3;
 
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "do", "does", "did", "have", "has",
+    "a", "an", "the", "am", "is", "are", "was", "were", "be", "been", "do", "does", "did", "have",
+    "has",
     "had", "what", "whats", "who", "whos", "whom", "where", "when", "which", "how", "why", "of",
     "for", "to", "in", "on", "at", "by", "with", "about", "your", "yours", "our", "their", "his",
     "her", "its", "it", "this", "that", "these", "those", "and", "or", "not", "no", "yes", "id",
@@ -285,6 +286,9 @@ mod tests {
             ),
             ("user's name?", "my name is casey", true),
             ("preferred shell?", "my preferred shell is zsh", true),
+            // Users speak as "i", not "the user" (e, 2026-07-17).
+            ("favorite color?", "i think my favorite color is green", true),
+            ("users hobbies?", "i spend most weekends on my hobbies: gardening and mame cabinets", true),
             ("user's name?", "favorite color?", false),
             ("user's name?", "prefers green tea in the mornings", false),
             (
