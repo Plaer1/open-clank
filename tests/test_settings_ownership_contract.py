@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_settings_has_exactly_fourteen_owned_panels():
+def test_settings_has_exactly_thirteen_owned_panels():
     html = (ROOT / "static/index.html").read_text(encoding="utf-8")
     javascript = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
     tabs = set(re.findall(r'data-settings-tab="([^"]+)"', html))
@@ -13,7 +13,7 @@ def test_settings_has_exactly_fourteen_owned_panels():
     # mimo-providers is no longer a tab: provider connections live inside
     # added-models so users see ONE providers menu, not two apps.
     expected = {
-        "services", "added-models", "ai", "personas", "search",
+        "services", "added-models", "ai", "search",
         "integrations", "email", "reminders", "appearance", "shortcuts",
         "account", "tools", "users", "system",
     }

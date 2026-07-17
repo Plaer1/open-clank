@@ -35,8 +35,10 @@ function safeRasterDataUrl(raw) {
 const SETTINGS_OWNERSHIP = Object.freeze({
   services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
   'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
+  // The Persona card inside this panel is per-user too, served by
+  // /api/presets/default-persona (chat default, assistant, reminder voice,
+  // background work — one synced record, ruling R13).
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
-  personas: { scope: 'per-user', api: '/api/presets/default-persona', consumer: 'chat default, personal assistant, reminder voice, background work' },
   search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
   integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
@@ -106,8 +108,7 @@ function initTabs() {
       // they flip toggles instead of having to close + reopen the modal.
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'ai') refreshAiModelEndpoints();
-      if (tab === 'personas') loadDefaultPersonaPanel();
+      if (tab === 'ai') { refreshAiModelEndpoints(); loadDefaultPersonaPanel(); }
       if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
       if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
     });
