@@ -291,7 +291,8 @@ def setup_session_routes(
             last_msg_map = {}
             mode_map = {}
             msg_count_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count).filter(DbSession.archived == False)
+            persona_map = {}
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.persona).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
@@ -309,6 +310,10 @@ def setup_session_routes(
                 )
                 mode_map[row.id] = row.mode
                 msg_count_map[row.id] = row.message_count or 0
+                try:
+                    persona_map[row.id] = json.loads(row.persona) if row.persona else None
+                except Exception:
+                    persona_map[row.id] = None
             # Sessions with active documents that have content
             from sqlalchemy import func
             doc_session_ids = set(
@@ -341,7 +346,8 @@ def setup_session_routes(
                      "has_documents": s.id in doc_session_ids,
                      "has_images": s.id in img_session_ids,
                      "mode": mode_map.get(s.id),
-                     "message_count": msg_count_map.get(s.id, 0)}
+                     "message_count": msg_count_map.get(s.id, 0),
+                     "persona": persona_map.get(s.id)}
                     for s in user_sessions.values()
                     if not s.archived
                     and (s.name or "").strip() not in ("Nobody", "Incognito")
@@ -649,6 +655,59 @@ def setup_session_routes(
             except RuntimeError as exc:
                 raise HTTPException(503, str(exc)) from exc
         return {"available": True, **state}
+
+    @router.put("/session/{sid}/persona")
+    async def set_session_persona(request: Request, sid: str):
+        """Attach a persona to THIS chat only (identity ruling: the in-chat
+        persona menu is chat-specific; the global default persona covers
+        branding and new chats)."""
+        _verify_session_owner(request, sid)
+        try:
+            session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, f"Session {sid} not found")
+        body = await request.json()
+        character_name = str(body.get("character_name") or "").strip()[:100]
+        system_prompt = str(body.get("system_prompt") or "").strip()[:10000]
+        if not character_name and not system_prompt:
+            raise HTTPException(400, "character_name or system_prompt required")
+        record = {"character_name": character_name, "system_prompt": system_prompt}
+        try:
+            temperature = body.get("temperature")
+            if temperature is not None:
+                record["temperature"] = max(0.0, min(2.0, float(temperature)))
+            max_tokens = body.get("max_tokens")
+            if max_tokens is not None:
+                record["max_tokens"] = max(0, min(65536, int(max_tokens)))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "temperature/max_tokens must be numeric")
+        db = SessionLocal()
+        try:
+            db_session = db.query(DbSession).filter(DbSession.id == sid).first()
+            if not db_session:
+                raise HTTPException(404, f"Session {sid} not found")
+            db_session.persona = json.dumps(record, ensure_ascii=False)
+            db_session.updated_at = utcnow_naive()
+            db.commit()
+        finally:
+            db.close()
+        return {"success": True, "persona": record}
+
+    @router.delete("/session/{sid}/persona")
+    async def clear_session_persona(request: Request, sid: str):
+        """Remove this chat's persona — it speaks as the default persona again."""
+        _verify_session_owner(request, sid)
+        db = SessionLocal()
+        try:
+            db_session = db.query(DbSession).filter(DbSession.id == sid).first()
+            if not db_session:
+                raise HTTPException(404, f"Session {sid} not found")
+            db_session.persona = None
+            db_session.updated_at = utcnow_naive()
+            db.commit()
+        finally:
+            db.close()
+        return {"success": True}
 
     @router.patch("/session/{sid}/mimo-config")
     async def set_mimo_config(request: Request, sid: str):
