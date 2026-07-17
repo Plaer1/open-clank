@@ -73,7 +73,10 @@ export function memoryChips(record, prefs) {
   );
 
   const kind = String(record.kind || '');
-  if (kind && kind !== String(record.category || '')) {
+  if (kind === 'unknown') {
+    // Open questions read as what they are, not as "kind: unknown".
+    chips.push({ label: 'open question', cls: 'kind kind-unknown', title: 'Open question you want answered — the AI weaves it into relevant conversations' });
+  } else if (kind && kind !== String(record.category || '')) {
     chips.push({ label: kind, cls: 'kind', title: `Engine kind: ${kind}` });
   }
 
