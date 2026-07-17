@@ -184,6 +184,19 @@ struct MemoryMutationParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ResolveMemoryParams {
+    /// The kind=unknown record to close.
+    id: String,
+    /// Curated record id whose content answers the question, if known.
+    #[serde(default)]
+    resolved_by: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct MemoryGetParams {
     id: String,
     #[serde(default)]
@@ -458,6 +471,7 @@ impl FrankenmemoryServer {
             "vectors_written": result.vectors_written,
             "providers_succeeded": result.providers_succeeded,
             "providers_failed": result.providers_failed,
+            "unknowns_resolved": result.unknowns_resolved,
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -849,6 +863,29 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "resolve_memory",
+        description = "Close one open question (kind=unknown): archives it with resolved_by/resolved_at provenance. Only unknown-kind records resolve; use resolved_by to link the memory that answered it."
+    )]
+    async fn resolve_memory(
+        &self,
+        Parameters(params): Parameters<ResolveMemoryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let resolved = self
+            .provider
+            .resolve_unknown(
+                &params.id,
+                params.resolved_by.as_deref(),
+                &scope.owner,
+                &scope.workspace_id,
+            )
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"id": params.id, "resolved": resolved}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "delete_memory",
         description = "Delete one curated memory by id within the owner/workspace scope."
     )]
@@ -901,11 +938,14 @@ impl FrankenmemoryServer {
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let payload = match params.op.as_str() {
             "overview" => {
-                let overview = self.graph_store.graph_overview(&scope, limit).map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("overview failed: {e}"), None)
-                })?;
-                let mut value = serde_json::to_value(&overview)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let overview = self
+                    .graph_store
+                    .graph_overview(&scope, limit)
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("overview failed: {e}"), None)
+                    })?;
+                let mut value =
+                    serde_json::to_value(&overview).unwrap_or_else(|_| serde_json::json!({}));
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("op".into(), serde_json::json!("overview"));
                 }
@@ -1108,7 +1148,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "groom",
-        description = "Curation dispatcher. Operations: decay (archive aged records), dedup (merge near-duplicates), reflect (adjust confidence)."
+        description = "Curation dispatcher. Operations: decay (archive aged records), dedup (merge near-duplicates), reflect (adjust confidence), promote_unknowns (merge the same open question from >=3 workspaces into one global)."
     )]
     async fn groom(
         &self,
@@ -1121,9 +1161,10 @@ impl FrankenmemoryServer {
             "reflect" => GroomOp::Reflect,
             "edge_decay" => GroomOp::EdgeDecay,
             "tag_normalize" => GroomOp::TagNormalize,
+            "promote_unknowns" => GroomOp::PromoteUnknowns,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    format!("Unknown groom op: {}. Use decay, dedup, reflect, edge_decay, or tag_normalize.", params.op),
+                    format!("Unknown groom op: {}. Use decay, dedup, reflect, edge_decay, tag_normalize, or promote_unknowns.", params.op),
                 )]));
             }
         };

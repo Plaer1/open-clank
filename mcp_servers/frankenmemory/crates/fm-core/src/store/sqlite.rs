@@ -919,7 +919,12 @@ impl SqliteStore {
                 .map_err(|error| error.to_string())?;
             let rows = stmt
                 .query_map(
-                    params![owner, workspace_id, include_global, OPEN_QUESTIONS_MAX as i64],
+                    params![
+                        owner,
+                        workspace_id,
+                        include_global,
+                        OPEN_QUESTIONS_MAX as i64
+                    ],
                     |row| {
                         Ok(serde_json::json!({
                             "id": row.get::<_, String>(0)?,
@@ -979,6 +984,119 @@ impl SqliteStore {
             .map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
+    }
+
+    /// Open (non-archived) kind=unknown records for an owner. With a
+    /// workspace the scope is workspace ∪ global (the recall scope a
+    /// passive resolve honors); with None it is every workspace (the
+    /// promotion pass groups across them). Earliest first so the oldest
+    /// copy of a question is the canonical one.
+    pub fn list_open_unknowns(
+        &self,
+        owner: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<MemoryRecord>, String> {
+        if owner.trim().is_empty() {
+            return Err("owner is required".into());
+        }
+        let conn = self.conn.lock().unwrap();
+        let base = "SELECT id, content, kind, priority, trust_score, confidence_score,
+                    importance_score, scene_name, source, source_type, owner,
+                    workspace_id, session_key, session_id, tags, source_message_ids,
+                    timestamps, created_at, updated_at, archived, last_accessed_at,
+                    exempt_from_decay, exempt_from_dedup, metadata, workspace_path
+             FROM curated
+             WHERE archived = 0 AND kind = 'unknown' AND owner = ?1";
+        let order = " ORDER BY created_at ASC";
+        let mut records = Vec::new();
+        if let Some(workspace) = workspace_id {
+            let sql = format!("{base} AND (workspace_id = ?2 OR workspace_id = 'global'){order}");
+            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![owner, workspace], Self::row_to_record)
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                records.push(row.map_err(|error| error.to_string())?);
+            }
+        } else {
+            let sql = format!("{base}{order}");
+            let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(params![owner], Self::row_to_record)
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                records.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+        Ok(records)
+    }
+
+    /// Archive one curated record and merge a provenance patch into its
+    /// metadata ({resolved_by, resolved_at} or {merged_into}). The only
+    /// lifecycle for closing an open question — archived records leave
+    /// recall/search/digest automatically via their archived = 0
+    /// filters. expect_kind guards misuse (resolving a non-unknown);
+    /// owner/workspace enforce scope when the call crosses the tool
+    /// boundary and are None for engine-internal callers that already
+    /// resolved scope.
+    pub fn archive_curated_record(
+        &self,
+        id: &str,
+        metadata_patch: &serde_json::Value,
+        expect_kind: Option<&str>,
+        owner: Option<&str>,
+        workspace_id: Option<&str>,
+    ) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT kind, owner, workspace_id, metadata FROM curated
+             WHERE id = ?1 AND archived = 0",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        );
+        let Ok((stored_kind, stored_owner, stored_workspace, metadata_raw)) = row else {
+            return false;
+        };
+        if expect_kind.is_some_and(|wanted| stored_kind != wanted) {
+            return false;
+        }
+        if let Some(wanted) = owner {
+            if stored_owner.as_deref() != Some(wanted) {
+                return false;
+            }
+        }
+        if let Some(wanted) = workspace_id {
+            if stored_workspace != wanted && stored_workspace != "global" {
+                return false;
+            }
+        }
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&metadata_raw).unwrap_or_else(|_| serde_json::json!({}));
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        if let (Some(object), Some(patch)) = (metadata.as_object_mut(), metadata_patch.as_object())
+        {
+            for (key, value) in patch {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        conn.execute(
+            "UPDATE curated SET archived = 1, metadata = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into()),
+                chrono::Utc::now().to_rfc3339(),
+                id
+            ],
+        )
+        .is_ok()
     }
 
     pub fn owner_counts(&self, owner: &str) -> Result<serde_json::Value, String> {

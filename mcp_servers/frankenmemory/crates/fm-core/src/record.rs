@@ -282,6 +282,11 @@ pub struct CaptureResult {
     pub vectors_written: usize,
     pub providers_succeeded: usize,
     pub providers_failed: usize,
+    /// Open questions passively resolved by this admission (U7c):
+    /// ids of kind=unknown records archived because the admitted
+    /// content answers them.
+    #[serde(default)]
+    pub unknowns_resolved: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +327,10 @@ pub enum GroomOp {
     EdgeDecay,
     /// Graph tier: merge near-duplicate edge tags into the canonical vocabulary.
     TagNormalize,
+    /// Merge the same open question asked in >= 3 distinct workspaces
+    /// into one global unknown; workspace copies archive with
+    /// {merged_into} provenance.
+    PromoteUnknowns,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
