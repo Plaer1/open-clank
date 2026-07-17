@@ -300,6 +300,7 @@ fn parse_memory_kind(value: &str) -> Option<MemoryKind> {
         "fabric" => Some(MemoryKind::Fabric),
         "wiki" | "reference" => Some(MemoryKind::Wiki),
         "raw" => Some(MemoryKind::Raw),
+        "unknown" | "question" => Some(MemoryKind::Unknown),
         _ => None,
     }
 }
