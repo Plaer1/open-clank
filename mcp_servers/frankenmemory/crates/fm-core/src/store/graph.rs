@@ -578,11 +578,8 @@ impl SqliteStore {
                  ORDER BY weight DESC, last_seen DESC"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![
-                &scope.owner,
-                &scope.workspace_id,
-                &scope.include_global,
-            ];
+            let mut bindings: Vec<&dyn rusqlite::ToSql> =
+                vec![&scope.owner, &scope.workspace_id, &scope.include_global];
             for node in &nodes {
                 bindings.push(&node.id);
             }

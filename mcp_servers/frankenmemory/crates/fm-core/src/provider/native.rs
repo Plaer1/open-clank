@@ -55,6 +55,39 @@ impl NativeProvider {
             .await
     }
 
+    /// Close one open question (U7a/U7b): archive the kind=unknown
+    /// record with {resolved_by?, resolved_at} provenance. Fails on
+    /// non-unknown kinds and out-of-scope ids.
+    pub fn resolve_unknown(
+        &self,
+        id: &str,
+        resolved_by: Option<&str>,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<bool, String> {
+        let sqlite = self
+            .store
+            .as_sqlite()
+            .ok_or_else(|| "resolution requires SQLite".to_string())?;
+        let mut patch = serde_json::json!({
+            "resolved_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Some(by) = resolved_by.filter(|value| !value.trim().is_empty()) {
+            patch["resolved_by"] = by.into();
+        }
+        let resolved = sqlite.archive_curated_record(
+            id,
+            &patch,
+            Some("unknown"),
+            Some(owner),
+            Some(workspace_id),
+        );
+        if resolved {
+            sqlite.metric_add("unknowns_resolved_directly", 1);
+        }
+        Ok(resolved)
+    }
+
     /// Idempotent projection of an agent-authored memory file into curated
     /// records, one per section. The file stays the source of truth: records
     /// carry (authored_path, anchor, content_hash) in metadata, unchanged
@@ -96,6 +129,7 @@ impl NativeProvider {
             existing.iter().map(|(_, hash)| hash.as_str()).collect();
         let mut upserted = 0usize;
         let mut unchanged = 0usize;
+        let mut unknowns_resolved: Vec<String> = Vec::new();
         for (hash, (anchor, content)) in &desired {
             if existing_hashes.contains(hash.as_str()) {
                 unchanged += 1;
@@ -117,6 +151,12 @@ impl NativeProvider {
             });
             self.store.upsert_curated(&record, None).await;
             upserted += 1;
+            // Passive resolution (U7c): authored ingest is an admission
+            // site too.
+            unknowns_resolved.extend(curate::questions::resolve_against_open_unknowns(
+                self.store.as_ref(),
+                &record,
+            ));
         }
 
         let mut deleted = 0usize;
@@ -136,6 +176,7 @@ impl NativeProvider {
             "unchanged": unchanged,
             "deleted": deleted,
             "total": desired.len(),
+            "unknowns_resolved": unknowns_resolved,
         }))
     }
 
@@ -312,6 +353,9 @@ impl NativeProvider {
         if embedding.is_some() {
             sqlite.metric_add("curated_embeddings_written", 1);
         }
+        // Passive resolution (U7c): candidate approval is an admission
+        // site; the newly endorsed content may answer an open question.
+        curate::questions::resolve_against_open_unknowns(self.store.as_ref(), &record);
         Ok(Some(curated_id))
     }
 }
@@ -501,6 +545,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 0,
                 providers_failed: 1,
+                unknowns_resolved: Vec::new(),
             };
         }
 
@@ -513,6 +558,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 1,
                 providers_failed: 0,
+                unknowns_resolved: Vec::new(),
             };
         }
 
@@ -595,6 +641,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 1,
                 providers_failed: 0,
+                unknowns_resolved: Vec::new(),
             };
         }
 
@@ -695,6 +742,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 0,
                 providers_failed: 1,
+                unknowns_resolved: Vec::new(),
             };
         };
         match sqlite.insert_candidate(&candidate) {
@@ -716,6 +764,7 @@ impl MemoryProvider for NativeProvider {
                     vectors_written: 0,
                     providers_succeeded: 1,
                     providers_failed: 0,
+                    unknowns_resolved: Vec::new(),
                 };
             }
             Err(error) => {
@@ -726,6 +775,7 @@ impl MemoryProvider for NativeProvider {
                     vectors_written: 0,
                     providers_succeeded: 0,
                     providers_failed: 1,
+                    unknowns_resolved: Vec::new(),
                 };
             }
         }
@@ -737,6 +787,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 1,
                 providers_failed: 0,
+                unknowns_resolved: Vec::new(),
             };
         }
         let Some(admission_reason) = admission_reason else {
@@ -747,6 +798,7 @@ impl MemoryProvider for NativeProvider {
                 vectors_written: 0,
                 providers_succeeded: 1,
                 providers_failed: 0,
+                unknowns_resolved: Vec::new(),
             };
         };
 
@@ -781,6 +833,7 @@ impl MemoryProvider for NativeProvider {
         }
 
         let embedding = self.embed.embed(content).await.ok();
+        let mut unknowns_resolved = Vec::new();
         if self
             .store
             .upsert_curated(&record, embedding.as_deref())
@@ -801,6 +854,10 @@ impl MemoryProvider for NativeProvider {
                 effective_workspace,
             );
             candidate.status = CandidateStatus::Accepted;
+            // Passive resolution (U7c) fires at admission only — never
+            // from maintenance passes.
+            unknowns_resolved =
+                curate::questions::resolve_against_open_unknowns(self.store.as_ref(), &record);
         }
 
         CaptureResult {
@@ -809,6 +866,7 @@ impl MemoryProvider for NativeProvider {
             vectors_written: usize::from(embedding.is_some()),
             providers_succeeded: 1,
             providers_failed: 0,
+            unknowns_resolved,
         }
     }
 
@@ -980,6 +1038,14 @@ impl MemoryProvider for NativeProvider {
                 curate::dedup::run_dedup(self.store.as_ref(), &self.embed, op.dry_run).await
             }
             GroomOp::Reflect => curate::reflect::run_reflect(self.store.as_ref()).await,
+            GroomOp::PromoteUnknowns => {
+                curate::questions::run_promote_unknowns(
+                    self.store.as_ref(),
+                    op.owner.as_deref(),
+                    op.dry_run,
+                )
+                .await
+            }
             GroomOp::EdgeDecay => {
                 let mut result = GroomResult {
                     op: GroomOp::EdgeDecay,
@@ -1276,7 +1342,11 @@ mod tests {
             "i work on database tooling",
         ] {
             if let Some((_, kind, _, _)) = automatic_admission(content, "user") {
-                assert_ne!(kind, MemoryKind::Unknown, "classifier minted unknown for {content:?}");
+                assert_ne!(
+                    kind,
+                    MemoryKind::Unknown,
+                    "classifier minted unknown for {content:?}"
+                );
             }
         }
         assert!(automatic_admission("what is the user's name?", "user").is_none());
@@ -1389,12 +1459,18 @@ mod tests {
             ("Build", "the build needs FM_DB_PATH set"),
         ]);
 
-        let first = p.ingest_authored("alice", "global", path, &v1).await.unwrap();
+        let first = p
+            .ingest_authored("alice", "global", path, &v1)
+            .await
+            .unwrap();
         assert_eq!(first["upserted"], 2);
         assert_eq!(first["deleted"], 0);
 
         // Re-ingest unchanged → no writes, no dupes.
-        let second = p.ingest_authored("alice", "global", path, &v1).await.unwrap();
+        let second = p
+            .ingest_authored("alice", "global", path, &v1)
+            .await
+            .unwrap();
         assert_eq!(second["upserted"], 0);
         assert_eq!(second["unchanged"], 2);
         let hits = store
@@ -1409,7 +1485,10 @@ mod tests {
             ("Preferences", "e prefers oolong tea over coffee"),
             ("Build", "the build needs FM_DB_PATH set"),
         ]);
-        let third = p.ingest_authored("alice", "global", path, &v2).await.unwrap();
+        let third = p
+            .ingest_authored("alice", "global", path, &v2)
+            .await
+            .unwrap();
         assert_eq!(third["upserted"], 1);
         assert_eq!(third["deleted"], 1);
         assert!(store
@@ -1425,7 +1504,10 @@ mod tests {
         );
 
         // File deleted → empty sections wipe the projection, nothing else.
-        let wipe = p.ingest_authored("alice", "global", path, &[]).await.unwrap();
+        let wipe = p
+            .ingest_authored("alice", "global", path, &[])
+            .await
+            .unwrap();
         assert_eq!(wipe["deleted"], 2);
         assert!(store
             .search_curated_fts_scoped("oolong", 10, Some("alice"), Some("global"))
@@ -1470,7 +1552,10 @@ mod tests {
         );
 
         assert!(p.ingest_authored("", "global", "/x.md", &[]).await.is_err());
-        assert!(p.ingest_authored("alice", "global", " ", &[]).await.is_err());
+        assert!(p
+            .ingest_authored("alice", "global", " ", &[])
+            .await
+            .is_err());
     }
 
     #[tokio::test]
