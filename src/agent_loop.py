@@ -615,6 +615,25 @@ def _compact_tool_line(name: str, section: str) -> str:
     return f"- `{name}` — " + lines[0][:160]
 
 
+def _unexposed_tools_note(included: set, disabled: set) -> str:
+    """One honest line about the rest of the tool base.
+
+    Tool-RAG shows a per-request subset; without this, the model answers
+    "what tools do you have?" from the subset and denies real
+    capabilities. Deliberately-disabled tools stay invisible (privilege
+    and admin gates must not leak), only RAG-omitted ones are named."""
+    others = sorted(set(TOOL_SECTIONS.keys()) - included - (disabled or set()))
+    if not others:
+        return ""
+    return (
+        "## Rest of the tool base\n"
+        "Also installed, just not loaded for this turn (tools are selected "
+        "per request; a message that clearly needs one will have it "
+        "available): " + ", ".join(f"`{name}`" for name in others) + ". "
+        "Never tell the user a listed tool doesn't exist."
+    )
+
+
 def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
     """Build the system prompt with only the specified tools included."""
     disabled = disabled_tools or set()
@@ -632,6 +651,9 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
             "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
             _API_AGENT_RULES,
         ]
+        _base_note = _unexposed_tools_note(included, disabled)
+        if _base_note:
+            parts.append(_base_note)
         parts.extend(_domain_rules_for_tools(included))
         return "\n\n".join(parts)
 
@@ -659,6 +681,9 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         parts.append("## Additional tools\n" + "\n".join(one_liners))
 
     parts.append(_AGENT_RULES)
+    _base_note = _unexposed_tools_note(included, disabled)
+    if _base_note:
+        parts.append(_base_note)
     parts.extend(_domain_rules_for_tools(included))
     return "\n\n".join(parts)
 
