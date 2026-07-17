@@ -26,17 +26,25 @@ pub const PROMOTE_WORKSPACES_MIN: usize = 3;
 const STOPWORDS: &[&str] = &[
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "do", "does", "did", "have", "has",
     "had", "what", "whats", "who", "whos", "whom", "where", "when", "which", "how", "why", "of",
-    "for", "to", "in", "on", "at", "by", "with", "about", "my", "your", "yours", "our", "their",
-    "his", "her", "its", "it", "this", "that", "these", "those", "and", "or", "not", "no", "yes",
-    "i", "im", "ive", "id", "you", "we", "they", "he", "she", "me", "us", "them", "s", "t", "re",
-    "ll", "ve", "d", "m",
+    "for", "to", "in", "on", "at", "by", "with", "about", "your", "yours", "our", "their", "his",
+    "her", "its", "it", "this", "that", "these", "those", "and", "or", "not", "no", "yes", "id",
+    "you", "we", "they", "he", "she", "us", "them", "s", "t", "re", "ll", "ve", "d", "m",
 ];
+
+/// Questions are phrased ABOUT the user ("user's name?") while the user
+/// answers in FIRST person ("my name is …") — without this bridge the
+/// literal flagship case never matched. "id" stays a stopword instead:
+/// mapping it would corrupt "user id?" questions.
+const FIRST_PERSON: &[&str] = &["i", "im", "ive", "my", "me", "mine", "myself"];
 
 fn tokens(text: &str) -> BTreeSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty() && !STOPWORDS.contains(token))
         .map(|token| {
+            if FIRST_PERSON.contains(&token) {
+                return "user".to_string();
+            }
             // Light plural/possessive stem so "users name?" meets
             // "user's name is E" — one trailing s drops, double-s
             // ("address") stays.
@@ -268,6 +276,15 @@ mod tests {
         for (a, b, matches) in [
             ("user's name?", "What is the user's name?", true),
             ("user's name?", "the user's name is E", true),
+            // First-person answers are the norm — the user says "my", not
+            // "the user's". This exact sentence failed live (2026-07-17).
+            (
+                "users name?",
+                "my name is eliott; but when we're chatting like this you can probably just call me \"e\"",
+                true,
+            ),
+            ("user's name?", "my name is casey", true),
+            ("preferred shell?", "my preferred shell is zsh", true),
             ("user's name?", "favorite color?", false),
             ("user's name?", "prefers green tea in the mornings", false),
             (
