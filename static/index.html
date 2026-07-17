@@ -1475,8 +1475,13 @@
         <div data-settings-panel="ai" class="hidden">
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Persona</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">The default persona is who the assistant is everywhere — chat, the personal assistant, reminders, and background work. Edits here sync to all of them. Additional characters live in the chat bar's persona modal.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">The default persona is who the assistant is everywhere — chat, the personal assistant, reminders, and background work; edits to it sync to all of them. Saved and built-in characters can be managed here too; enable one for a chat from the chat bar's persona modal.</div>
             <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Persona</label>
+                <select id="settings-persona-select" class="settings-select"></select>
+                <button type="button" id="settings-persona-new" class="btn-secondary" title="Create a new persona">+ New</button>
+              </div>
               <div class="settings-row">
                 <label class="settings-label">Name</label>
                 <input type="text" id="default-persona-name" class="settings-select" maxlength="100" placeholder="Odysseus" autocomplete="off" />
@@ -1488,6 +1493,7 @@
               <div class="settings-row">
                 <button type="button" id="default-persona-save" class="btn-primary">Save</button>
                 <button type="button" id="default-persona-reset" class="btn-secondary" title="Restore the factory default persona">Reset to factory</button>
+                <button type="button" id="settings-persona-delete" class="btn-secondary" style="display:none" title="Delete this saved persona">Delete</button>
                 <span id="default-persona-status" class="admin-toggle-sub"></span>
               </div>
             </div>

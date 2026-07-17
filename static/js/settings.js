@@ -520,15 +520,22 @@ function _bindFallbackWidget(opts) {
   };
 }
 
-/* ── Default persona (identity rulings R10/R11/R13) ──
-   One synced identity: edits here update chat defaults, the personal
-   assistant, and the reminder voice together. */
+/* ── Persona manager (identity rulings R10/R11/R13) ──
+   The DEFAULT persona is one synced identity: edits update chat defaults,
+   the personal assistant, and the reminder voice together. Saved and
+   built-in characters are managed from the same card; enabling one for a
+   chat stays in the chat bar's persona modal. */
 let _personasPanelWired = false;
+let _personaState = { kind: 'default', id: null, defaultRecord: null, templates: [] };
+
 async function loadDefaultPersonaPanel() {
+  const selectEl = el('settings-persona-select');
   const nameEl = el('default-persona-name');
   const promptEl = el('default-persona-prompt');
   const statusEl = el('default-persona-status');
-  if (!nameEl || !promptEl) return;
+  const resetBtn = el('default-persona-reset');
+  const deleteBtn = el('settings-persona-delete');
+  if (!nameEl || !promptEl || !selectEl) return;
 
   function setStatus(text) {
     if (statusEl) {
@@ -537,26 +544,87 @@ async function loadDefaultPersonaPanel() {
     }
   }
 
-  async function refresh() {
+  async function fetchState() {
+    const res = await checkedFetch('/api/presets/default-persona', { credentials: 'same-origin', cache: 'no-store' });
+    _personaState.defaultRecord = await res.json();
     try {
-      const res = await checkedFetch('/api/presets/default-persona', { credentials: 'same-origin', cache: 'no-store' });
-      const data = await res.json();
-      nameEl.value = data.name || 'Odysseus';
-      promptEl.value = data.system_prompt || '';
-    } catch (e) {
-      setStatus('Could not load persona');
+      const tRes = await checkedFetch('/api/presets/templates', { credentials: 'same-origin', cache: 'no-store' });
+      _personaState.templates = tRes.ok ? await tRes.json() : [];
+    } catch (e) { _personaState.templates = []; }
+  }
+
+  async function builtinCharacters() {
+    // Built-in characters ship in presets.js (single source, same list as
+    // the chat-bar modal). Lazy import avoids a load-order cycle.
+    const mod = await import('./presets.js');
+    return (mod.PROMPT_TEMPLATES || []).filter(t => t.isCharacter);
+  }
+
+  async function renderSelect() {
+    const builtins = await builtinCharacters();
+    const savedNames = new Set(_personaState.templates.map(t => t.name));
+    selectEl.innerHTML = '';
+    const defOpt = document.createElement('option');
+    defOpt.value = '__default__';
+    defOpt.textContent = `Default (${(_personaState.defaultRecord || {}).name || 'Odysseus'})`;
+    selectEl.appendChild(defOpt);
+    if (_personaState.templates.length) {
+      const group = document.createElement('optgroup');
+      group.label = 'Saved';
+      _personaState.templates.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = `tmpl:${t.id}`;
+        opt.textContent = t.name;
+        group.appendChild(opt);
+      });
+      selectEl.appendChild(group);
+    }
+    const visible = builtins.filter(t => !savedNames.has(t.name));
+    if (visible.length) {
+      const group = document.createElement('optgroup');
+      group.label = 'Built-in';
+      visible.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = `builtin:${t.id}`;
+        opt.textContent = t.name;
+        group.appendChild(opt);
+      });
+      selectEl.appendChild(group);
     }
   }
 
-  if (!_personasPanelWired) {
-    _personasPanelWired = true;
-    const saveBtn = el('default-persona-save');
-    const resetBtn = el('default-persona-reset');
-    if (saveBtn) saveBtn.addEventListener('click', async () => {
-      const name = (nameEl.value || '').trim();
-      const system_prompt = (promptEl.value || '').trim();
-      if (!name || !system_prompt) { setStatus('Name and prompt are required'); return; }
-      try {
+  async function showSelection(value) {
+    if (!value || value === '__default__') {
+      _personaState.kind = 'default'; _personaState.id = null;
+      const record = _personaState.defaultRecord || {};
+      nameEl.value = record.name || 'Odysseus';
+      promptEl.value = record.system_prompt || '';
+    } else if (value.startsWith('tmpl:')) {
+      const template = _personaState.templates.find(t => `tmpl:${t.id}` === value);
+      if (!template) return;
+      _personaState.kind = 'template'; _personaState.id = template.id;
+      nameEl.value = template.name; promptEl.value = template.system_prompt || '';
+    } else if (value.startsWith('builtin:')) {
+      const builtins = await builtinCharacters();
+      const builtin = builtins.find(t => `builtin:${t.id}` === value);
+      if (!builtin) return;
+      _personaState.kind = 'builtin'; _personaState.id = builtin.id;
+      nameEl.value = builtin.name; promptEl.value = builtin.prompt || '';
+    }
+    if (resetBtn) resetBtn.style.display = _personaState.kind === 'default' ? '' : 'none';
+    if (deleteBtn) deleteBtn.style.display = _personaState.kind === 'template' ? '' : 'none';
+  }
+
+  function notifyTemplatesChanged() {
+    window.dispatchEvent(new CustomEvent('user-templates-changed'));
+  }
+
+  async function saveCurrent() {
+    const name = (nameEl.value || '').trim();
+    const system_prompt = (promptEl.value || '').trim();
+    if (!name || !system_prompt) { setStatus('Name and prompt are required'); return; }
+    try {
+      if (_personaState.kind === 'default') {
         const res = await checkedFetch('/api/presets/default-persona', {
           method: 'PUT', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
@@ -564,12 +632,73 @@ async function loadDefaultPersonaPanel() {
         });
         const out = await res.json();
         if (out && out.success) {
+          _personaState.defaultRecord = { name: out.name, system_prompt: out.system_prompt, is_factory: false };
           setStatus('Saved — chat, assistant, and reminders updated');
           window.dispatchEvent(new CustomEvent('default-persona-changed', {
             detail: { name: out.name, system_prompt: out.system_prompt, is_factory: false },
           }));
+          await renderSelect(); selectEl.value = '__default__';
         } else setStatus('Save failed');
-      } catch (e) { setStatus('Save failed'); }
+        return;
+      }
+      // Template save — existing id for saved; a built-in edit becomes a
+      // saved copy (built-ins stay immutable, same rule as the chat modal).
+      const payload = {
+        id: _personaState.kind === 'template' ? _personaState.id : '',
+        name,
+        system_prompt,
+      };
+      const existing = _personaState.kind === 'template'
+        ? _personaState.templates.find(t => t.id === _personaState.id)
+        : null;
+      if (existing) {
+        payload.temperature = existing.temperature ?? 1.0;
+        payload.max_tokens = existing.max_tokens ?? 0;
+      }
+      const res = await checkedFetch('/api/presets/templates', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const out = await res.json();
+      if (out && out.success) {
+        setStatus(_personaState.kind === 'builtin' ? `Saved as new persona "${name}"` : 'Persona saved');
+        await fetchState(); await renderSelect();
+        const saved = _personaState.templates.find(t => t.name === name);
+        if (saved) { selectEl.value = `tmpl:${saved.id}`; await showSelection(selectEl.value); }
+        notifyTemplatesChanged();
+      } else setStatus('Save failed');
+    } catch (e) { setStatus('Save failed'); }
+  }
+
+  if (!_personasPanelWired) {
+    _personasPanelWired = true;
+    selectEl.addEventListener('change', () => { showSelection(selectEl.value); });
+    const saveBtn = el('default-persona-save');
+    if (saveBtn) saveBtn.addEventListener('click', saveCurrent);
+    const newBtn = el('settings-persona-new');
+    if (newBtn) newBtn.addEventListener('click', () => {
+      _personaState.kind = 'builtin'; _personaState.id = null; // saves create a template
+      nameEl.value = ''; promptEl.value = '';
+      if (resetBtn) resetBtn.style.display = 'none';
+      if (deleteBtn) deleteBtn.style.display = 'none';
+      nameEl.focus();
+      setStatus('New persona — Save stores it under Saved');
+    });
+    if (deleteBtn) deleteBtn.addEventListener('click', async () => {
+      if (_personaState.kind !== 'template' || !_personaState.id) return;
+      try {
+        const res = await checkedFetch(`/api/presets/templates/${_personaState.id}`, {
+          method: 'DELETE', credentials: 'same-origin',
+        });
+        const out = await res.json();
+        if (out && out.success) {
+          setStatus('Persona deleted');
+          await fetchState(); await renderSelect();
+          selectEl.value = '__default__'; await showSelection('__default__');
+          notifyTemplatesChanged();
+        } else setStatus('Delete failed');
+      } catch (e) { setStatus('Delete failed'); }
     });
     if (resetBtn) resetBtn.addEventListener('click', async () => {
       try {
@@ -578,17 +707,26 @@ async function loadDefaultPersonaPanel() {
         });
         const out = await res.json();
         if (out && out.success) {
+          _personaState.defaultRecord = { name: out.name, system_prompt: out.system_prompt, is_factory: false };
           nameEl.value = out.name; promptEl.value = out.system_prompt;
           setStatus('Factory default restored');
           window.dispatchEvent(new CustomEvent('default-persona-changed', {
             detail: { name: out.name, system_prompt: out.system_prompt, is_factory: false },
           }));
+          await renderSelect(); selectEl.value = '__default__';
         } else setStatus('Reset failed');
       } catch (e) { setStatus('Reset failed'); }
     });
   }
 
-  await refresh();
+  try {
+    await fetchState();
+    await renderSelect();
+    selectEl.value = '__default__';
+    await showSelection('__default__');
+  } catch (e) {
+    setStatus('Could not load personas');
+  }
 }
 
 /* ── Default Chat Model ── */
