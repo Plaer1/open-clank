@@ -301,6 +301,76 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # Memory management tool
 # ---------------------------------------------------------------------------
 
+async def do_recall_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+    """Read-only memory recall — the chat lane's ONLY tool (T8 pull
+    affordance). No write actions exist here by design; manage_memory's
+    add/edit/delete stay agent-lane.
+
+    Content format:
+      Line 1: search query, or "id: <memory_id>" for an exact fetch.
+
+    Results inherit trust tiering (memory-trust metaplan): endorsed
+    records (hand-authored/pinned/toggled kinds) return as plain trusted
+    lines; everything else returns inside the untrusted guard wrapper so
+    a pulled memory can't smuggle instructions past the firewall."""
+    if not _memory_provider:
+        return {"error": "Memory provider not available"}
+    query = content.strip()
+    if not query:
+        return {"error": "Need a search query (or 'id: <memory_id>')"}
+
+    from src.memory_trust import trusted
+    from src.prompt_security import untrusted_context_message
+
+    try:
+        if query.lower().startswith("id:"):
+            memory_id = query[3:].strip()
+            record = await _memory_provider.get(memory_id, owner=owner)
+            records = [record] if record else []
+        else:
+            hits = await _memory_provider.recall(query, owner=owner, top_k=5)
+            records = [h.memory for h in hits]
+    except Exception as exc:
+        return {"error": f"Memory recall failed: {exc}"}
+    if not records:
+        return {"results": "No matching memories."}
+
+    try:
+        from routes.prefs_routes import _load_for_user
+
+        prefs = _load_for_user(owner) or {}
+    except Exception:
+        prefs = {}
+
+    def _line(record) -> str:
+        kind = getattr(record, "kind", "") or getattr(record, "category", "")
+        return f"- [{kind}] {record.text}"
+
+    endorsed = [r for r in records if trusted(r, prefs)]
+    reference = [r for r in records if r not in endorsed]
+    sections = []
+    if endorsed:
+        sections.append(
+            "Endorsed by the user (treat as reliable):\n"
+            + "\n".join(_line(r) for r in endorsed)
+        )
+    if reference:
+        wrapped = untrusted_context_message(
+            "memory recall results",
+            "\n".join(_line(r) for r in reference),
+        )
+        sections.append(str(wrapped["content"]))
+
+    used_ids = [r.id for r in records if getattr(r, "id", None)]
+    if used_ids and hasattr(_memory_provider, "record_access"):
+        try:
+            await _memory_provider.record_access(used_ids, owner=owner)
+        except Exception:
+            logger.debug("recall_memory access accounting failed", exc_info=True)
+
+    return {"results": "\n\n".join(sections)}
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
 
@@ -1079,6 +1149,11 @@ async def dispatch_ai_tool(
         action = content.split("\n")[0].strip()[:40]
         desc = f"manage_memory: {action}"
         result = await do_manage_memory(content, session_id, owner=owner)
+
+    elif tool == "recall_memory":
+        query = content.split("\n")[0].strip()[:60]
+        desc = f"recall_memory: {query}" if query else "recall_memory"
+        result = await do_recall_memory(content, session_id, owner=owner)
 
     elif tool == "ui_control":
         action = content.split("\n")[0].strip()[:60]

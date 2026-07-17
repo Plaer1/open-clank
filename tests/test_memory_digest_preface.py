@@ -36,7 +36,7 @@ class TestRenderDigest:
         assert "- Keeper of the amber greenhouse ledger" in block
         assert "Threads: keeps (4)" in block
         assert "Recent topics: observatory code" in block
-        assert "memory search tool" in block
+        assert "recall_memory" in block, "tail names the tool this lane holds"
 
     def test_empty_bank_renders_nothing(self):
         empty = {

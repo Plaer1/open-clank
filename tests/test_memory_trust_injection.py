@@ -248,7 +248,14 @@ class TestCrossHostParity:
         )
         direct = render_split(digest, {})
         bridge = _split_memory_digest(digest, "alice")
-        assert direct == bridge, "one renderer, zero drift"
+        assert direct[0] == bridge[0], "identical trusted block"
+        # Cards match except the final tail line, which names the recall
+        # tool each lane actually holds (F4: per-lane wording).
+        direct_body = direct[1].rsplit("\n", 1)
+        bridge_body = bridge[1].rsplit("\n", 1)
+        assert direct_body[0] == bridge_body[0], "one renderer, zero drift"
+        assert "recall_memory" in direct_body[1]
+        assert "the memory tool" in bridge_body[1]
 
     def test_prompt_parts_skip_demoted_trusted_copy(self):
         """The endorsed block rides envelope.system_prompt as true system

@@ -1429,25 +1429,61 @@ def setup_chat_routes(
                         compare_mode=compare_mode,
                         is_admin=_request_owner_is_admin(request, _user),
                     )
-                    async for chunk in stream_chat_target(
-                        model_target,
-                        messages,
-                        session_id=session,
-                        owner=_user,
-                        cwd=workspace or None,
-                        supervisor=getattr(request.app.state, "mimo_supervisor", None),
-                        fallbacks=_fallback_candidates,
-                        temperature=ctx.preset.temperature,
-                        # Respect the preset; 0/unset = let the server decide (no
-                        # cap), matching agent mode. The old hard 4096 fallback
-                        # truncated reasoning models mid-<think> — they'd burn the
-                        # whole budget thinking and never emit the answer (seen in
-                        # Compare on heavy generation prompts).
-                        max_tokens=ctx.preset.max_tokens,
-                        prompt_type=preset_id,
-                        tools=None,
-                        turn_envelope=_chat_envelope,
-                    ):
+                    # T8 pull affordance (PULL-MECH option B): on the HTTP leg,
+                    # chat mode runs the SAME agent loop with exactly one
+                    # read-only tool — recall_memory — so the model can pull a
+                    # memory it saw in the index pitch. Everything else stays
+                    # denied; tiny call/round budget. Incognito and no-memory
+                    # turns keep the historical no-tools stream. The ACP leg
+                    # ignores these kwargs: mimo's chat agent enforces the same
+                    # single-tool policy natively (hardPermission memory allow).
+                    _memory_pull = (
+                        not incognito
+                        and not no_memory
+                        and chat_processor.memory_provider is not None
+                        and hasattr(chat_processor.memory_provider, "digest")
+                    )
+                    if _memory_pull and model_target.transport != "acp":
+                        from src.tool_policy import known_tool_names
+
+                        _chunk_iter = stream_agent_target(
+                            model_target,
+                            messages,
+                            session_id=session,
+                            owner=_user,
+                            cwd=workspace or None,
+                            supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                            fallbacks=_fallback_candidates,
+                            temperature=ctx.preset.temperature,
+                            max_tokens=ctx.preset.max_tokens,
+                            prompt_type=preset_id,
+                            relevant_tools={"recall_memory"},
+                            disabled_tools=known_tool_names() - {"recall_memory"},
+                            max_tool_calls=2,
+                            max_rounds=3,
+                            turn_envelope=_chat_envelope,
+                        )
+                    else:
+                        _chunk_iter = stream_chat_target(
+                            model_target,
+                            messages,
+                            session_id=session,
+                            owner=_user,
+                            cwd=workspace or None,
+                            supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                            fallbacks=_fallback_candidates,
+                            temperature=ctx.preset.temperature,
+                            # Respect the preset; 0/unset = let the server decide (no
+                            # cap), matching agent mode. The old hard 4096 fallback
+                            # truncated reasoning models mid-<think> — they'd burn the
+                            # whole budget thinking and never emit the answer (seen in
+                            # Compare on heavy generation prompts).
+                            max_tokens=ctx.preset.max_tokens,
+                            prompt_type=preset_id,
+                            tools=None,
+                            turn_envelope=_chat_envelope,
+                        )
+                    async for chunk in _chunk_iter:
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
                                 data = json.loads(chunk[6:])
