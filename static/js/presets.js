@@ -133,6 +133,11 @@ if (typeof window !== 'undefined') {
     _populateCharSelect();
     applyAgentName();
   });
+  // Settings persona manager edited the saved-template library — keep the
+  // chat-bar modal's dropdown in step.
+  window.addEventListener('user-templates-changed', () => {
+    loadUserTemplates().then(() => _populateCharSelect()).catch(() => {});
+  });
 }
 
 /**
