@@ -455,6 +455,7 @@ impl SqliteStore {
             "fabric" => MemoryKind::Fabric,
             "wiki" => MemoryKind::Wiki,
             "raw" => MemoryKind::Raw,
+            "unknown" => MemoryKind::Unknown,
             _ => MemoryKind::Episodic,
         };
         let source_type_str: String = row.get(9)?;
@@ -526,6 +527,7 @@ impl SqliteStore {
             "fabric" => MemoryKind::Fabric,
             "wiki" => MemoryKind::Wiki,
             "raw" => MemoryKind::Raw,
+            "unknown" => MemoryKind::Unknown,
             _ => MemoryKind::Episodic,
         };
         let status = match row.get::<_, String>(15)?.as_str() {
@@ -753,6 +755,7 @@ impl SqliteStore {
         const PINNED_MAX: usize = 5;
         const CLUSTERS_MAX: usize = 6;
         const RECENT_MAX: usize = 5;
+        const OPEN_QUESTIONS_MAX: usize = 5;
 
         if owner.trim().is_empty() {
             return Err("owner is required".into());
@@ -899,6 +902,39 @@ impl SqliteStore {
             }
         }
 
+        let mut open_questions = Vec::new();
+        {
+            // source_type rides along so the host renderer can refuse to
+            // render a non-human unknown into the endorsed block — by
+            // construction none should exist (capture rejects non-manual
+            // unknowns), so any hit there is a bug upstream.
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, content, workspace_id, source_type FROM curated
+                     WHERE archived = 0 AND kind = 'unknown' AND owner = ?1
+                       AND (workspace_id = ?2 OR (?3 AND workspace_id = 'global'))
+                     ORDER BY COALESCE(last_accessed_at, updated_at) DESC
+                     LIMIT ?4",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map(
+                    params![owner, workspace_id, include_global, OPEN_QUESTIONS_MAX as i64],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "id": row.get::<_, String>(0)?,
+                            "content": row.get::<_, String>(1)?,
+                            "workspace_id": row.get::<_, String>(2)?,
+                            "source_type": row.get::<_, String>(3)?,
+                        }))
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                open_questions.push(row.map_err(|error| error.to_string())?);
+            }
+        }
+
         Ok(serde_json::json!({
             "counts": {
                 "by_kind": by_kind,
@@ -912,6 +948,7 @@ impl SqliteStore {
             "pinned": pinned,
             "clusters": clusters,
             "recent": recent,
+            "open_questions": open_questions,
             "generated_at": chrono::Utc::now().to_rfc3339(),
         }))
     }
@@ -1530,7 +1567,6 @@ impl MemoryStore for SqliteStore {
                 object.insert("category".into(), serde_json::Value::String(value.into()));
             }
         }
-        let next_content = content.unwrap_or(&old_content);
         let next_kind = kind
             .map(|value| format!("{value:?}").to_lowercase())
             .unwrap_or_else(|| {
@@ -1541,6 +1577,12 @@ impl MemoryStore for SqliteStore {
                 )
                 .unwrap_or_else(|_| "episodic".into())
             });
+        let next_content = content.unwrap_or(&old_content);
+        let next_content = if next_kind == "unknown" {
+            crate::record::normalize_question(next_content)
+        } else {
+            next_content.to_string()
+        };
         let now = chrono::Utc::now().to_rfc3339();
         if conn
             .execute(
@@ -2207,6 +2249,7 @@ mod tests {
         assert!(d["pinned"].as_array().unwrap().is_empty());
         assert!(d["clusters"].as_array().unwrap().is_empty());
         assert!(d["recent"].as_array().unwrap().is_empty());
+        assert!(d["open_questions"].as_array().unwrap().is_empty());
         assert_eq!(d["counts"]["by_tier"]["curated"], 0);
         assert_eq!(d["counts"]["by_tier"]["raw"], 0);
         assert_eq!(d["counts"]["candidates_pending"], 0);
@@ -2252,6 +2295,59 @@ mod tests {
         let bob = store.digest("bob", "global", true).unwrap();
         assert_eq!(bob["counts"]["by_tier"]["curated"], 0);
         assert!(bob["pinned"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn digest_open_questions_scoped_capped_and_archived_excluded() {
+        let store = SqliteStore::memory(4).unwrap();
+        // 7 open questions for alice in-scope: cap keeps 5, most recently
+        // updated first.
+        for i in 0..7 {
+            let mut q = test_record(&format!("question number {i}?"));
+            q.kind = MemoryKind::Unknown;
+            q.source_type = SourceType::Human;
+            q.workspace_id = "repo-x".into();
+            q.updated_at = format!("2026-07-17T00:00:0{i}Z");
+            store.upsert_curated(&q, None).await;
+        }
+        let mut archived = test_record("archived question?");
+        archived.kind = MemoryKind::Unknown;
+        archived.archived = true;
+        store.upsert_curated(&archived, None).await;
+        let mut global_q = test_record("global question?");
+        global_q.kind = MemoryKind::Unknown;
+        global_q.source_type = SourceType::Human;
+        global_q.updated_at = "2026-07-18T00:00:00Z".into();
+        store.upsert_curated(&global_q, None).await;
+        let mut bobs = test_record("bobs question?");
+        bobs.kind = MemoryKind::Unknown;
+        bobs.owner = Some("bob".into());
+        bobs.workspace_id = "repo-x".into();
+        store.upsert_curated(&bobs, None).await;
+
+        let d = store.digest("alice", "repo-x", true).unwrap();
+        let questions = d["open_questions"].as_array().unwrap();
+        assert_eq!(questions.len(), 5, "capped at 5");
+        assert_eq!(
+            questions[0]["content"], "global question?",
+            "workspace ∪ global, most recently touched first"
+        );
+        for q in questions {
+            assert_ne!(q["content"], "archived question?");
+            assert_ne!(q["content"], "bobs question?");
+            assert!(q["id"].is_string());
+            assert!(q["workspace_id"].is_string());
+            assert_eq!(q["source_type"], "human");
+        }
+
+        // Workspace-strict scope drops the global question.
+        let strict = store.digest("alice", "repo-x", false).unwrap();
+        for q in strict["open_questions"].as_array().unwrap() {
+            assert_ne!(q["content"], "global question?");
+        }
+
+        let empty = store.digest("carol", "repo-x", true).unwrap();
+        assert!(empty["open_questions"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

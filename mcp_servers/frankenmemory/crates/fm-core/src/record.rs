@@ -11,6 +11,22 @@ pub enum MemoryKind {
     Fabric,
     Wiki,
     Raw,
+    /// An open question the user wants answered ("user's name?").
+    /// Human-minted only: the capture pipeline rejects it outside
+    /// manual admission.
+    Unknown,
+}
+
+/// Canonical form for kind=unknown content: whitespace collapsed,
+/// exactly one trailing "?". Also the comparison form for the question
+/// matcher, so the saved form and the matched form can never disagree.
+pub fn normalize_question(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_end_matches(['?', ' ']).trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{trimmed}?")
 }
 
 impl Default for MemoryKind {
@@ -373,5 +389,30 @@ mod tests {
         assert!(GroundTruthRank::Terminal.numeric() < GroundTruthRank::Injected.numeric());
         assert!(GroundTruthRank::Injected.numeric() < GroundTruthRank::Docs.numeric());
         assert!(GroundTruthRank::Docs.numeric() < GroundTruthRank::Training.numeric());
+    }
+
+    #[test]
+    fn unknown_kind_round_trips_on_the_wire() {
+        let json = serde_json::to_string(&MemoryKind::Unknown).unwrap();
+        assert_eq!(json, "\"unknown\"");
+        let back: MemoryKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MemoryKind::Unknown);
+    }
+
+    #[test]
+    fn question_normalization_matrix() {
+        for (input, expected) in [
+            ("user's name?", "user's name?"),
+            ("user's name", "user's name?"),
+            ("  user's   name ", "user's name?"),
+            ("what is the user's name???", "what is the user's name?"),
+            ("users name?? ", "users name?"),
+            ("what? really", "what? really?"),
+            ("", ""),
+            ("   ", ""),
+            ("???", ""),
+        ] {
+            assert_eq!(normalize_question(input), expected, "input: {input:?}");
+        }
     }
 }

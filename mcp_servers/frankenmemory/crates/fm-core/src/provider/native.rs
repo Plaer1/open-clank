@@ -328,6 +328,7 @@ fn category_to_kind(category: Option<&str>) -> MemoryKind {
         "fact" | "contact" | "project" | "goal" => MemoryKind::Fact,
         "fabric" => MemoryKind::Fabric,
         "wiki" | "reference" => MemoryKind::Wiki,
+        "unknown" | "question" => MemoryKind::Unknown,
         _ => MemoryKind::Episodic,
     }
 }
@@ -602,7 +603,36 @@ impl MemoryProvider for NativeProvider {
         } else {
             (turn.assistant_text.trim(), "assistant")
         };
-        let rejection = prefilter_candidate(content, evidence_role);
+        // Open questions (kind=unknown) are human-minted only: explicit
+        // category plus manual admission, everything else rejected here.
+        // The question is normalized BEFORE the dedup key so the stored
+        // form and the dedup form can never disagree, and the short-
+        // content prefilter is skipped for it — question fragments
+        // ("user's name?") are the intended shape.
+        let explicit_kind = turn
+            .category
+            .as_deref()
+            .map(|category| category_to_kind(Some(category)));
+        let question = explicit_kind == Some(MemoryKind::Unknown);
+        let normalized_question;
+        let content = if question {
+            normalized_question = normalize_question(content);
+            normalized_question.as_str()
+        } else {
+            content
+        };
+        let manual = capture_mode == "manual";
+        let rejection = if question {
+            if content.is_empty() {
+                Some("empty_question")
+            } else if !manual {
+                Some("unknown_kind_requires_manual")
+            } else {
+                None
+            }
+        } else {
+            prefilter_candidate(content, evidence_role)
+        };
         let auto_admission = automatic_admission(content, evidence_role);
         let dedup_key = stable_id(
             "dedup",
@@ -610,11 +640,7 @@ impl MemoryProvider for NativeProvider {
         );
         let candidate_id = stable_id("candidate", &[&dedup_key]);
         let now = chrono::Utc::now().to_rfc3339();
-        let manual = capture_mode == "manual";
-        let candidate_kind = turn
-            .category
-            .as_deref()
-            .map(|category| category_to_kind(Some(category)))
+        let candidate_kind = explicit_kind
             .or_else(|| auto_admission.map(|(_, kind, _, _)| kind))
             .unwrap_or(MemoryKind::Episodic);
         let admission_reason = if manual {
@@ -1175,6 +1201,85 @@ mod tests {
         );
         assert!(first.record_ids.first().unwrap().starts_with("m_"));
         assert_eq!(replay.records_captured, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_unknown_add_stores_normalized_question() {
+        let (p, store) = provider();
+        let mut add = turn_with_mode("users name", "", "manual", "evt-unknown-manual");
+        add.category = Some("unknown".into());
+        let result = p.capture(&add).await;
+        assert!(result.record_ids.first().unwrap().starts_with("m_"));
+
+        let hits = store
+            .search_curated_fts_scoped("users name", 10, Some("alice"), Some("workspace-test"))
+            .await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.kind, MemoryKind::Unknown);
+        assert_eq!(hits[0].record.content, "users name?");
+        assert_eq!(hits[0].record.source_type, SourceType::Human);
+
+        let digest = store.digest("alice", "workspace-test", true).unwrap();
+        let questions = digest["open_questions"].as_array().unwrap();
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0]["content"], "users name?");
+        assert_eq!(questions[0]["source_type"], "human");
+        assert_eq!(digest["counts"]["by_kind"]["unknown"], 1);
+    }
+
+    #[tokio::test]
+    async fn auto_capture_cannot_mint_unknown() {
+        let (p, store) = provider();
+        for mode in ["candidate", "raw_only"] {
+            let mut auto = turn_with_mode(
+                "what is the favorite color of the user",
+                "",
+                mode,
+                &format!("evt-unknown-{mode}"),
+            );
+            auto.category = Some("unknown".into());
+            p.capture(&auto).await;
+        }
+        assert!(store
+            .search_curated_fts_scoped("favorite color", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+        let rejected = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("rejected"), 10)
+            .unwrap();
+        assert_eq!(rejected.len(), 1, "candidate mode records the rejection");
+        assert_eq!(rejected[0].reason, "unknown_kind_requires_manual");
+        let digest = store.digest("alice", "workspace-test", true).unwrap();
+        assert!(digest["open_questions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn manual_empty_question_is_rejected() {
+        let (p, store) = provider();
+        let mut add = turn_with_mode("???", "", "manual", "evt-unknown-empty");
+        add.category = Some("unknown".into());
+        p.capture(&add).await;
+        let rejected = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("rejected"), 10)
+            .unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].reason, "empty_question");
+    }
+
+    #[test]
+    fn automatic_admission_never_emits_unknown() {
+        for content in [
+            "my name is casey",
+            "call me casey",
+            "i like green tea",
+            "i live in a quiet town",
+            "i work on database tooling",
+        ] {
+            if let Some((_, kind, _, _)) = automatic_admission(content, "user") {
+                assert_ne!(kind, MemoryKind::Unknown, "classifier minted unknown for {content:?}");
+            }
+        }
+        assert!(automatic_admission("what is the user's name?", "user").is_none());
     }
 
     #[tokio::test]
