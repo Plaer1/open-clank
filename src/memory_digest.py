@@ -9,16 +9,38 @@ Both hosts share this renderer: Odysseus injects the block through the
 chat preface, the bridge prepends it to mimo turns. DIGEST_SENTINEL marks
 the block so the receiving side can drop a duplicate if both paths ever
 cover the same turn.
+
+Trust split (metaplan T1/T6/T8): render_split() partitions the card into
+an ENDORSED GUIDANCE block (trusted records — carries force, injected
+below the persona, never wrapped untrusted) and the untrusted index
+(everything else, unchanged wrapper). Content rule T8: even trusted
+knowledge kinds stay headline-only in the guidance block; only trusted
+BEHAVIOR kinds (instruction/persona) render whole — the pitch of a
+standing order is the order. Both blocks are always produced by ONE
+render_split call and injected together, so the card sentinel dedups the
+pair.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 DIGEST_SENTINEL = "[Memory Index]"
+TRUST_SENTINEL = "[Endorsed Memory Guidance]"
+
+# A trusted behavior record renders whole, but never unbounded — a runaway
+# capture must not eat the context window.
+_TRUSTED_ENTRY_MAX_CHARS = 600
 
 
-def render_digest(digest: Optional[Dict[str, Any]]) -> str:
+def render_digest(
+    digest: Optional[Dict[str, Any]],
+    *,
+    exclude_pinned_ids: Optional[set] = None,
+) -> str:
     """Digest JSON → index-card text. Empty string when the bank is empty
-    or the digest is malformed — callers skip the block entirely."""
+    or the digest is malformed — callers skip the block entirely.
+
+    exclude_pinned_ids: pinned entries already rendered in the trusted
+    guidance block; they are dropped here so no memory appears twice."""
     if not isinstance(digest, dict):
         return ""
     counts = digest.get("counts") or {}
@@ -39,6 +61,8 @@ def render_digest(digest: Optional[Dict[str, Any]]) -> str:
         tier_bits.append(f"{pending} candidates pending review")
     lines.append("Memory bank: " + ", ".join(tier_bits) + ".")
 
+    excluded = exclude_pinned_ids or set()
+    pinned = [p for p in pinned if not (p.get("id") and p.get("id") in excluded)]
     if pinned:
         lines.append("Pinned:")
         for p in pinned:
@@ -64,3 +88,61 @@ def render_digest(digest: Optional[Dict[str, Any]]) -> str:
         "task, recall details with the memory search tool."
     )
     return "\n".join(lines)
+
+
+def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
+    """The endorsed-guidance block (T6): trusted pinned entries, rendered
+    with real force. Empty string when nothing qualifies.
+
+    Behavior kinds (instruction/persona) render their full content;
+    knowledge kinds stay headline-only per T8 — trust changes their
+    firewall status, not the pitch-first surfacing."""
+    from src.memory_trust import BEHAVIOR_KINDS, trusted
+
+    if not isinstance(digest, dict):
+        return ""
+    entries = [
+        p for p in (digest.get("pinned") or [])
+        if isinstance(p, dict) and trusted(p, prefs)
+    ]
+    if not entries:
+        return ""
+    lines = [
+        TRUST_SENTINEL,
+        "The user has endorsed these memories; treat them as standing "
+        "guidance from the user.",
+    ]
+    for entry in entries:
+        kind = str(entry.get("kind") or "")
+        if kind in BEHAVIOR_KINDS:
+            text = str(entry.get("content") or entry.get("headline") or "").strip()
+            text = text[:_TRUSTED_ENTRY_MAX_CHARS]
+        else:
+            text = str(entry.get("headline") or "").strip()
+        if text:
+            lines.append(f"- {text}")
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+def render_split(
+    digest: Optional[Dict[str, Any]], prefs: Any
+) -> Tuple[str, str]:
+    """One call → (trusted_block, untrusted_card).
+
+    The pair is the ONLY sanctioned way to render the split: entries in
+    the trusted block are excluded from the untrusted card, so a memory
+    never appears on both sides of the firewall."""
+    from src.memory_trust import trusted
+
+    if not isinstance(digest, dict):
+        return "", ""
+    trusted_ids = {
+        p.get("id")
+        for p in (digest.get("pinned") or [])
+        if isinstance(p, dict) and p.get("id") and trusted(p, prefs)
+    }
+    block = render_trusted_block(digest, prefs)
+    card = render_digest(digest, exclude_pinned_ids=trusted_ids)
+    return block, card

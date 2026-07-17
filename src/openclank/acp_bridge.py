@@ -755,30 +755,45 @@ class ACPBridge:
         owner: Optional[str],
         incognito: bool,
     ) -> list:
-        """Prepend one memory index card to turns that don't carry one.
+        """Memory injection for one mimo turn: returns (messages, trusted_block).
 
-        Odysseus-prefaced turns already have the block (sentinel check keeps
-        it single); this covers resume flows and any future mimo-first path.
-        Fail-open: no digest, no block, turn proceeds untouched."""
+        The untrusted index card is prepended to turns that don't carry one
+        (Odysseus-prefaced turns already have it; the sentinel keeps it
+        single — this covers resume flows and any future mimo-first path).
+        The TRUSTED guidance block (T6) is returned to the caller so it can
+        ride envelope.system_prompt — true system tier — instead of being
+        demoted to synthetic prompt text. If the Odysseus preface already
+        produced a trusted block, that exact text is reused (no second
+        digest fetch, no drift). Fail-open: no digest, no blocks."""
         if incognito or self._memory_provider is None:
-            return messages
+            return messages, ""
         if not hasattr(self._memory_provider, "digest"):
-            return messages
-        from src.memory_digest import DIGEST_SENTINEL
+            return messages, ""
+        from src.memory_digest import DIGEST_SENTINEL, TRUST_SENTINEL
 
+        existing_trusted = next(
+            (
+                _content_text(message.get("content"))
+                for message in messages
+                if TRUST_SENTINEL in _content_text(message.get("content"))
+            ),
+            "",
+        )
         for message in messages:
             if DIGEST_SENTINEL in _content_text(message.get("content")):
-                return messages
+                return messages, existing_trusted
         try:
             digest = await asyncio.wait_for(
                 self._memory_provider.digest(owner=owner or self._owner), timeout=0.25
             )
         except Exception as exc:
             logger.debug("bridge memory digest unavailable: %s", exc)
-            return messages
-        block = _format_memory_digest(digest)
-        if not block:
-            return messages
+            return messages, existing_trusted
+        trusted_block, card = _split_memory_digest(digest, owner or self._owner)
+        if existing_trusted:
+            trusted_block = existing_trusted
+        if not card:
+            return messages, trusted_block
         from src.prompt_security import untrusted_context_message
 
         out = list(messages)
@@ -786,8 +801,8 @@ class ACPBridge:
             (index for index in range(len(out) - 1, -1, -1) if out[index].get("role") == "user"),
             len(out),
         )
-        out.insert(insert_at, untrusted_context_message("memory bank index", block))
-        return out
+        out.insert(insert_at, untrusted_context_message("memory bank index", card))
+        return out, trusted_block
 
     async def run_turn(
         self,
@@ -920,9 +935,17 @@ class ACPBridge:
         self._queues[mimo_session] = q
 
         # Build the prompt parts from odysseus messages
-        messages = await self._maybe_inject_digest(
+        messages, trusted_block = await self._maybe_inject_digest(
             messages, owner=owner, incognito=incognito
         )
+        if trusted_block:
+            # T6: endorsed guidance rides the persona seam to TRUE system
+            # tier (mimo applies envelope.system_prompt as PromptInput.system).
+            # The demoted in-message copy is skipped in _build_prompt_parts.
+            base_system = str(envelope.get("system_prompt") or "").rstrip()
+            envelope["system_prompt"] = (
+                f"{base_system}\n\n{trusted_block}" if base_system else trusted_block
+            )
         prompt_parts = _build_prompt_parts(
             messages,
             turn_id=turn_id,
@@ -1353,6 +1376,8 @@ def _build_prompt_parts(
     """
     if not messages:
         return []
+    from src.memory_digest import TRUST_SENTINEL
+
     current_index = next(
         (index for index in range(len(messages) - 1, -1, -1) if messages[index].get("role") == "user"),
         len(messages) - 1,
@@ -1370,6 +1395,11 @@ def _build_prompt_parts(
             and role == "system"
             and text.strip() == authority
         ):
+            continue
+        if role == "system" and TRUST_SENTINEL in text:
+            # The endorsed-guidance block rides envelope.system_prompt as
+            # true system authority; never ALSO send it demoted to
+            # synthetic prompt text.
             continue
         parts.append({
             "type": "text",
@@ -1450,12 +1480,21 @@ def _extract_user_text(messages: list) -> str:
     return ""
 
 
-def _format_memory_digest(digest) -> str:
-    """Render the shared index card (untrusted framing comes from the
-    untrusted_context_message wrapper at injection, not repeated here)."""
-    from src.memory_digest import render_digest
+def _split_memory_digest(digest, owner) -> tuple:
+    """Shared trusted/untrusted split for bridge-side injection.
 
-    return render_digest(digest) or ""
+    Untrusted framing comes from the untrusted_context_message wrapper at
+    injection, not repeated here. Prefs fail CLOSED (broken prefs file =
+    master off), matching ChatProcessor._trust_prefs."""
+    from src.memory_digest import render_split
+
+    try:
+        from routes.prefs_routes import _load_for_user
+
+        prefs = _load_for_user(owner) or {}
+    except Exception:
+        prefs = {}
+    return render_split(digest, prefs)
 
 
 def _stop_reason_notice(reason: str) -> Optional[str]:
