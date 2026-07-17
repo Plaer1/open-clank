@@ -172,6 +172,19 @@ class TestLaneRegistration:
         window = source[pull_at - 2000:pull_at]
         assert "_pull_messages" in window, "lane note rides the pull leg"
 
+        # Both chat lanes carry the SAME awareness contract (e's ONE-app
+        # rule): single read-only lookup, never pretend, the full toolset
+        # exists in agent mode, never deny the capability.
+        chat_txt = pathlib.Path(
+            "packages/mimo-code/packages/opencode/src/agent/prompt/chat.txt"
+        ).read_text()
+        for lane_text in (CHAT_MODE_TOOL_NOTE, chat_txt):
+            lowered = lane_text.lower()
+            assert "full toolset" in lowered
+            assert "agent mode" in lowered
+            assert "never pretend" in lowered
+            assert "lacks the capability" in lowered
+
     def test_agent_prompt_names_the_rest_of_the_tool_base(self):
         """Tool-RAG shows a per-request subset; the prompt must say the
         rest exists (so 'what tools do you have?' isn't answered from
