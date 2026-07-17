@@ -1361,7 +1361,13 @@ export class Agent implements ACPAgent {
     if (!current) {
       this.sessionManager.setModel(session.id, model)
     }
-    const agent = session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent())))
+    // Explicit lane crossing (identity ruling R2): a host chat-lane turn
+    // runs the real chat profile instead of a coding agent with every tool
+    // denied. Agent-lane turns keep the session's negotiated mode.
+    const agent =
+      odysseus?.mode === "chat"
+        ? "chat"
+        : (session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))))
 
     const parts: Array<
       | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }

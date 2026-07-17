@@ -264,7 +264,12 @@ const live: Layer.Layer<
       // are the writers themselves. Shares the exact `servesCheckpoint` judgement
       // with SessionPrune.fireCheckpoints so the "who owns a checkpoint" and "who is
       // taught about it" sets can never drift apart.
-      const servesCheckpoint = yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID)
+      // The chat profile is a no-tools conversation lane (identity ruling
+      // R2): it can't Edit MEMORY.md, so teaching it the file-memory manual
+      // would assert capabilities the turn doesn't have.
+      const servesCheckpoint =
+        input.agent.name !== "chat" &&
+        (yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID))
       if (servesCheckpoint) {
         const projectID =
           (yield* Effect.try({
