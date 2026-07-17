@@ -116,8 +116,13 @@ class MemoryProvider(ABC):
         category: str = "fact",
         source: str = "user",
         metadata: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
     ) -> MemoryRecord:
-        """Store a memory and return the stored record."""
+        """Store a memory and return the stored record.
+
+        workspace_id overrides the provider's default scope (U3: open
+        questions may be workspace-bound or global); providers without
+        workspace scoping ignore it."""
 
     @abstractmethod
     async def recall(
@@ -176,6 +181,20 @@ class MemoryProvider(ABC):
     async def pin(self, memory_id: str, pinned: bool, *, owner: Optional[str] = None) -> bool:
         """Set pinned state when the provider supports it."""
         raise NotImplementedError(f"Provider {self.provider_id} does not support pinning")
+
+    async def resolve_question(
+        self,
+        memory_id: str,
+        *,
+        resolved_by: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> bool:
+        """Close one open question (kind=unknown): archive with
+        {resolved_by, resolved_at} provenance. Only unknown-kind records
+        resolve — never a plain delete."""
+        raise NotImplementedError(
+            f"Provider {self.provider_id} does not support question resolution"
+        )
 
     async def resolve_id(self, display_id: str, *, owner: Optional[str] = None) -> str:
         direct = await self.get(display_id, owner=owner)
@@ -284,6 +303,7 @@ class NativeMemoryProvider(MemoryProvider):
         category: str = "fact",
         source: str = "user",
         metadata: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
     ) -> MemoryRecord:
         entry = self.memory_manager.add_entry(
             text,

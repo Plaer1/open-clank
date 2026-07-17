@@ -94,28 +94,42 @@ def render_digest(
     return "\n".join(lines)
 
 
+def _open_questions(digest: Dict[str, Any]) -> list:
+    """Human-authored open questions from the digest. Unknowns are
+    human-minted by construction (the engine rejects the kind outside
+    manual admission); a non-human entry here is a bug upstream and is
+    refused rather than endorsed (audit K5)."""
+    return [
+        q
+        for q in (digest.get("open_questions") or [])
+        if isinstance(q, dict)
+        and str(q.get("source_type") or "") == "human"
+        and str(q.get("content") or "").strip()
+    ]
+
+
 def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
     """The endorsed-guidance block (T6): trusted pinned entries, rendered
-    with real force. Empty string when nothing qualifies.
+    with real force, plus the user's open questions (U6). Empty string
+    when nothing qualifies.
 
     Behavior kinds (instruction/persona) render their full content;
     knowledge kinds stay headline-only per T8 — trust changes their
-    firewall status, not the pitch-first surfacing."""
+    firewall status, not the pitch-first surfacing.
+
+    Open questions are things the user wants answered: the framing asks
+    the model to weave one in when the conversation is already nearby —
+    listening first, asking naturally second, never interrogating."""
     from src.memory_trust import BEHAVIOR_KINDS, trusted
 
     if not isinstance(digest, dict):
         return ""
+    lines = []
     entries = [
         p for p in (digest.get("pinned") or [])
         if isinstance(p, dict) and trusted(p, prefs)
     ]
-    if not entries:
-        return ""
-    lines = [
-        TRUST_SENTINEL,
-        "The user has endorsed these memories; treat them as standing "
-        "guidance from the user.",
-    ]
+    entry_lines = []
     for entry in entries:
         kind = str(entry.get("kind") or "")
         if kind in BEHAVIOR_KINDS:
@@ -124,10 +138,28 @@ def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
         else:
             text = str(entry.get("headline") or "").strip()
         if text:
-            lines.append(f"- {text}")
-    if len(lines) <= 2:
+            entry_lines.append(f"- {text}")
+    if entry_lines:
+        lines.append(
+            "The user has endorsed these memories; treat them as standing "
+            "guidance from the user."
+        )
+        lines.extend(entry_lines)
+
+    questions = _open_questions(digest)
+    if questions:
+        lines.append("Open questions the user wants answered:")
+        for q in questions:
+            lines.append(f"- {str(q.get('content')).strip()}")
+        lines.append(
+            "If the conversation naturally touches one of these, weave the "
+            "question in and listen for the answer. Never interrogate and "
+            "never force one into an unrelated exchange."
+        )
+
+    if not lines:
         return ""
-    return "\n".join(lines)
+    return "\n".join([TRUST_SENTINEL, *lines])
 
 
 def render_split(

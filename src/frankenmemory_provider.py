@@ -250,12 +250,13 @@ class FrankenmemoryProvider(MemoryProvider):
         category: str = "fact",
         source: str = "user",
         metadata: Optional[Dict[str, Any]] = None,
+        workspace_id: Optional[str] = None,
     ) -> MemoryRecord:
         scope = self._scope(owner, session_id)
         args: Dict[str, Any] = {
             "content": text,
             "capture_mode": "manual",
-            "workspace_id": scope.workspace_id,
+            "workspace_id": workspace_id or scope.workspace_id,
             "workspace_path": scope.workspace_path,
             "owner": scope.owner,
             "source": source,
@@ -497,6 +498,24 @@ class FrankenmemoryProvider(MemoryProvider):
             "workspace_id": scope.workspace_id,
         })
         return bool(result.get("updated"))
+
+    async def resolve_question(
+        self,
+        memory_id: str,
+        *,
+        resolved_by: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> bool:
+        scope = self._scope(owner)
+        args: Dict[str, Any] = {
+            "id": memory_id,
+            "owner": scope.owner,
+            "workspace_id": scope.workspace_id,
+        }
+        if resolved_by:
+            args["resolved_by"] = resolved_by
+        result = await self._call_tool("resolve_memory", args)
+        return bool(result.get("resolved"))
 
     async def record_access(
         self,
