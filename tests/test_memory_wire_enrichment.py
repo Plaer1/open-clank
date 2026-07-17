@@ -218,6 +218,10 @@ def test_graph_endpoint_503_when_provider_lacks_graph(monkeypatch):
 
 
 def test_digest_preview_matches_shared_renderer(monkeypatch):
+    import routes.prefs_routes as prefs_routes
+    from src.memory_digest import render_split
+
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user=None: {})
     digest = {
         "counts": {"by_kind": {"fact": 1}, "by_tier": {"curated": 1, "raw": 0}, "candidates_pending": 0},
         "pinned": [{
@@ -235,6 +239,12 @@ def test_digest_preview_matches_shared_renderer(monkeypatch):
     payload = asyncio.run(endpoint(request=None))
     assert payload["digest"] == digest
     assert payload["rendered"] == render_digest(digest), "byte-identical, no drift"
+    # The preview shows the SAME split injection produces (slice 05).
+    trusted_block, untrusted_card = render_split(digest, {})
+    assert payload["trusted_block"] == trusted_block
+    assert payload["untrusted_card"] == untrusted_card
+    assert "metric units" in payload["trusted_block"]
+    assert "metric units" not in payload["untrusted_card"]
 
 
 # ------------------------------------------------------------- live fm
