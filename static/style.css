@@ -564,7 +564,10 @@ body.bg-pattern-sparkles {
     .sidebar-header {
       display: flex;
       align-items: center;
-      justify-content: flex-end; /* right-align when sidebar is on left */
+      /* Left-align next to the fixed hamburger: the brand shows the active
+         persona's name, and long custom names look stranded when pushed to
+         the far right edge. */
+      justify-content: flex-start;
       gap: 8px;
       padding: 15px 10px 0 40px; /* top padding aligns logo with fixed hamburger */
       flex-shrink: 0;
@@ -606,7 +609,9 @@ body.bg-pattern-sparkles {
       user-select: none;
       position: relative;
       top: 0;
-      left: -10px;
+      /* was -10px — a right-edge nudge from the old flex-end layout; with
+         left alignment it would tuck the name under the hamburger */
+      left: 0;
     }
     .sidebar-sep {
       display: none;

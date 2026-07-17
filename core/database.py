@@ -220,6 +220,10 @@ class Session(TimestampMixin, Base):
     total_input_tokens = Column(Integer, default=0)
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
+    # Per-chat persona override (identity ruling: the in-chat persona menu is
+    # chat-specific; the global default persona covers branding + new chats).
+    # JSON: {"character_name", "system_prompt", "temperature", "max_tokens"}.
+    persona = Column(Text, nullable=True)
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
     mimo_session_id = Column(String, nullable=True)  # durable lazy-cache for pre-migration uuid4 rows
     transcript_revision = Column(Integer, nullable=False, default=0)
@@ -1261,6 +1265,29 @@ def _migrate_add_mode_column():
         except Exception:
             pass
 
+def _migrate_add_session_persona_column():
+    """Add persona column to sessions table if it doesn't exist."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "persona" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN persona TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'persona' column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration check for session persona failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def _migrate_add_folder_column():
     """Add folder column to sessions table if it doesn't exist."""
     import sqlite3
@@ -2118,6 +2145,7 @@ def init_db():
     _migrate_add_task_automation_columns()
     _migrate_add_disabled_tools()
     _migrate_add_mcp_oauth_tokens_column()
+    _migrate_add_session_persona_column()
     _migrate_add_task_v2_columns()
     _migrate_add_notifications_enabled()
     _migrate_drop_ping_notes_tasks()

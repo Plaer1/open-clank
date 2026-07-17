@@ -366,6 +366,45 @@ def extract_preset(chat_handler, preset_id, owner: str = "") -> PresetInfo:
     )
 
 
+def session_persona_override(session_id: str, preset: PresetInfo) -> PresetInfo:
+    """Apply the chat's own persona, if one is attached to the session.
+
+    Identity ruling (e, 2026-07-16): the in-chat persona menu is
+    CHAT-SPECIFIC — a persona enabled there rides the session row and wins
+    for that chat only; the global default persona covers branding and new
+    chats. Fail-open: any error keeps the incoming preset.
+    """
+    try:
+        import json as _json
+
+        from core.database import Session as _DbSession, SessionLocal as _SL
+
+        db = _SL()
+        try:
+            row = db.query(_DbSession.persona).filter(_DbSession.id == session_id).first()
+        finally:
+            db.close()
+        if not row or not row.persona:
+            return preset
+        record = _json.loads(row.persona)
+        if not isinstance(record, dict):
+            return preset
+        name = str(record.get("character_name") or "").strip()
+        prompt = str(record.get("system_prompt") or "").strip()
+        if not name and not prompt:
+            return preset
+        if name:
+            prompt = f"Your name is {name}. {prompt}".strip() if prompt else f"Your name is {name}."
+        return PresetInfo(
+            temperature=float(record.get("temperature", preset.temperature)),
+            max_tokens=int(record.get("max_tokens", preset.max_tokens)),
+            system_prompt=prompt or preset.system_prompt,
+            character_name=name or preset.character_name,
+        )
+    except Exception:
+        return preset
+
+
 async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
@@ -677,12 +716,14 @@ async def build_chat_context(
     message preprocessing, memory/RAG/web injection, compaction, normalization.
     """
     # Preset — owner-resolved so the default persona (R10) is the
-    # requester's own, not another user's edit.
+    # requester's own, not another user's edit. A persona attached to THIS
+    # chat then overrides both (chat-specific persona ruling).
     preset = extract_preset(
         chat_handler,
         preset_id,
         owner=effective_user(request) or getattr(sess, "owner", "") or "",
     )
+    preset = session_persona_override(session_id, preset)
 
     # Preprocess message (CoT, YouTube, VL images, build content). The
     # auto_opened_docs collector captures any docs created server-side

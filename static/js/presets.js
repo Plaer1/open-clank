@@ -92,11 +92,50 @@ async function loadDefaultPersona() {
 function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Odysseus'; }
 function _defaultPersonaPrompt() { return (defaultPersona && defaultPersona.system_prompt) || ''; }
 
+// Branding follows the GLOBAL default persona only (e's ruling: the
+// in-chat persona menu is chat-specific; the global one owns branding and
+// new chats). A per-chat persona shows on the chat's own indicator and
+// message labels, never on the app brand.
 function _activeAgentName() {
-  if (presets.custom && presets.custom.enabled && presets.custom.character_name) {
-    return presets.custom.character_name;
-  }
   return _defaultPersonaName();
+}
+
+// The current chat's persona (chat-specific), synced from the session row.
+let sessionPersona = null;
+
+async function _putSessionPersona(record) {
+  const sessions = await import('./sessions.js');
+  const sid = sessions.getCurrentSessionId ? sessions.getCurrentSessionId() : sessions.default.getCurrentSessionId();
+  if (!sid) throw new Error('no active session');
+  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/persona`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+  const out = await res.json();
+  if (!out || !out.success) throw new Error('persona save failed');
+  sessionPersona = out.persona;
+  return out.persona;
+}
+
+async function _deleteSessionPersona() {
+  const sessions = await import('./sessions.js');
+  const sid = sessions.getCurrentSessionId ? sessions.getCurrentSessionId() : sessions.default.getCurrentSessionId();
+  if (!sid) return;
+  try {
+    await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}/persona`, { method: 'DELETE' });
+  } catch (e) { /* best effort */ }
+  sessionPersona = null;
+}
+
+/** Pull THIS chat's persona from the session list (server-side record). */
+function _syncSessionPersona(sessionId) {
+  import('./sessions.js').then((sessions) => {
+    const list = sessions.getSessions ? sessions.getSessions() : sessions.default.getSessions();
+    const row = (list || []).find(s => s.id === sessionId);
+    sessionPersona = (row && row.persona) || null;
+    _syncCharIndicator();
+  }).catch(() => {});
 }
 
 /**
@@ -653,6 +692,17 @@ export function openCustomPresetModal() {
   const tokensInput = document.getElementById('custom-max-tokens');
   const promptInput = document.getElementById('custom-system-prompt');
 
+  // The modal shows THIS chat's persona when one is active (chat-specific
+  // ruling); otherwise the editable default persona (R10).
+  if (sessionPersona && sessionPersona.character_name) {
+    savedConfig = {
+      ...savedConfig,
+      character_name: sessionPersona.character_name,
+      system_prompt: sessionPersona.system_prompt || '',
+      temperature: sessionPersona.temperature ?? savedConfig.temperature,
+      max_tokens: sessionPersona.max_tokens ?? savedConfig.max_tokens,
+    };
+  }
   if (nameInput) nameInput.value = savedConfig.character_name || '';
   // Sync select dropdown to current character
   const charSelect = document.getElementById('char-template-select');
@@ -666,7 +716,7 @@ export function openCustomPresetModal() {
       charSelect.value = '__default__';
       // Ruling R10: the Default entry shows the real default persona,
       // editable — never a blank form.
-      if (!savedConfig.character_name && !savedConfig.system_prompt) {
+      if (!savedConfig.system_prompt) {
         if (nameInput) nameInput.value = _defaultPersonaName();
         savedConfig = { ...savedConfig, system_prompt: _defaultPersonaPrompt() };
       }
@@ -900,6 +950,56 @@ export async function saveCustomPreset(showToast, showError) {
   const max_tokens = rawTokens > 8192 ? 0 : rawTokens;
   const system_prompt = _isInjectStart ? '' : promptInput.value;
 
+  // Character start = CHAT-SPECIFIC persona (e's ruling): it rides the
+  // current session only; the global default persona keeps branding and
+  // new chats. Inject starts keep the legacy global tuning slot below.
+  if (!_isInjectStart && (name || system_prompt)) {
+    try {
+      await _putSessionPersona({
+        character_name: name,
+        system_prompt: system_prompt,
+        temperature: Math.max(0, Math.min(2, temperature)),
+        max_tokens: max_tokens,
+      });
+      if (window._syncResearchIndicator) window._syncResearchIndicator(false);
+      setTimeout(() => { _syncCharIndicator(); }, 0);
+      if (showToast) showToast(`Persona "${name || 'custom'}" active for this chat`);
+      // Library upkeep below (auto-save as template) still applies.
+      const _selValT = document.getElementById('char-template-select')?.value || '';
+      const isBuiltinPresetT = PROMPT_TEMPLATES.some(t => t.isPreset && (t.name === name || t.name === _selValT));
+      const saveNameT = isBuiltinPresetT ? null : (name || null);
+      if (saveNameT) {
+        const _existing = userTemplates.find(t => t.name === saveNameT);
+        const _entry = {
+          id: (_existing && _existing.id) || 'user-' + Math.random().toString(16).slice(2, 10),
+          name: saveNameT,
+          system_prompt: system_prompt ?? '',
+          temperature: Math.max(0, Math.min(2, temperature)),
+          max_tokens: max_tokens,
+        };
+        // Rollback snapshot BEFORE mutating the in-memory template.
+        let clone = null;
+        if (_existing) {
+          clone = JSON.parse(JSON.stringify(_existing));
+          Object.assign(_existing, _entry);
+        } else {
+          userTemplates.push(_entry);
+        }
+        fetch(`${API_BASE}/api/presets/templates`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(_entry),
+        }).then(() => _populateCharSelect()).catch(() => {
+          if (_existing && clone) Object.assign(_existing, clone);
+          else userTemplates = userTemplates.filter(t => t.id !== _entry.id);
+        });
+      }
+    } catch (e) {
+      console.error('Session persona save failed:', e);
+      if (showError) showError('Failed to set persona for this chat');
+    }
+    return;
+  }
+
   const enabled = true; // always enabled when saving — deactivation happens via X/Reset
 
   const _prefixInput = document.getElementById('inject-prefix');
@@ -928,17 +1028,15 @@ export async function saveCustomPreset(showToast, showError) {
 
       // The custom preset must be the SELECTED preset for its values to reach
       // the model — chat.js only sends `preset_id` when getSelectedPreset() is
-      // truthy. Activate it when there's a persona (name/prompt) OR when the
-      // user has dialed in non-default tuning (temperature / max tokens) — the
-      // "Inject" tab's plain-chat case. Without the tuning check, "just set
-      // temp + max tokens" would silently do nothing.
+      // truthy. Activate it when the user has dialed in non-default tuning
+      // (temperature / max tokens) or inject prefix/suffix — the "Inject"
+      // tab's plain-chat case. (Personas are session-scoped above and no
+      // longer ride this global slot.)
       const _hasTuning = (config.temperature !== 1.0) || (config.max_tokens !== 0);
       const _hasInject = !!(config.inject_prefix || config.inject_suffix);
-      const _hasContent = !!(system_prompt || name || _hasTuning || _hasInject);
+      const _hasContent = !!(_hasTuning || _hasInject);
       if (enabled && _hasContent) {
         selectedPreset = 'custom';
-        // Turn off research — doesn't make sense with a character
-        if (window._syncResearchIndicator) window._syncResearchIndicator(false);
       } else {
         selectedPreset = null;
       }
@@ -1082,6 +1180,10 @@ export function getInject() {
 export function deactivateCharacter() {
   selectedPreset = null;
   if (presets.custom) presets.custom.enabled = false;
+  // Chat-specific persona: turning the character off clears it from THIS
+  // session; the default persona speaks again.
+  if (sessionPersona) _deleteSessionPersona().then(() => _syncCharIndicator()).catch(() => {});
+  sessionPersona = null;
   const charInd = document.getElementById('character-indicator-btn');
   if (charInd) { charInd.style.display = 'none'; charInd.classList.remove('active'); }
   const miniBtn = document.getElementById('overflow-preset-btn');
@@ -1131,7 +1233,9 @@ function _syncCharIndicator() {
   if (!btn) return;
   const custom = presets.custom;
   const enabled = custom?.enabled !== false;
-  const hasChar = enabled && !!custom?.character_name;
+  // Personas are chat-specific: the indicator reflects THIS session's
+  // persona, not the legacy global slot.
+  const hasChar = !!(sessionPersona && sessionPersona.character_name);
   // "Inject mode": custom preset is active for plain tuning / inject only —
   // no persona. Detected from the custom config so it survives a reload.
   const _t = parseFloat(custom?.temperature);
@@ -1146,8 +1250,8 @@ function _syncCharIndicator() {
     btn.classList.add('active');
     if (hasChar) {
       if (iconEl) iconEl.innerHTML = _AVATAR;
-      if (nameSpan) nameSpan.textContent = custom.character_name;
-      btn.title = `Persona: ${custom.character_name} — click to configure`;
+      if (nameSpan) nameSpan.textContent = sessionPersona.character_name;
+      btn.title = `Persona (this chat): ${sessionPersona.character_name} — click to configure`;
     } else {
       // Inject/tuning chat — syringe tag labeled "Prompt" to match the
       // window identity, no persona name.
@@ -1196,6 +1300,11 @@ function _syncCharIndicator() {
 let _prevSessionId = null;
 
 export function onSessionSwitch(sessionId) {
+  // Server-side chat persona (the canonical per-chat mechanism): sync the
+  // indicator/modal to THIS session's persona record.
+  sessionPersona = null;
+  _syncSessionPersona(sessionId);
+
   const charSessions = loadStoredObject('odysseus-char-sessions');
 
   // Leaving a persistent chat — deactivate for this switch only
