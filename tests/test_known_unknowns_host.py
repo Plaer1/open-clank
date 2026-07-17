@@ -99,6 +99,22 @@ def test_split_keeps_questions_out_of_the_untrusted_card():
     assert card.startswith(DIGEST_SENTINEL)
 
 
+def test_digest_fetch_timeout_is_shared_and_not_hair_trigger():
+    """The old 250ms digest budget dropped the whole endorsed block
+    (guidance + open questions) SILENTLY whenever fm stalled past it —
+    observed live as 'the open question sometimes just isn't there'.
+    Both hosts must share one constant, and it must not be hair-trigger."""
+    import pathlib
+
+    from src.memory_digest import DIGEST_FETCH_TIMEOUT_SECONDS
+
+    assert DIGEST_FETCH_TIMEOUT_SECONDS >= 1.0
+    for path in ("src/chat_processor.py", "src/openclank/acp_bridge.py"):
+        source = pathlib.Path(path).read_text()
+        assert "DIGEST_FETCH_TIMEOUT_SECONDS" in source, path
+        assert "timeout=0.25" not in source, path
+
+
 # ------------------------------------------------------- manage_memory
 
 

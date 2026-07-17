@@ -783,11 +783,14 @@ class ACPBridge:
             if DIGEST_SENTINEL in _content_text(message.get("content")):
                 return messages, existing_trusted
         try:
+            from src.memory_digest import DIGEST_FETCH_TIMEOUT_SECONDS
+
             digest = await asyncio.wait_for(
-                self._memory_provider.digest(owner=owner or self._owner), timeout=0.25
+                self._memory_provider.digest(owner=owner or self._owner),
+                timeout=DIGEST_FETCH_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            logger.debug("bridge memory digest unavailable: %s", exc)
+            logger.warning("bridge memory digest unavailable, block dropped this turn: %s", exc)
             return messages, existing_trusted
         trusted_block, card = _split_memory_digest(digest, owner or self._owner)
         if existing_trusted:
