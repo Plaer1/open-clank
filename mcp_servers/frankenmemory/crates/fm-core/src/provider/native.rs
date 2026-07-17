@@ -1353,6 +1353,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_admitted_identity_claim_passively_resolves_open_question() {
+        // e's live flow 2026-07-17: "users name??" added in Brain, then the
+        // user answered in first person mid-chat. The admission hook must
+        // close the question — no one ever asked.
+        let (p, store) = provider();
+        let mut ask = turn_with_mode("users name??", "", "manual", "evt-q");
+        ask.category = Some("unknown".into());
+        p.capture(&ask).await;
+        assert_eq!(
+            store.list_open_unknowns("alice", None).unwrap().len(),
+            1
+        );
+
+        let answer = turn_with_mode(
+            "my name is eliott; but when we're chatting like this you can probably just call me \"e\"",
+            "",
+            "candidate",
+            "evt-answer",
+        );
+        let result = p.capture(&answer).await;
+        assert_eq!(
+            result.unknowns_resolved.len(),
+            1,
+            "capture reports the passive resolve"
+        );
+        assert!(store.list_open_unknowns("alice", None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn safe_user_claim_auto_admits_and_identity_is_pinned() {
         let (p, store) = provider();
         let result = p
