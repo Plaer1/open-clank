@@ -146,7 +146,9 @@ def _turn_envelope(
         "disabled_tools": sorted(str(name) for name in (disabled_tools or ())),
         "forced_tools": sorted(str(name) for name in (forced_tools or ())),
         "max_tool_calls": max(0, int(max_tool_calls or 0)),
-        "max_rounds": max(0, int(max_rounds or 0)),
+        # max_rounds is NOT mirrored into the envelope: the native loop
+        # consumes it directly and no ACP consumer exists (identity Slice 04
+        # rule — envelope fields are consumed or absent, never decorative).
         "system_prompt": getattr(preset, "system_prompt", "") if preset else "",
         "persona": getattr(preset, "character_name", "") if preset else "",
         "active_resources": {
