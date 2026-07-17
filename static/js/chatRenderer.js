@@ -2661,15 +2661,28 @@ export function addMessage(role, content, modelName, metadata) {
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
     var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? (window.__agentName || 'Odysseus') : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _agentLabelKind = (role !== 'user' && (isSlash || isCompacted)) ? 'default' : '';
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }
     if (metadata?.group_model && role !== 'user') {
       _roleText = metadata.group_model;
+      _agentLabelKind = '';
     } else if (metadata?.character_name && role !== 'user' && !isSlash && !isCompacted) {
-      _roleText = metadata.character_name;
+      // Identity presentation is LIVE (ruling R17): a chat with its own
+      // persona shows that persona; everything else shows the CURRENT
+      // default persona name — renaming the default rebrands old messages.
+      var _sessName = window.__sessionPersonaName || '';
+      if (_sessName) {
+        _roleText = _sessName;
+        _agentLabelKind = 'session';
+      } else {
+        _roleText = window.__agentName || metadata.character_name;
+        _agentLabelKind = 'default';
+      }
     }
     r.textContent = _roleText;
+    if (_agentLabelKind) r.dataset.agentName = _agentLabelKind;
     if (role !== 'user') {
       if (!isSlash && !isCompacted && replyModels.requestedModel && resolvedModel && !sameModelName(replyModels.requestedModel, resolvedModel)) {
         r.title = replyModels.requestedModel + ' -> ' + resolvedModel;
