@@ -38,6 +38,12 @@ the persona's context-message copy so it never ALSO arrives demoted to
 annotated prompt text (`acp_bridge._build_prompt_parts`,
 `authoritative_system`).
 
+The endorsed memory guidance block (memory-trust metaplan T6) rides the
+same seam: the bridge appends it to `envelope.system_prompt` below the
+persona text and skips its in-message copy by `TRUST_SENTINEL` — trusted
+memories carry system-tier force on both hosts without touching the
+persona itself (see docs/memory-architecture.md, "Trust tiers").
+
 The runtime never self-identifies: every mimo prompt asset and the
 SystemPrompt environment header are identity-neutral (ruling R14; frozen
 by `test/session/prompt-identity-neutral.test.ts`).
