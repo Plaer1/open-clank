@@ -11943,6 +11943,13 @@ textarea.memory-add-input {
   background: color-mix(in srgb, var(--red) 15%, transparent);
   color: var(--red);
 }
+/* Open questions (known-unknowns): the category value is "unknown" but
+   the badge reads "open question" — give it a distinct interrogative
+   tint so it never scans as a plain fact. */
+.memory-cat-unknown {
+  background: color-mix(in srgb, #c678dd 15%, transparent);
+  color: #c678dd;
+}
 
 /* Signal chips (memory-trust metaplan T2/T5): trust state, kind,
    provenance, workspace, exemptions, bucketed scores. Raw values ride

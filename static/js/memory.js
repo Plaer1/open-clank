@@ -39,7 +39,12 @@ function _renderMemoryProviderStatus() {
 }
 
 
-const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task'];
+const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task', 'unknown'];
+
+// Display names where the raw category value would read wrong in UI.
+// 'unknown' is the open-question kind, not "kind unknown".
+const CATEGORY_LABELS = { unknown: 'open question' };
+const categoryLabel = (cat) => CATEGORY_LABELS[cat] || cat;
 
 // Sort-option icons for the custom Memory sort picker (and Skills picker
 // once it reuses the same markup). Each value maps to a 13px Feather-style
@@ -122,7 +127,7 @@ function _ensureNewMemoryCategorySelect() {
   MEMORY_CATEGORIES.forEach(cat => {
     const opt = document.createElement('option');
     opt.value = cat;
-    opt.textContent = cat;
+    opt.textContent = categoryLabel(cat);
     if (cat === 'fact') opt.selected = true;
     sel.appendChild(opt);
   });
@@ -191,7 +196,7 @@ function buildCategoryChips() {
     const btn = document.createElement('button');
     btn.className = 'memory-cat-chip' + (cat === activeCategory ? ' active' : '');
     btn.dataset.cat = cat;
-    btn.textContent = cat;
+    btn.textContent = cat === 'all' ? 'all' : categoryLabel(cat);
     btn.addEventListener('click', () => {
       activeCategory = cat;
       container.querySelectorAll('.memory-cat-chip').forEach(b => b.classList.remove('active'));
@@ -1364,7 +1369,7 @@ function _buildMemoryDetails(memory) {
 }
 
 const _SIGNAL_FILTER_DEFS = [
-  ['memory-filter-kind', 'kind', ['all', 'instruction', 'persona', 'fact', 'episodic', 'fabric', 'wiki', 'raw']],
+  ['memory-filter-kind', 'kind', ['all', 'instruction', 'persona', 'fact', 'episodic', 'fabric', 'wiki', 'raw', 'unknown']],
   ['memory-filter-provenance', 'provenance', ['all', 'human', 'ai', 'auto_extracted', 'procedural']],
   ['memory-filter-trust', 'trust', ['all', 'trusted', 'reference']],
 ];
@@ -1380,7 +1385,9 @@ function _syncSignalFilterVisibility() {
       for (const option of options) {
         const el = document.createElement('option');
         el.value = option;
-        el.textContent = option === 'all' ? `${key}: all` : option.replace('_extracted', '');
+        el.textContent = option === 'all'
+          ? `${key}: all`
+          : (key === 'kind' && option === 'unknown' ? 'open question' : option.replace('_extracted', ''));
         select.appendChild(el);
       }
       select.addEventListener('change', () => {
@@ -1498,7 +1505,7 @@ export function renderMemoryList() {
     const catBadge = document.createElement('span');
     const cat = memory.category || 'fact';
     catBadge.className = 'memory-cat-badge memory-cat-' + cat;
-    catBadge.textContent = cat;
+    catBadge.textContent = categoryLabel(cat);
     meta.appendChild(catBadge);
 
     if (memory.source_type) {
@@ -1595,6 +1602,20 @@ export function renderMemoryList() {
         item.appendChild(_buildMemoryDetails(memory));
       });
 
+      // Resolve (U7a): open questions close with provenance, never a
+      // plain delete. Only offered on kind=unknown records.
+      let resolveItem = null;
+      if ((memory.kind === 'unknown' || memory.category === 'unknown') && !memory.archived) {
+        resolveItem = document.createElement('div');
+        resolveItem.className = 'dropdown-item-compact';
+        resolveItem.textContent = '✓ Resolve';
+        resolveItem.title = 'Mark this question answered — archives it with provenance';
+        resolveItem.addEventListener('click', () => {
+          dropdown.style.display = 'none';
+          resolveQuestion(memory.id);
+        });
+      }
+
       const deleteItem = document.createElement('div');
       deleteItem.className = 'dropdown-item-compact memory-dropdown-delete';
       deleteItem.textContent = '✕ Delete';
@@ -1626,6 +1647,7 @@ export function renderMemoryList() {
       dropdown.appendChild(selectItem);
       dropdown.appendChild(editItem);
       dropdown.appendChild(detailsItem);
+      if (resolveItem) dropdown.appendChild(resolveItem);
       dropdown.appendChild(deleteItem);
       dropdown.appendChild(cancelItem);
 
@@ -1759,7 +1781,7 @@ function startInlineEdit(item, memory) {
   MEMORY_CATEGORIES.forEach(cat => {
     const opt = document.createElement('option');
     opt.value = cat;
-    opt.textContent = cat;
+    opt.textContent = categoryLabel(cat);
     if (cat === (memory.category || 'fact')) opt.selected = true;
     catSelect.appendChild(opt);
   });
@@ -1902,6 +1924,25 @@ export async function editMemory(id) {
   if (!newText || newText === memory.text) return;
 
   await saveInlineEdit(id, newText);
+}
+
+async function resolveQuestion(id) {
+  try {
+    const res = await fetch(`${window.location.origin}/api/memory/${id}/resolve`, {
+      method: 'POST',
+      body: new URLSearchParams({}),
+    });
+    if (res.ok) {
+      await loadMemories();
+      showToast('Question resolved — archived with provenance');
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showError(err.detail || 'Failed to resolve question');
+    }
+  } catch (e) {
+    console.error('Failed to resolve question:', e);
+    showError('Failed to resolve question');
+  }
 }
 
 async function togglePin(id, pinned) {

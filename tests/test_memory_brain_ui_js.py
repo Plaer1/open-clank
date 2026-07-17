@@ -36,7 +36,7 @@ def _matrix():
     for source_type, pinned, kind, master, kind_on in itertools.product(
         ["human", "ai", "auto_extracted", "procedural"],
         [False, True],
-        ["instruction", "persona", "fact", "wiki", "raw", "mystery"],
+        ["instruction", "persona", "fact", "wiki", "raw", "unknown", "mystery"],
         [False, True],
         [False, True],
     ):
@@ -126,3 +126,27 @@ def test_memory_js_wires_prefs_and_chips():
     assert "memoryChips(" in source
     assert "_buildMemoryDetails" in source
     assert "_passesSignalFilters" in source
+
+
+@needs_node
+def test_unknown_kind_chips_read_as_open_question():
+    js = f"""
+    import {{ memoryChips, isTrusted }} from '{_HELPER.as_posix()}';
+    const question = memoryChips({{ source_type: 'human', kind: 'unknown', category: 'unknown' }}, {{}});
+    const smuggled = isTrusted({{ source_type: 'ai', kind: 'unknown' }},
+                               {{ memory_trust_auto: true, memory_trust_auto_kinds: {{ unknown: true }} }});
+    console.log(JSON.stringify({{ question, smuggled }}));
+    """
+    data = json.loads(_node(js))
+    labels = [c["label"] for c in data["question"]]
+    assert labels[0] == "trusted", "human-authored question is always trusted"
+    assert "open question" in labels, "kind chip reads as a question, not 'unknown'"
+    assert "unknown" not in labels
+    assert data["smuggled"] is False, "non-human unknown can never auto-trust"
+
+
+def test_memory_js_wires_question_lifecycle():
+    source = (_REPO / "static" / "js" / "memory.js").read_text()
+    assert "'unknown'" in source and "open question" in source
+    assert "resolveQuestion" in source
+    assert "/resolve" in source
