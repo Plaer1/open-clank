@@ -87,6 +87,23 @@ def test_update_without_prior_call_synthesizes_a_start(bridge):
     assert again == []
 
 
+def test_acp_stdout_limit_sized_for_tool_traffic():
+    """A single ACP tool result embeds whole file contents; asyncio's default
+    64 KiB readline limit raised LimitOverrunError mid-turn and took the whole
+    mimo worker down (live failure 2026-07-18: "Separator is found, but chunk
+    is longer than limit" → Error 500). The spawn must size the stdout buffer
+    for real tool traffic."""
+    import inspect
+
+    from src.openclank import mimo_supervisor as ms
+
+    assert ms.ACP_STDOUT_LIMIT >= 8 * 1024 * 1024
+    source = inspect.getsource(ms)
+    assert '"limit": ACP_STDOUT_LIMIT' in source, (
+        "create_subprocess_exec spawn options must carry the enlarged limit"
+    )
+
+
 def test_chat_js_pairs_tool_cards_by_id():
     chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
     # tool_start registers the card under its id.
