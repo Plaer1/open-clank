@@ -1,10 +1,20 @@
-"""CalDAV sync must not hijack another user's event via a shared VEVENT uid.
+"""CalDAV sync: a VEVENT uid held by another local calendar is skipped.
 
-CalendarEvent.uid is the global primary key. _sync_blocking looked up the
-existing event by uid with NO calendar scope, so when user B synced a uid
-that user A's calendar already held, the query returned A's row and the sync
-reassigned its calendar_id to B's calendar — stealing A's event. The lookup
-must be scoped to the calendar being synced.
+CalendarEvent.uid is the global primary key, but CalDAV only guarantees a uid
+is unique per collection. Two failure modes bracket the design:
+
+- The original unscoped lookup returned whatever row held the uid — including
+  another owner's — and the sync reassigned its calendar_id, stealing the
+  event across calendars/owners.
+- Scoping the lookup to the synced calendar (the first fix) stopped the theft
+  but made the sync INSERT a duplicate uid whenever the same event legitimately
+  exists elsewhere locally — e.g. a Copal event mirrored to Google coming back
+  on the pull. The uid PK rejected the batch and rolled back EVERY event of
+  that calendar, every sync (live failure 2026-07-17).
+
+Now _find_existing_event returns _UID_ELSEWHERE for a uid living under any
+other calendar and the sync skips that VEVENT: no theft, no crash, the local
+row stays authoritative.
 """
 import tempfile
 import uuid
@@ -17,7 +27,7 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import CalendarEvent, CalendarCal
-from src.caldav_sync import _find_existing_event
+from src.caldav_sync import _UID_ELSEWHERE, _find_existing_event
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(f"sqlite:///{_TMPDB.name}", connect_args={"check_same_thread": False}, poolclass=NullPool)
@@ -41,15 +51,19 @@ def _setup():
         db.close()
 
 
-def test_lookup_for_other_calendar_does_not_find_a_users_event():
+def test_uid_in_another_calendar_returns_skip_sentinel():
     _setup()
     db = _TS()
     try:
-        # Bob's calendar syncing the same uid must NOT resolve Alice's row.
-        assert _find_existing_event(db, {}, "shared@svc", "calB") is None
+        # Bob's calendar syncing the same uid must neither resolve Alice's row
+        # (theft) nor None (insert → uid PK violation → whole batch rolled
+        # back). The sentinel tells the sync to skip the VEVENT.
+        assert _find_existing_event(db, {}, "shared@svc", "calB") is _UID_ELSEWHERE
         # Same calendar still resolves its own event (normal update path).
         own = _find_existing_event(db, {}, "shared@svc", "calA")
         assert own is not None and own.calendar_id == "calA"
+        # Unknown uid is a genuinely new event.
+        assert _find_existing_event(db, {}, "new@svc", "calB") is None
     finally:
         db.close()
 
@@ -58,8 +72,7 @@ def test_alice_event_is_not_moved():
     _setup()
     db = _TS()
     try:
-        # Simulate the (fixed) sync deciding there is no existing row for calB.
-        assert _find_existing_event(db, {}, "shared@svc", "calB") is None
+        assert _find_existing_event(db, {}, "shared@svc", "calB") is _UID_ELSEWHERE
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == "shared@svc").first()
         assert ev.calendar_id == "calA"  # unchanged — not hijacked
     finally:
