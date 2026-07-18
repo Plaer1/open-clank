@@ -185,24 +185,16 @@ class TestLaneRegistration:
             assert "never pretend" in lowered
             assert "lacks the capability" in lowered
 
-    def test_agent_prompt_names_the_rest_of_the_tool_base(self):
-        """Tool-RAG shows a per-request subset; the prompt must say the
-        rest exists (so 'what tools do you have?' isn't answered from
-        the subset) while deliberately-disabled tools stay invisible."""
-        from src.agent_loop import TOOL_SECTIONS, _assemble_prompt, _unexposed_tools_note
+    def test_agent_prompt_carries_no_unloaded_tool_note(self):
+        """REVERTED by e's order (2026-07-17): the 'rest of the tool
+        base' note taught models to announce work and END TURN waiting
+        for an unloaded tool to appear ('Let me dig in!' → nothing).
+        Agent-lane tool awareness is mimo's job — native schemas — not
+        a prompt hack on the homegrown loop."""
+        from src.agent_loop import _assemble_prompt
 
         prompt = _assemble_prompt({"bash", "read_file"}, {"send_email"})
-        assert "Rest of the tool base" in prompt
-        assert "`manage_memory`" in prompt
-        assert "send_email" not in prompt.split("Rest of the tool base")[1].split("\n")[1], (
-            "disabled tools must not leak into the note"
-        )
-
-        # Full set → no note; chat lane (everything else disabled) → no note.
-        assert _unexposed_tools_note(set(TOOL_SECTIONS.keys()), set()) == ""
-        assert _unexposed_tools_note(
-            {"recall_memory"}, set(TOOL_SECTIONS.keys()) - {"recall_memory"}
-        ) == ""
+        assert "Rest of the tool base" not in prompt
 
     def test_digest_tail_names_a_real_tool_per_lane(self):
         from src.memory_digest import render_digest, render_split
