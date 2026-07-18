@@ -60,6 +60,22 @@ by `test/session/prompt-identity-neutral.test.ts`).
   empty map clears, omitted map preserves (no sticky deny-all).
 - Chat→agent intent auto-escalation is upstream-vanilla and kept (R16).
 
+### MiMo drives agent mode (2026-07-17)
+
+Agent-mode turns route to mimo for EVERY model it can serve, not just
+`mimo://acp` targets. The supervisor projects the Odysseus endpoint
+registry into mimo providers at spawn (`ody-<endpoint_id>` namespace,
+`_endpoint_registry_providers`; keys over the credential FD, never env
+or config), and the dispatch rewrite (`mimo_agent_target`,
+model_dispatch.py) sends any http-target agent turn whose model appears
+in mimo's catalog through the ACP lane instead. MiMo's native tool
+engine — full schemas, real function calling — replaces the homegrown
+loop's RAG tool guessing, which survives only as the fallback for
+models mimo cannot serve (e's ruling: "i used mimo because the people
+at xiaomi are smarter than you"). Kill switch: `agent_via_mimo`
+setting. Endpoint CRUD recycles mimo workers so the projection stays
+current; chat lane is untouched.
+
 ## Names in the UX
 
 The enabled persona's name populates the sidebar brand, welcome screen,

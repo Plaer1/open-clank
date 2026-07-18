@@ -492,6 +492,37 @@ def resolve_endpoint(
         db.close()
 
 
+def endpoint_id_for_chat_url(chat_url: str, owner: Optional[str] = None) -> Optional[str]:
+    """Reverse-map a session's chat URL to its ModelEndpoint id.
+
+    Sessions store the fully built chat URL; the registry stores base
+    URLs. Needed by the mimo-drives-agent dispatch to find which
+    projected provider (`ody-<endpoint_id>`) serves a session's model.
+    First enabled match wins; None when the URL isn't registry-backed
+    (direct URLs, mimo://acp, deleted endpoints)."""
+    wanted = (chat_url or "").strip().rstrip("/")
+    if not wanted.startswith(("http://", "https://")):
+        return None
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        for ep in q.all():
+            base = normalize_base(getattr(ep, "base_url", "") or "")
+            if not base:
+                continue
+            if build_chat_url(base).rstrip("/") == wanted or base.rstrip("/") == wanted:
+                return ep.id
+        return None
+    except Exception as exc:
+        logger.debug("endpoint reverse lookup failed for %s: %s", chat_url, exc)
+        return None
+    finally:
+        db.close()
+
+
 def resolve_endpoint_by_id(
     ep_id: str, model: Optional[str] = None, owner: Optional[str] = None
 ) -> Optional[Tuple[str, str, Dict]]:

@@ -25,6 +25,60 @@ def get_mimo_supervisor() -> Any:
     return _mimo_supervisor
 
 
+async def mimo_agent_target(
+    target: ResolvedModelTarget,
+    *,
+    owner: Optional[str] = None,
+    supervisor: Any = None,
+) -> Optional[ResolvedModelTarget]:
+    """Agent-mode ACP rewrite (mimo-drives-agent metaplan, e's ruling
+    2026-07-17): when an http target's model is servable through a
+    projected endpoint provider, return the ACP target so mimo's native
+    tool engine runs the turn. None = not servable → the caller keeps
+    today's homegrown path. The decision is made HERE, before dispatch —
+    no mid-stream fallback."""
+    if target is None or target.transport != "http":
+        return None
+    try:
+        from src.settings import get_setting
+
+        if not bool(get_setting("agent_via_mimo", True)):
+            return None
+    except Exception:
+        pass
+    pool = supervisor or _mimo_supervisor
+    if pool is None:
+        return None
+    try:
+        from src.endpoint_resolver import endpoint_id_for_chat_url
+        from src.openclank.mimo_supervisor import ENDPOINT_PROVIDER_PREFIX
+
+        ep_id = endpoint_id_for_chat_url(target.endpoint_url, owner=owner)
+        if not ep_id:
+            return None
+        mimo_model = f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}/{target.model_id}"
+        worker = await _supervisor(pool, owner=owner)
+        catalog = {
+            item.get("modelId")
+            for item in (worker.available_models() or [])
+            if item.get("modelId")
+        }
+        if mimo_model not in catalog:
+            logger.info(
+                "[agent-route] %s not in mimo catalog (%d models) — homegrown loop",
+                mimo_model,
+                len(catalog),
+            )
+            return None
+        logger.info("[agent-route] agent turn routed to mimo: %s", mimo_model)
+        return resolve_model_target("mimo://acp", mimo_model)
+    except HTTPException:
+        return None
+    except Exception as exc:
+        logger.warning("[agent-route] mimo rewrite failed, homegrown loop: %s", exc)
+        return None
+
+
 async def _supervisor(explicit: Any = None, *, owner: Optional[str] = None) -> Any:
     supervisor = explicit or _mimo_supervisor
     if supervisor and hasattr(supervisor, "for_owner"):
