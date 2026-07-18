@@ -239,6 +239,7 @@ class _TurnState:
         "full_response",
         "metrics",
         "tool_calls_seen",
+        "tool_titles",
         "agent_rounds",
         "stop_reason",
         "turn_start",
@@ -251,6 +252,7 @@ class _TurnState:
         self.full_response = ""
         self.metrics: dict = {}
         self.tool_calls_seen: set = set()
+        self.tool_titles: dict = {}
         self.agent_rounds = 0
         self.stop_reason: Optional[str] = None
         self.turn_start = time.time()
@@ -1110,15 +1112,24 @@ class ACPBridge:
 
         elif update_type == "tool_call":
             tool_call_id = update.get("toolCallId", "")
-            title = update.get("title", "tool")
+            title = update.get("title") or "tool"
             if tool_call_id not in state.tool_calls_seen:
                 state.tool_calls_seen.add(tool_call_id)
+                state.tool_titles[tool_call_id] = title
                 sses.append(f'data: {json.dumps({"type": "tool_start", "tool": title, "id": tool_call_id, "data": _sanitize_event_value(update)})}\n\n')
 
         elif update_type == "tool_call_update":
             tool_call_id = update.get("toolCallId", "")
             status = update.get("status", "")
-            title = update.get("title", "tool")
+            # Updates often omit the title; fall back to the one the
+            # initial tool_call carried so the finished card keeps its name.
+            title = update.get("title") or state.tool_titles.get(tool_call_id) or "tool"
+            if tool_call_id and tool_call_id not in state.tool_calls_seen:
+                # Update arrived without (or before) its tool_call — open a
+                # card anyway so the completion below has something to close.
+                state.tool_calls_seen.add(tool_call_id)
+                state.tool_titles[tool_call_id] = title
+                sses.append(f'data: {json.dumps({"type": "tool_start", "tool": title, "id": tool_call_id, "data": _sanitize_event_value(update)})}\n\n')
             if status not in ("pending", "in_progress", "completed", "failed"):
                 sses.append(f'data: {json.dumps({"type": "protocol_error", "data": {"message": "Unknown ACP tool status", "status": status}})}\n\n')
                 return sses
@@ -1141,7 +1152,12 @@ class ACPBridge:
             if isinstance(raw_output, dict) and not output_text:
                 output_text = str(raw_output.get("output") or raw_output.get("error") or "")
             event_type = "tool_progress" if status in ("pending", "in_progress") else "tool_output"
-            sses.append(f'data: {json.dumps({"type": event_type, "tool": title, "id": tool_call_id, "status": status, "output": output_text, "data": _sanitize_event_value(update)})}\n\n')
+            event: dict = {"type": event_type, "tool": title, "id": tool_call_id, "status": status, "output": output_text, "data": _sanitize_event_value(update)}
+            if event_type == "tool_output":
+                # The UI derives ✓/✗ from exit_code (homegrown-loop shape);
+                # ACP only reports status, so map it.
+                event["exit_code"] = 0 if status == "completed" else 1
+            sses.append(f'data: {json.dumps(event)}\n\n')
 
         elif update_type == "usage_update":
             usage = _sanitize_event_value(update)
