@@ -163,23 +163,37 @@ def _to_utc_naive(dt):
     return datetime(dt.year, dt.month, dt.day), True
 
 
-def _find_existing_event(db, pending, uid_val, calendar_id):
-    """Find the event to update for THIS calendar.
+# _find_existing_event: the uid exists locally under a DIFFERENT calendar —
+# the caller must skip this VEVENT (inserting would violate the uid PK).
+_UID_ELSEWHERE = object()
 
-    CalendarEvent.uid is the global primary key, so an unscoped lookup by uid
-    returns whatever row holds that VEVENT uid — including another owner's.
-    The old code then reassigned that row's calendar_id, moving (stealing)
-    another user's event into the syncing calendar whenever the two share a
-    uid (shared/subscribed/public calendars, or two accounts on one server).
-    Scope the lookup to the calendar being synced; a genuine cross-user uid
-    collision then fails the PK insert inside the per-calendar try/except
-    instead of hijacking the row. (import_ics was already fixed this way.)
+
+def _find_existing_event(db, pending, uid_val, calendar_id):
+    """Find the event to update for THIS calendar, or _UID_ELSEWHERE.
+
+    CalendarEvent.uid is the global primary key, but CalDAV only guarantees a
+    uid is unique per collection — the same uid legitimately lives in another
+    local calendar: a local (Copal/UI) event mirrored to the server coming
+    back on a pull, an event mid-move between server calendars, or another
+    owner's event on a shared server. The original unscoped lookup reassigned
+    that row's calendar_id (stealing it across calendars and owners); scoping
+    the lookup alone made the later INSERT hit the uid PK and roll back the
+    whole calendar's batch — every event, every sync. So: rows in THIS
+    calendar are returned for the normal update path; a uid held by any other
+    calendar returns _UID_ELSEWHERE and the caller skips the VEVENT. The
+    existing local row stays authoritative; an event genuinely moved between
+    server calendars converges once the old calendar's prune drops its row.
     """
     from core.database import CalendarEvent
-    return pending.get(uid_val) or db.query(CalendarEvent).filter(
-        CalendarEvent.uid == uid_val,
-        CalendarEvent.calendar_id == calendar_id,
-    ).first()
+    row = pending.get(uid_val)
+    if row is not None:
+        return row              # pending rows are this calendar's by construction
+    row = db.query(CalendarEvent).filter(CalendarEvent.uid == uid_val).first()
+    if row is None:
+        return None
+    if row.calendar_id != calendar_id:
+        return _UID_ELSEWHERE
+    return row
 
 
 def _google_caldav_events_url(url: str) -> str | None:
@@ -359,6 +373,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                     # duplicate UIDs within the same batch are updated, not re-inserted
                     # (which would violates the UNIQUE constraint on commit).
                     pending: dict = {}
+                    skipped_elsewhere = 0
                     parse_failed = False
                     try:
                         objs = remote_cal.date_search(start=start, end=end, expand=False)
@@ -416,11 +431,17 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                             )
 
                             existing = _find_existing_event(db, pending, uid_val, local_cal.id)
+                            if existing is _UID_ELSEWHERE:
+                                # The uid already lives under another local
+                                # calendar (see _find_existing_event). Leave
+                                # that row alone; inserting here would hit the
+                                # uid PK and roll back the whole batch.
+                                skipped_elsewhere += 1
+                                continue
                             if existing:
                                 if existing.caldav_sync_pending in {"create", "update"}:
                                     result["events"] += 1
                                     continue
-                                existing.calendar_id = local_cal.id
                                 existing.summary = summary
                                 existing.description = description
                                 existing.location = location
@@ -452,6 +473,12 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                                 db.add(new_ev)
                                 pending[uid_val] = new_ev
                             result["events"] += 1
+                    if skipped_elsewhere:
+                        logger.info(
+                            "%s: %d server event(s) share a uid with rows in "
+                            "other local calendars; left in place",
+                            display_name, skipped_elsewhere,
+                        )
                     db.commit()
 
                     # Prune locally-cached CalDAV events that vanished
