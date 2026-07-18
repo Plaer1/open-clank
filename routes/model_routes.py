@@ -1452,6 +1452,23 @@ def setup_model_routes(model_discovery):
         flip)."""
         _models_cache.clear()
 
+    def _schedule_mimo_reprojection(request: Request) -> None:
+        """Endpoint registry mutated: recycle mimo workers so the next turn
+        respawns them with a freshly projected provider config (the config
+        is spawn-time env). CRUD sites only — prefs flips and background
+        model refreshes must not churn live workers."""
+        import asyncio
+
+        supervisor = getattr(getattr(request, "app", None), "state", None)
+        supervisor = getattr(supervisor, "mimo_supervisor", None)
+        refresh = getattr(supervisor, "refresh_endpoint_projection", None)
+        if refresh is None:
+            return
+        try:
+            asyncio.get_running_loop().create_task(refresh())
+        except RuntimeError:
+            logger.debug("no running loop; mimo reprojection deferred to next spawn")
+
     # Track model-list refreshes by URL+key. This prevents repeated picker/API
     # opens from starting duplicate /models probes, and gives slow/offline
     # providers a cooldown after failures.
@@ -2454,6 +2471,7 @@ def setup_model_routes(model_discovery):
             )
             db.add(ep)
             db.commit()
+            _schedule_mimo_reprojection(request)
             # Auto-set as default chat endpoint when none is usable yet — either
             # nothing is configured, or the configured default points at an
             # endpoint that is now missing/disabled (#3586). Seed the first CHAT
@@ -2684,6 +2702,7 @@ def setup_model_routes(model_discovery):
                 ep.pinned_models = json.dumps(pinned) if pinned else None
             db.commit()
             _invalidate_models_cache()
+            _schedule_mimo_reprojection(request)
             hidden_count = len(json.loads(ep.hidden_models)) if ep.hidden_models else 0
             pinned_count = len(json.loads(ep.pinned_models)) if ep.pinned_models else 0
             return {"id": ep_id, "hidden_count": hidden_count, "pinned_count": pinned_count}
@@ -2899,6 +2918,7 @@ def setup_model_routes(model_discovery):
                 ep.is_enabled = not ep.is_enabled
             db.commit()
             _invalidate_models_cache()
+            _schedule_mimo_reprojection(request)
             _local_probe_cache["data"] = None
             return {
                 "id": ep.id,
@@ -3015,6 +3035,7 @@ def setup_model_routes(model_discovery):
             cleared_provider_auth = _delete_orphaned_provider_auth(db, auth_id, exclude_ep_id=ep_id)
             db.commit()
             _invalidate_models_cache()
+            _schedule_mimo_reprojection(request)
             _local_probe_cache["data"] = None
             return {
                 "deleted": True,

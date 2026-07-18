@@ -1674,6 +1674,23 @@ def setup_chat_routes(
                         is_admin=_request_owner_is_admin(request, _user),
                     )
 
+                    # MiMo drives agent mode (e's ruling 2026-07-17): when the
+                    # session's model is servable through a projected endpoint
+                    # provider, rewrite the target to ACP so mimo's native tool
+                    # engine runs the turn. The homegrown loop only serves
+                    # models mimo cannot. When mimo takes the turn it also owns
+                    # retries — drop the http fallback chain.
+                    from src.model_dispatch import mimo_agent_target
+
+                    _acp_target = await mimo_agent_target(
+                        model_target,
+                        owner=_user,
+                        supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                    )
+                    if _acp_target is not None:
+                        model_target = _acp_target
+                        _fallback_candidates = []
+
                     _chunk_source = stream_agent_target(
                         model_target,
                         messages,

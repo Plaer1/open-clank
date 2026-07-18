@@ -2501,6 +2501,51 @@ describe("MIMOCODE_CONFIG_CONTENT token substitution", () => {
       }
     }
   })
+
+  // Contract test for the host's endpoint-registry projection
+  // (open-clank mimo_supervisor._endpoint_registry_providers): the exact
+  // provider entry shape the host injects must parse through the config
+  // schema, or the agent lane silently loses its projected providers.
+  test("accepts the host endpoint-registry provider projection", async () => {
+    const originalEnv = process.env["MIMOCODE_CONFIG_CONTENT"]
+    process.env["MIMOCODE_CONFIG_CONTENT"] = JSON.stringify({
+      provider: {
+        "ody-9ed3f46a": {
+          name: "Z.ai",
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://api.z.ai/api/coding/paas/v4",
+          options: { baseURL: "https://api.z.ai/api/coding/paas/v4" },
+          models: {
+            "glm-5.2": {
+              id: "glm-5.2",
+              name: "glm-5.2",
+              provider: { npm: "@ai-sdk/openai-compatible", api: "https://api.z.ai/api/coding/paas/v4" },
+            },
+          },
+          only_configured_models: true,
+        },
+      },
+    })
+    try {
+      await using tmp = await tmpdir()
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const config = await load()
+          const provider = config.provider?.["ody-9ed3f46a"]
+          expect(provider).toBeDefined()
+          expect(provider?.only_configured_models).toBe(true)
+          expect(Object.keys(provider?.models ?? {})).toContain("glm-5.2")
+        },
+      })
+    } finally {
+      if (originalEnv !== undefined) {
+        process.env["MIMOCODE_CONFIG_CONTENT"] = originalEnv
+      } else {
+        delete process.env["MIMOCODE_CONFIG_CONTENT"]
+      }
+    }
+  })
 })
 
 // parseManagedPlist unit tests — pure function, no OS interaction

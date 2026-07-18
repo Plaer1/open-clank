@@ -167,6 +167,88 @@ def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, 
     return ({"provider": providers} if providers else {}), credentials
 
 
+ENDPOINT_PROVIDER_PREFIX = "ody-"
+
+
+def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]:
+    """Project Odysseus's ModelEndpoint registry into mimo providers.
+
+    Every enabled OpenAI-compatible endpoint becomes a provider named
+    `ody-<endpoint_id>` (collision-proof against xiaomi/deepseek/native
+    mimo providers) with the same model list the Settings UI shows
+    (cached + pinned − hidden; no probing at spawn). Keys ride the
+    credential dict for the pipe FD, NEVER the config content or env.
+
+    This is why mimo can drive the agent lane for operator models
+    (e's ruling 2026-07-17): mimo's native tool engine takes any
+    OpenAI-compatible provider, so the homegrown loop only remains for
+    models that don't project. supports_tools == False rows are
+    skipped — agent mode is function calling.
+    """
+    if os.environ.get("ODYSSEUS_PROJECT_ENDPOINTS", "").strip().lower() in {"0", "false", "no"}:
+        return {}, {}
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        from src.auth_helpers import owner_filter
+        from src.endpoint_resolver import (
+            _endpoint_enabled_models,
+            normalize_base,
+            resolve_endpoint_runtime,
+        )
+    except Exception as exc:  # pragma: no cover - import cycle guard
+        logger.warning("endpoint projection unavailable: %s", exc)
+        return {}, {}
+
+    providers: dict[str, dict] = {}
+    credentials: dict[str, str] = {}
+    db = SessionLocal()
+    try:
+        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+        query = owner_filter(query, ModelEndpoint, owner or "")
+        rows = query.all()
+    except Exception as exc:
+        logger.warning("endpoint projection query failed: %s", exc)
+        return {}, {}
+    finally:
+        db.close()
+
+    for ep in rows:
+        if getattr(ep, "supports_tools", None) is False:
+            continue
+        try:
+            base, api_key = resolve_endpoint_runtime(ep, owner=owner or None)
+        except Exception as exc:
+            logger.warning("endpoint %s credential resolution failed: %s", ep.id, exc)
+            continue
+        base = normalize_base(base or "")
+        if not base.startswith(("http://", "https://")):
+            continue
+        model_ids = _endpoint_enabled_models(ep)
+        if not model_ids:
+            continue
+        provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
+        adapter = "@ai-sdk/openai-compatible"
+        providers[provider_id] = {
+            "name": ep.name or ep.id,
+            "npm": adapter,
+            "api": base,
+            "options": {"baseURL": base},
+            "models": {
+                model_id: {
+                    "id": model_id,
+                    "name": model_id,
+                    "provider": {"npm": adapter, "api": base},
+                }
+                for model_id in model_ids
+            },
+            "only_configured_models": True,
+        }
+        if isinstance(api_key, str) and 0 < len(api_key) <= _MAX_PROVIDER_KEY_LENGTH:
+            credentials[provider_id] = api_key
+
+    return ({"provider": providers} if providers else {}), credentials
+
+
 def _load_stored_auth(owner: str) -> tuple[str | None, float]:
     """(payload_json, updated_at_epoch) for an owner's provider credentials."""
     from core.database import SessionLocal, MimoAuthStore
@@ -339,34 +421,48 @@ class MimoSupervisor:
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
         self._mimocode_home = env["MIMOCODE_HOME"]
         self._reconcile_auth_store()
+        merged_providers: dict[str, dict] = {}
+        merged_credentials: dict[str, str] = {}
         if self._inherit_host_providers:
             provider_config, provider_credentials = _load_openclaw_providers()
             if provider_config:
-                config_content = json.loads(env.get("MIMOCODE_CONFIG_CONTENT", "{}"))
-                config_content.setdefault("provider", {}).update(
-                    provider_config["provider"]
-                )
-                env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
-                # Remember each provider's API base so Settings can render
-                # these as ordinary endpoint rows (URL and all).
-                self._provider_apis = {
-                    pid: cfg.get("api", "")
-                    for pid, cfg in provider_config["provider"].items()
-                }
-                if provider_credentials:
-                    provider_auth_fd, write_fd = os.pipe()
-                    try:
-                        payload = json.dumps(provider_credentials).encode()
-                        if os.write(write_fd, payload) != len(payload):
-                            raise RuntimeError("incomplete MiMo provider credential handoff")
-                    finally:
-                        os.close(write_fd)
-                    env["MIMOCODE_PROVIDER_AUTH_FD"] = str(provider_auth_fd)
-                logger.info(
-                    "injected host model providers for owner %s: %s",
-                    self._owner,
-                    ", ".join(sorted(provider_config["provider"])),
-                )
+                merged_providers.update(provider_config["provider"])
+                merged_credentials.update(provider_credentials)
+        # The operator's own endpoint registry projects unconditionally —
+        # this is what lets mimo drive the agent lane for every
+        # OpenAI-compatible model Odysseus knows (e's ruling 2026-07-17).
+        registry_config, registry_credentials = _endpoint_registry_providers(self._owner)
+        if registry_config:
+            # Openclaw entries win on id collision; the ody- namespace
+            # should make collisions impossible anyway.
+            for pid, cfg in registry_config["provider"].items():
+                merged_providers.setdefault(pid, cfg)
+            for pid, key in registry_credentials.items():
+                merged_credentials.setdefault(pid, key)
+        if merged_providers:
+            config_content = json.loads(env.get("MIMOCODE_CONFIG_CONTENT", "{}"))
+            config_content.setdefault("provider", {}).update(merged_providers)
+            env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
+            # Remember each provider's API base so Settings can render
+            # these as ordinary endpoint rows (URL and all).
+            self._provider_apis = {
+                pid: cfg.get("api", "")
+                for pid, cfg in merged_providers.items()
+            }
+            if merged_credentials:
+                provider_auth_fd, write_fd = os.pipe()
+                try:
+                    payload = json.dumps(merged_credentials).encode()
+                    if os.write(write_fd, payload) != len(payload):
+                        raise RuntimeError("incomplete MiMo provider credential handoff")
+                finally:
+                    os.close(write_fd)
+                env["MIMOCODE_PROVIDER_AUTH_FD"] = str(provider_auth_fd)
+            logger.info(
+                "injected host model providers for owner %s: %s",
+                self._owner,
+                ", ".join(sorted(merged_providers)),
+            )
         env["MIMOCODE_ENABLE_QUESTION_TOOL"] = "1"
         logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
@@ -1059,6 +1155,22 @@ class MimoSupervisorPool:
     async def stop(self) -> None:
         workers = list(self._workers.values())
         self._workers.clear()
+        await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
+
+    async def refresh_endpoint_projection(self) -> None:
+        """The endpoint registry changed: provider config is spawn-time
+        env, so stop the workers — the next turn lazily respawns them
+        with a freshly projected config. Best-effort; endpoint edits
+        are rare admin actions and a dropped in-flight turn surfaces as
+        a clean stream error."""
+        async with self._lock:
+            workers = list(self._workers.values())
+            self._workers.clear()
+        if workers:
+            logger.info(
+                "endpoint registry changed — recycling %d mimo worker(s) for reprojection",
+                len(workers),
+            )
         await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
 
     async def rename_owner(self, old_owner: str, new_owner: str) -> None:
