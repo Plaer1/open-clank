@@ -1163,6 +1163,11 @@ def setup_chat_routes(
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
+            # model_target IS reassigned (the mimo agent-mode ACP rewrite),
+            # so it must be nonlocal — a bare assignment would shadow it as
+            # a closure local and blow up every earlier read with
+            # UnboundLocalError (live 500, 2026-07-17).
+            nonlocal model_target
             research_sources = None
             web_sources = ctx.web_sources
 
