@@ -12,7 +12,7 @@ import logging
 import re
 from typing import List, Optional, Tuple
 
-from src.agent_tools import ToolBlock, TOOL_TAGS
+from src.tool_blocks import ToolBlock, TOOL_TAGS
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 logger = logging.getLogger(__name__)

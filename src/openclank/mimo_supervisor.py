@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -36,6 +37,9 @@ _ODYSSEUS_SKILLS_DIR = os.getenv(
 ) + "/skills"
 
 # Restart backoff
+# Strips ANSI color/style sequences from mimo's stderr log lines.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 # Max size of one newline-delimited ACP JSON message from the child. Tool
 # results embed whole file contents, so this must comfortably exceed any
 # single read (asyncio's default is 64 KiB — a live worker-killer).
@@ -46,6 +50,32 @@ _RESTART_DELAY_MAX = 5.0
 _RESTART_DELAY_MULTIPLIER = 2.0
 _MAX_RESTART_ATTEMPTS = 10
 _RESTART_WINDOW = 60.0  # reset attempt counter after this many seconds of stability
+
+# Model ids that cannot hold a chat conversation — never a small_model pick.
+_NON_CHAT_MODEL_RE = re.compile(r"tts|voice|embed|rerank|image|audio|video|ocr|asr", re.IGNORECASE)
+
+
+def _pick_small_model(providers: dict) -> str | None:
+    """First chat-capable model across the injected providers (provider/model).
+
+    Mimo's title/summarize subagents use the configured ``small_model``; left
+    unset, its picker grabbed xiaomi's TTS voicedesign model from our injected
+    list and every title call 400'd ("system role is not allowed for TTS
+    model"). We injected the list, so we pin a sane default. Override with
+    ODYSSEUS_SMALL_MODEL (the injected env config is merged last in mimo's
+    chain, so a file-level small_model would not win against it).
+    """
+    override = os.environ.get("ODYSSEUS_SMALL_MODEL")
+    if override:
+        return override
+    for pid, cfg in providers.items():
+        models = cfg.get("models") or {}
+        ids = list(models) if isinstance(models, (dict, list, tuple)) else []
+        for mid in ids:
+            if not _NON_CHAT_MODEL_RE.search(str(mid)):
+                return f"{pid}/{mid}"
+    return None
+
 
 _OPENCLAW_PROVIDER_ADAPTERS = {
     "openai-completions": "@ai-sdk/openai-compatible",
@@ -447,6 +477,10 @@ class MimoSupervisor:
         if merged_providers:
             config_content = json.loads(env.get("MIMOCODE_CONFIG_CONTENT", "{}"))
             config_content.setdefault("provider", {}).update(merged_providers)
+            small_model = _pick_small_model(merged_providers)
+            if small_model and "small_model" not in config_content:
+                config_content["small_model"] = small_model
+                logger.info("mimo small_model pinned: %s", small_model)
             env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
             # Remember each provider's API base so Settings can render
             # these as ordinary endpoint rows (URL and all).
@@ -494,7 +528,11 @@ class MimoSupervisor:
             if provider_auth_fd is not None:
                 spawn_options["pass_fds"] = (provider_auth_fd,)
             self._proc = await asyncio.create_subprocess_exec(
+                # --print-logs mirrors mimo's own log stream to stderr, which
+                # _drain_stderr folds into the host log — ONE log to read
+                # instead of chasing per-owner files under data/mimocode.
                 str(MIMO_BIN), "acp", "--hostname", "127.0.0.1", "--port", str(self._http_port),
+                "--print-logs",
                 **spawn_options,
             )
         except NotImplementedError as exc:
@@ -591,12 +629,30 @@ class MimoSupervisor:
         self._health_task = asyncio.create_task(self._health_monitor())
 
     async def _drain_stderr(self) -> None:
+        """Fold the child's stderr — mimo's log stream under --print-logs —
+        into the host log at the line's own severity, so app.log is the one
+        place to look. Must never die while the child lives: an undrained
+        stderr pipe fills up and blocks the child mid-turn."""
         assert self._proc and self._proc.stderr
         try:
-            async for line in self._proc.stderr:
-                logger.warning("mimo stderr: %s", line.decode(errors="replace").rstrip())
+            async for raw in self._proc.stderr:
+                line = _ANSI_RE.sub("", raw.decode(errors="replace")).rstrip()
+                if not line:
+                    continue
+                level = line.split(" ", 1)[0]
+                if level == "ERROR":
+                    logger.error("mimo: %s", line)
+                elif level == "WARN":
+                    logger.warning("mimo: %s", line)
+                elif level in ("INFO", "DEBUG"):
+                    logger.info("mimo: %s", line)
+                else:
+                    # Not a mimo log line (raw crash output, bun panic, …).
+                    logger.warning("mimo stderr: %s", line)
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            logger.error("mimo stderr drain failed (child output no longer mirrored): %s", exc)
 
     async def _health_monitor(self) -> None:
         """Detect child crash (EOF or proc exit) and trigger restart."""
