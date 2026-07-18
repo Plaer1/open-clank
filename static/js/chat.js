@@ -3989,7 +3989,32 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
-                     json.type === 'tool_progress' || json.type === 'agent_step' ||
+                     json.type === 'tool_progress') {
+            rich = true;
+            // A tool-heavy agent run emits no text for minutes; without this
+            // the re-attached view is a blind spinner that reads as a dead
+            // turn. Show a lightweight activity feed (id-paired, no timers) —
+            // the full tool cards come from the DB reload when the run ends.
+            try { spinner.destroy(); } catch (_) {}
+            let feed = holder.querySelector('.resume-tool-feed');
+            if (!feed) {
+              feed = document.createElement('div');
+              feed.className = 'resume-tool-feed';
+              feed.style.cssText = 'font-size:11px;opacity:0.6;font-family:monospace;padding:2px 0;';
+              holder.querySelector('.body').appendChild(feed);
+            }
+            if (json.type === 'tool_start') {
+              const row = document.createElement('div');
+              row.dataset.toolId = json.id || '';
+              row.textContent = '▸ ' + (json.tool || 'tool');
+              feed.appendChild(row);
+            } else if (json.type === 'tool_output') {
+              const row = (json.id && feed.querySelector(`[data-tool-id="${CSS.escape(json.id)}"]`)) || feed.lastElementChild;
+              const ok = (json.exit_code === 0 || json.exit_code == null);
+              if (row) row.textContent = (ok ? '✓ ' : '✗ ') + (json.tool || 'tool');
+            }
+            uiModule.scrollHistory();
+          } else if (json.type === 'agent_step' ||
                      json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
                      json.type === 'research_findings' || json.type === 'research_done') {
