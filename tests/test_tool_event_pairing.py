@@ -97,6 +97,20 @@ def test_chat_js_pairs_tool_cards_by_id():
     assert "if (json.id) delete toolNodesById[json.id];" in chat
 
 
+def test_resume_reader_shows_live_tool_activity():
+    """Re-attaching to a detached run (page refresh) must not be a blind
+    spinner while the agent is mid-tool-phase — that reads as a dead turn
+    even though the run is alive server-side and saves on completion."""
+    chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+    resume_at = chat.index("export async function resumeStream")
+    reader = chat[resume_at:resume_at + 9000]
+    assert "resume-tool-feed" in reader
+    assert "data-tool-id" in reader and "CSS.escape(json.id)" in reader, (
+        "feed rows pair completions by tool-call id, same as live cards"
+    )
+    assert "setInterval" not in reader, "the feed must not leak timers"
+
+
 def test_chat_js_sweeps_stranded_running_cards_at_stream_end():
     chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
     finally_at = chat.index("} finally {", chat.index("agent-thread-node running"))
