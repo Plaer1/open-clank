@@ -36,6 +36,11 @@ _ODYSSEUS_SKILLS_DIR = os.getenv(
 ) + "/skills"
 
 # Restart backoff
+# Max size of one newline-delimited ACP JSON message from the child. Tool
+# results embed whole file contents, so this must comfortably exceed any
+# single read (asyncio's default is 64 KiB — a live worker-killer).
+ACP_STDOUT_LIMIT = 32 * 1024 * 1024
+
 _RESTART_DELAY_INITIAL = 1.0
 _RESTART_DELAY_MAX = 5.0
 _RESTART_DELAY_MULTIPLIER = 2.0
@@ -471,6 +476,12 @@ class MimoSupervisor:
                 "stdin": asyncio.subprocess.PIPE,
                 "stdout": asyncio.subprocess.PIPE,
                 "stderr": asyncio.subprocess.PIPE,
+                # ACP messages are newline-delimited JSON on stdout; a single
+                # tool result carrying a large file easily exceeds asyncio's
+                # default 64 KiB StreamReader line limit, which kills the
+                # reader (LimitOverrunError) and takes the whole worker down
+                # mid-turn. Size the buffer for real tool traffic.
+                "limit": ACP_STDOUT_LIMIT,
                 "env": env,
                 "cwd": "/home/e",
                 # Detach from the terminal's process group: Ctrl+C must reach
