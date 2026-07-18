@@ -123,6 +123,38 @@ async def test_kill_switch(monkeypatch, endpoint):
     assert await mimo_agent_target(_http_target(), owner="", supervisor=pool) is None
 
 
+def test_stream_with_save_reassigns_model_target_via_nonlocal():
+    """The ACP rewrite reassigns model_target inside the stream_with_save
+    closure. Without `nonlocal`, that assignment shadows the name as a
+    closure local and every EARLIER read raises UnboundLocalError — this
+    was a live 500. Pin it with real scope analysis, not grep."""
+    import pathlib
+    import symtable
+
+    source = pathlib.Path("routes/chat_routes.py").read_text()
+    table = symtable.symtable(source, "chat_routes.py", "exec")
+
+    def walk(tbl):
+        yield tbl
+        for child in tbl.get_children():
+            yield from walk(child)
+
+    checked = 0
+    for scope in walk(table):
+        if scope.get_name() != "stream_with_save":
+            continue
+        if "model_target" not in scope.get_identifiers():
+            continue
+        symbol = scope.lookup("model_target")
+        if symbol.is_assigned():
+            checked += 1
+            assert not symbol.is_local(), (
+                "model_target assigned in stream_with_save without nonlocal "
+                "— shadows the outer target and 500s on the first read"
+            )
+    assert checked >= 1, "the rewriting closure exists and was analyzed"
+
+
 def test_chat_routes_wiring():
     import pathlib
 
