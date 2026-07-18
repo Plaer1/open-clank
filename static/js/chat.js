@@ -1493,6 +1493,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
+      // Tool cards keyed by the stream's tool-call id. The single-slot
+      // currentToolBubble only works for a strictly sequential loop; the
+      // mimo (ACP) lane runs tool calls in parallel and interleaves text
+      // (agent_step nulls the slot), so a completion must find ITS card by
+      // id or every earlier card spins forever — wave + elapsed intervals
+      // ticking on each one until the tab crawls.
+      let toolNodesById = Object.create(null);
       let lastToolThread = null;      // Visible tool timeline for tool-only turns
       let roundFinalized = false;     // Whether current round's text is finalized
       let _sourcesHtml = '';          // Sources box HTML to prepend to body
@@ -2626,6 +2633,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Expand/collapse via delegated click handler (init at module bottom).
                 threadWrap.appendChild(node);
                 currentToolBubble = node;
+                if (json.id) toolNodesById[json.id] = node;
                 // Animate the wave
                 const waveEl = node.querySelector('.agent-thread-wave');
                 if (waveEl) {
@@ -2664,17 +2672,19 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // elapsed-time + tail of its stdout/stderr so the
                 // user doesn't stare at a blind "Running…" spinner.
                 if (_isBg) continue;
-                if (!currentToolBubble) continue;
+                const progNode = (json.id && toolNodesById[json.id]) || currentToolBubble;
+                if (!progNode) continue;
                 // The per-second ticker (started in tool_start) owns the
                 // elapsed display; here we just surface the live output tail.
-                const tailStr = (json.tail || '').trim();
+                // (homegrown loop sends `tail`, the mimo bridge sends `output`)
+                const tailStr = (json.tail || json.output || '').trim();
                 if (tailStr) {
-                  let tailEl = currentToolBubble.querySelector('.agent-thread-tail');
+                  let tailEl = progNode.querySelector('.agent-thread-tail');
                   if (!tailEl) {
                     tailEl = document.createElement('pre');
                     tailEl.className = 'agent-thread-tail';
                     tailEl.style.cssText = 'margin:4px 0 0;padding:6px 8px;font-size:11px;background:rgba(0,0,0,0.18);border-radius:4px;max-height:140px;overflow:auto;white-space:pre-wrap;opacity:0.85;';
-                    const content = currentToolBubble.querySelector('.agent-thread-content');
+                    const content = progNode.querySelector('.agent-thread-content');
                     if (content) content.appendChild(tailEl);
                   }
                   tailEl.textContent = tailStr;
@@ -2684,16 +2694,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
-                // --- Update the current thread node ---
-                if (currentToolBubble) {
+                // --- Update THIS call's thread node (by id when present) ---
+                const outNode = (json.id && toolNodesById[json.id]) || currentToolBubble;
+                if (json.id) delete toolNodesById[json.id];
+                if (outNode) {
                   // Stop wave animation + the per-second cooking ticker
-                  if (currentToolBubble._waveInterval) {
-                    clearInterval(currentToolBubble._waveInterval);
-                    currentToolBubble._waveInterval = null;
+                  if (outNode._waveInterval) {
+                    clearInterval(outNode._waveInterval);
+                    outNode._waveInterval = null;
                   }
-                  if (currentToolBubble._elapsedTicker) {
-                    clearInterval(currentToolBubble._elapsedTicker);
-                    currentToolBubble._elapsedTicker = null;
+                  if (outNode._elapsedTicker) {
+                    clearInterval(outNode._elapsedTicker);
+                    outNode._elapsedTicker = null;
                   }
                   const ok = (json.exit_code === 0 || json.exit_code == null);
                   const cmd = json.command || '';
@@ -2733,9 +2745,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   // it as soon as the result lands, forcing the user to
                   // click again. Click handling is delegated (see init at
                   // bottom of file) so no per-node listener needed.
-                  const _wasOpen = currentToolBubble.classList.contains('open');
-                  currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
-                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  const _wasOpen = outNode.classList.contains('open');
+                  outNode.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
+                  outNode.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -2749,8 +2761,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   window.dispatchEvent(new CustomEvent('gallery-refresh'));
                 }
                 // --- Render browser screenshots in tool output ---
-                if (json.screenshot && currentToolBubble) {
-                  const contentEl = currentToolBubble.querySelector('.agent-thread-content');
+                if (json.screenshot && outNode) {
+                  const contentEl = outNode.querySelector('.agent-thread-content');
                   if (contentEl) {
                     const screenshotSrc = chatRenderer.safeToolScreenshotSrc(json.screenshot);
                     if (screenshotSrc) {
@@ -3491,6 +3503,24 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Streaming done — let screen readers announce the settled response.
       const _chatLogDone = document.getElementById('chat-history');
       if (_chatLogDone) _chatLogDone.setAttribute('aria-busy', 'false');
+      // Any tool card still "running" at stream end never got its
+      // tool_output (abort, error, dropped event). Stop its animation
+      // timers — leaked intervals from stacked cards freeze the tab —
+      // and label it honestly instead of spinning forever.
+      document.querySelectorAll('.agent-thread-node.running').forEach((n) => {
+        if (n._waveInterval) { clearInterval(n._waveInterval); n._waveInterval = null; }
+        if (n._elapsedTicker) { clearInterval(n._elapsedTicker); n._elapsedTicker = null; }
+        n.classList.remove('running');
+        const wave = n.querySelector('.agent-thread-wave');
+        if (wave) wave.remove();
+        const hdr = n.querySelector('.agent-thread-header');
+        if (hdr && !hdr.querySelector('.agent-thread-status')) {
+          const st = document.createElement('span');
+          st.className = 'agent-thread-status';
+          st.textContent = 'interrupted';
+          hdr.appendChild(st);
+        }
+      });
       // Always clean up research tracking regardless of background state
       _researchingStreamIds.delete(streamSessionId);
       if (_researchingStreamIds.size === 0) {
