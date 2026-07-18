@@ -112,6 +112,36 @@ def test_kill_switch(monkeypatch, endpoint_factory):
     assert config == {} and credentials == {}
 
 
+def test_small_model_pick_skips_non_chat_models(monkeypatch):
+    """Live failure 2026-07-18: with small_model unset, mimo's title agent
+    picked xiaomi's TTS voicedesign model from our injected provider list and
+    every title call 400'd. The projection pins the first chat-capable model."""
+    from src.openclank.mimo_supervisor import _pick_small_model
+
+    providers = {
+        "xiaomi": {"models": {
+            "mimo-v2.5-tts-voicedesign": {},
+            "mimo-embed-large": {},
+            "mimo-auto": {},
+        }},
+        "ody-abc": {"models": ["glm-5.2"]},
+    }
+    assert _pick_small_model(providers) == "xiaomi/mimo-auto"
+    assert _pick_small_model({"x": {"models": {"a-tts": {}, "b-embed": {}}}}) is None
+    monkeypatch.setenv("ODYSSEUS_SMALL_MODEL", "ody-abc/glm-5.2")
+    assert _pick_small_model({}) == "ody-abc/glm-5.2"
+
+
+def test_spawn_pins_small_model_and_print_logs():
+    import inspect
+
+    from src.openclank import mimo_supervisor as ms
+
+    source = inspect.getsource(ms)
+    assert 'config_content["small_model"] = small_model' in source
+    assert '"--print-logs"' in source, "mimo log stream must fold into app.log"
+
+
 def test_mutation_routes_schedule_reprojection():
     import pathlib
 

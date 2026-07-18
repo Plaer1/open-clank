@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Optional
 
-from src.agent_tools import ToolBlock, TOOL_TAGS
+from src.tool_blocks import ToolBlock, TOOL_TAGS
 from src.tool_parsing import _TOOL_NAME_MAP
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
