@@ -106,6 +106,57 @@ class TestModelListHelpers:
 # ── _probe_endpoint: model-list parsing ──
 
 class TestProbeEndpointParsing:
+    @pytest.mark.parametrize("http_status,expected", [
+        (401, "auth_invalid"),
+        (403, "auth_forbidden"),
+        (404, "unsupported"),
+        (500, "unavailable"),
+    ])
+    def test_catalog_probe_classifies_http_failure_without_exposing_credentials(
+        self, monkeypatch, http_status, expected
+    ):
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(http_status),
+        )
+        diagnostics = {}
+
+        assert _probe_endpoint(
+            "https://api.example.com/v1", "private-key", diagnostics=diagnostics
+        ) == []
+        assert diagnostics["status"] == expected
+        assert diagnostics["http_status"] == http_status
+        assert "private-key" not in str(diagnostics)
+
+    def test_catalog_probe_classifies_malformed_success(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(200),
+        )
+        diagnostics = {}
+
+        assert _probe_endpoint("https://api.example.com/v1", diagnostics=diagnostics) == []
+        assert diagnostics["status"] == "malformed"
+
+    def test_catalog_probe_classifies_success(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr(
+            model_routes.httpx,
+            "get",
+            lambda url, headers=None, timeout=None, verify=None, **kwargs: _resp(
+                200, json={"data": [{"id": "model-a"}]}
+            ),
+        )
+        diagnostics = {}
+
+        assert _probe_endpoint("https://api.example.com/v1", diagnostics=diagnostics) == ["model-a"]
+        assert diagnostics["status"] == "ok"
+        assert diagnostics["http_status"] == 200
+
     def test_parses_openai_data_format(self, monkeypatch):
         _patch_resolve(monkeypatch)
         monkeypatch.setattr(
@@ -430,6 +481,26 @@ class TestProbeSingleModel:
         monkeypatch.setattr(model_routes.httpx, "post", fake_post)
         _probe_single_model("https://api.anthropic.com/v1", "sk-ant", "claude-sonnet-4-5", with_tools=True)
         assert "input_schema" in captured["payload"]["tools"][0]
+
+    def test_openai_tool_probe_has_budget_to_serialize_forced_call(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None, verify=None):
+            captured["payload"] = json
+            return _resp(200, json={
+                "choices": [{"message": {"tool_calls": [{
+                    "function": {"name": "test", "arguments": "{}"}
+                }]}}]
+            })
+
+        monkeypatch.setattr(model_routes.httpx, "post", fake_post)
+        result = _probe_single_model(
+            "https://api.example.com/v1", "key", "reasoning-model", with_tools=True
+        )
+
+        assert result["tool_support"] is True
+        assert captured["payload"]["max_tokens"] == 64
 
     def test_chatgpt_subscription_skips_completion_probe(self, monkeypatch):
         # This provider speaks the Responses/Codex API. A chat-completions probe

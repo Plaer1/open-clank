@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.endpoint_resolver import build_chat_url, resolve_model_target
-from src.model_dispatch import call_model_target
+from src.model_dispatch import _typed_error_sse, call_model_target
 
 
 def test_resolved_target_uses_transport_not_url_guessing_at_call_sites():
@@ -27,6 +27,21 @@ def test_resolved_target_rejects_unknown_transport(url):
 def test_resolved_target_rejects_ineligible_owner_before_dispatch():
     with pytest.raises(PermissionError):
         resolve_model_target("mimo://acp", "model-a", owner_eligible=False)
+
+
+def test_unexpected_agent_error_is_safe_and_terminal():
+    first, done = _typed_error_sse(RuntimeError("secret upstream body"))
+    payload = json.loads(first.split("data: ", 1)[1])
+
+    assert payload == {
+        "code": "AGENT_INTERNAL_ERROR",
+        "error": "Agent failed before completion.",
+        "phase": "internal",
+        "retryable": True,
+        "status": 500,
+    }
+    assert "secret upstream body" not in first
+    assert done == "data: [DONE]\n\n"
 
 
 def test_http_url_builder_rejects_acp_transport():
@@ -146,9 +161,8 @@ async def test_rejected_mimo_model_aborts_before_prompt(monkeypatch, tmp_path):
 def test_chat_routes_dispatch_by_resolved_target_not_drive_flag():
     source = open("routes/chat_routes.py", encoding="utf-8").read()
     assert 'os.environ.get("OPENTHESIUS_DRIVE")' not in source
-    assert "stream_chat_target(" in source
+    assert "stream_chat_target(" not in source
     assert "stream_agent_target(" in source
-    assert "call_model_target(" in source
 
 
 def test_settings_reject_stale_or_ineligible_mimo_capabilities(monkeypatch):
@@ -286,11 +300,12 @@ def test_acp_prompt_compiler_preserves_structured_content_and_path_policy(tmp_pa
 def test_mimo_tool_policy_applies_chat_incognito_and_aliases():
     from src.openclank.acp_bridge import _mimo_tool_policy
 
-    # Chat mode: everything denied EXCEPT the read-only memory recall
-    # (T8 pull affordance). Incognito stays a full deny.
-    assert _mimo_tool_policy({"mode": "chat"}) == {"*": False, "memory": True}
-    assert _mimo_tool_policy({"incognito": True}) == {"*": False}
-    assert _mimo_tool_policy({"mode": "chat", "incognito": True}) == {"*": False}
+    # Tool-free behavior is structural: auxiliary turns and a user's explicit
+    # Tools-off preference both get a full deny.
+    assert _mimo_tool_policy({"mode": "chat"}) == {}
+    assert _mimo_tool_policy({"incognito": True}) == {}
+    assert _mimo_tool_policy({"lane": "auxiliary", "incognito": True}) == {"*": False}
+    assert _mimo_tool_policy({"lane": "agent", "allowed_tools": []}) == {"*": False}
     policy = _mimo_tool_policy({
         "mode": "agent",
         "disabled_tools": ["write_file", "manage_memory"],
@@ -434,8 +449,12 @@ async def test_pool_rolls_back_sibling_when_multi_owner_start_fails(monkeypatch,
         data_dir=tmp_path,
     )
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(module.SupervisorAdmissionError) as caught:
         await pool.start()
+
+    assert caught.value.code == "SUPERVISOR_CRASHLOOP"
+    assert caught.value.__cause__ is not None
+    assert "boom" in str(caught.value.__cause__)
 
     assert created
     assert all(worker.started is False for worker in created)
@@ -1058,24 +1077,24 @@ async def test_signal_death_grace_lets_shutdown_win_over_restart(monkeypatch):
 
     # same signal death but nobody is shutting down: restart proceeds
     sup2 = module.MimoSupervisor(None)
-    restarts2 = []
+    crashes = []
 
-    async def _record_restart2():
-        restarts2.append(True)
-        sup2._client = None
-        sup2._bridge = None
+    async def _record_crash(worker, returncode):
+        crashes.append((worker, returncode))
 
     sup2._client = None
     sup2._teardown_child = _noop
     sup2._reconcile_sessions = _noop
-    sup2._restart_with_backoff = _record_restart2
+    sup2._crash_callback = _record_crash
 
     async def _instant_sleep(_seconds):
         return None
 
     monkeypatch.setattr(module.asyncio, "sleep", _instant_sleep)
     await sup2._handle_crash(-_signal.SIGTERM)
-    assert restarts2 == [True], "external kill without shutdown should self-heal"
+    assert crashes == [(sup2, -_signal.SIGTERM)], (
+        "external kill must hand recovery to the generation-scoped pool"
+    )
 
 
 async def test_http_transport_drops_acp_only_turn_envelope(monkeypatch):

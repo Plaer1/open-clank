@@ -408,3 +408,64 @@ describe("retryable() with raw Error (Spec ③ P2 regression)", () => {
     expect(retryable(rawErr as unknown as never)).toBeUndefined()
   })
 })
+
+describe("quota exhaustion is terminal (no retry before the provider reset)", () => {
+  const zaiMessage = "Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-07-23 03:49:14"
+
+  test("z.ai weekly/monthly limit APIError is not retryable", () => {
+    const error = new MessageV2.APIError({
+      message: zaiMessage,
+      statusCode: 429,
+      isRetryable: true,
+      responseBody: `{"error":{"message":"${zaiMessage}","code":"1310"}}`,
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("quota text only in responseBody still blocks retry", () => {
+    const error = new MessageV2.APIError({
+      message: "Too Many Requests",
+      statusCode: 429,
+      isRetryable: true,
+      responseBody: '{"error":{"message":"exceeded your current quota"}}',
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeUndefined()
+  })
+
+  test("openai / anthropic / google quota phrasings are not retryable", () => {
+    for (const message of [
+      "insufficient_quota",
+      "You exceeded your current quota, please check your plan and billing details.",
+      "Your credit balance is too low to access the Anthropic API.",
+      "Quota exceeded for quota metric",
+    ]) {
+      const error = new MessageV2.APIError({
+        message,
+        statusCode: 429,
+        isRetryable: true,
+      }).toObject()
+      expect(SessionRetry.retryable(error)).toBeUndefined()
+    }
+  })
+
+  test("plain rate-limit 429s stay retryable", () => {
+    const error = new MessageV2.APIError({
+      message: "Rate limit exceeded, please try again later",
+      statusCode: 429,
+      isRetryable: true,
+    }).toObject()
+    expect(SessionRetry.retryable(error)).toBeTruthy()
+  })
+
+  test("isRetryableTransientError treats quota 429 as terminal", () => {
+    const quota = Object.assign(new Error(zaiMessage), { statusCode: 429 })
+    expect(isRetryableTransientError(quota)).toBe(false)
+    const bodyOnly = Object.assign(new Error("http"), {
+      statusCode: 429,
+      responseBody: '{"error":{"message":"credit balance is too low"}}',
+    })
+    expect(isRetryableTransientError(bodyOnly)).toBe(false)
+    const plain = Object.assign(new Error("http"), { statusCode: 429 })
+    expect(isRetryableTransientError(plain)).toBe(true)
+  })
+})

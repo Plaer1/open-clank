@@ -77,3 +77,57 @@ export function dragPatch(event, mode, deltaDays) {
   }
   return {};
 }
+
+export const MAX_RECURRENCE_EXPANSION = 500;
+
+function monthEnd(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function nextRecurrenceDate(current, frequency, interval) {
+  const d = new Date(current);
+  if (frequency === 'daily') { d.setDate(d.getDate() + interval); }
+  else if (frequency === 'weekly') { d.setDate(d.getDate() + interval * 7); }
+  else if (frequency === 'monthly') {
+    let year = d.getFullYear() + Math.floor((d.getMonth() + interval) / 12);
+    let month = (d.getMonth() + interval) % 12;
+    d.setDate(Math.min(d.getDate(), monthEnd(year, month)));
+    d.setFullYear(year);
+    d.setMonth(month);
+  }
+  return d;
+}
+
+export function expandRecurrence(event, windowStart, windowEnd) {
+  const rec = event.recurrence;
+  if (!rec) return [];
+  const seriesStart = parseLocalDate(event.startDate);
+  if (!seriesStart) return [];
+  const durationDays = event.dueDate ? daysBetween(event.startDate, event.dueDate) : 0;
+  const exceptions = new Set(rec.exceptionDates || []);
+  const occurrences = [];
+  let current = new Date(seriesStart);
+  let count = 0;
+  const until = rec.until ? parseLocalDate(rec.until) : null;
+  while (occurrences.length < MAX_RECURRENCE_EXPANSION) {
+    if (rec.count != null && count >= rec.count) break;
+    if (until && current > until) break;
+    if (current >= windowStart && current <= windowEnd) {
+      const key = formatLocalDate(current);
+      if (!exceptions.has(key)) {
+        const due = durationDays ? addDays(current, durationDays) : null;
+        occurrences.push({
+          eventId: event.id,
+          occurrenceKey: key,
+          startDate: key,
+          dueDate: due ? formatLocalDate(due) : null,
+          allDay: !!rec.allDay,
+        });
+      }
+    }
+    current = nextRecurrenceDate(current, rec.frequency || 'weekly', rec.interval || 1);
+    count++;
+    if (current > windowEnd && (rec.count != null || until)) break;
+  }
+  return occurrences;
+}

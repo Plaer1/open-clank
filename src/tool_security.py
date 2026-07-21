@@ -122,6 +122,21 @@ PLAN_MODE_READONLY_TOOLS = {
 }
 
 
+# Compare is an evaluation lane, so it gets a deliberately smaller positive
+# authority than Plan. Unknown built-ins and every MCP tool stay denied unless
+# they are added here after a server-side read-only audit.
+COMPARE_READONLY_TOOLS = frozenset({
+    "read_file",
+    "grep",
+    "glob",
+    "ls",
+    "get_workspace",
+    "web_search",
+    "web_fetch",
+    "list_models",
+})
+
+
 # The agent's tool gate is a DENYLIST: execute_tool_block blocks any tool whose
 # name is in `disabled_tools`. Plan mode's policy is the opposite — an allowlist
 # (PLAN_MODE_READONLY_TOOLS). To apply an allowlist through a denylist, plan mode
@@ -190,6 +205,23 @@ def plan_mode_disabled_tools() -> Set[str]:
     # static mutator backstop). Fail closed: if the schema import failed above,
     # the backstop alone still blocks known mutators.
     return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - PLAN_MODE_READONLY_TOOLS
+
+
+def compare_mode_disabled_tools() -> Set[str]:
+    """Return the denylist complement for the server-owned Compare allowlist."""
+    try:
+        import src.agent_tools  # noqa: F401
+        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+        all_names = {
+            (tool.get("function") or {}).get("name")
+            for tool in FUNCTION_TOOL_SCHEMAS
+        }
+        all_names.discard(None)
+    except Exception as exc:
+        logger.warning("Unable to load tool schemas for Compare gating: %s", exc)
+        all_names = set()
+    return (all_names | _PLAN_MODE_KNOWN_MUTATORS) - COMPARE_READONLY_TOOLS
 
 
 def email_tool_policy_names(tool_name: str) -> frozenset:

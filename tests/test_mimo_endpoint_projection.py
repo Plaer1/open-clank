@@ -1,10 +1,7 @@
 """MiMo-drives-agent slice 01: the endpoint registry projects into mimo.
 
-Every enabled OpenAI-compatible ModelEndpoint becomes a mimo provider
-(`ody-<endpoint_id>`) with the exact model list the Settings UI shows;
-keys ride the credential dict (pipe FD at spawn), never the config
-content. supports_tools=False, disabled, and model-less endpoints stay
-out; owner scoping holds.
+Every visible endpoint/model pair becomes a mimo provider model.
+Keys ride the credential dict (pipe FD at spawn), never config content.
 """
 import json
 import uuid
@@ -32,6 +29,7 @@ def endpoint_factory():
     created = []
 
     def _make(**overrides):
+        capability = overrides.pop("capability", True)
         db = SessionLocal()
         try:
             row = ModelEndpoint(
@@ -44,6 +42,10 @@ def endpoint_factory():
                 **overrides,
             )
             db.add(row)
+            db.flush()
+            if capability is not None:
+                from src.model_capabilities import declare_current_models
+                declare_current_models(db, row, capability)
             db.commit()
             created.append(row.id)
             return row.id
@@ -80,20 +82,46 @@ def test_enabled_endpoint_projects_with_models_and_credential(endpoint_factory):
     assert "sk-test-key" not in json.dumps(config)
 
 
-def test_skips_disabled_toolless_and_modelless_endpoints(endpoint_factory):
+def test_chatgpt_subscription_projects_responses_adapter_and_scoped_headers(
+    monkeypatch, endpoint_factory,
+):
+    access_token = "x" * 2280
+    monkeypatch.setattr(
+        "src.chatgpt_subscription.extract_account_id",
+        lambda _tokens: "account-test",
+    )
+    ep_id = endpoint_factory(
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=access_token,
+        cached_models=json.dumps(["gpt-5.6-luna"]),
+    )
+
+    config, credentials = _endpoint_registry_providers("")
+    provider = config["provider"][f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"]
+
+    assert provider["npm"] == "@ai-sdk/openai"
+    assert provider["options"]["baseURL"] == "https://chatgpt.com/backend-api/codex"
+    assert provider["options"]["headers"]["ChatGPT-Account-Id"] == "account-test"
+    assert provider["models"]["gpt-5.6-luna"]["provider"]["npm"] == "@ai-sdk/openai"
+    assert access_token not in json.dumps(config)
+    assert credentials[f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"] == access_token
+
+
+def test_skips_disabled_and_modelless_but_keeps_tools_off(endpoint_factory):
     disabled = endpoint_factory(is_enabled=False)
-    toolless = endpoint_factory(supports_tools=False)
+    toolless = endpoint_factory(capability=False)
     modelless = endpoint_factory(cached_models=None)
     config, _ = _endpoint_registry_providers("")
     providers = (config.get("provider") or {})
-    for ep_id in (disabled, toolless, modelless):
+    assert f"{ENDPOINT_PROVIDER_PREFIX}{toolless}" in providers
+    for ep_id in (disabled, modelless):
         assert f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}" not in providers
 
 
-def test_unknown_tool_support_still_projects(endpoint_factory):
-    ep_id = endpoint_factory(supports_tools=None)
+def test_unknown_tool_support_defaults_on_and_projects(endpoint_factory):
+    ep_id = endpoint_factory(capability=None)
     config, _ = _endpoint_registry_providers("")
-    assert f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}" in config["provider"]
+    assert f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}" in (config.get("provider") or {})
 
 
 def test_owner_scoping_hides_foreign_private_endpoints(endpoint_factory):
@@ -105,11 +133,28 @@ def test_owner_scoping_hides_foreign_private_endpoints(endpoint_factory):
     assert f"{ENDPOINT_PROVIDER_PREFIX}{private}" not in providers
 
 
-def test_kill_switch(monkeypatch, endpoint_factory):
-    endpoint_factory()
+def test_legacy_kill_switch_no_longer_changes_projection(monkeypatch, endpoint_factory):
+    ep_id = endpoint_factory()
     monkeypatch.setenv("ODYSSEUS_PROJECT_ENDPOINTS", "0")
-    config, credentials = _endpoint_registry_providers("")
-    assert config == {} and credentials == {}
+    config, _ = _endpoint_registry_providers("")
+    assert f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}" in config["provider"]
+
+
+def test_mixed_model_capability_projects_independently(endpoint_factory):
+    ep_id = endpoint_factory(capability=None, cached_models=json.dumps(["yes", "no", "unknown"]))
+    db = SessionLocal()
+    try:
+        ep = db.get(ModelEndpoint, ep_id)
+        from src.model_capabilities import set_declared
+        set_declared(db, ep, "yes", True)
+        set_declared(db, ep, "no", False)
+        db.commit()
+    finally:
+        db.close()
+    config, _ = _endpoint_registry_providers("")
+    assert set(config["provider"][f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"]["models"]) == {
+        "yes", "no", "unknown",
+    }
 
 
 def test_small_model_pick_skips_non_chat_models(monkeypatch):

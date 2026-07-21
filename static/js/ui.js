@@ -1235,7 +1235,16 @@ if (!window._odyEscExpandGuard) {
   };
 
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+
+    // An open modal <dialog> owns Escape outright. The platform already
+    // closes exactly the topmost dialog of a stack via its cancel behavior,
+    // so silence every competing document-level handler (this one included)
+    // and do NOT preventDefault — that would suppress the native cancel.
+    if (document.querySelector('dialog:modal')) {
+      e.stopImmediatePropagation();
+      return;
+    }
 
     // Find the single thing to close, in priority order. The first hit wins.
     // Important: if a thinking block is open we MUST handle it ourselves and
@@ -1243,16 +1252,17 @@ if (!window._odyEscExpandGuard) {
     // (the live-stream chat rebuilds thinking DOM mid-stream so the header
     // can briefly be absent). Toggling the `expanded` class directly is the
     // fallback so ESC never bypasses the thinking block to hit a modal.
-    if (_closeHoveredWindow()) {
+    // Transient ad-hoc menus (dropdowns / context popups) live outside the
+    // .modal system and register a dismiss callback in escMenuStack. Close the
+    // most-recently-opened one first — before the hovered-window close, since
+    // a menu opened over a window is the topmost surface — and BEFORE the
+    // text-input guard below, since a menu may own the focused input (e.g. a
+    // search dropdown).
+    if (dismissTopMenu()) {
       e.stopImmediatePropagation(); e.preventDefault();
       return;
     }
-    // Transient ad-hoc menus (dropdowns / context popups) live outside the
-    // .modal system and register a dismiss callback in escMenuStack. Close the
-    // most-recently-opened one first — so a menu opened over a modal dismisses
-    // before the modal — and do it BEFORE the text-input guard below, since a
-    // menu may own the focused input (e.g. a search dropdown).
-    if (dismissTopMenu()) {
+    if (_closeHoveredWindow()) {
       e.stopImmediatePropagation(); e.preventDefault();
       return;
     }

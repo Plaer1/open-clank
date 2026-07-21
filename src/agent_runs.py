@@ -108,6 +108,8 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
             pass
     try:
         async for ev in agen:
+            if ev.startswith("event: error"):
+                run.status = "error"
             _publish(run, ev)
         if run.status == "running":
             run.status = "done"

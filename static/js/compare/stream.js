@@ -220,31 +220,11 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
     fd.append('message', message);
     fd.append('session', sessionId);
 
-    // Compare mode determines what tools/features are enabled
-    const isAgent = state._compareMode === 'agent';
-    const isResearch = state._compareMode === 'research';
-
-    // Agent mode: enable all tools (web, bash, etc.)
-    if (isAgent) {
-      fd.append('mode', 'agent');
-      fd.append('allow_web_search', 'true');
-      fd.append('allow_bash', 'true');
-    } else if (isResearch) {
-      fd.append('use_research', 'true');
-    } else {
-      // Chat/Image: pure chat only — no tools, no search, no bash, no RAG.
-      // Explicitly send mode='chat' so the backend's compare_mode strip
-      // (chat_routes.py line 385) actually triggers — otherwise the form
-      // field was missing and chat_mode defaulted to "", which meant
-      // bash/python/web_search were never added to disabled_tools and
-      // models would still attempt to run Python.
-      fd.append('mode', 'chat');
-      fd.append('use_rag', 'false');
-    }
-    const incognitoChk = document.getElementById('incognito-toggle');
-    if (incognitoChk && incognitoChk.checked) {
-      fd.append('incognito', 'true');
-    }
+    // Compare is always Agent with a server-enforced positive read-only tool set.
+    // These client flags request the lane; they cannot widen server authority.
+    fd.append('mode', 'agent');
+    fd.append('allow_web_search', 'true');
+    fd.append('allow_bash', 'false');
     // Disable document tool and memory injection in compare mode
     fd.append('no_documents', 'true');
     fd.append('no_memory', 'true');

@@ -1,6 +1,7 @@
 """Small helpers for route-local upload size caps."""
 
 import os
+from pathlib import Path
 
 from fastapi import HTTPException, UploadFile
 
@@ -60,7 +61,7 @@ ICS_MAX_BYTES = read_byte_limit_env(
     "ODYSSEUS_ICS_MAX_BYTES", 10 * 1024 * 1024
 )
 COPAL_IMPORT_MAX_BYTES = read_byte_limit_env(
-    "ODYSSEUS_COPAL_IMPORT_MAX_BYTES", 64 * 1024 * 1024
+    "ODYSSEUS_COPAL_IMPORT_MAX_BYTES", 256 * 1024 * 1024
 )
 
 
@@ -73,3 +74,35 @@ async def read_upload_limited(upload: UploadFile, limit: int, label: str = "Uplo
             detail=f"{label} exceeds {format_byte_limit(limit)} limit",
         )
     return data
+
+
+async def copy_upload_limited(
+    upload: UploadFile,
+    destination: str | Path,
+    limit: int,
+    label: str = "Upload",
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> int:
+    """Copy a spooled upload to disk without retaining the payload in memory."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be greater than 0")
+    path = Path(destination)
+    total = 0
+    try:
+        with path.open("xb") as output:
+            while True:
+                chunk = await upload.read(min(chunk_size, limit - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"{label} exceeds {format_byte_limit(limit)} limit",
+                    )
+                output.write(chunk)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return total

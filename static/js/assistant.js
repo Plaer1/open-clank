@@ -237,15 +237,15 @@ function _renderSettingsBody(body, data, tzList) {
       if (!ep.is_enabled) continue;
       const url = ep.base_url || '';
       const name = ep.name || url;
-      const sel = (crew.endpoint_url && url.includes(crew.endpoint_url.replace('/v1', '').replace(/\/$/, ''))) ? ' selected' : '';
-      epHTML += `<option value="${_esc(url)}"${sel}>${_esc(name)}</option>`;
+      const sel = crew.endpoint_id === ep.id ? ' selected' : '';
+      epHTML += `<option value="${_esc(ep.id)}"${sel}>${_esc(name)}</option>`;
     }
     epSelect.innerHTML = epHTML;
     // When endpoint changes, load its models
     epSelect.addEventListener('change', async () => {
-      const url = epSelect.value;
-      if (!url) { modelSelect.innerHTML = '<option value="">(default)</option>'; return; }
-      const ep = endpoints.find(e => e.base_url === url);
+      const endpointId = epSelect.value;
+      if (!endpointId) { modelSelect.innerHTML = '<option value="">(default)</option>'; return; }
+      const ep = endpoints.find(e => e.id === endpointId);
       if (!ep) return;
       modelSelect.innerHTML = '<option value="">loading...</option>';
       try {
@@ -347,7 +347,7 @@ function _renderSettingsBody(body, data, tzList) {
       personality: body.querySelector('#assistant-personality').value,
       timezone: body.querySelector('#assistant-timezone').value || null,
       model: body.querySelector('#assistant-model').value || null,
-      endpoint_url: body.querySelector('#assistant-endpoint').value || null,
+      endpoint_id: body.querySelector('#assistant-endpoint').value || null,
       enabled_tools: selectedTools,
       check_ins: Array.from(body.querySelectorAll('.assistant-checkin-row')).map((row) => ({
         id: row.dataset.taskId,

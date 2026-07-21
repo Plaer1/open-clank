@@ -77,6 +77,8 @@ def build_projection(
     owner: str,
     workspace: str,
     planning_document_id: str,
+    window_start: str | date | None = None,
+    window_end: str | date | None = None,
 ) -> tuple[list[ProjectedEvent], list[dict[str, str]]]:
     """Map planning JSON to deterministic all-day native events.
 
@@ -84,7 +86,12 @@ def build_projection(
     ``dtend``.  FUZZY tasks use only explicit anchors.  AUTO is derived only
     when another visible task supplies a defensible latest end; no date is
     invented for unresolved records.
+
+    Recurring tasks are expanded into per-occurrence projections with UIDs
+    derived from seriesId + occurrenceKey. Non-recurring tasks keep their
+    existing UID logic.
     """
+    from src.openclank.copal_planning import expand_recurrence, _DATE_RE
 
     rows = list(_all_tasks(planning))
     known_ends: list[date] = []
@@ -96,6 +103,17 @@ def build_projection(
             known_ends.append(end or start)  # type: ignore[arg-type]
     auto_start = max(known_ends) + timedelta(days=1) if known_ends else None
 
+    # Default expansion window: 1 year from today if not specified
+    today = date.today()
+    if window_start is None:
+        window_start = today - timedelta(days=30)
+    elif isinstance(window_start, str):
+        window_start = date.fromisoformat(window_start)
+    if window_end is None:
+        window_end = today + timedelta(days=365)
+    elif isinstance(window_end, str):
+        window_end = date.fromisoformat(window_end)
+
     selected: dict[str, ProjectedEvent] = {}
     diagnostics: list[dict[str, str]] = []
     for track, task in rows:
@@ -104,6 +122,47 @@ def build_projection(
             diagnostics.append({"taskId": "", "reason": "missing stable task ID"})
             continue
         logical_id = str(task.get("linkId") or task_id).strip()
+
+        # Recurring tasks: expand into per-occurrence projections
+        recurrence = task.get("recurrence") if isinstance(task.get("recurrence"), dict) else None
+        if recurrence:
+            occurrences = expand_recurrence(task, window_start, window_end)
+            track_name = str(track.get("name") or track.get("id") or "Planning")
+            tags = [str(tag) for tag in task.get("tags") or [] if str(tag).strip()]
+            status = str(task.get("status") or "pending")
+            priority = str(task.get("priority") or "normal").lower()
+            importance = priority if priority in {"low", "normal", "high", "critical"} else "normal"
+            base_desc_parts = [str(task.get("description") or "").strip()]
+            base_desc_parts.extend([
+                f"Copal track: {track_name}",
+                f"Status: {status}",
+                f"Source: /copal/timeline?doc={planning_document_id}",
+            ])
+            if tags:
+                base_desc_parts.append(f"Tags: {', '.join(tags)}")
+            summary = str(task.get("title") or task.get("text") or "Untitled Copal task")[:512]
+            for occ in occurrences:
+                occ_key = occ["occurrenceKey"]
+                occ_uid = str(uuid.uuid5(EVENT_NAMESPACE, f"{owner}\n{workspace}\n{planning_document_id}\n{logical_id}\n{occ_key}"))
+                occ_start = _parse_day(occ["startDate"])
+                occ_end = _parse_day(occ.get("dueDate")) or occ_start
+                if not occ_start or not occ_end:
+                    continue
+                occ_desc = base_desc_parts + [f"Occurrence: {occ_key}"]
+                selected[occ_uid] = ProjectedEvent(
+                    task_id=task_id,
+                    logical_id=logical_id,
+                    uid=occ_uid,
+                    summary=summary,
+                    description="\n".join(part for part in occ_desc if part),
+                    start=occ_start,
+                    end_exclusive=occ_end + timedelta(days=1),
+                    color=str(track.get("color") or "").strip() or None,
+                    importance=importance,
+                    status=status,
+                )
+            continue
+
         fuzzy = task.get("fuzzy") if isinstance(task.get("fuzzy"), dict) else {}
         start = _parse_day(task.get("startDate")) or _parse_day(fuzzy.get("anchorStart"))
         end = _parse_day(task.get("dueDate")) or _parse_day(fuzzy.get("anchorEnd"))

@@ -163,8 +163,8 @@ def _canonical_view(raw: dict[str, Any], index: int, inherited: dict[str, Any]) 
         raise BaseDefinitionError("View must be an object", path=path)
     name = str(raw.get("name") or f"View {index + 1}")[:128]
     view_type = str(raw.get("type") or "table").lower()
-    if view_type != "table":
-        raise BaseDefinitionError("Only table views are supported in Base v1", path=f"{path}.type", code="unsupported_view")
+    if view_type not in {"table", "card", "list"}:
+        raise BaseDefinitionError("View type must be table, card, or list", path=f"{path}.type", code="unsupported_view")
     columns_raw = raw.get("columns") or inherited.get("columns") or ["file.name", "tags"]
     if not isinstance(columns_raw, list) or not columns_raw:
         raise BaseDefinitionError("View needs at least one column", path=f"{path}.columns")
@@ -189,7 +189,7 @@ def _canonical_view(raw: dict[str, Any], index: int, inherited: dict[str, Any]) 
     return {
         "id": _slug(str(raw.get("id") or name), f"view-{index + 1}"),
         "name": name,
-        "type": "table",
+        "type": view_type,
         "columns": columns,
         "filters": _canonical_filter(raw.get("filters", raw.get("filter", inherited.get("filters"))), f"{path}.filters"),
         "sorts": [_canonical_sort(item, f"{path}.sorts[{i}]") for i, item in enumerate(sorts_raw[:8])],

@@ -1,5 +1,13 @@
+# OpenAI Build Week.
+
+Codex made ALL of the master plans for Open Clank. Other models did a ton of the coding busywork; GPT-5.6 was the closer, and with less than an hour left, Codex fast mode came back in and basically saved the submission.
+
+It also made the Clanker theme—and, buried under that, the system that generates the metathemes. lol. We’ll talk about that one later.
+
+# Open Clank
+
 <p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
+  <img src="docs/open-clanker.png" alt="Open Clanker mascot" width="560">
 </p>
 
 <p align="center">
@@ -14,22 +22,18 @@
 </p>
 
 <p align="center">
-  <a href="https://repology.org/project/odysseus-ai/versions"><img src="https://repology.org/badge/vertical-allrepos/odysseus-ai.svg" alt="Packaging status"></a>
-</p>
-
-<p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
+  <img src="docs/odysseus-browser.jpg" alt="Open Clank interface">
 </p>
 
 ---
 
 ## Quick Start
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/pewdiepie-archdaemon/odysseus/tree/main) if you want the more curated branch.
+> This is the OpenAI Build Week snapshot. It is moving fast because, well, build week. xD
 
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
-cd odysseus
+git clone https://github.com/Plaer1/open-clank.git
+cd open-clank
 cp .env.example .env
 docker compose up -d --build
 ```
@@ -59,18 +63,22 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+Open Clank is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=pewdiepie-archdaemon%2Fodysseus&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=Plaer1%2Fopen-clank&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&legend=top-left" />
  </picture>
 </a>
 
 ## License
 
 AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
+
+The previous [Odysseus wordmark](docs/odysseus-wordmark.png) remains available
+as a legacy identity asset; Open Clank and the Open Clanker mascot are the
+current project branding.

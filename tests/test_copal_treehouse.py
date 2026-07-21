@@ -65,7 +65,11 @@ def test_complete_author_learner_grade_and_gamification_workflow_is_event_derive
     assert projection["skills"]["skill:foundation"]["points"] == 60
     assert projection["skills"]["skill:advanced"]["points"] == 100
     assert projection["skills"]["skill:advanced"]["unlocked"] is True
-    assert projection["courses"]["course:one"] == {"completed": 3, "total": 3, "percent": 100, "complete": True}
+    assert projection["courses"]["course:one"]["completed"] == 3
+    assert projection["courses"]["course:one"]["total"] == 3
+    assert projection["courses"]["course:one"]["percent"] == 100
+    assert projection["courses"]["course:one"]["complete"] is True
+    assert "modules" in projection["courses"]["course:one"]
     assert projection["badges"][0]["badgeId"] == "badge:century"
     assert projection["quests"][0]["questId"] == "quest:path"
     assert projection["streak"] == 3
@@ -108,13 +112,14 @@ def test_publish_gates_submission_ownership_and_regrade_supersedes_points():
     state = setup_course()
     state, _, _ = run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="learner")
     state, _, _ = run(state, "activity.complete", {"activityId": "activity:foundation"}, actor="learner")
+    state, _, _ = run(state, "activity.complete", {"activityId": "activity:advanced"}, actor="learner")
     state, submitted, _ = run(state, "submission.submit", {"assignmentId": "assignment:one", "answer": "answer"}, actor="learner")
     with pytest.raises(TreeHouseError):
         run(state, "submission.grade", {"submissionId": submitted["submissionId"], "score": 10}, actor="learner")
     state, _, _ = run(state, "submission.grade", {"submissionId": submitted["submissionId"], "score": 90})
     state, _, _ = run(state, "submission.grade", {"submissionId": submitted["submissionId"], "score": 30})
     projection = compute_treehouse_projections(state)["learners"]["learner"]
-    assert projection["points"] == 60 + 30
+    assert projection["points"] == 60 + 20 + 30
 
 
 def test_ordering_deadlines_and_enrollment_completion_state_are_enforced():

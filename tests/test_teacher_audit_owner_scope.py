@@ -7,6 +7,7 @@ owner's ModelEndpoint in a multi-user deployment. See #2283.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import src.teacher_escalation as teacher_escalation
 import routes.skills_routes as skills_routes
@@ -18,14 +19,18 @@ def test_call_teacher_scopes_model_resolution_to_owner(monkeypatch):
     def fake_resolve_model(spec, owner=None):
         seen["spec"] = spec
         seen["owner"] = owner
-        return ("http://endpoint.local/v1", "teacher-model", {})
+        return SimpleNamespace(
+            endpoint_url="http://endpoint.local/v1",
+            model_id="teacher-model",
+            headers={},
+        )
 
-    async def fake_llm_call_async(url, model, messages, **kwargs):
+    async def fake_auxiliary(request):
         return "teacher reply"
 
-    monkeypatch.setattr("src.ai_interaction._resolve_model", fake_resolve_model)
+    monkeypatch.setattr("src.ai_interaction._resolve_model_target", fake_resolve_model)
     monkeypatch.setattr("src.ai_interaction._TEACHER_SYSTEM_PROMPT", "sys", raising=False)
-    monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
+    monkeypatch.setattr("src.model_dispatch.run_auxiliary_inference", fake_auxiliary)
 
     result = asyncio.run(
         teacher_escalation._call_teacher("teacher-model", "prompt", owner="alice")

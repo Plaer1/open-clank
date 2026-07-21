@@ -11,7 +11,8 @@ const log = Log.create({ service: "plugin.codex" })
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
-const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+const CODEX_API_BASE = "https://chatgpt.com/backend-api/codex"
+const CODEX_API_ENDPOINT = `${CODEX_API_BASE}/responses`
 const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
@@ -19,6 +20,19 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 type CodexModelCatalogEntry = {
   slug?: unknown
   visibility?: unknown
+}
+
+function usesCodexBackend(
+  model: { providerID: string; api: { npm: string } },
+  provider: { options?: Record<string, unknown> },
+): boolean {
+  if (model.providerID === "openai") return true
+  const baseURL = provider.options?.baseURL
+  return (
+    model.api.npm === "@ai-sdk/openai" &&
+    typeof baseURL === "string" &&
+    baseURL.replace(/\/+$/, "") === CODEX_API_BASE
+  )
 }
 
 /**
@@ -647,13 +661,13 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
       ],
     },
     "chat.headers": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (!usesCodexBackend(input.model, input.provider)) return
       output.headers.originator = "opencode"
       output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
       output.headers.session_id = input.sessionID
     },
     "chat.params": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (!usesCodexBackend(input.model, input.provider)) return
       // Match codex cli
       output.maxOutputTokens = undefined
     },

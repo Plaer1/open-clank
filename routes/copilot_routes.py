@@ -50,13 +50,6 @@ def _provision_endpoint(token: str, base: str, owner: Optional[str]) -> Dict:
         logger.warning(f"Copilot model fetch failed during provisioning: {e}")
         models = []
     model_ids = [m["id"] for m in models]
-    # Copilot picker models support OpenAI-style tool calling; mark the endpoint
-    # tool-capable so the agent loop sends native tool schemas.
-    # Tool-capable if any picker model advertises tool_calls. When the model
-    # fetch failed (empty list) default to True, since Copilot picker models
-    # support OpenAI-style tool calling.
-    supports_tools = bool(not models or any(m.get("tool_calls") for m in models))
-
     db = SessionLocal()
     try:
         ep = (
@@ -77,7 +70,7 @@ def _provision_endpoint(token: str, base: str, owner: Optional[str]) -> Dict:
             db.add(ep)
         ep.api_key = token
         ep.is_enabled = True
-        ep.supports_tools = supports_tools
+        ep.supports_tools = None
         if model_ids:
             ep.cached_models = json.dumps(model_ids)
         db.commit()

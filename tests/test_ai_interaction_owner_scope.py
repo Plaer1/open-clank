@@ -11,7 +11,7 @@ def _source(fn) -> str:
 
 
 def test_model_resolver_applies_owner_filter():
-    body = _source(ai_interaction._resolve_model)
+    body = _source(ai_interaction._resolve_model_target)
 
     assert "owner: Optional[str] = None" in body
     assert "from src.auth_helpers import owner_filter" in body

@@ -1,13 +1,11 @@
 import asyncio
-import sys
-import types
 from types import SimpleNamespace
 
 from src import bg_monitor
 
 
 def test_drain_agent_ignores_non_string_deltas(monkeypatch):
-    async def fake_stream_agent_loop(*args, **kwargs):
+    async def fake_stream_agent_target(*args, **kwargs):
         yield 'data: {"delta": null}'
         yield 'data: {"delta": ["bad"]}'
         yield 'data: {"delta": "ok"}'
@@ -15,9 +13,9 @@ def test_drain_agent_ignores_non_string_deltas(monkeypatch):
         yield 'data: {"type": "tool_output", "tool": "shell", "output": "done"}'
         yield "data: [DONE]"
 
-    agent_loop = types.ModuleType("src.agent_loop")
-    agent_loop.stream_agent_loop = fake_stream_agent_loop
-    monkeypatch.setitem(sys.modules, "src.agent_loop", agent_loop)
+    monkeypatch.setattr(
+        "src.model_dispatch.stream_agent_target", fake_stream_agent_target,
+    )
 
     sess = SimpleNamespace(
         endpoint_url="http://example.test",
@@ -25,6 +23,7 @@ def test_drain_agent_ignores_non_string_deltas(monkeypatch):
         headers=None,
         context_length=0,
         id="s1",
+        endpoint_id="endpoint-1",
     )
 
     full, events = asyncio.run(bg_monitor._drain_agent(sess, []))

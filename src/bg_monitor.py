@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import uuid
 
 from src import bg_jobs
 
@@ -23,6 +25,8 @@ POLL_INTERVAL_S = 5
 # The follow-up agent run is allowed a few rounds to actually continue the task
 # (e.g. after `pip install` finishes, run the transcription).
 _FOLLOWUP_MAX_ROUNDS = 12
+_MONITOR_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+_FOLLOWUP_TIMEOUT_S = 15 * 60
 
 
 async def _drain_agent(sess, messages):
@@ -39,6 +43,7 @@ async def _drain_agent(sess, messages):
         sess.endpoint_url,
         sess.model,
         getattr(sess, "headers", None),
+        endpoint_id=getattr(sess, "endpoint_id", None),
     )
     async for chunk in stream_agent_target(
         target,
@@ -47,7 +52,16 @@ async def _drain_agent(sess, messages):
         session_id=sess.id,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,
         owner=getattr(sess, "owner", None),
+        cwd=getattr(sess, "workspace", None),
+        workload="background",
     ):
+        if chunk.startswith("event: error"):
+            data_line = next((line[5:].strip() for line in chunk.splitlines() if line.startswith("data:")), "")
+            try:
+                payload = json.loads(data_line)
+            except ValueError:
+                payload = {"error": data_line or "Agent follow-up failed"}
+            raise RuntimeError(str(payload.get("code") or payload.get("error") or "Agent follow-up failed"))
         if not chunk.startswith("data: "):
             continue
         body = chunk[6:].strip()
@@ -96,6 +110,15 @@ async def _run_followup(rec: dict) -> bool:
         logger.info("bg-followup: session %s gone for job %s — skipping", rec.get("session_id"), rec.get("id"))
         return True
 
+    # Crash-safe idempotency: persistence may have succeeded immediately before
+    # a process died and released its file-store claim. Never append twice.
+    for message in getattr(sess, "history", ()):
+        metadata = getattr(message, "metadata", None)
+        if metadata is None and isinstance(message, dict):
+            metadata = message.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("bg_job_id") == rec.get("id"):
+            return True
+
     # Don't write into a session that's mid-stream. The followup appends to
     # history + save_sessions(); a concurrent live turn does the same, and with
     # no per-session lock the two interleave (reordered/clobbered messages).
@@ -118,6 +141,8 @@ async def _run_followup(rec: dict) -> bool:
     context.append({"role": "user", "content": inject})
 
     full, tool_events = await _drain_agent(sess, context)
+    if not full.strip() and not tool_events:
+        raise RuntimeError("Agent follow-up ended without a result")
 
     # Persist ONLY the assistant continuation so it renders as a normal agent
     # turn — a standard chat bubble plus `tool_events` that the frontend
@@ -142,16 +167,49 @@ async def _run_followup(rec: dict) -> bool:
 async def _loop():
     while True:
         try:
-            for rec in bg_jobs.pending_followups():
+            for rec in bg_jobs.claim_pending_followups(_MONITOR_ID):
+                claim_token = rec.get("_claim_token") or ""
                 try:
-                    if await _run_followup(rec):
-                        bg_jobs.mark_followed_up(rec["id"])
+                    completed = await asyncio.wait_for(
+                        _run_followup(rec), timeout=_FOLLOWUP_TIMEOUT_S,
+                    )
+                    if completed:
+                        bg_jobs.finish_followup(rec["id"], claim_token)
+                    else:
+                        bg_jobs.fail_followup(
+                            rec["id"], claim_token, "Session is busy", count_attempt=False,
+                        )
                 except Exception as e:
-                    # Idempotent: leave followed_up=False so the next tick retries.
-                    logger.warning("bg-followup failed for %s (will retry): %s", rec.get("id"), e)
+                    state = bg_jobs.fail_followup(rec["id"], claim_token, str(e))
+                    logger.warning("bg-followup failed for %s (%s): %s", rec.get("id"), state, e)
+                    if state == "failed":
+                        await _persist_terminal_failure(rec, str(e))
         except Exception as e:
             logger.warning("bg-monitor tick error: %s", e)
         await asyncio.sleep(POLL_INTERVAL_S)
+
+
+async def _persist_terminal_failure(rec: dict, error: str) -> None:
+    """Surface exhausted continuation failure once without claiming success."""
+    from core.models import ChatMessage
+    from src.ai_interaction import get_session_manager
+
+    sm = get_session_manager()
+    sess = sm.get_session(rec.get("session_id")) if sm else None
+    if not sess:
+        return
+    for message in getattr(sess, "history", ()):
+        metadata = getattr(message, "metadata", None)
+        if metadata is None and isinstance(message, dict):
+            metadata = message.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("bg_followup_failure") == rec.get("id"):
+            return
+    sm.add_message(sess.id, ChatMessage(
+        "assistant",
+        f"Background job {rec.get('id')} finished, but its automatic Agent continuation failed: {error}",
+        metadata={"bg_followup_failure": rec.get("id"), "status": "error"},
+    ))
+    sm.save_sessions()
 
 
 def start_bg_monitor():

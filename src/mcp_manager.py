@@ -9,8 +9,9 @@ import json
 import logging
 import os
 import re
-import asyncio 
-from typing import Any, Dict, List, Optional, Set, Tuple
+import asyncio
+from contextlib import AsyncExitStack
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
 from src.runtime_paths import get_app_root
@@ -50,6 +51,7 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
 _MCP_PARAM_MAX = 12   # max params rendered per tool
 _MCP_TOKEN_MAX = 40   # max chars per rendered name / type token
 _MCP_HINT_MAX = 300   # total-length backstop for the whole hint
+_MCP_DISCONNECT_TIMEOUT = 5.0
 
 
 def _sanitize_schema_token(value: Any, limit: int = _MCP_TOKEN_MAX) -> str:
@@ -151,12 +153,168 @@ class McpManager:
         self._tools: Dict[str, List[Dict]] = {}
         # server_id -> MCP ClientSession
         self._sessions: Dict[str, Any] = {}
-        # server_id -> exit stack (for cleanup)
-        self._stacks: Dict[str, Any] = {}
-        # server_id -> background connect task (HTTP transport / OAuth)
-        self._connect_tasks: Dict[str, Any] = {}
+        # A persistent owner task enters, serves, and exits each MCP transport.
+        # AnyIO cancel scopes must be exited by the task that entered them.
+        self._connect_tasks: Dict[str, asyncio.Task] = {}
+        self._connect_stops: Dict[str, asyncio.Event] = {}
+        self._connect_ready: Dict[str, asyncio.Future] = {}
+        # HTTP/OAuth waits can outlive the bounded connect response while the
+        # persistent owner task continues toward authorization/readiness.
+        self._connect_waiters: Dict[str, asyncio.Task] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
+
+    @staticmethod
+    def _tool_records(tools_result: Any) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for tool in tools_result.tools:
+            records.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                "annotations": getattr(tool, "annotations", None),
+            })
+        return records
+
+    async def _run_connection_owner(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        ready: asyncio.Future,
+        stop: asyncio.Event,
+        opener: Callable[[AsyncExitStack], Awaitable[Tuple[Any, List[Dict[str, Any]], Dict[str, Any]]]],
+    ) -> None:
+        """Own one MCP context stack from entry through exit in one task."""
+        stack = AsyncExitStack()
+        current = asyncio.current_task()
+        connected = False
+        failed: Optional[BaseException] = None
+        try:
+            session, tools, metadata = await opener(stack)
+            if self._connect_tasks.get(server_id) is not current:
+                return
+            self._sessions[server_id] = session
+            self._tools[server_id] = tools
+            self._connections[server_id] = {
+                "status": "connected",
+                "name": name,
+                "transport": transport,
+                "tool_count": len(tools),
+                **metadata,
+            }
+            connected = True
+            if not ready.done():
+                ready.set_result(True)
+            logger.info(
+                "MCP server connected: %s (%s) - %d tools via %s",
+                name,
+                server_id,
+                len(tools),
+                transport,
+            )
+            await stop.wait()
+        except asyncio.CancelledError as exc:
+            failed = exc
+            if not ready.done():
+                ready.set_result(False)
+        except Exception as exc:
+            failed = exc
+            if not ready.done():
+                ready.set_exception(exc)
+            elif self._connect_tasks.get(server_id) is current:
+                self._connections[server_id] = {
+                    "status": "error",
+                    "error": str(exc),
+                    "name": name,
+                    "transport": transport,
+                }
+                logger.error(
+                    "MCP server owner failed after connect: %s (%s): %s",
+                    name,
+                    server_id,
+                    exc,
+                )
+        finally:
+            close_started = asyncio.get_running_loop().time()
+            close_result = "cancelled" if isinstance(failed, asyncio.CancelledError) else "ok"
+            logger.info(
+                "MCP shutdown server=%s name=%s transport=%s event=start",
+                server_id,
+                name,
+                transport,
+            )
+            try:
+                await stack.aclose()
+            except Exception as exc:
+                close_result = "error"
+                logger.warning(
+                    "Error closing MCP server %s in owner task: %s",
+                    server_id,
+                    exc,
+                )
+                if failed is None:
+                    failed = exc
+            logger.info(
+                "MCP shutdown server=%s name=%s transport=%s event=end duration_s=%.3f result=%s",
+                server_id,
+                name,
+                transport,
+                asyncio.get_running_loop().time() - close_started,
+                close_result,
+            )
+            if not ready.done():
+                ready.set_result(False)
+            if self._connect_tasks.get(server_id) is current:
+                self._connect_tasks.pop(server_id, None)
+                self._connect_stops.pop(server_id, None)
+                self._connect_ready.pop(server_id, None)
+                self._sessions.pop(server_id, None)
+                self._tools.pop(server_id, None)
+                if connected and not stop.is_set() and failed is not None:
+                    self._connections[server_id] = {
+                        "status": "error",
+                        "error": str(failed),
+                        "name": name,
+                        "transport": transport,
+                    }
+
+    async def _start_owned_connection(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        opener: Callable[[AsyncExitStack], Awaitable[Tuple[Any, List[Dict[str, Any]], Dict[str, Any]]]],
+    ) -> bool:
+        if server_id in self._connect_tasks or server_id in self._sessions:
+            raise RuntimeError(f"MCP server {server_id} already has an active owner")
+        loop = asyncio.get_running_loop()
+        ready = loop.create_future()
+        # Retrieve exceptions even when an HTTP authorization waiter is later
+        # cancelled, preventing an unobserved-future warning during shutdown.
+        ready.add_done_callback(lambda fut: fut.exception() if not fut.cancelled() else None)
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            self._run_connection_owner(
+                server_id,
+                name,
+                transport,
+                ready,
+                stop,
+                opener,
+            ),
+            name=f"mcp-owner:{server_id}",
+        )
+        self._connect_tasks[server_id] = task
+        self._connect_stops[server_id] = stop
+        self._connect_ready[server_id] = ready
+        try:
+            return bool(await asyncio.shield(ready))
+        except asyncio.CancelledError:
+            if self._connect_tasks.get(server_id) is task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
 
     async def connect_server(
         self,
@@ -170,6 +328,12 @@ class McpManager:
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
         try:
+            if (
+                server_id in self._connect_tasks
+                or server_id in self._connect_waiters
+                or server_id in self._sessions
+            ):
+                await self.disconnect_server(server_id)
             if transport == "stdio":
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
             elif transport == "sse":
@@ -191,145 +355,62 @@ class McpManager:
 
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
         """Connect to an MCP server via stdio transport."""
-        try:
+        async def _open(stack: AsyncExitStack):
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from contextlib import AsyncExitStack
 
             server_params = StdioServerParameters(
                 command=command,
                 args=args,
                 env={**os.environ, **env} if env else None,
             )
+            # Child stderr goes to a log file, never the operator's terminal.
+            errlog = _mcp_child_stderr_log(server_id)
+            stack.callback(errlog.close)
+            read_stream, write_stream = await stack.enter_async_context(
+                stdio_client(server_params, errlog=errlog)
+            )
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            tools = self._tool_records(await session.list_tools())
 
-            stack = AsyncExitStack()
-            registered = False
+            identity_hints = []
+            for key, value in (env or {}).items():
+                key_lower = key.lower()
+                if any(part in key_lower for part in ("email_address", "account", "user", "username")):
+                    identity_hints.append(value)
+            identity = ", ".join(identity_hints) if identity_hints else ""
+            return session, tools, {"identity": identity}
 
-            try:
-                # Child stderr goes to a log file, never the operator's
-                # terminal — inherited stderr kept spamming after exit.
-                errlog = _mcp_child_stderr_log(server_id)
-                stack.callback(errlog.close)
-                transport = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
-
-                tools = []
-                for tool in tools_result.tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                        # plan-mode read-only gating. Absent on many servers, so we
-                        # fall back to a name heuristic in mcp_tool_is_readonly().
-                        "annotations": getattr(tool, "annotations", None),
-                    })
-
-                # Extract identity hints from env vars (e.g. email address, API name)
-                # so tool descriptions can distinguish between multiple instances of
-                # the same MCP server (e.g. two email accounts).
-                identity_hints = []
-                for k, v in (env or {}).items():
-                    k_lower = k.lower()
-                    if any(x in k_lower for x in ["email_address", "account", "user", "username"]):
-                        identity_hints.append(v)
-                identity = ", ".join(identity_hints) if identity_hints else ""
-
-                self._sessions[server_id] = session
-                self._stacks[server_id] = stack
-                self._tools[server_id] = tools
-                self._connections[server_id] = {
-                    "status": "connected",
-                    "name": name,
-                    "transport": "stdio",
-                    "tool_count": len(tools),
-                    "identity": identity,
-                }
-
-                registered = True
-
-            finally:
-                if not registered:
-                    await stack.aclose()
-
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via stdio")
-            return True
-
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {
-                "status": "error",
-                "error": "mcp package not installed",
-                "name": name,
-            }
-            return False
+        return await self._start_owned_connection(server_id, name, "stdio", _open)
 
     async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
         """Connect to an MCP server via SSE transport."""
-        try:
+        async def _open(stack: AsyncExitStack):
             from mcp import ClientSession
             from mcp.client.sse import sse_client
-            from contextlib import AsyncExitStack
 
-            stack = AsyncExitStack()
-            registered = False
+            read_stream, write_stream = await stack.enter_async_context(sse_client(url))
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            tools = self._tool_records(await session.list_tools())
+            return session, tools, {}
 
-            try:
-                transport = await stack.enter_async_context(sse_client(url))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
-
-                tools = []
-                for tool in tools_result.tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "input_schema": tool.inputSchema if hasattr(tool, 'inputSchema') else {},
-                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                        # plan-mode read-only gating. Absent on many servers, so we
-                        # fall back to a name heuristic in mcp_tool_is_readonly().
-                        "annotations": getattr(tool, 'annotations', None),
-                    })
-
-                self._sessions[server_id] = session
-                self._stacks[server_id] = stack
-                self._tools[server_id] = tools
-                self._connections[server_id] = {
-                    "status": "connected",
-                    "name": name,
-                    "transport": "sse",
-                    "tool_count": len(tools),
-                }
-
-                registered = True
-
-                logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via SSE")
-                return True
-
-            finally:
-                if not registered:
-                    await stack.aclose()
-
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
+        return await self._start_owned_connection(server_id, name, "sse", _open)
 
     async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0) -> bool:
         """Begin a Streamable HTTP connect in the background. Returns within
         `wait` seconds: True if it connected (cached-token path), otherwise the
         flow is awaiting browser authorization and status becomes 'needs_auth'."""
-        import asyncio
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
         task = asyncio.create_task(self._connect_http(server_id, name, url))
-        self._connect_tasks[server_id] = task
+        self._connect_waiters[server_id] = task
+
+        def _forget_waiter(done: asyncio.Task) -> None:
+            if self._connect_waiters.get(server_id) is done:
+                self._connect_waiters.pop(server_id, None)
+
+        task.add_done_callback(_forget_waiter)
         done, _ = await asyncio.wait({task}, timeout=wait)
         if task in done:
             try:
@@ -352,11 +433,6 @@ class McpManager:
     async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
         """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
         try:
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
-            from src.mcp_oauth import build_provider, clear_auth_url
-
             def _on_redirect(auth_url):
                 # Publish needs_auth the moment the URL is known, independent of
                 # how long discovery/DCR took (may exceed the bounded start wait).
@@ -365,35 +441,29 @@ class McpManager:
                     "auth_url": auth_url,
                 }
 
-            provider = build_provider(server_id, url, on_redirect=_on_redirect)
-            stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await session.initialize()
+            async def _open(stack: AsyncExitStack):
+                from mcp import ClientSession
+                from mcp.client.streamable_http import streamablehttp_client
+                from src.mcp_oauth import build_provider
 
-            tools_result = await session.list_tools()
-            tools = []
-            for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                })
+                provider = build_provider(server_id, url, on_redirect=_on_redirect)
+                read_stream, write_stream, _get_session_id = await stack.enter_async_context(
+                    streamablehttp_client(url, auth=provider)
+                )
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                tools = self._tool_records(await session.list_tools())
+                return session, tools, {}
 
-            self._sessions[server_id] = session
-            self._stacks[server_id] = stack
-            self._tools[server_id] = tools
-            self._connections[server_id] = {
-                "status": "connected", "name": name, "transport": "http",
-                "tool_count": len(tools),
-            }
+            connected = await self._start_owned_connection(server_id, name, "http", _open)
+            if not connected:
+                return False
+            from src.mcp_oauth import clear_auth_url
             clear_auth_url(server_id)
             # Tools changed (this can complete after connect_server already
             # returned, via the background OAuth flow), so bump the generation
             # to invalidate the tool-prompt cache.
             self._generation += 1
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via http")
             return True
         except ImportError:
             logger.warning("MCP package not installed. Install with: pip install mcp")
@@ -406,23 +476,51 @@ class McpManager:
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
-        # Cancel any in-flight HTTP/OAuth background connect so it stops
-        # publishing status for a server that may be getting deleted.
-        task = self._connect_tasks.pop(server_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+        # Stop any bounded HTTP/OAuth readiness waiter first. Its cancellation
+        # asks the persistent owner task to unwind partial startup in that same
+        # owner task.
+        waiter = self._connect_waiters.pop(server_id, None)
+        if waiter is not None and waiter is not asyncio.current_task() and not waiter.done():
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
         try:
             from src.mcp_oauth import clear_auth_url
             clear_auth_url(server_id)
         except Exception:
             pass
 
-        stack = self._stacks.pop(server_id, None)
-        if stack:
+        task = self._connect_tasks.pop(server_id, None)
+        stop = self._connect_stops.pop(server_id, None)
+        ready = self._connect_ready.pop(server_id, None)
+        if task is not None and task is not asyncio.current_task():
+            state = self._connections.get(server_id, {}).get("status")
+            if not task.done():
+                if state == "connected" and stop is not None:
+                    self._connections[server_id]["status"] = "disconnecting"
+                    stop.set()
+                else:
+                    # Partial startup may be blocked inside transport/OAuth
+                    # setup and has not reached its stop wait. Cancellation is
+                    # delivered to the owner so its own finally closes the stack.
+                    task.cancel()
             try:
-                await stack.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing MCP server {server_id}: {e}")
+                await asyncio.wait_for(task, timeout=_MCP_DISCONNECT_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Timed out closing MCP server %s after %.1fs; cancelling owner task",
+                    server_id,
+                    _MCP_DISCONNECT_TIMEOUT,
+                )
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            except asyncio.CancelledError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            except Exception as exc:
+                logger.warning("MCP owner task failed while closing %s: %s", server_id, exc)
+        elif ready is not None and not ready.done():
+            ready.set_result(False)
 
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
@@ -432,9 +530,16 @@ class McpManager:
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
-        ids = list(self._sessions.keys())
-        for sid in ids:
-            await self.disconnect_server(sid)
+        ids = sorted({
+            *self._sessions.keys(),
+            *self._connect_tasks.keys(),
+            *self._connect_waiters.keys(),
+            *self._connections.keys(),
+        })
+        if ids:
+            await asyncio.gather(
+                *(self.disconnect_server(server_id) for server_id in ids)
+            )
 
 
     async def connect_all_enabled(self):

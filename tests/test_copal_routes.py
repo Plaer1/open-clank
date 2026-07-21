@@ -1,15 +1,76 @@
 import io
 import json
+import stat
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from routes.copal_routes import setup_copal_routes
+from routes.copal_routes import (
+    _encode_note,
+    _import_markdown_record,
+    _note_blocks,
+    _note_markdown,
+    _note_view,
+    _require_mutable_note,
+    setup_copal_routes,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_note_block_ids_survive_insertions_before_unchanged_content():
+    original = _note_blocks("Alpha\nBeta")
+    alpha_id, beta_id = [block["id"] for block in original]
+
+    inserted = _note_blocks("New\nAlpha\nBeta", original)
+
+    assert inserted[0]["id"] not in {alpha_id, beta_id}
+    assert inserted[1]["id"] == alpha_id
+    assert inserted[2]["id"] == beta_id
+
+
+def test_preserved_database_note_rejects_content_mutation():
+    with pytest.raises(HTTPException) as error:
+        _require_mutable_note({"kind": "note", "rawPreserved": True, "note_error": "future schema"})
+
+    assert error.value.status_code == 409
+
+
+def test_imported_markdown_is_deterministic_and_exactly_exportable():
+    source = "---\ntags: [alpha, beta]\ndue: 2026-07-19\n---\n\n# Welcome\n\n```dataview\nTABLE due\n```\n"
+    first, diagnostics = _import_markdown_record(source, "Welcome.md")
+    second, repeated_diagnostics = _import_markdown_record(source, "Welcome.md")
+
+    assert first == second
+    assert diagnostics == repeated_diagnostics == []
+    document = _note_view({"id": "DOC1", "kind": "note", "name": "Welcome.md", "text": first})
+    assert document["properties"] == {"tags": ["alpha", "beta"], "due": "2026-07-19"}
+    assert document["extensions"]["compatibility"] == [
+        {"kind": "plugin-query-block", "language": "dataview", "execution": "inert"}
+    ]
+    assert _note_markdown(document) == source
+
+
+def test_editing_imported_markdown_marks_snapshot_modified_and_exports_projection():
+    source = "---\nstatus: draft\n---\n\nOriginal\n"
+    encoded, _ = _import_markdown_record(source, "Article.md")
+    stored = json.loads(encoded)
+    edited = _encode_note(
+        "Edited",
+        {"status": "final"},
+        previous=stored,
+    )
+    document = _note_view({"id": "DOC1", "kind": "wiki", "name": "Article.md", "text": edited})
+
+    assert document["corpus"] == "wiki"
+    assert document["extensions"]["interchange"]["modified"] is True
+    assert _note_markdown(document) != source
+    assert "status: \"final\"" in _note_markdown(document)
+    assert _note_markdown(document).endswith("Edited")
 
 
 class FakeBridge:
@@ -39,7 +100,16 @@ class FakeBridge:
                 for path in root.rglob("*")
                 if path.is_file()
             }
-            return {"notes": 1, "assets": 0, "planning": True, "treehouse": True, "op": "IMPORT1"}
+            return {
+                "notes": 1,
+                "assets": 0,
+                "compatibility": 0,
+                "unchanged": 0,
+                "planning": True,
+                "treehouse": True,
+                "entries": [],
+                "op": "IMPORT1",
+            }
         if operation == "export_snapshot":
             return {
                 "docs": [
@@ -70,6 +140,47 @@ class RestartingBridge(FakeBridge):
     async def start(self):
         self.start_calls += 1
         self.alive = True
+
+
+class VisibilityBridge(FakeBridge):
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation == "index":
+            return {
+                "docs": [
+                    {"id": "VISIBLE", "kind": "note", "name": "Visible", "text": "visible", "hidden": False},
+                    {"id": "HIDDEN", "kind": "note", "name": ".private/Hidden", "text": "hidden", "hidden": True},
+                    {"id": "COMPAT", "kind": "compatibility", "name": ".app/config.json", "text": "", "hidden": True},
+                ]
+            }
+        return await super().call(operation, args, timeout)
+
+
+class MixedCorpusExportBridge(FakeBridge):
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation == "export_snapshot":
+            note, _ = _import_markdown_record("# Notes version\n", "Same.md")
+            wiki, _ = _import_markdown_record("# Wiki version\n", "Same.md")
+            return {
+                "docs": [
+                    {"id": "NOTE", "corpus": "notes", "kind": "note", "name": "Same.md", "text": note},
+                    {"id": "WIKI", "corpus": "wiki", "kind": "wiki", "name": "Same.md", "text": wiki},
+                ]
+            }
+        return await super().call(operation, args, timeout)
+
+
+class MissingAssetExportBridge(FakeBridge):
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation == "export_snapshot":
+            return {
+                "docs": [
+                    {"id": "MISSING", "corpus": "notes", "kind": "asset", "name": "missing.bin"},
+                ]
+            }
+        return await super().call(operation, args, timeout)
 
 
 class BaseBridge(FakeBridge):
@@ -114,6 +225,50 @@ views:
             if doc["kind"] == "markdown" and "status:" in doc["text"]:
                 status = doc["text"].split("status:", 1)[1].splitlines()[0].strip().strip('"')
                 doc["frontmatter"]["status"] = status
+            return {"outcome": "committed", "doc": doc}
+        return await super().call(operation, args, timeout)
+
+
+class NoteBridge(FakeBridge):
+    def __init__(self, data_dir):
+        super().__init__(data_dir)
+        self.counter = 1
+        self.docs = {
+            "TARGET": {
+                "id": "TARGET", "kind": "markdown", "name": "Target.md", "head": "target-head",
+                "text": "# Target\n", "frontmatter": {}, "tags": [], "links": [],
+            },
+            "BASE": {
+                "id": "BASE", "kind": "base", "name": "Notes.base", "head": "base-head",
+                "text": "version: 1\nviews:\n  - id: table\n    name: Table\n    columns: [file.name, status]\n",
+                "frontmatter": {}, "tags": [], "links": [],
+            },
+        }
+
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation in {"index", "export_snapshot"}:
+            docs = list(self.docs.values())
+            if args.get("kind"):
+                docs = [doc for doc in docs if doc["kind"] == args["kind"]]
+            return {"docs": docs}
+        if operation == "get":
+            return self.docs[args["id"]]
+        if operation == "create":
+            document_id = f"NOTE{self.counter}"
+            self.counter += 1
+            doc = {
+                "id": document_id, "kind": args["kind"], "name": args["name"], "head": f"{document_id}-head",
+                "text": args["content"], "frontmatter": {}, "tags": [], "links": [],
+            }
+            self.docs[document_id] = doc
+            return {"outcome": "created", "doc": doc}
+        if operation == "write":
+            doc = self.docs[args["id"]]
+            if args.get("base") and args["base"] != doc["head"]:
+                return {"outcome": "stale", "doc": doc}
+            doc["text"] = args["content"]
+            doc["head"] += "x"
             return {"outcome": "committed", "doc": doc}
         return await super().call(operation, args, timeout)
 
@@ -199,6 +354,20 @@ def test_scope_is_server_owned_and_workspace_validated(tmp_path, monkeypatch):
     assert http.get("/api/copal/documents?workspace=../escape").status_code == 400
 
 
+def test_hidden_document_query_is_explicit_and_ui_requests_full_projection(tmp_path, monkeypatch):
+    http, _ = client(tmp_path, monkeypatch)
+    http.app.state.copal_bridge = VisibilityBridge(tmp_path)
+
+    visible = http.get("/api/copal/documents").json()["docs"]
+    included = http.get("/api/copal/documents?hidden=include").json()["docs"]
+    hidden = http.get("/api/copal/documents?hidden=only").json()["docs"]
+
+    assert [document["id"] for document in visible] == ["VISIBLE"]
+    assert [document["id"] for document in included] == ["VISIBLE", "HIDDEN"]
+    assert [document["id"] for document in hidden] == ["HIDDEN"]
+    assert "api('/documents?hidden=include')" in (ROOT / "static/js/copal.js").read_text()
+
+
 def test_dead_bridge_restarts_before_copal_operation(tmp_path, monkeypatch):
     http, _ = client(tmp_path, monkeypatch)
     bridge = RestartingBridge(tmp_path)
@@ -228,13 +397,115 @@ def test_stale_write_surfaces_authoritative_head(tmp_path, monkeypatch):
     assert response.json()["detail"]["doc"]["head"] == "new-head"
 
 
+def test_database_note_envelope_is_structured_lossless_and_indexed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_copal_routes())
+    bridge = NoteBridge(tmp_path)
+    app.state.copal_bridge = bridge
+    http = TestClient(app)
+    body = "# Native\n  - [ ] nested\n* bullet\n___\n  > quote\nSee [[Target#Proof]] and #native"
+    created = http.post(
+        "/api/copal/documents",
+        json={
+            "name": "Ideas/Native",
+            "content": body,
+            "properties": {"status": "active", "score": 7, "settings": {"dense": True}, "tags": ["database"]},
+            "relations": [{"kind": "link", "target": "Target", "targetDocumentId": "TARGET", "fragment": "Proof"}],
+        },
+    )
+    assert created.status_code == 200
+    note = created.json()["doc"]
+    assert note["kind"] == "note"
+    assert note["storage"] == "database"
+    assert note["text"] == body
+    assert note["properties"]["settings"] == {"dense": True}
+    assert note["relations"][0]["targetDocumentId"] == "TARGET"
+    assert note["tasks"][0]["text"] == "nested"
+    assert {"native", "database"}.issubset(note["tags"])
+
+    stored = json.loads(bridge.docs[note["id"]]["text"])
+    assert stored["body"]["type"] == "doc"
+    assert "\n".join(block["source"] for block in stored["body"]["blocks"]) == body
+    assert all(block["id"].startswith("blk_") for block in stored["body"]["blocks"])
+    assert all(property_["id"].startswith("prop_") for property_ in stored["properties"])
+    assert stored["relations"][0]["id"] in stored["body"]["blocks"][-1]["relationIds"]
+    first_block = stored["body"]["blocks"][0]["id"]
+
+    updated_body = body.replace("# Native", "# Native note", 1)
+    updated = http.put(
+        f"/api/copal/documents/{note['id']}",
+        json={
+            "content": updated_body,
+            "base": note["head"],
+            "properties": {**note["properties"], "status": "done"},
+            "relations": [
+                {"kind": "link", "target": "Target", "targetDocumentId": "TARGET", "fragment": "Proof"},
+                {"kind": "parent", "target": "Target", "targetDocumentId": "TARGET"},
+            ],
+        },
+    )
+    assert updated.status_code == 200
+    fresh = http.get(f"/api/copal/documents/{note['id']}").json()
+    assert fresh["text"] == updated_body
+    assert fresh["properties"]["status"] == "done"
+    rewritten = json.loads(bridge.docs[note["id"]]["text"])
+    assert rewritten["body"]["blocks"][0]["id"] == first_block
+    assert any(relation["kind"] == "parent" and relation["origin"] == "explicit" for relation in rewritten["relations"])
+
+    assert [doc["id"] for doc in http.get("/api/copal/documents?query=done").json()["docs"]] == [note["id"]]
+    assert http.get("/api/copal/documents?query=schemaVersion").json()["docs"] == []
+
+    stale = http.put(
+        f"/api/copal/documents/{note['id']}",
+        json={"content": "mine", "base": "stale", "properties": fresh["properties"]},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["doc"]["text"] == updated_body
+
+
+def test_base_edits_native_properties_and_markdown_export_is_only_an_adapter(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_copal_routes())
+    bridge = NoteBridge(tmp_path)
+    app.state.copal_bridge = bridge
+    http = TestClient(app)
+    created = http.post(
+        "/api/copal/documents",
+        json={"name": "Native", "content": "Body", "properties": {"status": "active"}},
+    ).json()["doc"]
+    block_id = created["blocks"][0]["id"]
+
+    patched = http.patch(
+        f"/api/copal/bases/BASE/rows/{created['id']}",
+        json={"property": "status", "value": "parked", "base": created["head"]},
+    )
+    assert patched.status_code == 200
+    fresh = http.get(f"/api/copal/documents/{created['id']}").json()
+    assert fresh["properties"]["status"] == "parked"
+    assert fresh["blocks"][0]["id"] == block_id
+    assert not fresh["text"].startswith("---")
+
+    exported = http.get("/api/copal/export/obsidian")
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        markdown = archive.read("Native.md").decode()
+    assert markdown.startswith('---\nstatus: "parked"\n---\n\nBody')
+
+
 def test_trash_restore_keeps_server_owned_scope(tmp_path, monkeypatch):
     http, bridge = client(tmp_path, monkeypatch)
 
     assert http.get("/api/copal/trash?workspace=personal").status_code == 200
-    assert bridge.calls[-1][1] == {"owner": "local", "workspace_id": "personal"}
+    # trash now queries both notes and wiki stores
+    notes_call = next(call for call in bridge.calls if call[1].get("corpus") == "notes")
+    wiki_call = next(call for call in bridge.calls if call[1].get("corpus") == "wiki")
+    assert notes_call[1] == {"owner": "local", "workspace_id": "personal", "corpus": "notes"}
+    assert wiki_call[1] == {"owner": "local", "workspace_id": "personal", "corpus": "wiki"}
     assert http.post("/api/copal/trash/DOC1/restore?workspace=personal").status_code == 200
-    assert bridge.calls[-1][1] == {"owner": "local", "workspace_id": "personal", "id": "DOC1"}
+    assert bridge.calls[-1][1]["owner"] == "local"
+    assert bridge.calls[-1][1]["workspace_id"] == "personal"
+    assert bridge.calls[-1][1]["id"] == "DOC1"
 
 
 def test_obsidian_export_is_scoped_and_scrubs_operational_metadata(tmp_path, monkeypatch):
@@ -246,8 +517,99 @@ def test_obsidian_export_is_scoped_and_scrubs_operational_metadata(tmp_path, mon
         manifest = archive.read(".copal/export-manifest.json").decode()
     assert "secret-operational-head" not in manifest
     assert '"workspace": "personal"' in manifest
+    assert int(response.headers["content-length"]) == len(response.content)
     export_call = next(call for call in bridge.calls if call[0] == "export_snapshot")
     assert export_call[1] == {"owner": "local", "workspace_id": "personal"}
+
+
+def test_mixed_note_and_wiki_export_uses_collision_free_round_trip_layout(tmp_path, monkeypatch):
+    http, _ = client(tmp_path, monkeypatch)
+    bridge = MixedCorpusExportBridge(tmp_path)
+    http.app.state.copal_bridge = bridge
+
+    exported = http.get("/api/copal/export/obsidian?workspace=personal")
+
+    assert exported.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        assert archive.read("Same.md") == b"# Notes version\n"
+        assert archive.read(".copal/wiki/Same.md") == b"# Wiki version\n"
+        assert len(archive.namelist()) == len(set(archive.namelist()))
+        manifest = json.loads(archive.read(".copal/export-manifest.json"))
+    assert {item["corpus"] for item in manifest["documents"]} == {"notes", "wiki"}
+
+    imported = http.post(
+        "/api/copal/import/obsidian?workspace=personal",
+        files={"file": ("round-trip.zip", exported.content, "application/zip")},
+    )
+
+    assert imported.status_code == 200
+    assert json.loads(bridge.imported_files["Same.md"])["schemaVersion"] == 1
+    assert json.loads(bridge.imported_files[".copal/wiki/Same.md"])["schemaVersion"] == 1
+    import_call = next(call for call in reversed(bridge.calls) if call[0] == "import_vault")
+    assert import_call[1]["note_kind"] == "note"
+    assert import_call[1]["restore_ids"] == {
+        "Same.md": {"id": "NOTE", "corpus": "notes", "kind": "note"},
+        ".copal/wiki/Same.md": {"id": "WIKI", "corpus": "wiki", "kind": "wiki"},
+    }
+    assert imported.json()["restoreManifest"] == {"present": True, "identities": 2}
+
+
+def test_copal_export_excludes_shared_seeds_and_manifest_tampering_fails_closed(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+
+    class SharedExportBridge(FakeBridge):
+        async def call(self, operation, args, timeout=20):
+            if operation == "export_snapshot":
+                return {
+                    "docs": [
+                        {
+                            "id": "LOCAL",
+                            "corpus": "notes",
+                            "kind": "markdown",
+                            "name": "Local.md",
+                            "text": "local\n",
+                            "readOnly": False,
+                        },
+                        {
+                            "id": "SHARED",
+                            "corpus": "notes",
+                            "kind": "markdown",
+                            "name": "Shared.md",
+                            "text": "shared\n",
+                            "readOnly": True,
+                        },
+                    ]
+                }
+            return await super().call(operation, args, timeout)
+
+    http.app.state.copal_bridge = SharedExportBridge(tmp_path)
+    exported = http.get("/api/copal/export/obsidian?workspace=personal")
+    assert exported.status_code == 200
+    payload = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as source, zipfile.ZipFile(payload, "w") as changed:
+        assert "Shared.md" not in source.namelist()
+        for name in source.namelist():
+            content = source.read(name)
+            if name == "Local.md":
+                content += b"tampered"
+            changed.writestr(name, content)
+
+    rejected = http.post(
+        "/api/copal/import/obsidian?workspace=personal",
+        files={"file": ("tampered.zip", payload.getvalue(), "application/zip")},
+    )
+    assert rejected.status_code == 400
+    assert "does not match archive content" in rejected.json()["detail"]
+
+
+def test_export_fails_closed_when_versioned_asset_bytes_are_missing(tmp_path, monkeypatch):
+    http, _ = client(tmp_path, monkeypatch)
+    http.app.state.copal_bridge = MissingAssetExportBridge(tmp_path)
+
+    response = http.get("/api/copal/export/obsidian")
+
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("Export integrity failure")
 
 
 def test_obsidian_import_is_bounded_scoped_and_uses_temporary_vault(tmp_path, monkeypatch):
@@ -268,9 +630,30 @@ def test_obsidian_import_is_bounded_scoped_and_uses_temporary_vault(tmp_path, mo
     call = next(call for call in bridge.calls if call[0] == "import_vault")
     assert call[1]["owner"] == "local"
     assert call[1]["workspace_id"] == "personal"
+    assert call[1]["note_kind"] == "note"
     assert call[1]["planning_path"].endswith("/.copal/planning.json")
-    assert bridge.imported_files["Welcome.md"] == b"# Welcome\n"
+    imported = json.loads(bridge.imported_files["Welcome.md"])
+    assert imported["schemaVersion"] == 1
+    assert imported["extensions"]["interchange"]["source"] == "# Welcome\n"
+    assert imported["extensions"]["interchange"]["modified"] is False
     assert not Path(call[1]["path"]).exists()
+
+
+def test_obsidian_import_can_target_the_separate_wiki_corpus(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("Article.md", "# Article\n")
+
+    response = http.post(
+        "/api/copal/import/obsidian?workspace=personal&corpus=wiki",
+        files={"file": ("wiki.zip", payload.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    call = next(call for call in bridge.calls if call[0] == "import_vault")
+    assert call[1]["note_kind"] == "wiki"
+    assert response.json()["corpus"] == "wiki"
 
 
 def test_obsidian_import_rejects_zip_traversal(tmp_path, monkeypatch):
@@ -286,6 +669,89 @@ def test_obsidian_import_rejects_zip_traversal(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert not any(call[0] == "import_vault" for call in bridge.calls)
+
+
+def test_obsidian_import_rejects_duplicate_member_names(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("duplicate.md", "first")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            archive.writestr("duplicate.md", "second")
+
+    response = http.post(
+        "/api/copal/import/obsidian",
+        files={"file": ("duplicate.zip", payload.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Duplicate ZIP member")
+    assert not any(call[0] == "import_vault" for call in bridge.calls)
+
+
+def test_obsidian_import_rejects_casefold_path_collisions(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("Folder/Note.md", "first")
+        archive.writestr("folder/note.md", "second")
+
+    response = http.post(
+        "/api/copal/import/obsidian",
+        files={"file": ("colliding.zip", payload.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert "portable filesystems" in response.json()["detail"]
+    assert not any(call[0] == "import_vault" for call in bridge.calls)
+
+
+def test_obsidian_import_rejects_symlinks_and_zip_bombs(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    symlink_payload = io.BytesIO()
+    with zipfile.ZipFile(symlink_payload, "w") as archive:
+        link = zipfile.ZipInfo("linked.md")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "outside.md")
+    symlink_response = http.post(
+        "/api/copal/import/obsidian",
+        files={"file": ("symlink.zip", symlink_payload.getvalue(), "application/zip")},
+    )
+
+    bomb_payload = io.BytesIO()
+    with zipfile.ZipFile(bomb_payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("bomb.md", b"0" * (1024 * 1024))
+    bomb_response = http.post(
+        "/api/copal/import/obsidian",
+        files={"file": ("bomb.zip", bomb_payload.getvalue(), "application/zip")},
+    )
+
+    assert symlink_response.status_code == 400
+    assert bomb_response.status_code == 413
+    assert "compression ratio" in bomb_response.json()["detail"]
+    assert not any(call[0] == "import_vault" for call in bridge.calls)
+
+
+def test_obsidian_import_preserves_binary_and_dot_namespace_payloads(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("Note.md", "# Note\n")
+        archive.writestr("Media/reference.pdf", b"PDF\x00bytes")
+        archive.writestr("Media/demo.mp4", b"MP4\x00bytes")
+        archive.writestr(".obsidian/community-plugins.json", b'["dataview"]')
+
+    response = http.post(
+        "/api/copal/import/obsidian",
+        files={"file": ("complete.zip", payload.getvalue(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    assert bridge.imported_files["Media/reference.pdf"] == b"PDF\x00bytes"
+    assert bridge.imported_files["Media/demo.mp4"] == b"MP4\x00bytes"
+    assert bridge.imported_files[".obsidian/community-plugins.json"] == b'["dataview"]'
+    assert response.json()["preparation"]["preparedDatabaseNotes"] == 1
 
 
 def test_asset_delivery_is_scoped_to_owned_asset_directory(tmp_path, monkeypatch):
@@ -440,3 +906,130 @@ def test_planning_migration_is_dry_runnable_idempotent_and_blocks_split_truth(tm
     unsafe_rollback = http.post("/api/copal/planning/migrate?dry_run=false", json={"action": "rollback"})
     assert unsafe_rollback.status_code == 409
     assert unsafe_rollback.json()["detail"]["conflicts"][0]["id"] == event["id"]
+
+
+# ── Corpus isolation tests ────────────────────────────────────────────────
+
+class CorpusTrackingBridge(FakeBridge):
+    """Tracks create calls by corpus to verify routing."""
+
+    def __init__(self, data_dir):
+        super().__init__(data_dir)
+        self.create_calls = []
+
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation == "create":
+            self.create_calls.append(args)
+            return {"outcome": "created", "doc": {"id": f"DOC-{args.get('corpus', 'notes')}-{args.get('kind', 'note')}"}}
+        return await super().call(operation, args, timeout)
+
+
+def test_wiki_create_routes_to_wiki_corpus(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    bridge2 = CorpusTrackingBridge(tmp_path)
+    http.app.state.copal_bridge = bridge2
+
+    result = http.post("/api/copal/documents", json={
+        "name": "Test Tiddler",
+        "kind": "note",
+        "content": "Hello wiki",
+        "corpus": "wiki",
+    })
+    assert result.status_code == 200
+    create_args = bridge2.create_calls[-1]
+    assert create_args["corpus"] == "wiki"
+    assert create_args["kind"] == "wiki"
+
+
+def test_notes_create_routes_to_notes_corpus(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    bridge2 = CorpusTrackingBridge(tmp_path)
+    http.app.state.copal_bridge = bridge2
+
+    result = http.post("/api/copal/documents", json={
+        "name": "My Note",
+        "kind": "note",
+        "content": "Hello notes",
+        "corpus": "notes",
+    })
+    assert result.status_code == 200
+    create_args = bridge2.create_calls[-1]
+    assert create_args["corpus"] == "notes"
+    assert create_args["kind"] == "note"
+
+
+def test_wiki_list_filters_by_corpus(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+
+    http.get("/api/copal/documents?corpus=wiki")
+    # The bridge should receive corpus=wiki
+    assert bridge.calls[-1][1].get("corpus") == "wiki"
+
+    http.get("/api/copal/documents?corpus=notes")
+    assert bridge.calls[-1][1].get("corpus") == "notes"
+
+    http.get("/api/copal/documents?corpus=all")
+    assert bridge.calls[-1][1].get("corpus") == "all"
+
+
+def test_wiki_create_coerces_kind(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+
+    # When corpus=wiki and kind=note, kind should be coerced to wiki
+    result = http.post("/api/copal/documents", json={
+        "name": "Auto Wiki",
+        "kind": "note",
+        "content": "",
+        "corpus": "wiki",
+    })
+    assert result.status_code == 200
+    # Find the create call (may be followed by get calls)
+    create_calls = [c for c in bridge.calls if c[0] == "create"]
+    assert len(create_calls) == 1
+    assert create_calls[0][1]["kind"] == "wiki"
+
+
+def test_wiki_create_rejects_non_note_kinds(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+
+    # Wiki corpus should reject non-note kinds (e.g., markdown)
+    result = http.post("/api/copal/documents", json={
+        "name": "Bad Wiki",
+        "kind": "markdown",
+        "content": "",
+        "corpus": "wiki",
+    })
+    assert result.status_code == 422
+
+
+def test_write_route_passes_corpus_for_wiki_doc(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+
+    # FakeBridge.get returns a wiki-kind doc for DOC1
+    wiki_bridge = CorpusTrackingBridge(tmp_path)
+    wiki_bridge.write_result = {"outcome": "committed", "doc": {"id": "DOC1"}}
+    http.app.state.copal_bridge = wiki_bridge
+
+    # Patch the get call to return a wiki doc with copal-note-v1 format
+    original_call = wiki_bridge.call
+    wiki_text = json.dumps({
+        "schemaVersion": 1,
+        "body": {"type": "doc", "blocks": [{"id": "blk1", "type": "paragraph", "text": "Hello", "source": "Hello"}]},
+        "properties": [],
+        "relations": [],
+    })
+
+    async def patched_call(operation, args, timeout=20):
+        if operation == "get" and args.get("id") == "DOC1":
+            wiki_bridge.calls.append((operation, args, timeout))
+            return {"id": "DOC1", "kind": "wiki", "name": "Test Wiki", "text": wiki_text, "head": "h1", "corpus": "wiki", "format": "copal-note-v1", "blocks": [{"id": "blk1", "type": "paragraph", "text": "Hello", "source": "Hello"}], "propertyDefinitions": [], "relations": [], "extensions": {}}
+        return await original_call(operation, args, timeout)
+
+    wiki_bridge.call = patched_call
+    result = http.put("/api/copal/documents/DOC1", json={"content": "updated", "base": "h1"})
+    assert result.status_code == 200
+    # Find the last write call and check it has corpus=wiki
+    write_calls = [c for c in wiki_bridge.calls if c[0] == "write"]
+    assert len(write_calls) >= 1
+    assert write_calls[-1][1]["corpus"] == "wiki"

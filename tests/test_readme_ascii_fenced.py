@@ -3,9 +3,9 @@
 Originally (#1390) the README opened with an ASCII-art banner that had to live
 inside a ``` code fence, otherwise GitHub's markdown collapsed its leading
 whitespace and box-drawing rules and rendered it misaligned. The README refresh
-(#4306) dropped that banner in favour of a centered wordmark image, so the guard
-now pins the wordmark identity instead, while still catching the original failure
-mode if an un-fenced ASCII banner is ever reintroduced.
+(#4306) dropped that banner in favour of centered brand art, so the guard now
+pins the current Open Clank identity instead, while still catching the original
+failure mode if an un-fenced ASCII banner is ever reintroduced.
 """
 from pathlib import Path
 
@@ -22,11 +22,13 @@ def _fenced_segments(text: str):
     return parts[1::2]
 
 
-def test_readme_opens_with_wordmark_title():
-    # The README must still open with a recognizable Odysseus title: now the
-    # centered wordmark image rather than an H1 / ASCII banner.
+def test_readme_opens_with_open_clank_branding():
+    # A short Build Week preface may lead, but the product title and current
+    # mascot must remain visible at the top of the README.
     head = "\n".join(README.read_text(encoding="utf-8").splitlines()[:15])
-    assert 'alt="Odysseus"' in head, "README must open with the Odysseus wordmark image"
+    assert "# Open Clank" in head
+    assert 'src="docs/open-clanker.png"' in head
+    assert 'alt="Open Clanker mascot"' in head
 
 
 def test_reintroduced_ascii_banner_stays_fenced():

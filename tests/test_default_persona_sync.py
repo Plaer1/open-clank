@@ -9,7 +9,12 @@ Rulings under test (2026-07-16):
   task framing stays separate from the voice.
 """
 
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
+from fastapi import HTTPException
 
 from src import default_persona
 from src.default_persona import (
@@ -21,6 +26,7 @@ from src.default_persona import (
     sync_from_assistant,
 )
 from src.preset_manager import PresetManager
+from routes.preset_routes import setup_preset_routes
 
 
 @pytest.fixture
@@ -154,3 +160,37 @@ def test_assistant_prompt_empty_voice_falls_back_to_framing_only():
     from src.task_scheduler import ASSISTANT_TASK_FRAMING, _compose_assistant_prompt
 
     assert _compose_assistant_prompt("") == ASSISTANT_TASK_FRAMING
+
+
+def _default_persona_endpoint():
+    router = setup_preset_routes(MagicMock())
+    return next(route.endpoint for route in router.routes if route.path == "/api/presets/default-persona")
+
+
+def _persona_request(**state):
+    auth_manager = SimpleNamespace(is_configured=True)
+    return SimpleNamespace(
+        state=SimpleNamespace(**state),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
+        client=SimpleNamespace(host="203.0.113.10"),
+    )
+
+
+def test_default_persona_route_allows_explicit_single_user_mode(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(
+        default_persona,
+        "get_default_persona",
+        lambda owner, preset_manager=None: {"owner": owner},
+    )
+
+    assert asyncio.run(_default_persona_endpoint()(_persona_request())) == {"owner": ""}
+
+
+def test_default_persona_route_keeps_configured_auth_fail_closed(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(_default_persona_endpoint()(_persona_request()))
+
+    assert raised.value.status_code == 401

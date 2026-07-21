@@ -20,6 +20,22 @@ export function propertyType(value, key = '') {
   return 'text';
 }
 
+export function coercePropertyValue(value, type = 'text') {
+  if (type === 'checkbox') return value === true || value === 'true';
+  if (type === 'number') return Number.isFinite(Number(value)) ? Number(value) : 0;
+  if (type === 'list' || type === 'tags') {
+    return (Array.isArray(value) ? value : String(value || '').split(','))
+      .map((item) => String(item).trim().replace(/^#/, ''))
+      .filter(Boolean);
+  }
+  if (type === 'object') {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Object properties require a JSON object.');
+    return parsed;
+  }
+  return value == null ? '' : String(value);
+}
+
 export function parseFrontmatter(text) {
   const source = String(text || '');
   const lines = source.split('\n');
@@ -181,6 +197,40 @@ export function moveHeadingSectionTo(text, fromLine, targetLine) {
   return remainder.join('\n');
 }
 
+export function outlineTree(entries) {
+  const root = { line: 0, level: 0, text: '', kind: 'heading', children: [] };
+  const stack = [root];
+  for (const entry of entries) {
+    const node = { ...entry, children: [] };
+    while (stack.length > 1 && stack[stack.length - 1].level >= entry.level) {
+      stack.pop();
+    }
+    stack[stack.length - 1].children.push(node);
+    stack.push(node);
+  }
+  return root.children;
+}
+
+export function flattenTree(nodes, result = []) {
+  for (const node of nodes) {
+    result.push(node);
+    if (node.children?.length) flattenTree(node.children, result);
+  }
+  return result;
+}
+
+export function reparentHeading(text, line, newLevel) {
+  const source = String(text || '');
+  const lines = source.split('\n');
+  const entries = outlineEntries(source);
+  const index = entries.findIndex((entry) => entry.line === Number(line));
+  if (index < 0) return source;
+  const level = Math.max(1, Math.min(6, Number(newLevel)));
+  const lineIdx = entries[index].line - 1;
+  lines[lineIdx] = `${'#'.repeat(level)} ${entries[index].text}`;
+  return lines.join('\n');
+}
+
 export function parseCanvasDocument(text) {
   try {
     const value = JSON.parse(String(text || '{}'));
@@ -242,11 +292,31 @@ export function resolveDocumentLink(docs, value) {
   return docs.find((doc) => normalizedDocumentNames(doc).includes(target)) || null;
 }
 
+export function databaseRelations(text, docs = []) {
+  const relations = [];
+  const seen = new Set();
+  for (const match of String(text || '').matchAll(/(!?)\[\[([^\]\n]+)\]\]/g)) {
+    const raw = match[2].split('|', 1)[0].trim();
+    const [target, ...fragmentParts] = raw.split('#');
+    const name = target.trim();
+    if (!name) continue;
+    const kind = match[1] ? 'embed' : 'link';
+    const fragment = fragmentParts.join('#').trim();
+    const key = `${kind}\0${name}\0${fragment}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const resolved = resolveDocumentLink(docs, name);
+    relations.push({ kind, target:name, targetDocumentId:resolved?.id || null, ...(fragment ? { fragment } : {}) });
+  }
+  return relations;
+}
+
 export function linkedMentions(docs, target) {
   const wanted = new Set(normalizedDocumentNames(target));
   return docs.flatMap((doc) => {
     if (!doc || doc.id === target?.id) return [];
-    const link = (doc.links || []).find((value) => wanted.has(normalizeLinkTarget(value)));
+    const relation = (doc.relations || []).find((value) => ['link', 'embed'].includes(value.kind) && value.targetDocumentId === target?.id);
+    const link = relation?.target || (doc.links || []).find((value) => wanted.has(normalizeLinkTarget(value)));
     if (!link) return [];
     const lines = String(doc.text || '').split('\n');
     const lineIndex = lines.findIndex((line) => line.toLowerCase().includes(`[[${String(link).toLowerCase()}`));

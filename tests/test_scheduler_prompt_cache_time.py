@@ -3,9 +3,8 @@ a minute-level timestamp that busts the Anthropic prompt cache.
 
 Three focused tests:
 1. End-to-end: system prompt is clean; message ordering is [system, datetime
-   user-context, task user-prompt] through the real _run_agent_loop.
-2. Fallback: same ordering when the agent loop raises and task_llm_call_async
-   is used directly.
+   user-context, task user-prompt] through the strict Agent door.
+2. Failure: an Agent error does not fall back to no-tools inference.
 3. Helper: current_datetime_context_message_for_tz() renders the correct local
    time for an explicit IANA timezone, and falls back to UTC for None or invalid.
 """
@@ -18,9 +17,11 @@ from types import SimpleNamespace
 
 def _make_task(prompt="run the digest"):
     return SimpleNamespace(
-        crew_member_id=None, endpoint_url="http://ep/v1", model="m",
+        id="task-1", crew_member_id=None, endpoint_id="mimo",
+        endpoint_url="mimo://acp", model="xiaomi/mimo-auto",
         session_id="s", owner="admin", prompt=prompt,
-        name="job", max_steps=5, character_id=None,
+        name="job", max_steps=5, max_tool_calls=5, character_id=None,
+        allowed_tools="[]", workspace=None,
     )
 
 
@@ -47,19 +48,22 @@ async def test_scheduler_agent_loop_path(monkeypatch):
 
     captured = {}
 
-    async def _stub_stream(*args, **kwargs):
-        # Reached via model_dispatch.stream_agent_target, which passes
-        # (endpoint_url, model_id, messages) positionally.
-        messages = args[2] if len(args) > 2 else kwargs.get("messages", [])
+    async def _stub_stream(target, messages, **kwargs):
         captured["messages"] = list(messages)
-        return
-        yield  # async generator
+        yield 'data: {"delta": "done"}\n\n'
+        yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
-    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **kw: [])
+    monkeypatch.setattr("src.model_dispatch.stream_agent_target", _stub_stream)
 
     from src.task_scheduler import TaskScheduler
-    await TaskScheduler(session_manager=None)._execute_llm_task(_make_task(), db=None)
+    task = _make_task()
+    await TaskScheduler(session_manager=None)._run_agent_loop(
+        task.endpoint_url,
+        task.model,
+        task,
+        task.session_id,
+        datetime_context_msg={"role": "user", "content": "## Current date and time\nNow"},
+    )
 
     msgs = captured.get("messages", [])
     assert len(msgs) == 3, f"expected 3 messages, got {len(msgs)}"
@@ -72,39 +76,26 @@ async def test_scheduler_agent_loop_path(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — fallback path receives the same datetime context
+# Test 2 — strict failure has no no-tools success fallback
 # ---------------------------------------------------------------------------
 
-async def test_scheduler_fallback_path(monkeypatch):
-    """When _run_agent_loop raises, task_llm_call_async must receive
-    [system, datetime user-context, task user-prompt] — the same ordering."""
+async def test_scheduler_has_no_agent_failure_fallback(monkeypatch):
     _patch_scheduler_deps(monkeypatch)
 
-    captured = {}
+    async def _failed_stream(*args, **kwargs):
+        yield 'event: error\ndata: {"code":"SUPERVISOR_UNAVAILABLE","error":"down"}\n\n'
+        yield "data: [DONE]\n\n"
 
-    async def _fail(*args, **kwargs):
-        raise RuntimeError("simulated failure")
+    monkeypatch.setattr("src.model_dispatch.stream_agent_target", _failed_stream)
 
-    async def _capture_call(messages, **kw):
-        captured["messages"] = list(messages)
-        return "fallback"
-
-    import src.task_endpoint as _te
-    monkeypatch.setattr(_te, "task_llm_call_async", _capture_call)
-
+    import pytest
     from src.task_scheduler import TaskScheduler
     sched = TaskScheduler(session_manager=None)
-    sched._run_agent_loop = _fail
-    await sched._execute_llm_task(_make_task(prompt="send the digest"), db=None)
-
-    msgs = captured.get("messages", [])
-    assert len(msgs) == 3, f"expected 3 messages, got {len(msgs)}"
-    assert msgs[0]["role"] == "system"
-    assert "Current time:" not in msgs[0]["content"]
-    assert msgs[1]["role"] == "user"
-    assert "## Current date and time" in msgs[1]["content"]
-    assert msgs[2]["role"] == "user"
-    assert msgs[2]["content"] == "send the digest"
+    task = _make_task(prompt="send the digest")
+    with pytest.raises(RuntimeError, match="SUPERVISOR_UNAVAILABLE"):
+        await sched._run_agent_loop(
+            task.endpoint_url, task.model, task, task.session_id,
+        )
 
 
 # ---------------------------------------------------------------------------

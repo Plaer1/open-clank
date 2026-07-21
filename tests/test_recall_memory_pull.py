@@ -1,12 +1,4 @@
-"""SLICE-03 — pull affordance: skill-style memory in chat lanes (T8).
-
-The digest card is an elevator pitch; the model must be able to act on
-it. recall_memory is the read-only pull tool: registered in every direct
-lane (chat mode runs the shared agent loop restricted to exactly this
-tool; agent mode carries it in ALWAYS_AVAILABLE), and its results
-inherit the trust tiering — endorsed records return plain, everything
-else returns inside the untrusted guard wrapper.
-"""
+"""The Agent memory pull tool stays read-only and trust-tiered."""
 
 import asyncio
 from types import SimpleNamespace
@@ -139,51 +131,20 @@ class TestLaneRegistration:
         assert "recall_memory" in BUILTIN_TOOL_DESCRIPTIONS
         assert "recall_memory" in known_tool_names()
 
-    def test_chat_branch_runs_agent_loop_with_only_recall_memory(self):
-        """Regression pin on the PULL-MECH option B dispatch: chat mode's
-        HTTP leg goes through stream_agent_target restricted to exactly
-        recall_memory with tiny budgets."""
+    def test_no_generic_chat_branch_survives(self):
         import pathlib
 
         source = pathlib.Path("routes/chat_routes.py").read_text()
-        assert 'relevant_tools={"recall_memory"}' in source
-        assert 'known_tool_names() - {"recall_memory"}' in source
-        pull_at = source.index('relevant_tools={"recall_memory"}')
-        window = source[pull_at - 2000:pull_at + 2000]
-        assert "max_tool_calls=2" in window
-        assert "max_rounds=3" in window
-        assert "not incognito" in window and "not no_memory" in window
+        assert 'requested_mode == "chat"' in source
+        assert 'Chat mode was removed' in source
+        assert 'relevant_tools={"recall_memory"}' not in source
 
-    def test_chat_leg_carries_lane_note_matching_mimo_chat_txt(self):
-        """Parity with mimo's chat.txt (ONE-app rule): the HTTP chat leg
-        tells the model it is in Chat mode with one read-only tool AND
-        that the full toolset exists in Agent mode — so it points the
-        user there instead of denying the app's capabilities."""
+    def test_memory_pull_remains_a_registered_read_only_agent_tool(self):
         import pathlib
 
-        from src.tool_policy import CHAT_MODE_TOOL_NOTE
-
-        assert "recall_memory" in CHAT_MODE_TOOL_NOTE
-        assert "Agent mode" in CHAT_MODE_TOOL_NOTE
-        assert "never pretend" in CHAT_MODE_TOOL_NOTE
-        source = pathlib.Path("routes/chat_routes.py").read_text()
-        assert "CHAT_MODE_TOOL_NOTE" in source
-        pull_at = source.index('relevant_tools={"recall_memory"}')
-        window = source[pull_at - 2000:pull_at]
-        assert "_pull_messages" in window, "lane note rides the pull leg"
-
-        # Both chat lanes carry the SAME awareness contract (e's ONE-app
-        # rule): single read-only lookup, never pretend, the full toolset
-        # exists in agent mode, never deny the capability.
-        chat_txt = pathlib.Path(
-            "packages/mimo-code/packages/opencode/src/agent/prompt/chat.txt"
-        ).read_text()
-        for lane_text in (CHAT_MODE_TOOL_NOTE, chat_txt):
-            lowered = lane_text.lower()
-            assert "full toolset" in lowered
-            assert "agent mode" in lowered
-            assert "never pretend" in lowered
-            assert "lacks the capability" in lowered
+        source = pathlib.Path("src/tool_policy.py").read_text()
+        assert '"recall_memory"' in source
+        assert "CHAT_MODE_TOOL_NOTE" not in source
 
     def test_agent_prompt_carries_no_unloaded_tool_note(self):
         """REVERTED by e's order (2026-07-17): the 'rest of the tool

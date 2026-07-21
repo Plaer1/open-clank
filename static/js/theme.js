@@ -9,6 +9,22 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
+  'clanker-dark': {
+    bg:'#101727', fg:'#FFF7DD', panel:'#1A2340', border:'#405A96', red:'#4A91FF',
+    advanced: { userBubbleBg:'#293864', aiBubbleBg:'#1A2340', bubbleBorder:'#405A96',
+                sidebarBg:'#141C31', brandColor:'#F5B72F', brandMixTo:'#F75DB6',
+                hamburgerColor:'#FFF7DD', inputBg:'#161F38', inputBorder:'#405A96',
+                sendBtnBg:'#4A91FF', sendBtnHover:'#1E5FDE', codeBg:'#0B1020',
+                codeFg:'#FFF7DD', toggleActive:'#B6E950' },
+  },
+  'clanker-light': {
+    bg:'#F1ECD7', fg:'#17202A', panel:'#FFF9E7', border:'#1E67D6', red:'#1E67D6',
+    advanced: { userBubbleBg:'#DCEAF0', aiBubbleBg:'#FFF9E7', bubbleBorder:'#1E67D6',
+                sidebarBg:'#FFF9E7', brandColor:'#EC635C', brandMixTo:'#D94B9C',
+                hamburgerColor:'#17202A', inputBg:'#FFF9E7', inputBorder:'#1E67D6',
+                sendBtnBg:'#1E67D6', sendBtnHover:'#0E3B7A', codeBg:'#111A27',
+                codeFg:'#FFF9E7', toggleActive:'#4F9F38' },
+  },
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
   light:      { bg:'#f0ebe3', fg:'#5a5248', panel:'#faf6f0', border:'#d4cdc2', red:'#c47d5a' },
   midnight:   { bg:'#0d1117', fg:'#c9d1d9', panel:'#161b22', border:'#30363d', red:'#f85149' },
@@ -31,11 +47,19 @@ export const THEMES = {
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
 };
 
-const DEFAULT_THEME = 'dark';
+const THEME_LABELS = {
+  'clanker-dark': 'Clanker Dark',
+  'clanker-light': 'Clanker Light',
+  dark: 'original',
+  gpt: 'GPT',
+};
+
+const DEFAULT_THEME = 'clanker-dark';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 
 const FONT_MAP = {
+  'liga-comic-mono': "'Liga Comic Mono', 'Fira Code', monospace",
   mono: "'Fira Code', monospace",
   sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   serif: "Georgia, 'Times New Roman', serif",
@@ -47,6 +71,8 @@ const MAX_CUSTOM_THEMES = 8;
 
 // Default background patterns for built-in themes
 const THEME_DEFAULT_PATTERN = {
+  'clanker-dark':  'clanker-routefield',
+  'clanker-light': 'clanker-blueprint',
   dark:       'none',
   light:      'dots',
   midnight:   'rain',
@@ -63,6 +89,8 @@ const THEME_DEFAULT_PATTERN = {
 
 // Default effect colors for specific themes (overrides --fg)
 const THEME_DEFAULT_EFFECT_COLOR = {
+  'clanker-dark':  '#5ABCF5',
+  'clanker-light': '#1E67D6',
   midnight:   '#ffffff',
   organs:     '#451616',
   cute:       '#ff8cb8',
@@ -71,9 +99,21 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
 const THEME_DEFAULT_INTENSITY = {
+  'clanker-dark':  0.8,
+  'clanker-light': 0.55,
   midnight:   0.5,
   terminal:   0.8,
   organs:     0.65,
+};
+
+const THEME_DEFAULT_SIZE = {
+  'clanker-dark': 1,
+  'clanker-light': 1,
+};
+
+const THEME_DEFAULT_FONT = {
+  'clanker-dark': 'liga-comic-mono',
+  'clanker-light': 'liga-comic-mono',
 };
 
 // Default frosted-glass state per theme. Themes not listed default to false.
@@ -402,11 +442,12 @@ export function applyUiScale(scale) {
   if (s === '125') document.documentElement.classList.add('ui-scale-125');
 }
 
-const _BG_CLASSES = ['bg-pattern-dots',
+const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
-const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
+const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
+  synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
 
@@ -424,6 +465,8 @@ export function applyBgEffectSize(v) {
   // v is a multiplier 0.3..2.5. Default 1 when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0.2, Math.min(3, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-size', String(n));
+  document.documentElement.style.setProperty('--clanker-grid-size', `${Math.round(32 * n)}px`);
+  document.documentElement.style.setProperty('--clanker-route-size', `${Math.round(160 * n)}px`);
 }
 
 /** Toggle the global "frosted glass" look — applies a translucent + blurred
@@ -446,7 +489,7 @@ export function applyBgPattern(pattern) {
   const p = pattern || 'none';
   document.body.classList.remove(..._BG_CLASSES);
   // Clean up any canvas backgrounds
-  document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
+  document.querySelectorAll('#clanker-routefield-canvas, #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
   if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
@@ -463,6 +506,16 @@ export function getSaved() {
   if (obj && obj.name === 'chatgpt') obj.name = 'gpt';
   // Migration: 'sakura' preset was renamed to 'ume'
   if (obj && obj.name === 'sakura') obj.name = 'ume';
+  // Built-in themes are versioned product presets. Prior Clanker Dark saves
+  // should receive the current Toon Command palette and route-field while
+  // user-edited palettes continue to live under the separate custom theme.
+  if (obj && obj.name === 'clanker-dark') {
+    obj.colors = { ...THEMES['clanker-dark'], advanced: { ...THEMES['clanker-dark'].advanced } };
+    if (!obj.bgPattern || obj.bgPattern === 'clanker-sweep') obj.bgPattern = THEME_DEFAULT_PATTERN['clanker-dark'];
+    if (!obj.bgEffectColor || (typeof obj.bgEffectColor === 'string' && obj.bgEffectColor.toUpperCase() === '#78D4F3')) obj.bgEffectColor = THEME_DEFAULT_EFFECT_COLOR['clanker-dark'];
+    if (obj.bgEffectIntensity === undefined || obj.bgEffectIntensity === 0.7) obj.bgEffectIntensity = THEME_DEFAULT_INTENSITY['clanker-dark'];
+    Storage.setJSON(LS_KEY, obj);
+  }
   return obj;
 }
 
@@ -490,6 +543,89 @@ function _syncToServer(obj) {
       body: JSON.stringify({ value: obj }),
     }).catch(e => console.warn('Theme sync failed:', e));
   } catch (e) { console.warn('Theme sync error:', e); }
+}
+
+export function applyThemeIdentity(name) {
+  document.body.classList.remove('theme-clanker-dark', 'theme-clanker-light');
+  if (name === 'clanker-dark' || name === 'clanker-light') {
+    document.body.classList.add('theme-' + name);
+    document.documentElement.style.setProperty('color-scheme', name === 'clanker-light' ? 'light' : 'dark');
+  } else {
+    document.documentElement.style.removeProperty('color-scheme');
+  }
+}
+
+function _getThemeOptions(name, source = {}) {
+  const savedPattern = name === 'clanker-dark' && source.bgPattern === 'clanker-sweep'
+    ? THEME_DEFAULT_PATTERN[name]
+    : source.bgPattern;
+  const savedEffectColor = name === 'clanker-dark'
+    && (!source.bgEffectColor || (typeof source.bgEffectColor === 'string' && source.bgEffectColor.toUpperCase() === '#78D4F3'))
+    ? THEME_DEFAULT_EFFECT_COLOR[name]
+    : source.bgEffectColor;
+  const savedEffectIntensity = name === 'clanker-dark' && source.bgEffectIntensity === 0.7
+    ? THEME_DEFAULT_INTENSITY[name]
+    : source.bgEffectIntensity;
+  return {
+    font: THEME_DEFAULT_FONT[name] || source.font || DEFAULT_FONT,
+    density: source.density || DEFAULT_DENSITY,
+    bgPattern: savedPattern || THEME_DEFAULT_PATTERN[name] || 'none',
+    bgEffectColor: savedEffectColor || THEME_DEFAULT_EFFECT_COLOR[name] || '',
+    bgEffectIntensity: savedEffectIntensity !== undefined
+      ? savedEffectIntensity
+      : (THEME_DEFAULT_INTENSITY[name] !== undefined ? THEME_DEFAULT_INTENSITY[name] : 1),
+    bgEffectSize: source.bgEffectSize !== undefined
+      ? source.bgEffectSize
+      : (THEME_DEFAULT_SIZE[name] !== undefined ? THEME_DEFAULT_SIZE[name] : 1),
+    frosted: source.frosted !== undefined ? !!source.frosted : THEME_DEFAULT_FROSTED[name] === true,
+  };
+}
+
+function _syncThemeControls(name, colors, opts) {
+  const values = {
+    'theme-font-select': opts.font,
+    'theme-density-select': opts.density,
+    'theme-bg-pattern-select': opts.bgPattern,
+    'theme-bg-effect-color': opts.bgEffectColor || colors.fg || '#9cdef2',
+    'theme-bg-intensity': String(Math.round(opts.bgEffectIntensity * 100)),
+    'theme-bg-size': String(Math.round(opts.bgEffectSize * 100)),
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  }
+  const font = document.getElementById('theme-font-select');
+  if (font) {
+    const locked = !!THEME_DEFAULT_FONT[name];
+    font.disabled = locked;
+    font.title = locked ? 'Clanker themes bundle and lock Liga Comic Mono' : '';
+  }
+  const frosted = document.getElementById('theme-frosted-toggle');
+  if (frosted) frosted.checked = opts.frosted;
+  if (document.getElementById('clr-bg')) syncPickers(colors);
+  document.querySelectorAll('.theme-swatch').forEach(sw => {
+    sw.classList.toggle('active', sw.dataset.theme === name);
+  });
+}
+
+export function applyTheme(name, providedColors = null, config = {}) {
+  const custom = _loadCustomThemes();
+  const builtIn = Object.prototype.hasOwnProperty.call(THEMES, name);
+  const colors = builtIn ? THEMES[name] : (providedColors || custom[name]);
+  if (!colors) return null;
+  const optionSource = config.storedOptions || (builtIn ? {} : (custom[name] || colors));
+  const opts = _getThemeOptions(name, optionSource);
+  applyColors(colors);
+  applyThemeIdentity(name);
+  applyFontDensity(opts.font, opts.density);
+  applyBgEffectColor(opts.bgEffectColor);
+  applyBgEffectIntensity(opts.bgEffectIntensity);
+  applyBgEffectSize(opts.bgEffectSize);
+  applyFrostedGlass(opts.frosted);
+  applyBgPattern(opts.bgPattern);
+  _syncThemeControls(name, colors, opts);
+  if (config.persist !== false) save(name, colors, opts);
+  return { colors, opts };
 }
 
 async function _loadFromServer() {
@@ -647,7 +783,7 @@ export function initThemeUI() {
         <span style="background:${c.fg}"></span>
         <span style="background:${c.red}"></span>
       </div>
-      ${name === 'dark' ? 'original' : (name === 'gpt' ? 'GPT' : name)}
+      ${THEME_LABELS[name] || name}
     </div>
   `).join('');
 
@@ -696,7 +832,6 @@ export function initThemeUI() {
 
   // Click handlers for all swatches (preset + custom) across both grids
   const allGrids = [grid, userGrid].filter(Boolean);
-  function clearAllActive() { allGrids.forEach(g => g.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'))); }
   allGrids.forEach(g => {
     g.querySelectorAll('.theme-swatch').forEach(sw => {
       sw.addEventListener('click', (e) => {
@@ -704,41 +839,7 @@ export function initThemeUI() {
         const name = sw.dataset.theme;
         const colors = sw.dataset.custom ? customThemes[name] : THEMES[name];
         if (!colors) return;
-        applyColors(colors);
-        clearAllActive();
-        sw.classList.add('active');
-        syncPickers(colors);
-        const ct = sw.dataset.custom ? customThemes[name] : null;
-        const f = ct && ct.font ? ct.font : DEFAULT_FONT;
-        const d = ct && ct.density ? ct.density : DEFAULT_DENSITY;
-        const p = ct && ct.bgPattern ? ct.bgPattern : (THEME_DEFAULT_PATTERN[name] || 'none');
-        const ec = ct && ct.bgEffectColor ? ct.bgEffectColor : (THEME_DEFAULT_EFFECT_COLOR[name] || '');
-        const ei = (ct && ct.bgEffectIntensity !== undefined) ? ct.bgEffectIntensity : (THEME_DEFAULT_INTENSITY[name] !== undefined ? THEME_DEFAULT_INTENSITY[name] : 1);
-        const sz = (ct && ct.bgEffectSize !== undefined) ? ct.bgEffectSize : 1;
-        const fr = (ct && ct.frosted !== undefined)
-          ? !!ct.frosted
-          : (THEME_DEFAULT_FROSTED[name] === true);
-        applyFontDensity(f, d);
-        applyBgEffectColor(ec);
-        applyBgEffectIntensity(ei);
-        applyBgEffectSize(sz);
-        applyFrostedGlass(fr);
-        applyBgPattern(p);
-        const fs = document.getElementById('theme-font-select');
-        const ds = document.getElementById('theme-density-select');
-        const ps = document.getElementById('theme-bg-pattern-select');
-        const ecs = document.getElementById('theme-bg-effect-color');
-        const eis = document.getElementById('theme-bg-intensity');
-        const szs = document.getElementById('theme-bg-size');
-        const frs = document.getElementById('theme-frosted-toggle');
-        if (fs) fs.value = f;
-        if (ds) ds.value = d;
-        if (ps) ps.value = p;
-        if (ecs) ecs.value = ec || colors.fg || '#9cdef2';
-        if (eis) eis.value = String(Math.round(ei * 100));
-        if (szs) szs.value = String(Math.round(sz * 100));
-        if (frs) frs.checked = fr;
-        save(name, colors, { font: f, density: d, bgPattern: p, bgEffectColor: ec, bgEffectIntensity: ei, bgEffectSize: sz, frosted: fr });
+        applyTheme(name, colors);
       });
     });
     g.querySelectorAll('.theme-delete-btn').forEach(btn => {
@@ -754,9 +855,8 @@ export function initThemeUI() {
   });
 
   // Init color pickers from current theme and apply syntax colors
-  const currentColors = saved ? saved.colors : THEMES[DEFAULT_THEME];
-  applyColors(currentColors);
-  syncPickers(currentColors);
+  const currentColors = THEMES[activeName] || customThemes[activeName] || (saved ? saved.colors : THEMES[DEFAULT_THEME]);
+  applyTheme(activeName, currentColors, { persist: false, storedOptions: saved || {} });
 
   // Reference colors for per-picker reset (the theme you started from)
   const refName = saved ? saved.name : DEFAULT_THEME;
@@ -936,19 +1036,7 @@ export function initThemeUI() {
     newReset.addEventListener('click', () => {
       Storage.remove(LS_KEY);
       const colors = THEMES[DEFAULT_THEME];
-      applyColors(colors);
-      syncPickers(colors);
-      applyFontDensity(DEFAULT_FONT, DEFAULT_DENSITY);
-      applyBgPattern('none');
-      const fs = document.getElementById('theme-font-select');
-      const ds = document.getElementById('theme-density-select');
-      const ps = document.getElementById('theme-bg-pattern-select');
-      if (fs) fs.value = DEFAULT_FONT;
-      if (ds) ds.value = DEFAULT_DENSITY;
-      if (ps) ps.value = 'none';
-      grid.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'));
-      const darkSwatch = grid.querySelector('[data-theme="dark"]');
-      if (darkSwatch) darkSwatch.classList.add('active');
+      applyTheme(DEFAULT_THEME, colors, { persist: false });
     });
   }
 
@@ -1092,17 +1180,14 @@ export function initThemeUI() {
   syncResetButtons();
 
   // Font, density, background pattern controls
-  const _initFont = (saved && saved.font) || DEFAULT_FONT;
-  const _initDensity = (saved && saved.density) || DEFAULT_DENSITY;
-  const _initPattern = (saved && saved.bgPattern) || (saved && THEME_DEFAULT_PATTERN[saved.name]) || 'none';
-  const _initEffectColor = (saved && saved.bgEffectColor) || (saved && THEME_DEFAULT_EFFECT_COLOR[saved.name]) || '';
-  const _initEffectIntensity = (saved && saved.bgEffectIntensity !== undefined)
-    ? saved.bgEffectIntensity
-    : (saved && THEME_DEFAULT_INTENSITY[saved.name] !== undefined ? THEME_DEFAULT_INTENSITY[saved.name] : 1);
-  const _initEffectSize = (saved && saved.bgEffectSize !== undefined) ? saved.bgEffectSize : 1;
-  const _initFrosted = (saved && saved.frosted !== undefined)
-    ? !!saved.frosted
-    : (saved && THEME_DEFAULT_FROSTED[saved.name] === true);
+  const _initialOptions = _getThemeOptions(activeName, saved || {});
+  const _initFont = _initialOptions.font;
+  const _initDensity = _initialOptions.density;
+  const _initPattern = _initialOptions.bgPattern;
+  const _initEffectColor = _initialOptions.bgEffectColor;
+  const _initEffectIntensity = _initialOptions.bgEffectIntensity;
+  const _initEffectSize = _initialOptions.bgEffectSize;
+  const _initFrosted = _initialOptions.frosted;
   applyFontDensity(_initFont, _initDensity);
   applyBgEffectColor(_initEffectColor);
   applyBgEffectIntensity(_initEffectIntensity);
@@ -1517,6 +1602,175 @@ export function closePopup() {
 
 // Expose for app.js wiring + AI ui_control
 export function getCustomThemes() { return _loadCustomThemes(); }
+
+// Asset-free night operations map: curved routes, instrument nodes, and
+// packets moving between them. The layout is deterministic so it never
+// flickers or jumps when the theme is reapplied.
+function _initClankerRoutefield() {
+  if (document.getElementById('clanker-routefield-canvas')) return;
+  const canvas = document.createElement('canvas');
+  canvas.id = 'clanker-routefield-canvas';
+  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.setAttribute('aria-hidden', 'true');
+  document.body.prepend(canvas);
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) { canvas.remove(); return; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  canvas.dataset.motion = motion.matches ? 'reduced' : 'active';
+
+  const anchors = [
+    [0.04, 0.18, 0, 0], [0.16, 0.11, 1, 0], [0.29, 0.23, 0, 1],
+    [0.43, 0.13, 2, 0], [0.58, 0.22, 0, 0], [0.77, 0.12, 3, 1],
+    [0.93, 0.24, 0, 0], [0.08, 0.59, 1, 0], [0.24, 0.46, 0, 1],
+    [0.39, 0.64, 2, 0], [0.54, 0.45, 0, 1], [0.69, 0.62, 3, 0],
+    [0.86, 0.48, 0, 1], [0.96, 0.73, 1, 0], [0.18, 0.86, 3, 1],
+    [0.47, 0.83, 0, 0], [0.73, 0.87, 2, 1],
+  ];
+  const links = [
+    [0, 1, -0.03, 0.02], [1, 2, 0.05, 0.19], [2, 3, -0.08, 0.31],
+    [3, 4, 0.06, 0.43], [4, 5, -0.05, 0.57], [5, 6, 0.04, 0.68],
+    [0, 7, 0.05, 0.81], [2, 8, -0.04, 0.11], [7, 8, 0.06, 0.26],
+    [8, 9, -0.08, 0.39], [3, 10, 0.08, 0.52], [9, 10, 0.05, 0.64],
+    [10, 11, -0.07, 0.76], [5, 12, 0.08, 0.88], [11, 12, 0.04, 0.07],
+    [12, 13, -0.05, 0.22], [7, 14, -0.07, 0.35], [14, 15, 0.08, 0.48],
+    [9, 15, -0.05, 0.61], [15, 16, 0.06, 0.74], [11, 16, -0.08, 0.91],
+  ];
+  const palette = ['#5ABCF5', '#F5B72F', '#B6E950', '#F75DB6'];
+  let width = 0;
+  let height = 0;
+  let nodes = [];
+  let routes = [];
+  let animationFrame = 0;
+  let previousFrame = 0;
+
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.max(1, Math.floor(width * dpr));
+    canvas.height = Math.max(1, Math.floor(height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    nodes = anchors.map(([x, y, color, hub]) => ({ x: x * width, y: y * height, color, hub }));
+    const bendScale = Math.min(width, height);
+    routes = links.map(([from, to, bend, phase]) => {
+      const a = nodes[from];
+      const b = nodes[to];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const length = Math.hypot(dx, dy) || 1;
+      return {
+        a, b, phase,
+        color: (from + to) % palette.length,
+        cx: (a.x + b.x) / 2 - (dy / length) * bend * bendScale,
+        cy: (a.y + b.y) / 2 + (dx / length) * bend * bendScale,
+      };
+    });
+  }
+
+  function pointOnRoute(route, t) {
+    const inv = 1 - t;
+    return {
+      x: inv * inv * route.a.x + 2 * inv * t * route.cx + t * t * route.b.x,
+      y: inv * inv * route.a.y + 2 * inv * t * route.cy + t * t * route.b.y,
+    };
+  }
+
+  function effectIntensity() {
+    const raw = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
+    return Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.8;
+  }
+
+  function draw(time = 0) {
+    if (!canvas.isConnected || document.getElementById('clanker-routefield-canvas') !== canvas
+        || !document.body.classList.contains('bg-pattern-clanker-routefield')) {
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener('resize', resize);
+      canvas.remove();
+      return;
+    }
+    if (!motion.matches && previousFrame && time - previousFrame < 32) {
+      animationFrame = window.requestAnimationFrame(draw);
+      return;
+    }
+    previousFrame = time;
+    ctx.clearRect(0, 0, width, height);
+
+    const intensity = effectIntensity();
+    const size = _getEffectSize();
+    const primary = getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim() || palette[0];
+    const colors = [primary, palette[1], palette[2], palette[3]];
+
+    // Topographic instrument rings sit around a few routing hubs.
+    for (const node of nodes.filter(item => item.hub)) {
+      const drift = motion.matches ? 0 : Math.sin(time / 1700 + node.x / 240) * 3;
+      for (let ring = 0; ring < 3; ring += 1) {
+        ctx.beginPath();
+        ctx.ellipse(node.x, node.y, (28 + ring * 17 + drift) * size, (18 + ring * 11 + drift * 0.5) * size, -0.28, 0, Math.PI * 2);
+        ctx.strokeStyle = colors[node.color];
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = intensity * (0.1 - ring * 0.018);
+        ctx.stroke();
+      }
+    }
+
+    // Give each route a dark keyline, then a colored broken instrument line.
+    for (const route of routes) {
+      ctx.beginPath();
+      ctx.moveTo(route.a.x, route.a.y);
+      ctx.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#070B15';
+      ctx.lineWidth = 3 * size;
+      ctx.globalAlpha = intensity * 0.38;
+      ctx.stroke();
+
+      ctx.setLineDash([5 * size, 10 * size]);
+      ctx.lineDashOffset = motion.matches ? 0 : -time / 90;
+      ctx.strokeStyle = colors[route.color];
+      ctx.lineWidth = 1.2 * size;
+      ctx.globalAlpha = intensity * 0.32;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Flat, toy-like routing nodes with a near-black outer keyline.
+    for (const node of nodes) {
+      const radius = (node.hub ? 5 : 3.5) * size;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, radius + 2 * size, 0, Math.PI * 2);
+      ctx.fillStyle = '#070B15';
+      ctx.globalAlpha = intensity * 0.72;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = colors[node.color];
+      ctx.globalAlpha = intensity * (node.hub ? 0.8 : 0.55);
+      ctx.fill();
+    }
+
+    // Small diamond packets travel along the routes at staggered speeds.
+    routes.forEach((route, index) => {
+      const progress = motion.matches ? route.phase : (time / (6200 + (index % 4) * 650) + route.phase) % 1;
+      const point = pointOnRoute(route, progress);
+      const packet = (index % 3 === 0 ? 4.5 : 3.2) * size;
+      ctx.save();
+      ctx.translate(point.x, point.y);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = colors[route.color];
+      ctx.globalAlpha = intensity * 0.92;
+      ctx.fillRect(-packet / 2, -packet / 2, packet, packet);
+      ctx.restore();
+    });
+    ctx.globalAlpha = 1;
+
+    if (!motion.matches) animationFrame = window.requestAnimationFrame(draw);
+  }
+
+  resize();
+  if (!motion.matches) window.addEventListener('resize', resize);
+  draw();
+}
 
 // ── Synapse background effect ──
 // Uses the CSS grid pattern as base, overlays fast-moving small light pulses on grid lines
@@ -2072,7 +2326,7 @@ function _initEmbers() {
 }
 
 const themeModule = { initThemeUI, togglePopup, closePopup, makeDraggable,
-                       THEMES, applyColors, applyFontDensity, applyBgPattern,
+                       THEMES, applyTheme, applyThemeIdentity, applyColors, applyFontDensity, applyBgPattern,
                        applyBgEffectColor, applyBgEffectIntensity, applyBgEffectSize,
                        applyFrostedGlass,
                        save, getSaved, saveCustomTheme, deleteCustomTheme,

@@ -114,7 +114,7 @@ function _saveVote(winnerIdx) {
     winner: winner,
     prompt: state._lastPrompt,
     blind: state._blindMode,
-    mode: state._compareMode || 'chat',
+    mode: state._compareMode || 'agent',
     timestamp: Date.now(),
     costs: costs,
   };

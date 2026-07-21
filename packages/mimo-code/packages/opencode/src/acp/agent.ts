@@ -49,6 +49,7 @@ import { LoadAPIKeyError } from "ai"
 import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, ToolPart } from "@mimo-ai/sdk/v2"
 import { applyPatch } from "diff"
 import { InstallationVersion } from "@/installation/version"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 
 type ModeOption = { id: string; name: string; description?: string }
 type ModelOption = { modelId: string; name: string }
@@ -145,6 +146,9 @@ export class Agent implements ACPAgent {
   private toolStarts = new Set<string>()
   private permissionQueues = new Map<string, Promise<void>>()
   private questionQueues = new Map<string, Promise<void>>()
+  private actorFeeds = new Map<string, { rootTurnID: string; revision: number; baseline: Set<string> }>()
+  private actorRoots = new Map<string, string>()
+  private actorRevisions = new Map<string, number>()
   private permissionOptions: PermissionOption[] = [
     { optionId: "once", kind: "allow_once", name: "Allow once" },
     { optionId: "always", kind: "allow_always", name: "Always allow" },
@@ -197,6 +201,12 @@ export class Agent implements ACPAgent {
 
   private async handleEvent(event: Event) {
     switch (event.type) {
+      case "actor.registered":
+      case "actor.status": {
+        await this.forwardActorSnapshot(event.properties.sessionID, event.properties.actorID)
+        return
+      }
+
       case "question.asked": {
         const question = event.properties
         const session = this.sessionManager.tryGet(question.sessionID)
@@ -319,6 +329,45 @@ export class Agent implements ACPAgent {
             }
           })
         this.permissionQueues.set(permission.sessionID, next)
+        return
+      }
+
+      case "session.error": {
+        // Provider/LLM failures land on the assistant message and this bus
+        // event — session.prompt still resolves 200. Without forwarding, the
+        // host sees a clean empty turn and the user gets silence.
+        const props = event.properties
+        const sessionID = props.sessionID
+        if (!sessionID || !this.sessionManager.tryGet(sessionID)) return
+        const err = props.error
+        let message = err ? String(err.name ?? "provider error") : "Unknown provider error"
+        if (err && "data" in err && err.data && typeof err.data === "object" && "message" in err.data) {
+          message = String((err.data as { message?: unknown }).message ?? message)
+        }
+        await this.connection.sessionUpdate({
+          sessionId: sessionID,
+          update: {
+            sessionUpdate: "_odysseus_error",
+            name: err ? String(err.name ?? "UnknownError") : "UnknownError",
+            message,
+          } as any,
+        })
+        return
+      }
+
+      case "session.retry.attempt": {
+        const props = event.properties
+        if (!this.sessionManager.tryGet(props.sessionID)) return
+        await this.connection.sessionUpdate({
+          sessionId: props.sessionID,
+          update: {
+            sessionUpdate: "_odysseus_retry",
+            attempt: props.attempt,
+            maxAttempts: props.maxAttempts,
+            reason: props.reason,
+            nextDelayMs: props.nextDelayMs,
+          } as any,
+        })
         return
       }
 
@@ -546,6 +595,73 @@ export class Agent implements ACPAgent {
         return
       }
     }
+  }
+
+  private async listActorSnapshots(sessionID: string): Promise<any[]> {
+    const session = this.sessionManager.tryGet(sessionID)
+    if (!session) return []
+    const response = await this.sdk.session
+      .actors({ sessionID, directory: session.cwd }, { throwOnError: true })
+      .catch((error) => {
+        log.error("failed to fetch actor snapshots", { error, sessionID })
+        return undefined
+      })
+    return Array.isArray(response?.data) ? (response.data as any[]) : []
+  }
+
+  private async startActorFeed(sessionID: string, rootTurnID: string) {
+    const actors = await this.listActorSnapshots(sessionID)
+    const feed = {
+      rootTurnID,
+      revision: 1,
+      baseline: new Set(actors.map((actor) => String(actor?.actorID ?? "")).filter(Boolean)),
+    }
+    this.actorFeeds.set(sessionID, feed)
+    this.actorRevisions.set(rootTurnID, 1)
+    await this.connection.sessionUpdate({
+      sessionId: sessionID,
+      update: {
+        sessionUpdate: "_odysseus_actor_snapshot",
+        rootTurnId: rootTurnID,
+        mimoSessionId: sessionID,
+        sourceRevision: 1,
+        acknowledged: true,
+      } as any,
+    })
+  }
+
+  private async forwardActorSnapshot(sessionID: string, actorID: string) {
+    const feed = this.actorFeeds.get(sessionID)
+    if (!feed) return
+    const actors = await this.listActorSnapshots(sessionID)
+    const actor = actors.find((item) => String(item?.actorID ?? "") === actorID)
+    if (!actor) return
+
+    let rootTurnID = this.actorRoots.get(`${sessionID}:${actorID}`)
+    const parentID = String(actor.parentActorID ?? "")
+    if (!rootTurnID && parentID) rootTurnID = this.actorRoots.get(`${sessionID}:${parentID}`)
+    if (!rootTurnID && !feed.baseline.has(actorID)) rootTurnID = feed.rootTurnID
+    if (!rootTurnID) return
+    this.actorRoots.set(`${sessionID}:${actorID}`, rootTurnID)
+
+    const revision = (this.actorRevisions.get(rootTurnID) ?? 1) + 1
+    this.actorRevisions.set(rootTurnID, revision)
+    await this.connection.sessionUpdate({
+      sessionId: sessionID,
+      update: {
+        sessionUpdate: "_odysseus_actor_snapshot",
+        rootTurnId: rootTurnID,
+        mimoSessionId: sessionID,
+        sourceRevision: revision,
+        acknowledged: true,
+        actor: {
+          ...actor,
+          systemSpawned: SYSTEM_SPAWNED_AGENT_TYPES.has(String(actor.agent ?? "")),
+          countsTowardTotal:
+            actor.mode === "subagent" && !SYSTEM_SPAWNED_AGENT_TYPES.has(String(actor.agent ?? "")),
+        },
+      } as any,
+    })
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -1348,6 +1464,8 @@ export class Agent implements ACPAgent {
           system_prompt?: string
           persona?: string
           mode?: string
+          lane?: string
+          root_turn_id?: string
         }
       }
     })._meta?.odysseus
@@ -1361,13 +1479,14 @@ export class Agent implements ACPAgent {
     if (!current) {
       this.sessionManager.setModel(session.id, model)
     }
-    // Explicit lane crossing (identity ruling R2): a host chat-lane turn
-    // runs the real chat profile instead of a coding agent with every tool
-    // denied. Agent-lane turns keep the session's negotiated mode.
+    // Named auxiliary work is tool-free Chat plumbing; Plan is an explicit
+    // read-only Agent authority. Ordinary product turns stay on Agent.
     const agent =
-      odysseus?.mode === "chat"
+      odysseus?.lane === "auxiliary"
         ? "chat"
-        : (session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))))
+        : odysseus?.mode === "plan"
+          ? "plan"
+          : (session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))))
 
     const parts: Array<
       | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }
@@ -1445,6 +1564,10 @@ export class Agent implements ACPAgent {
 
     log.info("parts", { parts })
 
+    if (odysseus?.root_turn_id) {
+      await this.startActorFeed(sessionID, odysseus.root_turn_id)
+    }
+
     const cmd = (() => {
       const text = parts
         .findLast(
@@ -1474,6 +1597,34 @@ export class Agent implements ACPAgent {
       cachedWriteTokens: msg.tokens.cache?.write || undefined,
     })
 
+    // The server resolves session.prompt 200 even when the turn died on a
+    // provider error (it lands on info.error), and the SDK reports transport
+    // rejections (e.g. session busy) via response.error without throwing.
+    // Both were silently collapsing into an empty end_turn.
+    const turnFailure = (response: {
+      data?: { info?: AssistantMessage }
+      error?: unknown
+    }): { cancelled: boolean; message: string } | undefined => {
+      const err = response.data?.info?.error
+      if (err) {
+        if (err.name === "MessageAbortedError") return { cancelled: true, message: "" }
+        const data = (err as { data?: { message?: unknown } }).data
+        const message = typeof data?.message === "string" && data.message ? data.message : String(err.name)
+        return { cancelled: false, message }
+      }
+      if (response.data === undefined && response.error !== undefined) {
+        const raw = response.error
+        const message =
+          typeof raw === "object" && raw !== null && "message" in raw
+            ? String((raw as { message?: unknown }).message)
+            : typeof raw === "string"
+              ? raw
+              : JSON.stringify(raw)
+        return { cancelled: false, message: message || "prompt request failed" }
+      }
+      return undefined
+    }
+
     if (!cmd) {
       const response = await this.sdk.session.prompt({
         sessionID,
@@ -1491,6 +1642,18 @@ export class Agent implements ACPAgent {
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
+
+      const failure = turnFailure(response)
+      if (failure?.cancelled) {
+        return {
+          stopReason: "cancelled" as const,
+          usage: msg ? buildUsage(msg) : undefined,
+          _meta: {},
+        }
+      }
+      if (failure) {
+        throw new RequestError(-32603, failure.message, { sessionId: sessionID })
+      }
 
       return {
         stopReason: "end_turn" as const,
@@ -1516,6 +1679,18 @@ export class Agent implements ACPAgent {
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
+
+      const failure = turnFailure(response)
+      if (failure?.cancelled) {
+        return {
+          stopReason: "cancelled" as const,
+          usage: msg ? buildUsage(msg) : undefined,
+          _meta: {},
+        }
+      }
+      if (failure) {
+        throw new RequestError(-32603, failure.message, { sessionId: sessionID })
+      }
 
       return {
         stopReason: "end_turn" as const,

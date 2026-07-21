@@ -23,6 +23,14 @@ secrets.env~
 /data/
 /logs/
 .git/
+.archive/
+.references/
+references/
+.futures/
+robonotes/
+.robonotes/
+.mimocode/
+/bin/
 .claude/
 .playwright-mcp/
 .pytest_cache/

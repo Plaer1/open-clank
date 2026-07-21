@@ -12,7 +12,7 @@ seed: name **Odysseus**, prompt = upstream's legacy baseline. The record
 is EDITABLE and is ONE state across three surfaces (edits anywhere update
 everywhere):
 
-1. **Chat** — a turn with no explicit preset/persona speaks as the
+1. **Conversation** — a turn with no explicit preset/persona speaks as the
    default persona (`chat_handler.validate_and_extract_preset`).
 2. **Personal assistant** — the CrewMember row's name/personality is a
    synced copy (`_push_to_assistant` / `sync_from_assistant`); the
@@ -22,7 +22,7 @@ everywhere):
    (`reminder_personas.synthesis_system_prompt`); novelty voices stay.
 
 Background work that users read — research final reports, chat
-auto-titles, scheduled-task fallback — speaks as the default persona too;
+auto-titles, and scheduled tasks — speaks as the default persona too;
 internal role prompts stay mechanical (ruling R15).
 
 Editing surfaces: the chat-bar persona modal's "Default (…)" entry, the
@@ -50,31 +50,35 @@ by `test/session/prompt-identity-neutral.test.ts`).
 
 ## Lanes
 
-- **Chat lane** (`envelope.mode == "chat"`): the child runs the built-in
-  `chat` agent — its own conversational prompt (no CLI-coding framing, no
-  file-memory manual), hard wildcard tool deny that config cannot relax.
-  Identity text matches what the turn can actually do (ruling R2).
-- **Agent lane**: the session's negotiated mimo mode (build/plan/compose);
-  full registry filtered by the envelope tool policy.
+- **Agent lane**: the only conversation lane. Standard, Plan, read-only
+  Compare, and Temporary Agent all enter `run_agent(AgentRunRequest)` and the
+  MiMo registry is filtered by the authoritative envelope tool policy.
+- **Auxiliary inference**: named function-level jobs such as title generation,
+  memory extraction, grading, notifications, and bounded summaries enter
+  `run_auxiliary_inference(AuxiliaryRequest)`. The child uses its conversational
+  profile with a wildcard tool deny. This plumbing is not selectable as a chat
+  mode and cannot rescue a failed Agent run.
 - Tool policy is a complete per-turn revision: provided map replaces,
   empty map clears, omitted map preserves (no sticky deny-all).
-- Chat→agent intent auto-escalation is upstream-vanilla and kept (R16).
+- Temporary Agent disables transcript, memory, skill, webhook, and actor
+  residue and deletes its ephemeral child session on every terminal path.
 
-### MiMo drives agent mode (2026-07-17)
+### MiMo is the strict Agent runtime (2026-07-18)
 
-Agent-mode turns route to mimo for EVERY model it can serve, not just
-`mimo://acp` targets. The supervisor projects the Odysseus endpoint
-registry into mimo providers at spawn (`ody-<endpoint_id>` namespace,
-`_endpoint_registry_providers`; keys over the credential FD, never env
-or config), and the dispatch rewrite (`mimo_agent_target`,
-model_dispatch.py) sends any http-target agent turn whose model appears
-in mimo's catalog through the ACP lane instead. MiMo's native tool
-engine — full schemas, real function calling — replaces the homegrown
-loop's RAG tool guessing, which survives only as the fallback for
-models mimo cannot serve (e's ruling: "i used mimo because the people
-at xiaomi are smarter than you"). Kill switch: `agent_via_mimo`
-setting. Endpoint CRUD recycles mimo workers so the projection stays
-current; chat lane is untouched.
+Every tool-bearing turn routes through MiMo. `ModelEndpoint` rows are the sole
+endpoint registry; a session persists the exact endpoint ID and never
+reverse-routes by URL. Per-model capability evidence decides eligibility. The
+supervisor materializes owner-visible rows into child spawn configuration under
+the `ody-<endpoint_id>` namespace, with credentials passed over an inherited FD.
+MiMo-native catalog entries may coexist and are ignored when checking a selected
+projected endpoint/model.
+
+Admission reconciles the committed spawn fingerprint and generation, then
+acquires a generation-scoped worker/session lease. Reprojection warms a fenced
+candidate, drains the old generation, and publishes atomically. Agent failure
+returns a typed terminal error; there is no provider, no-tools, or homegrown
+fallback and no runtime kill switch. `src/agent_loop.py` remains compatibility
+code only until the separately approved retirement gate deletes it.
 
 ## Names in the UX
 

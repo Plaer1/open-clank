@@ -269,7 +269,11 @@ def _skill_dump(sk) -> Dict:
 # Task management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
+async def do_manage_tasks(
+    content: str,
+    owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Dict:
     """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
     import uuid as _uuid
     from core.database import SessionLocal, ScheduledTask
@@ -327,6 +331,32 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             # None when the key is present but null, and None[:50] raises.
             name = args.get("name") or (args.get("prompt") or args.get("action_name") or "Task")[:50]
 
+            endpoint_id = None
+            endpoint_url = None
+            model = None
+            workspace = None
+            allowed_tools = []
+            if task_type in ("llm", "research"):
+                from core.database import Session as DbSession
+                source = db.query(DbSession).filter(DbSession.id == session_id).first() if session_id else None
+                if not source or (owner and source.owner != owner):
+                    return {"error": "A current owned session is required for model tasks", "exit_code": 1}
+                if not source.endpoint_id:
+                    return {"error": "Current session has no registered endpoint identity", "exit_code": 1}
+                endpoint_id = source.endpoint_id
+                endpoint_url = source.endpoint_url
+                model = source.model
+                requested_tools = args.get("allowed_tools") or []
+                if not isinstance(requested_tools, list):
+                    return {"error": "allowed_tools must be a list", "exit_code": 1}
+                from src.tool_policy import known_tool_names
+                allowed_tools = sorted({str(tool) for tool in requested_tools if str(tool)})
+                unknown = set(allowed_tools) - known_tool_names()
+                if unknown:
+                    return {"error": f"Unknown task tools: {', '.join(sorted(unknown))}", "exit_code": 1}
+                from src.tool_execution import get_active_workspace
+                workspace = get_active_workspace()
+
             task = ScheduledTask(
                 id=task_id,
                 owner=owner,
@@ -344,6 +374,13 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 next_run=next_run,
                 status="active",
                 output_target=args.get("output_target", "session"),
+                endpoint_id=endpoint_id,
+                endpoint_url=endpoint_url,
+                model=model,
+                workspace=workspace,
+                allowed_tools=json.dumps(allowed_tools),
+                interaction_policy="fail_on_interaction",
+                max_tool_calls=max(1, min(1000, int(args.get("max_tool_calls") or 20))),
             )
             db.add(task)
             db.commit()

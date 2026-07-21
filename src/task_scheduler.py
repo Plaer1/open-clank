@@ -28,9 +28,8 @@ def _utcnow() -> datetime:
 # setting turns them off). The RAG tool selector + ASSISTANT_ALWAYS_AVAILABLE
 # never include bash/python, so on a host with an empty/degraded tool-embedding
 # index a task could not run shell or Python even for an admin owner. Offering
-# them here is safe: stream_agent_loop's blocked_tools_for_owner() still strips
-# this whole group for non-admin multi-user owners, and only admits it for
-# admins and single-user (AUTH_ENABLED=false) deployments.
+# them here is safe: the stored task allowlist and current owner/global policy
+# are intersected at the strict Agent door before ACP sees any schema.
 TASK_DEFAULT_SHELL_TOOLS = frozenset({
     "bash", "python", "read_file", "write_file", "edit_file",
     "grep", "glob", "ls", "get_workspace",
@@ -118,7 +117,8 @@ def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools):
     Unions the RAG-retrieved tools, the assistant's always-available set, and
     the default shell/file group, then removes anything the task's crew
     explicitly disabled via its `enabled_tools` allowlist. Per-owner admin
-    gating is applied later by stream_agent_loop (blocked_tools_for_owner).
+    owner/global gating and the stored task allowlist are applied later at the
+    strict Agent door.
     """
     tools = set(rag_tools) | set(assistant_always) | set(TASK_DEFAULT_SHELL_TOOLS)
     if disabled_tools:
@@ -670,6 +670,11 @@ class TaskScheduler:
                 t.cancel()
                 try: await t
                 except asyncio.CancelledError: pass
+        handles = [handle for handle in set(self._task_handles.values()) if not handle.done()]
+        for handle in handles:
+            handle.cancel()
+        if handles:
+            await asyncio.gather(*handles, return_exceptions=True)
         logger.info("Task scheduler stopped")
 
     async def _note_pings_loop(self):
@@ -1592,15 +1597,23 @@ class TaskScheduler:
                 crew = None
 
         # Determine endpoint + model
+        endpoint_id = getattr(task, "endpoint_id", None)
         endpoint_url = task.endpoint_url
         model = task.model
         if (not endpoint_url or not model) and crew:
+            endpoint_id = endpoint_id or getattr(crew, "endpoint_id", None)
             endpoint_url = endpoint_url or crew.endpoint_url
             model = model or crew.model
-        if not endpoint_url or not model:
-            endpoint_url, model = self._resolve_defaults(db, task.owner)
-        if not endpoint_url or not model:
-            raise RuntimeError("No model/endpoint configured")
+        if not endpoint_id or not endpoint_url or not model:
+            default_id, default_url, default_model = self._resolve_defaults(db, task.owner)
+            endpoint_id = endpoint_id or default_id
+            endpoint_url = endpoint_url or default_url
+            model = model or default_model
+        if not endpoint_id or not endpoint_url or not model:
+            raise RuntimeError("No registered model endpoint configured")
+        task.endpoint_id = endpoint_id
+        task.endpoint_url = endpoint_url
+        task.model = model
         endpoint_url = _normalize_chat_endpoint(endpoint_url)
         # Record the resolved model so _execute_task_locked can persist it on
         # the run (tasks rarely pin a model, so this is the only record of
@@ -1615,6 +1628,7 @@ class TaskScheduler:
                 id=session_id,
                 name=f"[Task] {task.name}",
                 endpoint_url=endpoint_url,
+                endpoint_id=endpoint_id,
                 model=model,
                 owner=task.owner,
                 folder="Tasks",
@@ -1628,10 +1642,17 @@ class TaskScheduler:
                 try:
                     self._session_manager.ensure_task_session(
                         session_id, f"[Task] {task.name}", endpoint_url, model,
-                        owner=task.owner, task=task
+                        owner=task.owner, task=task, endpoint_id=endpoint_id,
                     )
                 except Exception:
                     pass
+        else:
+            existing_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if existing_session:
+                existing_session.endpoint_id = endpoint_id
+                existing_session.endpoint_url = endpoint_url
+                existing_session.model = model
+                db.commit()
 
         # For assistant check-ins: call each tool directly and post results
         # as separate messages. More reliable than hoping the model calls tools.
@@ -1726,28 +1747,12 @@ class TaskScheduler:
         except Exception as e:
             logger.warning(f"[assistant] RAG tool selection failed, using all: {e}")
 
-        # Try using the agent loop for full tool access
-        try:
-            result = await self._run_agent_loop(
-                endpoint_url, model, task, session_id,
-                system_prompt=system_prompt, disabled_tools=disabled_tools or None,
-                relevant_tools=relevant_tools,
-                datetime_context_msg=_dt_msg,
-            )
-        except Exception as e:
-            logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
-            from src.task_endpoint import task_llm_call_async
-            messages: list = [{"role": "system", "content": system_prompt}]
-            if _dt_msg:
-                messages.append(_dt_msg)
-            messages.append({"role": "user", "content": task.prompt})
-            result = await task_llm_call_async(
-                messages,
-                fallback_url=endpoint_url,
-                fallback_model=model,
-                owner=task.owner,
-                timeout=120,
-            )
+        result = await self._run_agent_loop(
+            endpoint_url, model, task, session_id,
+            system_prompt=system_prompt, disabled_tools=disabled_tools or None,
+            relevant_tools=relevant_tools,
+            datetime_context_msg=_dt_msg,
+        )
 
         # Strip the model's chain-of-thought before saving/delivering. Task
         # output is LLM-only, so prose=True (which also removes untagged
@@ -1789,6 +1794,7 @@ class TaskScheduler:
         if output != "session":
             return
 
+        endpoint_id = getattr(task, "endpoint_id", None)
         endpoint_url = task.endpoint_url
         model_name = model or task.model
         crew = None
@@ -1798,11 +1804,13 @@ class TaskScheduler:
             except Exception:
                 crew = None
         if (not endpoint_url or not model_name) and crew:
+            endpoint_id = endpoint_id or getattr(crew, "endpoint_id", None)
             endpoint_url = endpoint_url or crew.endpoint_url
             model_name = model_name or crew.model
-        if not endpoint_url or not model_name:
+        if not endpoint_id or not endpoint_url or not model_name:
             try:
-                resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
+                resolved_id, resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
+                endpoint_id = endpoint_id or resolved_id
                 endpoint_url = endpoint_url or resolved_url
                 model_name = model_name or resolved_model
             except Exception:
@@ -1817,6 +1825,7 @@ class TaskScheduler:
                 id=session_id,
                 name=f"[Task] {task.name}",
                 endpoint_url=endpoint_url or "",
+                endpoint_id=endpoint_id,
                 model=model_name or "",
                 owner=task.owner,
                 folder="Tasks",
@@ -1830,7 +1839,7 @@ class TaskScheduler:
                 try:
                     self._session_manager.ensure_task_session(
                         session_id, f"[Task] {task.name}", endpoint_url, model_name,
-                        owner=task.owner, task=task
+                        owner=task.owner, task=task, endpoint_id=endpoint_id,
                     )
                 except Exception:
                     pass
@@ -1961,50 +1970,59 @@ class TaskScheduler:
             messages.append(datetime_context_msg)
         messages.append({"role": "user", "content": user_content})
 
-        # Resolve headers from the endpoint's API key
+        endpoint_id = str(getattr(task, "endpoint_id", "") or "").strip()
+        if not endpoint_id:
+            raise RuntimeError("UNREGISTERED_ENDPOINT: scheduled task has no endpoint_id")
         headers = {}
-        try:
+        if endpoint_id != "mimo":
             from core.database import SessionLocal, ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
             from src.auth_helpers import owner_filter
+            from src.endpoint_resolver import build_chat_url, build_headers, resolve_endpoint_runtime
+
             db2 = SessionLocal()
             try:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
+                query = db2.query(ModelEndpoint).filter(
+                    ModelEndpoint.id == endpoint_id,
+                    ModelEndpoint.is_enabled == True,  # noqa: E712
+                )
+                endpoint = owner_filter(query, ModelEndpoint, task.owner or "").first()
+                if endpoint is None:
+                    raise RuntimeError("ENDPOINT_NOT_PROJECTABLE: task endpoint is unavailable")
+                runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)
+                endpoint_url = build_chat_url(runtime_base)
+                headers = build_headers(api_key, runtime_base)
             finally:
                 db2.close()
-        except Exception:
-            pass
+        else:
+            endpoint_url = "mimo://acp"
+
+        try:
+            stored_allowed = json.loads(getattr(task, "allowed_tools", None) or "[]")
+        except (TypeError, ValueError):
+            stored_allowed = []
+        if not isinstance(stored_allowed, list):
+            raise RuntimeError("INVALID_TOOL_POLICY: task allowed_tools must be a JSON list")
+        allowed_tools = {str(name) for name in stored_allowed if str(name)}
+        if relevant_tools is not None:
+            allowed_tools.intersection_update(map(str, relevant_tools))
+        if disabled_tools:
+            allowed_tools.difference_update(map(str, disabled_tools))
         full_text = ""
         tool_results = []
+        terminal = False
+        stream_error = None
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
         _task_max_rounds = task.max_steps if task.max_steps and task.max_steps > 0 else 20
-        # Tasks are background workloads: use the shared task fallback chain
-        # behind the primary endpoint so a downed primary won't silently yield
-        # `(no output)`.
-        try:
-            from src.interactive_gate import wait_for_interactive_quiet
-            await wait_for_interactive_quiet(f"agent task {task.name}")
-            from src.task_endpoint import resolve_task_candidates
-            _task_fallbacks = resolve_task_candidates(
-                fallback_url=endpoint_url,
-                fallback_model=model,
-                fallback_headers=headers,
-                owner=task.owner or None,
-            )[1:]
-        except Exception:
-            _task_fallbacks = []
+        from src.interactive_gate import wait_for_interactive_quiet
+        await wait_for_interactive_quiet(f"agent task {task.name}")
         target = resolve_model_target(
             endpoint_url,
             model,
             headers,
+            endpoint_id=endpoint_id,
+            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}"),
             lifecycle="ephemeral",
         )
         async for event_str in stream_agent_target(
@@ -2012,60 +2030,82 @@ class TaskScheduler:
             messages=messages,
             supervisor=self._mimo_supervisor,
             max_rounds=_task_max_rounds,
+            max_tool_calls=int(getattr(task, "max_tool_calls", None) or 20),
             session_id=session_id,
             owner=task.owner,
+            cwd=getattr(task, "workspace", None),
             disabled_tools=disabled_tools,
-            relevant_tools=relevant_tools,
-            fallbacks=_task_fallbacks,
+            relevant_tools=allowed_tools,
+            turn_envelope={
+                "durable_id": f"task:{task.id}",
+                "interaction_policy": "fail_on_interaction",
+                "allowed_tools": sorted(allowed_tools),
+                "workspace": getattr(task, "workspace", None) or "",
+            },
             workload="background",
         ):
-            if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
+            event_name = "message"
+            for line in event_str.splitlines():
+                if line.startswith("event:"):
+                    event_name = line[6:].strip() or "message"
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if raw == "[DONE]":
+                    terminal = True
+                    continue
+                if not raw:
+                    continue
                 try:
-                    data = json.loads(event_str[6:])
-                    # Capture text from all event types, not just delta
-                    if "delta" in data:
-                        if data.get("thinking"):
-                            continue
-                        full_text += data["delta"]
-                    elif data.get("type") == "tool_output":
-                        # Tool results — capture summary so we have SOMETHING even
-                        # if the model never produces a final text response
-                        tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
-                        if isinstance(tool_summary, str) and tool_summary.strip():
-                            tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
-                except (json.JSONDecodeError, KeyError):
-                    pass
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if event_name == "error" or data.get("error"):
+                    stream_error = data
+                    continue
+                if data.get("type") in {"permission_request", "question", "interaction_required"}:
+                    stream_error = {
+                        "code": "INTERACTION_REQUIRED",
+                        "error": "Headless task requested user interaction",
+                    }
+                    continue
+                if isinstance(data.get("delta"), str) and not data.get("thinking"):
+                    full_text += data["delta"]
+                if data.get("type") == "tool_output":
+                    tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
+                    if isinstance(tool_summary, str) and tool_summary.strip():
+                        tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
 
-        # Grace summarization — if the model exhausted rounds on tool calls
-        # without producing a final text response, do one last LLM call
-        # asking it to summarize what it did. Guarantees output.
+        if stream_error:
+            code = stream_error.get("code") or "AGENT_STREAM_FAILED"
+            detail = stream_error.get("error") or stream_error.get("detail") or "Agent stream failed"
+            raise RuntimeError(f"{code}: {detail}")
+        if not terminal:
+            raise RuntimeError("IN_FLIGHT_INTERRUPTED: Agent stream ended without a terminal event")
+
+        # A no-tools auxiliary may summarize real completed tool results. It
+        # never rescues admission/stream failure and cannot invent success when
+        # no tool work happened.
         if not full_text.strip():
-            try:
-                from src.task_endpoint import task_llm_call_async
-                grace_context = "You ran out of steps. "
-                if tool_results:
-                    grace_context += "Here's what your tools returned:\n" + "\n".join(tool_results[-5:])
-                else:
-                    grace_context += "No tool results were captured."
-                grace_context += "\n\nSummarize what you accomplished and what's still pending. Be concise."
-                full_text = await task_llm_call_async(
-                    messages=[
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": grace_context},
-                    ],
-                    fallback_url=endpoint_url,
-                    fallback_model=model,
-                    fallback_headers=headers,
-                    owner=task.owner or None,
-                    timeout=30,
-                )
-                full_text = (full_text or "").strip()
-            except Exception as e:
-                logger.warning(f"Grace summarization failed: {e}")
-                if tool_results:
-                    full_text = "\n".join(tool_results[-5:])
+            if not tool_results:
+                raise RuntimeError("AGENT_NO_OUTPUT: completed without answer text or tool results")
+            from src.model_dispatch import AuxiliaryRequest, run_auxiliary_inference
+            full_text = await run_auxiliary_inference(AuxiliaryRequest(
+                purpose="scheduled_task_grace_summary",
+                target=target,
+                messages=[
+                    {"role": "system", "content": "Summarize only the supplied completed tool results. Do not claim any unlisted action."},
+                    {"role": "user", "content": "\n".join(tool_results[-5:])},
+                ],
+                owner=task.owner,
+                timeout=30,
+            ))
+            full_text = (full_text or "").strip()
+            if not full_text:
+                raise RuntimeError("AUXILIARY_NO_OUTPUT: tool-result summary was empty")
 
-        return full_text or "(no output)"
+        return full_text
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""
@@ -2076,53 +2116,38 @@ class TaskScheduler:
         from src.settings import get_setting
 
         # Resolve endpoint/model: research settings > task settings > session defaults
+        endpoint_id = getattr(task, "endpoint_id", None)
         endpoint_url = task.endpoint_url
         model = task.model
         headers = {}
-        headers_from_resolver = False
 
-        if not endpoint_url or not model:
-            try:
-                from src.endpoint_resolver import resolve_endpoint
-                ep_url, ep_model, ep_headers = resolve_endpoint(
-                    "research",
-                    endpoint_url or None,
-                    model or None,
-                    None,
-                    owner=task.owner or None,
-                )
-                endpoint_url = ep_url or endpoint_url
-                model = ep_model or model
-                if ep_headers is not None:
-                    headers = ep_headers
-                    headers_from_resolver = True
-            except Exception:
-                pass
-
-        if not endpoint_url or not model:
-            endpoint_url, model = self._resolve_defaults(db, task.owner)
-        if not endpoint_url or not model:
-            raise RuntimeError("No model/endpoint configured for research")
-        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+        if not endpoint_id or not endpoint_url or not model:
+            default_id, default_url, default_model = self._resolve_defaults(db, task.owner)
+            endpoint_id = endpoint_id or default_id
+            endpoint_url = endpoint_url or default_url
+            model = model or default_model
+        if not endpoint_id or not endpoint_url or not model:
+            raise RuntimeError("No registered model endpoint configured for research")
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
 
-        # Resolve headers
-        try:
+        if endpoint_id == "mimo":
+            endpoint_url = "mimo://acp"
+        else:
             from core.database import ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
             from src.auth_helpers import owner_filter
-            db2 = db
-            if not headers_from_resolver:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
-        except Exception:
-            pass
+            from src.endpoint_resolver import build_chat_url, build_headers, resolve_endpoint_runtime
+
+            query = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == endpoint_id,
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+            )
+            endpoint = owner_filter(query, ModelEndpoint, task.owner or "").first()
+            if endpoint is None:
+                raise RuntimeError("Scheduled research endpoint is unavailable")
+            runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)
+            endpoint_url = build_chat_url(runtime_base)
+            headers = build_headers(api_key, runtime_base)
 
         max_tokens = int(get_setting("research_max_tokens", 8192))
         extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
@@ -2157,6 +2182,7 @@ class TaskScheduler:
                 id=session_id,
                 name=f"[Research] {task.name}",
                 endpoint_url=endpoint_url,
+                endpoint_id=endpoint_id,
                 model=model,
                 owner=task.owner,
                 folder="Tasks",
@@ -2232,19 +2258,20 @@ class TaskScheduler:
         return True  # too deep, treat as cycle
 
     def _resolve_defaults(self, db, owner):
-        """Find the first available endpoint + model from an existing session."""
+        """Find one recent session with persisted endpoint identity."""
         from core.database import Session as DbSession
         try:
             recent = db.query(DbSession).filter(
+                DbSession.endpoint_id.isnot(None),
                 DbSession.endpoint_url.isnot(None),
                 DbSession.model.isnot(None),
                 *([DbSession.owner == owner] if owner else []),
             ).order_by(DbSession.created_at.desc()).first()
             if recent:
-                return recent.endpoint_url, recent.model
+                return recent.endpoint_id, recent.endpoint_url, recent.model
         except Exception:
             pass
-        return None, None
+        return None, None, None
 
     async def _deliver_via_mcp(self, tool_name: str, task, result: str):
         """Send the task result via an MCP tool (e.g. Gmail send).
@@ -2332,12 +2359,14 @@ class TaskScheduler:
         return True
 
     async def stop_task(self, task_id: str) -> bool:
-        """Request cancellation of a running/queued task and mark its run aborted."""
+        """Cancel and join a task before reporting its durable aborted state."""
         handle = self._task_handles.get(task_id)
         stopped = False
         if handle and not handle.done():
             handle.cancel()
             stopped = True
+            if handle is not asyncio.current_task():
+                await asyncio.gather(handle, return_exceptions=True)
         async with self._executing_lock:
             if task_id in self._executing:
                 self._executing.discard(task_id)
@@ -2357,11 +2386,16 @@ class TaskScheduler:
         async with self._executing_lock:
             task_ids = list(self._executing)
         stopped = 0
+        handles = []
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)
             if handle and not handle.done():
                 handle.cancel()
+                handles.append(handle)
                 stopped += 1
+        if handles:
+            await asyncio.gather(*handles, return_exceptions=True)
+        for task_id in task_ids:
             if self._mark_run_aborted(task_id):
                 stopped += 1
         if stopped:
@@ -2607,7 +2641,7 @@ class TaskScheduler:
 
             # Resolve a default model/endpoint from any existing session so the
             # assistant has something to call. The user can change this later.
-            endpoint_url, model = self._resolve_defaults(db, owner)
+            endpoint_id, endpoint_url, model = self._resolve_defaults(db, owner)
 
             # Voice comes from the owner's synced default persona (rulings
             # R13/R15); the mechanical operating rules live in
@@ -2631,6 +2665,7 @@ class TaskScheduler:
                 id=session_id,
                 name="Assistant",
                 endpoint_url=endpoint_url or "",
+                endpoint_id=endpoint_id,
                 model=model or "",
                 owner=owner,
                 is_important=True,
@@ -2653,6 +2688,7 @@ class TaskScheduler:
                 personality=default_personality,
                 model=model,
                 endpoint_url=endpoint_url,
+                endpoint_id=endpoint_id,
                 greeting=None,
                 enabled_tools=json.dumps([
                     "manage_calendar", "manage_notes", "manage_tasks", "manage_memory",

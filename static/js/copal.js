@@ -1,10 +1,12 @@
 import { openCalendar } from './calendar.js';
-import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort } from './copal/bases.js';
+import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from './copal/bases.js';
 import { createMarkdownEditor } from './copal/codemirror.js';
 import { createNotesFeature } from './copal/notesFeature.js';
+import { databaseRelations, moveHeadingSection, moveHeadingSectionTo, outlineEntries, reparentHeading } from './copal/notesModel.js';
 import { createPlanningFeature } from './copal/planning.js';
 import { createTreeHouseFeature } from './copal/treehouse.js';
 import { createCopalWindow } from './copal/windows.js';
+import { wireDialog } from './copal/overlays.js';
 
 const VIEWS = ['notes', 'wiki', 'timeline', 'galaxy', 'graph', 'mind', 'bases', 'treehouse', 'todo'];
 const LABELS = { notes: 'Notes', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Mind', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
@@ -18,7 +20,8 @@ const state = {
   wikiEditing: new Set(), treehouseSection: 'courses', treehouseLesson: null,
   title: null, status: null, search: null, events: null, reloadTimer: null, ignoreEventsUntil: 0,
   projectedPlanningHead: null,
-  baseId: null, baseView: null, basePage: 1, baseQueryToken: 0, baseDefinition: null,
+  baseId: null, baseView: null, basePage: 1, basePageSize: 100, baseQueryToken: 0, baseDefinition: null,
+  baseSourceDocs: new Map(), baseFocusRow: -1, baseFocusCol: -1, baseFocusTable: null,
   noteEditors: new Set(),
 };
 let planningFeature = null;
@@ -122,10 +125,12 @@ function planningData() {
   return state.planning || { tracks: [], floatingTodos: [] };
 }
 
-function visibleDocs() {
+function visibleDocs(corpus) {
   const query = state.filter.trim().toLowerCase();
   return state.docs.filter((doc) => {
     if (HIDDEN_KINDS.has(doc.kind)) return false;
+    if (corpus === 'wiki' && doc.kind !== 'wiki') return false;
+    if (corpus === 'notes' && doc.kind === 'wiki') return false;
     return !query || doc.name.toLowerCase().includes(query) || String(doc.text || '').toLowerCase().includes(query);
   });
 }
@@ -153,12 +158,12 @@ async function reconcileCalendarProjection(force = false) {
 async function loadDocuments(render = true) {
   setStatus('Loading…');
   try {
-    let [result, planning] = await Promise.all([api('/documents'), api('/planning')]);
+    let [result, planning] = await Promise.all([api('/documents?hidden=include'), api('/planning')]);
     if (planning.migrationRequired) {
       setStatus('Migrating Timeline events into canonical Redb notes…');
       const migration = await api('/planning/migrate?dry_run=false', { method:'POST', body:JSON.stringify({ action:'apply' }) });
       projectionChanged(migration);
-      [result, planning] = await Promise.all([api('/documents'), api('/planning')]);
+      [result, planning] = await Promise.all([api('/documents?hidden=include'), api('/planning')]);
     }
     state.docs = result.docs || [];
     state.planning = planning || { tracks: [], floatingTodos: [] };
@@ -278,16 +283,23 @@ function showDocumentConflict(doc, localContent, remote, view) {
       doc.head = remote.head;
       if (await saveDocument(doc, localContent, true, view)) notesFeature?.acceptSavedDocument(doc.id, localContent);
     } })));
-  document.body.append(dialog);
-  dialog.addEventListener('close', () => dialog.remove());
+  wireDialog(dialog); document.body.append(dialog);
   dialog.showModal();
 }
 
 async function saveDocument(doc, content, rerender = false, view = state.view) {
   setViewStatus(view, 'Saving…');
   try {
+    const payload = { content, base:doc.head };
+    if (doc.kind === 'note') {
+      payload.properties = doc.properties || {};
+      payload.relations = [
+        ...(doc.relations || []).filter((relation) => relation.origin === 'explicit'),
+        ...databaseRelations(content, state.docs),
+      ];
+    }
     const result = await api(`/documents/${encodeURIComponent(doc.id)}`, {
-      method: 'PUT', body: JSON.stringify({ content, base: doc.head }),
+      method: 'PUT', body: JSON.stringify(payload),
     });
     doc.text = content;
     doc.head = result.doc?.head || doc.head;
@@ -319,9 +331,63 @@ function scheduleSave(doc, textarea) {
   state.saveTimers.set(doc.id, setTimeout(() => { state.saveTimers.delete(doc.id); saveDocument(doc, textarea.value, false, view); }, 700));
 }
 
+function convertPluginBlock(source, lang) {
+  if (lang !== 'dataview') {
+    // Non-dataview blocks: create as note (existing behavior)
+    showForm('Convert plugin block', [
+      ['name', 'Base name', `${lang}-converted.base`],
+    ], async ({ name }) => {
+      const properties = { source_block: lang, original_source: source };
+      const relations = databaseRelations(source, state.docs);
+      await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'note', content:source, properties, relations }) });
+      await loadDocuments(false);
+      setStatus(`Created ${name} from ${lang} block`);
+    });
+    return;
+  }
+  // D2: Dataview → Base conversion with preview
+  const parsed = parseDataviewQuery(source);
+  const dialog = h('dialog', { class: 'copal-dialog' });
+  const name = h('input', { value: 'Dataview.base', 'aria-label': 'Base name' });
+  let previewBody;
+  if (parsed) {
+    const cols = parsed.fields.map((f) => h('th', { text: f.label }));
+    const headerRow = h('tr', {}, ...cols);
+    previewBody = h('div', {},
+      h('p', { text: `Type: ${parsed.type}` }),
+      h('p', { text: `Columns: ${parsed.fields.map((f) => f.label).join(', ')}` }),
+      parsed.folder ? h('p', { text: `Source folder: ${parsed.folder}` }) : null,
+      parsed.filter ? h('p', { text: `Filter: ${JSON.stringify(parsed.filter)}` }) : null,
+      h('table', { class: 'copal-table', style: 'margin-top:8px' }, h('thead', {}, headerRow), h('tbody', {}, h('tr', {}, ...parsed.fields.map(() => h('td', { text: '—' }))))),
+      h('p', { class: 'copal-base-diagnostic', text: 'Rows will be populated from live documents on creation.' }),
+    );
+  } else {
+    previewBody = h('p', { class: 'copal-base-diagnostic', text: 'Could not parse this Dataview query. A default Base will be created.' });
+  }
+  dialog.append(h('h2', { text: 'Convert Dataview to Base' }), name, previewBody);
+  dialog.append(h('div', { class: 'copal-dialog-actions' },
+    h('button', { class: 'copal-btn', text: 'Cancel', onclick: () => dialog.close() }),
+    h('button', { class: 'copal-btn primary', text: 'Create Base', onclick: async () => {
+      const safeName = name.value.trim().endsWith('.base') ? name.value.trim() : `${name.value.trim()}.base`;
+      if (!safeName || safeName === '.base') return;
+      const def = makeDefaultBase(safeName.replace(/\.base$/i, ''));
+      if (parsed && parsed.fields.length) {
+        def.views[0].columns = parsed.fields.map((f) => ({ property: f.property, label: f.label }));
+        if (parsed.filter) def.views[0].filters = parsed.filter;
+      }
+      try {
+        await api('/documents', { method:'POST', body:JSON.stringify({ name: safeName, kind:'base', content: serializeBase(def) }) });
+        await loadDocuments(false);
+        dialog.close();
+        setStatus(`Created Base ${safeName} from dataview block`);
+      } catch (error) { setStatus(error.message, true); }
+    } })));
+  wireDialog(dialog); document.body.append(dialog); dialog.showModal(); name.focus(); name.select();
+}
+
 function appendMarkdownInline(parent, value) {
   let rest = String(value || '');
-  const token = /(!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]|`([^`]+)`|\*\*([^*]+)\*\*|~~([^~]+)~~|==([^=]+)==|(?<!\*)\*([^*]+)\*(?!\*)|\[([^\]]+)\]\(([^)\s]+)\)|\$([^$\n]+)\$|(?<![\p{L}\p{N}_])#([A-Za-z0-9_/-]+))/u;
+  const token = /(!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]|`([^`]+)`|\*\*([^*]+)\*\*|~~([^~]+)~~|==([^=]+)==|(?<!\*)\*([^*]+)\*(?!\*)|\[([^\]]+)\]\(([^)\s]+)\)|\$([^$\n]+)\$|<%[^%]*%>|(?<![\p{L}\p{N}_])#([A-Za-z0-9_/-]+))/u;
   const appendText = (text) => parent.append(document.createTextNode(String(text || '').replace(/\\(?=[\\`*_[\]{}()#+.!|~-])/g, '')));
   while (rest) {
     const match = rest.match(token);
@@ -341,7 +407,8 @@ function appendMarkdownInline(parent, value) {
         ? h('a', { href:match[10], target:'_blank', rel:'noopener noreferrer', text:match[9] })
         : h('button', { class:`copal-chip${target ? '' : ' unresolved'}`, type:'button', disabled:!target, text:match[9], onclick:() => target && openDocument(target.id, state.view === 'notes' ? 'notes' : 'wiki') }));
     } else if (match[11]) parent.append(h('span', { class:'copal-inline-math', text:match[11] }));
-    else if (match[12]) parent.append(h('span', { class:'copal-markdown-tag', text:`#${match[12]}` }));
+    else if (match[12]) parent.append(h('code', { class:'copal-templater-block', text:match[12] }));
+    else if (match[13]) parent.append(h('span', { class:'copal-markdown-tag', text:`#${match[13]}` }));
     rest = rest.slice(match.index + match[0].length);
   }
 }
@@ -361,10 +428,23 @@ function renderMarkdown(text, seen = new Set()) {
     if (fence) {
       if (codeBlock) { root.append(codeBlock.wrapper); codeBlock = null; }
       else {
-        const code = h('code', { 'data-language':fence[1] || '' });
+        const lang = fence[1] || '';
+        const isPluginBlock = /^(dataview|tasks|dataviewjs|tasksjs)$/i.test(lang);
+        const code = h('code', { 'data-language':lang });
         const pre = h('pre', { class:'copal-markdown-code' }, code);
         const copy = h('button', { type:'button', class:'copal-btn copal-code-copy', text:'Copy', onclick:async() => navigator.clipboard.writeText(code.textContent || '') });
-        codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, fence[1] ? h('figcaption', { text:fence[1] }) : null, copy, pre) };
+        const header = fence[1] ? h('figcaption', { text:fence[1] }) : null;
+        if (isPluginBlock) {
+          const banner = h('div', { class:'copal-plugin-block-banner' },
+            h('span', { class:'copal-plugin-block-badge', text:`${lang} block` }),
+            h('span', { text:'Inert — plugin queries are not executed in the editor.' }));
+          const convertBtn = h('button', { type:'button', class:'copal-btn copal-plugin-convert', text:'Convert to Base', onclick:() => {
+            convertPluginBlock(code.textContent || '', lang);
+          } });
+          codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre) };
+        } else {
+          codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre) };
+        }
       }
       continue;
     }
@@ -447,8 +527,7 @@ async function showHistory(doc) {
   const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: `History · ${doc.name}` }));
   const list = h('div', { text: 'Loading…' });
   dialog.append(list, h('div', { class: 'copal-dialog-actions' }, h('button', { class: 'copal-btn', text: 'Close', onclick: () => dialog.close() })));
-  document.body.append(dialog);
-  dialog.addEventListener('close', () => dialog.remove());
+  wireDialog(dialog); document.body.append(dialog);
   dialog.showModal();
   try {
     const result = await api(`/documents/${doc.id}/history`);
@@ -468,8 +547,7 @@ async function showTrash(kind = null) {
   const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: kind === 'base' ? 'Deleted Bases' : 'Deleted Copal documents' }));
   const list = h('div', { text: 'Loading…' });
   dialog.append(list, h('div', { class: 'copal-dialog-actions' }, h('button', { class: 'copal-btn', text: 'Close', onclick: () => dialog.close() })));
-  document.body.append(dialog);
-  dialog.addEventListener('close', () => dialog.remove());
+  wireDialog(dialog); document.body.append(dialog);
   dialog.showModal();
   try {
     const result = await api('/trash');
@@ -517,11 +595,21 @@ function renderNotes() {
 }
 
 function renderWiki() {
-  const docs = visibleDocs().filter((doc) => doc.kind !== 'base' && doc.kind !== 'canvas');
+  const docs = visibleDocs('wiki').filter((doc) => doc.kind !== 'base' && doc.kind !== 'canvas');
   state.story = state.story.filter((id) => docs.some((doc) => doc.id === id));
   if (state.selected && docs.some((doc) => doc.id === state.selected) && !state.story.includes(state.selected)) state.story.unshift(state.selected);
   if (!state.story.length) state.story = docs.slice(0, 3).map((doc) => doc.id);
-  const library = h('aside', { class: 'copal-pane' }, h('div', { class: 'copal-pane-header', text: 'Tiddlers' }));
+  const newMeme = async () => {
+    const name = prompt('Meme name:');
+    if (!name) return;
+    const result = await api('/documents', { method: 'POST', body: JSON.stringify({ name, kind: 'wiki', content: '', corpus: 'wiki' }) });
+    await loadDocuments(false);
+    openDocument(result.doc.id, 'wiki');
+  };
+  const library = h('aside', { class: 'copal-pane' },
+    h('div', { class: 'copal-pane-header' },
+      h('span', { text: 'Memes' }),
+      h('button', { class: 'copal-btn', text: '+ Meme', onclick: newMeme })));
   const rows = h('div', { class: 'copal-scroll' });
   for (const doc of docs) rows.append(h('button', { class: 'copal-doc-row', onclick: () => { if (!state.story.includes(doc.id)) state.story.push(doc.id); renderWiki(); } }, doc.name));
   library.append(rows);
@@ -529,16 +617,16 @@ function renderWiki() {
   for (const id of state.story) {
     const doc = state.docs.find((item) => item.id === id);
     if (!doc) continue;
-    const card = h('article', { class: `copal-tiddler${state.pinned.has(id) ? ' pinned' : ''}` });
+    const card = h('article', { class: `copal-meme${state.pinned.has(id) ? ' pinned' : ''}` });
     const move = (delta) => { const index = state.story.indexOf(id); const next = index + delta; if (next < 0 || next >= state.story.length) return; [state.story[index], state.story[next]] = [state.story[next], state.story[index]]; renderWiki(); };
     const editing = state.wikiEditing.has(id);
-    card.append(h('header', { class: 'copal-tiddler-head' }, h('strong', { text: doc.name }),
+    card.append(h('header', { class: 'copal-meme-head' }, h('strong', { text: doc.name }),
       h('button', { class: 'copal-btn', text: '←', 'aria-label': 'Move left', onclick: () => move(-1) }),
       h('button', { class: 'copal-btn', text: '→', 'aria-label': 'Move right', onclick: () => move(1) }),
       h('button', { class: 'copal-btn', text: state.pinned.has(id) ? 'Unpin' : 'Pin', onclick: () => { state.pinned.has(id) ? state.pinned.delete(id) : state.pinned.add(id); renderWiki(); } }),
       h('button', { class: 'copal-btn', text: 'History', onclick: () => showHistory(doc) }),
       h('button', { class: 'copal-btn', text: editing ? 'Read' : 'Edit', onclick: () => { editing ? state.wikiEditing.delete(id) : state.wikiEditing.add(id); renderWiki(); } }),
-      h('button', { class: 'copal-btn', text: '×', 'aria-label': 'Close tiddler', onclick: () => { state.story = state.story.filter((value) => value !== id || state.pinned.has(id)); renderWiki(); } })));
+      h('button', { class: 'copal-btn', text: '×', 'aria-label': 'Close meme', onclick: () => { state.story = state.story.filter((value) => value !== id || state.pinned.has(id)); renderWiki(); } })));
     if (editing) {
       const editor = h('textarea', { class: 'copal-editor copal-wiki-editor', 'aria-label': `Edit ${doc.name}` });
       editor.value = doc.text || '';
@@ -546,15 +634,28 @@ function renderWiki() {
       editor.addEventListener('blur', () => saveDocument(doc, editor.value));
       card.append(editor);
     } else {
-      card.append(h('div', { class: 'copal-tiddler-body' }, renderMarkdown(doc.text, new Set([doc.id]))));
+      card.append(h('div', { class: 'copal-meme-body' }, renderMarkdown(doc.text, new Set([doc.id]))));
     }
-    const links = h('footer', { class: 'copal-inspector-section copal-tiddler-links' });
+    const footer = h('footer', { class: 'copal-inspector-section copal-meme-links' });
+    // Meme fields: compact property strip.
+    const props = doc.properties;
+    if (props && typeof props === 'object' && Object.keys(props).length) {
+      const fields = h('div', { class: 'copal-meme-fields' });
+      for (const [key, value] of Object.entries(props)) {
+        const display = Array.isArray(value) ? value.join(', ') : String(value ?? '');
+        fields.append(h('span', { class: 'copal-chip', text: `${key}: ${display}` }));
+      }
+      footer.append(fields);
+    }
+    // Links section.
     const incoming = state.docs.filter((candidate) => (candidate.links || []).some((name) => normalizeName(name) === normalizeName(doc.name) || normalizeName(name) === normalizeName(doc.name.split('/').pop())));
+    const links = h('div');
     links.append(h('strong', { text: 'Links ' }));
     for (const name of doc.links || []) { const target = findByName(name); links.append(h('button', { class: 'copal-chip', text: `→ ${name}`, onclick: () => target && openDocument(target.id, 'wiki') })); }
     for (const source of incoming) links.append(h('button', { class: 'copal-chip', text: `← ${source.name}`, onclick: () => openDocument(source.id, 'wiki') }));
     if (!(doc.links || []).length && !incoming.length) links.append(h('span', { text: 'None' }));
-    card.append(links);
+    footer.append(links);
+    card.append(footer);
     story.append(card);
   }
   const shell = h('div', { class: 'copal-layout' }, library, h('section', { style: 'grid-column:2 / -1;min-width:0;overflow:hidden' }, story));
@@ -599,17 +700,211 @@ function renderCalendar() {
   state.body.replaceChildren(toolbar, calendar);
 }
 
+const graphState = { searchQuery: '', activeKinds: new Set(['note', 'event', 'wiki', 'base']), selectedNodeId: null };
+
+function docKindToGraphKind(doc) {
+  const kind = String(doc.kind || '').toLowerCase();
+  if (kind === 'copal-event') return 'event';
+  if (kind === 'markdown') return 'wiki';
+  if (kind === 'base') return 'base';
+  if (kind === 'note') return 'note';
+  return 'note';
+}
+
+function kindColor(kind) {
+  return { note: 'var(--accent, var(--red))', event: '#22c55e', wiki: '#3b82f6', base: '#f59e0b' }[kind] || 'var(--accent, var(--red))';
+}
+
 function graphSvg(nodes, edges, onOpen) {
-  const root = svg('svg', { class: 'copal-graph', viewBox: '0 0 1000 650', role: 'img', 'aria-label': 'Copal relationship graph' });
+  const root = h('div', { class: 'copal-graph-wrap' });
+  const vb = { x: 0, y: 0, w: 1000, h: 650 };
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const svgEl = svg('svg', { class: 'copal-graph', viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`, role: 'img', 'aria-label': `Graph showing ${nodes.length} nodes and ${edges.length} edges` });
+
+  // B1: compute edge sets for highlight
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const adjacentEdges = new Map();
+  for (const edge of edges) {
+    if (!adjacentEdges.has(edge.from)) adjacentEdges.set(edge.from, []);
+    if (!adjacentEdges.has(edge.to)) adjacentEdges.set(edge.to, []);
+    adjacentEdges.get(edge.from).push(edge);
+    adjacentEdges.get(edge.to).push(edge);
+  }
+
+  // Layout positions
   const positions = new Map();
   nodes.forEach((node, index) => { const angle = index / Math.max(1, nodes.length) * Math.PI * 2; const ring = 190 + (index % 3) * 45; positions.set(node.id, { x: 500 + Math.cos(angle) * ring, y: 325 + Math.sin(angle) * ring }); });
-  for (const edge of edges) { const from = positions.get(edge.from); const to = positions.get(edge.to); if (from && to) root.append(svg('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y })); }
+
+  // B2: filter visibility
+  const query = graphState.searchQuery.toLowerCase();
+  const visibleNodeIds = new Set();
   for (const node of nodes) {
-    const pos = positions.get(node.id); const group = svg('g'); const circle = svg('circle', { cx: pos.x, cy: pos.y, r: node.hub ? 22 : 15, tabindex: '0', role: 'button' });
-    circle.addEventListener('click', () => onOpen(node)); circle.addEventListener('keydown', (event) => { if (event.key === 'Enter') onOpen(node); });
-    const label = svg('text', { x: pos.x + 19, y: pos.y + 3 }); label.textContent = String(node.label || '').slice(0, 34);
-    group.append(circle, label); root.append(group);
+    if (!graphState.activeKinds.has(node.kind || 'note')) continue;
+    if (query && !String(node.label || '').toLowerCase().includes(query)) continue;
+    visibleNodeIds.add(node.id);
   }
+
+  // B1: render edges with type-based styling
+  const edgeEls = [];
+  for (const edge of edges) {
+    const from = positions.get(edge.from); const to = positions.get(edge.to);
+    if (!from || !to) continue;
+    const edgeType = edge.type || 'link';
+    const line = svg('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, class: `copal-graph-edge edge-${edgeType}`, 'data-from': edge.from, 'data-to': edge.to });
+    edgeEls.push({ el: line, edge });
+    svgEl.append(line);
+  }
+
+  // B4: node elements with kind-based coloring
+  const nodeEls = [];
+  for (const node of nodes) {
+    const pos = positions.get(node.id); if (!pos) continue;
+    const visible = visibleNodeIds.has(node.id);
+    const group = svg('g', { class: `copal-graph-node${visible ? '' : ' dimmed'}`, tabindex: '0', role: 'button', 'aria-label': `${node.label} (${node.kind || 'note'})` });
+    const color = kindColor(node.kind || 'note');
+    group.append(svg('circle', { cx: pos.x, cy: pos.y, r: node.hub ? 22 : 15, class: `kind-${node.kind || 'note'}${node.hub ? ' hub' : ''}`, fill: color, stroke: color }));
+    const label = svg('text', { x: pos.x + (node.hub ? 26 : 20), y: pos.y + 4, class: 'copal-graph-label' });
+    label.textContent = String(node.label || '').slice(0, 40);
+    group.append(label);
+    nodeEls.push({ el: group, node });
+    svgEl.append(group);
+  }
+
+  // Inspector panel (B3)
+  const inspector = h('div', { class: 'copal-graph-inspector' });
+
+  function updateInspector(node) {
+    inspector.textContent = '';
+    if (!node) return;
+    const name = h('div', { class: 'copal-graph-inspector-name', text: node.label || '' });
+    const kindLabel = h('span', { class: `copal-graph-inspector-kind kind-${node.kind || 'note'}`, text: (node.kind || 'note').charAt(0).toUpperCase() + (node.kind || 'note').slice(1) });
+    const meta = h('div', { class: 'copal-graph-inspector-meta' });
+
+    // Find connected nodes
+    const connected = adjacentEdges.get(node.id) || [];
+    const links = h('div', { class: 'copal-graph-inspector-links' });
+    for (const edge of connected) {
+      const otherId = edge.from === node.id ? edge.to : edge.from;
+      const otherNode = nodes.find((n) => n.id === otherId);
+      if (!otherNode) continue;
+      const chip = h('button', { class: 'copal-graph-inspector-chip', text: `${edge.type === 'embed' ? '⬒ ' : edge.type === 'relation' ? '⋯ ' : '→ '}${otherNode.label || otherId}`, onclick: () => onOpen(otherNode) });
+      links.append(chip);
+    }
+
+    const openBtn = h('button', { class: 'copal-graph-inspector-open', text: 'Open in Notes', onclick: () => onOpen(node) });
+
+    meta.textContent = `${connected.length} connection${connected.length !== 1 ? 's' : ''}`;
+    inspector.append(name, kindLabel, meta);
+    if (connected.length) inspector.append(links);
+    inspector.append(openBtn);
+  }
+
+  function clearInspector() { inspector.textContent = ''; }
+
+  // B4: select/deselect node
+  let selectedEl = null;
+  function selectNode(nodeEl, node) {
+    if (selectedEl) selectedEl.classList.remove('selected');
+    selectedEl = nodeEl;
+    nodeEl.classList.add('selected');
+    graphState.selectedNodeId = node.id;
+    updateInspector(node);
+    // highlight adjacent edges
+    for (const ee of edgeEls) ee.el.classList.toggle('edge-highlight', ee.edge.from === node.id || ee.edge.to === node.id);
+  }
+  function deselectNode() {
+    if (selectedEl) selectedEl.classList.remove('selected');
+    selectedEl = null;
+    graphState.selectedNodeId = null;
+    clearInspector();
+    for (const ee of edgeEls) ee.el.classList.remove('edge-highlight');
+  }
+
+  // Wire node click/select
+  for (const { el, node } of nodeEls) {
+    el.addEventListener('click', () => { selectNode(el, node); onOpen(node); });
+    el.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectNode(el, node); onOpen(node); }
+      // B4: arrow key navigation
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const currentIdx = nodeEls.findIndex((n) => n.node.id === node.id);
+        let nextIdx = currentIdx;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIdx = (currentIdx + 1) % nodeEls.length;
+        else nextIdx = (currentIdx - 1 + nodeEls.length) % nodeEls.length;
+        const next = nodeEls[nextIdx];
+        next.el.focus();
+        selectNode(next.el, next.node);
+      }
+    });
+    // B4: click on SVG background to deselect
+    svgEl.addEventListener('click', (e) => { if (e.target === svgEl || e.target.tagName === 'line') deselectNode(); });
+  }
+
+  // Zoom controls
+  const zoomIn = h('button', { class: 'copal-graph-ctrl', title: 'Zoom in', 'aria-label': 'Zoom in', onclick: () => { vb.w *= 0.8; vb.h *= 0.8; vb.x += vb.w * 0.1; vb.y += vb.h * 0.1; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); } });
+  const zoomOut = h('button', { class: 'copal-graph-ctrl', title: 'Zoom out', 'aria-label': 'Zoom out', onclick: () => { vb.x -= vb.w * 0.125; vb.y -= vb.h * 0.125; vb.w *= 1.25; vb.h *= 1.25; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); } });
+  const reset = h('button', { class: 'copal-graph-ctrl', title: 'Reset view', 'aria-label': 'Reset view', onclick: () => { vb.x = 0; vb.y = 0; vb.w = 1000; vb.h = 650; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); } });
+
+  // B1: Legend with actual node/edge types
+  const presentKinds = new Set(nodes.map((n) => n.kind || 'note'));
+  const presentEdgeTypes = new Set(edges.map((e) => e.type || 'link'));
+  const legendItems = [];
+  const kindOrder = ['note', 'event', 'wiki', 'base'];
+  const kindLabels = { note: 'Notes', event: 'Events', wiki: 'Wiki', base: 'Bases' };
+  for (const kind of kindOrder) {
+    if (!presentKinds.has(kind)) continue;
+    legendItems.push(h('span', { class: 'copal-graph-legend-item' }, svg('circle', { cx: 6, cy: 6, r: 6, fill: kindColor(kind), stroke: kindColor(kind) }), h('span', { text: kindLabels[kind] })));
+  }
+  const edgeOrder = ['link', 'embed', 'relation'];
+  const edgeLabels = { link: 'Links', embed: 'Embeds', relation: 'Relations' };
+  const edgeDash = { link: '', embed: '6 3', relation: '2 3' };
+  for (const type of edgeOrder) {
+    if (!presentEdgeTypes.has(type)) continue;
+    legendItems.push(h('span', { class: 'copal-graph-legend-item' }, svg('line', { x1: 0, y1: 6, x2: 18, y2: 6, class: `copal-graph-edge edge-${type}` }), h('span', { text: edgeLabels[type] })));
+  }
+  const legend = h('div', { class: 'copal-graph-legend' }, ...legendItems);
+  const controls = h('div', { class: 'copal-graph-controls' }, zoomIn, zoomOut, reset, legend);
+
+  // B2: search + filter toolbar
+  const searchInput = h('input', { class: 'copal-graph-search', type: 'search', placeholder: 'Search nodes…', 'aria-label': 'Search graph nodes', value: graphState.searchQuery });
+  const filters = h('div', { class: 'copal-graph-filters' });
+  const kindCheckboxes = [];
+  for (const kind of kindOrder) {
+    if (!presentKinds.has(kind)) continue;
+    const cb = h('label', { class: 'copal-graph-filter-label' });
+    const input = h('input', { type: 'checkbox', checked: graphState.activeKinds.has(kind) || undefined });
+    input.addEventListener('change', () => { if (input.checked) graphState.activeKinds.add(kind); else graphState.activeKinds.delete(kind); });
+    cb.append(input, h('span', { text: kindLabels[kind] }));
+    filters.append(cb);
+    kindCheckboxes.push({ kind, input });
+  }
+  const toolbar = h('div', { class: 'copal-graph-toolbar' }, searchInput, filters);
+
+  searchInput.addEventListener('input', () => { graphState.searchQuery = searchInput.value; rebuildGraph(); });
+
+  // B4: screen-reader summary
+  const info = h('div', { class: 'copal-graph-info', role: 'status', 'aria-live': 'polite' }, h('span', { text: `Graph showing ${nodes.length} nodes and ${edges.length} edges` }));
+
+  // Rebuild on filter/search change
+  function rebuildGraph() {
+    const q = graphState.searchQuery.toLowerCase();
+    for (const { el, node } of nodeEls) {
+      const visible = graphState.activeKinds.has(node.kind || 'note') && (!q || String(node.label || '').toLowerCase().includes(q));
+      el.classList.toggle('dimmed', !visible);
+    }
+    updateInspector(graphState.selectedNodeId ? nodes.find((n) => n.id === graphState.selectedNodeId) : null);
+  }
+
+  root.append(toolbar, svgEl, controls, inspector, info);
+
+  // Pan via pointer drag
+  let dragging = false, lastX = 0, lastY = 0;
+  svgEl.addEventListener('pointerdown', (e) => { if (e.target === svgEl || e.target.tagName === 'line') { dragging = true; lastX = e.clientX; lastY = e.clientY; svgEl.setPointerCapture(e.pointerId); } });
+  if (!reducedMotion) {
+    svgEl.addEventListener('pointermove', (e) => { if (!dragging) return; const scale = vb.w / svgEl.clientWidth; vb.x -= (e.clientX - lastX) * scale; vb.y -= (e.clientY - lastY) * scale; lastX = e.clientX; lastY = e.clientY; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); });
+  }
+  svgEl.addEventListener('pointerup', () => { dragging = false; });
   return root;
 }
 
@@ -625,20 +920,261 @@ function renderGalaxy() {
 }
 
 function renderGraph() {
-  const docs = visibleDocs(); const nodes = docs.map((doc) => ({ id: doc.id, label: doc.name, doc })); const edges = [];
-  for (const doc of docs) for (const link of doc.links || []) { const target = findByName(link); if (target) edges.push({ from: doc.id, to: target.id }); }
+  // B2: respect dot-folder toggle from workspace settings
+  let docs = visibleDocs();
+  try {
+    const saved = JSON.parse(localStorage.getItem(`odysseus-copal-notes-layout:${state.workspace}`) || '{}');
+    const showDot = saved?.left?.showDotFolders === true;
+    if (!showDot) docs = docs.filter((doc) => !(doc.name || '').split('/').some((part) => part.startsWith('.')));
+  } catch (_) {}
+
+  const nodes = docs.map((doc) => ({ id: doc.id, label: doc.name, doc, kind: docKindToGraphKind(doc) }));
+
+  // B1: build edges from both doc.links (wiki-style) and doc.relations (structured)
+  const edgeMap = new Map();
+  function addEdge(from, to, type) {
+    const key = `${from}\0${to}`;
+    if (edgeMap.has(key)) return;
+    edgeMap.set(key, { from, to, type });
+  }
+  const docIds = new Set(docs.map((d) => d.id));
+  for (const doc of docs) {
+    for (const link of doc.links || []) {
+      const target = findByName(link);
+      if (target && docIds.has(target.id)) addEdge(doc.id, target.id, 'link');
+    }
+    for (const rel of doc.relations || []) {
+      if (rel.targetDocumentId && docIds.has(rel.targetDocumentId) && rel.targetDocumentId !== doc.id) {
+        addEdge(doc.id, rel.targetDocumentId, rel.kind || 'relation');
+      }
+    }
+  }
+  const edges = [...edgeMap.values()];
   state.body.replaceChildren(graphSvg(nodes, edges, (node) => node.doc && openDocument(node.doc.id, 'notes')));
 }
 
-function renderMind() {
-  const groups = new Map();
-  for (const doc of visibleDocs()) {
-    const keys = [doc.frontmatter?.course, doc.frontmatter?.skill, ...(doc.tags || [])].filter(Boolean);
-    for (const key of keys) { if (!groups.has(key)) groups.set(key, []); groups.get(key).push(doc); }
+const mindState = { docId: null, collapsed: new Set(), selectedLine: null, editingLine: null, draggingLine: null };
+
+function buildMindTree(entries) {
+  const nodes = entries.map((entry) => ({ ...entry, children: [] }));
+  const stack = [];
+  for (const node of nodes) {
+    while (stack.length && stack[stack.length - 1].level >= node.level) stack.pop();
+    if (stack.length) stack[stack.length - 1].children.push(node);
+    stack.push(node);
   }
-  const tree = h('div', { class: 'copal-mind-tree copal-card' }, h('h2', { text: 'Knowledge outline' })); const list = h('ul');
-  for (const [group, docs] of [...groups].sort()) list.append(h('li', {}, h('strong', { text: group }), h('ul', {}, docs.map((doc) => h('li', {}, h('button', { class: 'copal-chip', text: doc.name, onclick: () => openDocument(doc.id, 'notes') }))))));
-  tree.append(list); state.body.replaceChildren(tree);
+  return nodes.filter((node) => !stack.some((parent) => parent !== node && isAncestor(parent, node, entries)));
+}
+
+function isAncestor(potential, node, entries) {
+  const pi = entries.indexOf(potential);
+  const ni = entries.indexOf(node);
+  if (pi >= ni) return false;
+  for (let i = pi + 1; i < ni; i++) {
+    if (entries[i].level <= potential.level) return false;
+  }
+  return true;
+}
+
+function renderMindTree(nodes, doc, entries, depth = 0) {
+  const list = h('ul', { class: 'copal-mind-tree-list' });
+  for (const node of nodes) {
+    const isCollapsed = mindState.collapsed.has(node.line);
+    const isSelected = mindState.selectedLine === node.line;
+    const isEditing = mindState.editingLine === node.line;
+    const hasChildren = node.children.length > 0;
+
+    const label = h('span', { class: 'copal-mind-tree-label', text: node.text });
+    if (isEditing) {
+      const input = h('input', { class: 'copal-mind-tree-input', type: 'text', value: node.text });
+      label.replaceChildren(input);
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+      input.addEventListener('blur', () => {
+        const next = input.value.trim();
+        if (next && next !== node.text) {
+          const source = String(doc.text || '');
+          const lines = source.split('\n');
+          const lineIdx = node.line - 1;
+          const hashes = '#'.repeat(node.level);
+          lines[lineIdx] = `${hashes} ${next}`;
+          saveDocument(doc, lines.join('\n'), true);
+        }
+        mindState.editingLine = null;
+        renderMind();
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { mindState.editingLine = null; renderMind(); }
+        e.stopPropagation();
+      });
+    }
+
+    const toggle = h('button', { class: 'copal-mind-tree-toggle', text: hasChildren ? (isCollapsed ? '\u25B6' : '\u25BC') : '\u00A0' });
+    toggle.addEventListener('click', (e) => { e.stopPropagation(); if (hasChildren) { if (mindState.collapsed.has(node.line)) mindState.collapsed.delete(node.line); else mindState.collapsed.add(node.line); renderMind(); } });
+
+    const nodeEl = h('li', { class: `copal-mind-tree-node${isSelected ? ' selected' : ''}`, tabindex: '0', 'data-line': String(node.line) }, toggle, label);
+
+    nodeEl.addEventListener('click', () => { mindState.selectedLine = node.line; renderMind(); });
+    nodeEl.addEventListener('dblclick', (e) => { e.preventDefault(); mindState.editingLine = node.line; renderMind(); });
+    nodeEl.addEventListener('keydown', (e) => {
+      if (isEditing) return;
+      if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); mindState.editingLine = node.line; renderMind(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); mindMindDeleteHeading(doc, node); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); mindSelectNext(node, entries); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); mindSelectPrev(node, entries); return; }
+      if (e.key === 'ArrowRight') { e.preventDefault(); if (hasChildren && isCollapsed) { mindState.collapsed.delete(node.line); renderMind(); } else if (hasChildren) { const next = node.children[0]; mindState.selectedLine = next.line; renderMind(); } return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); if (hasChildren && !isCollapsed) { mindState.collapsed.add(node.line); renderMind(); } return; }
+      if (e.key === 'Tab') { e.preventDefault(); const src = String(doc.text || ''); const newLv = Math.max(1, Math.min(6, node.level + (e.shiftKey ? -1 : 1))); mindMindRenameHeading(doc, node, newLv); return; }
+      if (e.key === ' ') { e.preventDefault(); if (hasChildren) { if (mindState.collapsed.has(node.line)) mindState.collapsed.delete(node.line); else mindState.collapsed.add(node.line); renderMind(); } return; }
+    });
+
+    // Drag reparent
+    nodeEl.draggable = true;
+    nodeEl.addEventListener('dragstart', (e) => { mindState.draggingLine = node.line; e.dataTransfer.effectAllowed = 'move'; nodeEl.classList.add('dragging'); });
+    nodeEl.addEventListener('dragend', () => { mindState.draggingLine = null; nodeEl.classList.remove('dragging'); });
+    nodeEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; nodeEl.classList.add('drag-over'); });
+    nodeEl.addEventListener('dragleave', () => nodeEl.classList.remove('drag-over'));
+    nodeEl.addEventListener('drop', (e) => {
+      e.preventDefault(); nodeEl.classList.remove('drag-over');
+      const fromLine = mindState.draggingLine;
+      mindState.draggingLine = null;
+      if (fromLine && fromLine !== node.line) mindMindReparent(doc, fromLine, node.line);
+    });
+
+    if (!isCollapsed && hasChildren) nodeEl.append(renderMindTree(node.children, doc, entries, depth + 1));
+    list.append(nodeEl);
+  }
+  return list;
+}
+
+
+function mindSelectNext(node, entries) {
+  const idx = entries.findIndex((e) => e.line === node.line);
+  if (idx < entries.length - 1) { mindState.selectedLine = entries[idx + 1].line; renderMind(); }
+}
+
+function mindSelectPrev(node, entries) {
+  const idx = entries.findIndex((e) => e.line === node.line);
+  if (idx > 0) { mindState.selectedLine = entries[idx - 1].line; renderMind(); }
+}
+
+function mindMindDeleteHeading(doc, node) {
+  const source = String(doc.text || '');
+  const lines = source.split('\n');
+  const entries = outlineEntries(source);
+  const idx = entries.findIndex((e) => e.line === node.line);
+  if (idx < 0) return;
+  let endLine = lines.length;
+  for (let i = idx + 1; i < entries.length; i++) {
+    if (entries[i].level <= node.level) { endLine = entries[i].line; break; }
+  }
+  const before = lines.slice(0, node.line - 1).join('\n');
+  const after = lines.slice(endLine - 1).join('\n');
+  const newSource = [before, after].filter(Boolean).join('\n');
+  saveDocument(doc, newSource, true);
+  mindState.selectedLine = null;
+}
+
+function mindMindRenameHeading(doc, node, newLevel) {
+  const source = String(doc.text || '');
+  const lines = source.split('\n');
+  lines[node.line - 1] = `${'#'.repeat(newLevel)} ${node.text}`;
+  saveDocument(doc, lines.join('\n'), true);
+}
+
+function mindMindReparent(doc, fromLine, toLine) {
+  const source = String(doc.text || '');
+  const entries = outlineEntries(source);
+  const from = entries.find((e) => e.line === fromLine);
+  const to = entries.find((e) => e.line === toLine);
+  if (!from || !to || fromLine === toLine) return;
+  // Change level to be one deeper than the target
+  const newLevel = Math.max(1, Math.min(6, to.level + 1));
+  const afterLevelChange = reparentHeading(source, fromLine, newLevel);
+  // Move section after the target's section
+  const moved = moveHeadingSectionTo(afterLevelChange, fromLine, toLine);
+  saveDocument(doc, moved, true);
+  mindState.selectedLine = fromLine;
+}
+
+function renderMind() {
+  const docs = visibleDocs().filter((doc) => doc.kind === 'markdown' || doc.kind === 'note');
+  if (!docs.length) {
+    state.body.replaceChildren(h('div', { class: 'copal-mind-empty' }, h('h2', { text: 'Mind' }), h('p', { text: 'No markdown documents available. Import or create notes to use the hierarchy editor.' })));
+    return;
+  }
+  if (!mindState.docId || !docs.some((doc) => doc.id === mindState.docId)) mindState.docId = docs[0].id;
+  const doc = docs.find((d) => d.id === mindState.docId);
+  if (!doc) { state.body.replaceChildren(h('div', { class: 'copal-mind-empty', text: 'Document not found.' })); return; }
+  const source = String(doc.text || '');
+  const entries = outlineEntries(source);
+  const treeNodes = buildMindTree(entries);
+  const mindEl = h('div', { class: 'copal-mind' });
+
+  // Document picker
+  const picker = h('div', { class: 'copal-mind-picker' }, h('h3', { text: 'Documents' }));
+  const docList = h('ul', { class: 'copal-mind-doc-list' });
+  for (const d of docs) {
+    const item = h('li', { class: `copal-mind-doc-item${d.id === mindState.docId ? ' active' : ''}` },
+      h('button', { class: 'copal-mind-doc-btn', text: d.name, onclick: () => { mindState.docId = d.id; mindState.collapsed.clear(); mindState.selectedLine = null; mindState.editingLine = null; renderMind(); } }));
+    docList.append(item);
+  }
+  picker.append(docList);
+
+  // Tree
+  const treePane = h('div', { class: 'copal-mind-tree' });
+  if (!treeNodes.length) {
+    treePane.append(h('div', { class: 'copal-mind-empty-tree' }, h('p', { text: 'No headings found. Add headings in the source editor to see them here.' })));
+  } else {
+    // Toolbar
+    const toolbar = h('div', { class: 'copal-mind-toolbar' },
+      h('button', { class: 'copal-btn', text: '+ Heading', onclick: () => mindMindAddHeading(doc) }),
+      h('button', { class: 'copal-btn', text: 'Delete', onclick: () => { if (mindState.selectedLine) { const n = treeNodes.find((e) => e.line === mindState.selectedLine); if (n) mindMindDeleteHeading(doc, n); } } }),
+      h('button', { class: 'copal-btn', text: '\u2191', title: 'Move up', onclick: () => { if (mindState.selectedLine) { const newSrc = moveHeadingSection(source, mindState.selectedLine, -1); const moved = outlineEntries(newSrc).find((e) => e.text === entries.find((x) => x.line === mindState.selectedLine)?.text); mindState.selectedLine = moved?.line || mindState.selectedLine; saveDocument(doc, newSrc, true); } } }),
+      h('button', { class: 'copal-btn', text: '\u2193', title: 'Move down', onclick: () => { if (mindState.selectedLine) { const newSrc = moveHeadingSection(source, mindState.selectedLine, 1); const moved = outlineEntries(newSrc).find((e) => e.text === entries.find((x) => x.line === mindState.selectedLine)?.text); mindState.selectedLine = moved?.line || mindState.selectedLine; saveDocument(doc, newSrc, true); } } }),
+      h('span', { class: 'copal-mind-doc-name', text: doc.name }),
+      h('span', { class: 'copal-mind-headings-count', text: `${entries.length} headings` }),
+    );
+    treePane.append(toolbar);
+    const treeList = renderMindTree(treeNodes, doc, entries);
+    treePane.append(treeList);
+  }
+
+  mindEl.append(picker, treePane);
+  state.body.replaceChildren(mindEl);
+
+  // Focus selected
+  if (mindState.selectedLine) {
+    const selected = mindEl.querySelector(`[data-line="${mindState.selectedLine}"]`);
+    if (selected) selected.focus();
+  }
+}
+
+function mindMindAddHeading(doc) {
+  const source = String(doc.text || '');
+  const entries = outlineEntries(source);
+  let newLine, level = 1;
+  if (mindState.selectedLine) {
+    const sel = entries.find((e) => e.line === mindState.selectedLine);
+    if (sel) {
+      level = sel.level;
+      // Find end of selected section
+      const idx = entries.indexOf(sel);
+      let endLine = source.split('\n').length;
+      for (let i = idx + 1; i < entries.length; i++) {
+        if (entries[i].level <= sel.level) { endLine = entries[i].line; break; }
+      }
+      newLine = endLine;
+    }
+  }
+  if (!newLine) newLine = (entries.length ? entries[entries.length - 1].line : 0) + 1;
+  const lines = source.split('\n');
+  lines.splice(newLine - 1, 0, `${'#'.repeat(level)} New heading`);
+  const newSource = lines.join('\n');
+  const newEntries = outlineEntries(newSource);
+  const added = newEntries.find((e) => e.line === newLine);
+  if (added) { mindState.selectedLine = added.line; mindState.editingLine = added.line; }
+  saveDocument(doc, newSource, true);
 }
 
 function baseField(label, control) {
@@ -667,7 +1203,7 @@ async function createBaseDocument() {
         await loadDocuments();
       } catch (error) { setStatus(error.message, true); }
     } })));
-  document.body.append(dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); name.focus(); name.select();
+  wireDialog(dialog); document.body.append(dialog); dialog.showModal(); name.focus(); name.select();
 }
 
 async function renameBaseDocument(base) {
@@ -709,14 +1245,17 @@ function configureBase(base, definition, viewId) {
   const columns = h('textarea', { rows: '4', placeholder: 'file.name | Name | 220' }); columns.value = view.columns.filter((column) => !column.formula).map((column) => `${column.property} | ${column.label || column.property}${column.width ? ` | ${column.width}` : ''}`).join('\n');
   const formulas = h('textarea', { rows: '3', placeholder: 'total = price * quantity' }); formulas.value = view.columns.filter((column) => column.formula).map((column) => `${column.property} = ${column.formula}`).join('\n');
   const filters = h('textarea', { rows: '3', placeholder: 'status | eq | active' });
-  const flattenFilter = (rule) => {
-    if (!rule) return [];
-    if (rule.and) return rule.and.map((item) => `${item.property} | ${item.operator} | ${JSON.stringify(item.value ?? '')}`);
-    if (rule.or) return rule.or.map((item) => `${item.property} | ${item.operator} | ${JSON.stringify(item.value ?? '')}`);
-    return rule.property ? [`${rule.property} | ${rule.operator} | ${JSON.stringify(rule.value ?? '')}`] : [];
-  };
-  filters.value = flattenFilter(view.filters).join('\n');
+  const hasNested = hasNestedFilterGroups(view.filters);
+  const filterRawJson = h('textarea', { rows: '5', placeholder: '{"and": [...]}' });
   const filterMode = h('select'); for (const mode of ['and', 'or']) filterMode.append(h('option', { value: mode, text: mode.toUpperCase(), selected: !!view.filters?.[mode] }));
+  filters.value = flattenFilterToLines(view.filters).join('\n');
+  filterRawJson.value = JSON.stringify(view.filters, null, 2);
+  if (hasNested) { filterRawJson.style.display = ''; filters.style.display = 'none'; } else { filterRawJson.style.display = 'none'; }
+  const useRawJson = h('label', { class: 'copal-base-field' }, h('input', { type: 'checkbox', checked: hasNested }), ' Edit filter as raw JSON');
+  useRawJson.querySelector('input').addEventListener('change', (e) => {
+    filterRawJson.style.display = e.target.checked ? '' : 'none';
+    filters.style.display = e.target.checked ? 'none' : '';
+  });
   const sorts = h('textarea', { rows: '2', placeholder: 'file.name : asc' }); sorts.value = (view.sorts || []).map((sort) => `${sort.property} : ${sort.direction}`).join('\n');
   const groupBy = h('input', { value: view.groupBy || '', placeholder: 'category' });
   const summaries = h('textarea', { rows: '2', placeholder: 'price : avg' }); summaries.value = Object.entries(view.summaries || {}).map(([property, operation]) => `${property} : ${operation}`).join('\n');
@@ -727,6 +1266,8 @@ function configureBase(base, definition, viewId) {
     baseField('Formulas (one “property = expression” per line)', formulas),
     baseField('Filter mode', filterMode),
     baseField('Filters (one “property | operator | value” per line)', filters),
+    useRawJson,
+    baseField('Filter JSON (raw)', filterRawJson),
     baseField('Sorts (one “property : asc/desc” per line)', sorts),
     baseField('Group by property', groupBy),
     baseField('Summaries (one “property : count/sum/avg/min/max/distinct” per line)', summaries),
@@ -743,15 +1284,18 @@ function configureBase(base, definition, viewId) {
           return { property, label: label || property, ...(Number(width) > 0 ? { width: Math.round(Number(width)) } : {}) };
         });
         for (const formula of parseDesignerLines(formulas.value, '=', (property, expression) => ({ property, label: property, formula: expression }))) view.columns.push(formula);
-        const rules = parseDesignerLines(filters.value, '|', (property, remainder) => {
-          const split = remainder.indexOf('|');
-          const operator = (split < 0 ? remainder : remainder.slice(0, split)).trim() || 'eq';
-          const rawValue = split < 0 ? '' : remainder.slice(split + 1).trim();
-          const rule = { property, operator };
-          if (!['exists', 'missing'].includes(operator)) rule.value = parseBaseLiteral(rawValue);
-          return rule;
-        });
-        view.filters = rules.length ? { [filterMode.value]: rules } : null;
+        const useRaw = useRawJson.querySelector('input').checked;
+        if (useRaw) {
+          const rawText = filterRawJson.value.trim();
+          if (!rawText) { view.filters = null; }
+          else {
+            let parsed;
+            try { parsed = JSON.parse(rawText); } catch { throw new Error('Invalid JSON in filter editor'); }
+            view.filters = parsed;
+          }
+        } else {
+          view.filters = parseFilterLines(filters.value.split('\n'), filterMode.value);
+        }
         view.sorts = parseDesignerLines(sorts.value, ':', (property, direction) => ({ property, direction: (direction || 'asc').toLowerCase() }));
         view.groupBy = groupBy.value.trim() || null;
         view.summaries = Object.fromEntries(parseDesignerLines(summaries.value, ':', (property, operation) => [property, (operation || 'count').toLowerCase()]));
@@ -764,18 +1308,27 @@ function configureBase(base, definition, viewId) {
         dialog.close(); renderBases();
       } catch (error) { feedback.textContent = error.message; feedback.classList.add('error'); }
     } })));
-  document.body.append(dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); name.focus();
+  wireDialog(dialog); document.body.append(dialog); dialog.showModal(); name.focus();
 }
 
 async function addBaseView(base, definition) {
-  const name = window.prompt('Name the new Base view:', 'Table 2');
-  if (!name?.trim()) return;
-  const next = JSON.parse(JSON.stringify(definition));
-  const template = JSON.parse(JSON.stringify(next.views[0] || makeDefaultBase().views[0]));
-  template.id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'view'}-${Date.now().toString(36)}`;
-  template.name = name.trim();
-  next.views.push(template);
-  if (await saveDocument(base, serializeBase(next), false)) { state.baseView = template.id; state.baseDefinition = next; renderBases(); }
+  const dialog = h('dialog', { class: 'copal-dialog' }, h('h2', { text: 'Add Base View' }));
+  const viewName = h('input', { value: 'Table 2', 'aria-label': 'View name' });
+  const viewType = h('select', { 'aria-label': 'View type' });
+  for (const type of VIEW_TYPES) viewType.append(h('option', { value: type, text: type.charAt(0).toUpperCase() + type.slice(1), selected: type === 'table' }));
+  dialog.append(baseField('View name', viewName), baseField('View type', viewType));
+  dialog.append(h('div', { class: 'copal-dialog-actions' },
+    h('button', { class: 'copal-btn', text: 'Cancel', onclick: () => dialog.close() }),
+    h('button', { class: 'copal-btn primary', text: 'Create', onclick: async () => {
+      const name = viewName.value.trim();
+      if (!name) return;
+      const next = JSON.parse(JSON.stringify(definition));
+      const template = makeViewFromTemplate(next.views[0] || makeDefaultBase().views[0], name, viewType.value);
+      next.views.push(template);
+      const validation = await api('/bases/validate', { method: 'POST', body: JSON.stringify({ content: serializeBase(next) }) });
+      if (await saveDocument(base, validation.canonical, false)) { state.baseView = template.id; state.baseDefinition = validation.definition; dialog.close(); renderBases(); }
+    } })));
+  wireDialog(dialog); document.body.append(dialog); dialog.showModal(); viewName.focus();
 }
 
 function makeBaseColumnResizer(base, definition, viewId, property, cell) {
@@ -806,16 +1359,47 @@ function makeBaseColumnResizer(base, definition, viewId, property, cell) {
   return handle;
 }
 
-async function editBaseCell(base, row, column) {
+function makeInlineCellEditor(base, row, column, td) {
   const current = row.values?.[column.property];
-  const value = window.prompt(`Set ${column.property} on ${row.name}\nUse JSON for numbers, booleans, or lists.`, current == null ? '' : (typeof current === 'string' ? current : JSON.stringify(current)));
-  if (value == null) return;
-  try {
-    await api(`/bases/${encodeURIComponent(base.id)}/rows/${encodeURIComponent(row.documentId)}`, {
-      method: 'PATCH', body: JSON.stringify({ property: column.property, value: parseBaseLiteral(value), base: row.head }),
-    });
-    await loadDocuments(false); renderBases();
-  } catch (error) { setStatus(error.message, true); }
+  const prop = column.property;
+  const isBoolean = current === true || current === false;
+  const isNumber = typeof current === 'number';
+  const isArray = Array.isArray(current);
+  let input;
+  if (isBoolean) {
+    input = h('input', { type: 'checkbox', class: 'copal-base-inline-editor', 'aria-label': column.label });
+    input.checked = !!current;
+  } else if (isNumber) {
+    input = h('input', { type: 'number', class: 'copal-base-inline-editor', value: current == null ? '' : String(current), 'aria-label': column.label });
+  } else if (isArray) {
+    input = h('input', { type: 'text', class: 'copal-base-inline-editor', value: (current || []).join(', '), 'aria-label': column.label, placeholder: 'tag1, tag2' });
+  } else {
+    input = h('input', { type: 'text', class: 'copal-base-inline-editor', value: current == null ? '' : String(current), 'aria-label': column.label });
+  }
+  const commit = async () => {
+    let newValue;
+    if (isBoolean) { newValue = input.checked; }
+    else if (isNumber) { newValue = input.value.trim() === '' ? null : Number(input.value); }
+    else if (isArray) { newValue = input.value.split(',').map((s) => s.trim()).filter(Boolean); }
+    else { newValue = input.value; }
+    try {
+      await api(`/bases/${encodeURIComponent(base.id)}/rows/${encodeURIComponent(row.documentId)}`, {
+        method: 'PATCH', body: JSON.stringify({ property: prop, value: newValue, base: row.head }),
+      });
+      await loadDocuments(false); renderBases();
+    } catch (error) { setStatus(error.message, true); }
+  };
+  const cancel = () => { renderBases(); };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !isBoolean) { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    if (e.key === 'Tab') { e.preventDefault(); commit(); }
+    e.stopPropagation();
+  });
+  input.addEventListener('blur', () => { setTimeout(cancel, 150); });
+  td.replaceChildren(input);
+  requestAnimationFrame(() => { input.focus(); if (input.select) input.select(); });
+  return input;
 }
 
 async function renderBases() {
@@ -835,9 +1419,14 @@ async function renderBases() {
   shell.append(browser, main); state.body.replaceChildren(shell);
   try {
     const viewParam = state.baseView ? `&view=${encodeURIComponent(state.baseView)}` : '';
-    const result = await api(`/bases/${encodeURIComponent(base.id)}/query?page=${state.basePage}&page_size=100${viewParam}`);
+    const pageSize = state.basePageSize || 100;
+    const result = await api(`/bases/${encodeURIComponent(base.id)}/query?page=${state.basePage}&page_size=${pageSize}${viewParam}`);
     if (token !== state.baseQueryToken) return;
     state.baseDefinition = result.definition;
+    // D1: Track source documents for scoped invalidation
+    const sourceDocs = new Set();
+    for (const row of result.rows) sourceDocs.add(row.documentId);
+    state.baseSourceDocs.set(base.id, sourceDocs);
     const view = result.view; state.baseView = view.id;
     const toolbar = h('div', { class: 'copal-base-toolbar' }, h('strong', { text: base.name }));
     const viewSelect = h('select', { 'aria-label': 'Base view' });
@@ -851,6 +1440,19 @@ async function renderBases() {
       h('button', { class: 'copal-btn', text: 'Rename', onclick: () => renameBaseDocument(base) }),
       h('button', { class: 'copal-btn', text: 'Duplicate', onclick: () => duplicateBaseDocument(base) }),
       h('button', { class: 'copal-btn', text: 'History', onclick: () => showHistory(base) }),
+      h('button', { class: 'copal-btn', text: '↑', title: 'Move view left', disabled: result.definition.views.findIndex((v) => v.id === view.id) <= 0, onclick: async () => {
+        const reordered = reorderBaseView(result.definition, view.id, 'up');
+        if (reordered && await saveDocument(base, serializeBase(reordered), false)) { state.baseDefinition = reordered; renderBases(); }
+      } }),
+      h('button', { class: 'copal-btn', text: '↓', title: 'Move view right', disabled: result.definition.views.findIndex((v) => v.id === view.id) >= result.definition.views.length - 1, onclick: async () => {
+        const reordered = reorderBaseView(result.definition, view.id, 'down');
+        if (reordered && await saveDocument(base, serializeBase(reordered), false)) { state.baseDefinition = reordered; renderBases(); }
+      } }),
+      h('button', { class: 'copal-btn danger', text: '× View', title: 'Delete this view', disabled: result.definition.views.length <= 1, onclick: async () => {
+        if (!window.confirm(`Delete view "${'$'}{view.name}"?`)) return;
+        const removed = removeBaseView(result.definition, view.id);
+        if (removed && await saveDocument(base, serializeBase(removed), false)) { state.baseDefinition = removed; state.baseView = null; renderBases(); }
+      } }),
       h('button', { class: 'copal-btn danger', text: 'Trash', onclick: () => deleteDocument(base) }));
     const messages = h('div');
     for (const diagnostic of result.diagnostics || []) messages.append(h('p', { class: 'copal-base-diagnostic', text: diagnostic.message }));
@@ -859,56 +1461,173 @@ async function renderBases() {
       main.replaceChildren(toolbar, messages, h('div', { class: 'copal-empty', text: 'This live query returned no rows. Adjust its filters or add matching document properties.' }));
       return;
     }
-    const tableWrap = h('div', { class: 'copal-base-table-wrap' });
-    const table = h('table', { class: 'copal-table copal-base-table' });
-    const headRow = h('tr');
-    for (const column of view.columns) {
-      const sortIndex = (view.sorts || []).findIndex((sort) => sort.property === column.property);
-      const sort = sortIndex >= 0 ? view.sorts[sortIndex] : null;
-      const cell = h('th', { style: column.width ? `width:${column.width}px` : '' }, h('button', {
-        class: 'copal-base-sort', type: 'button',
-        'aria-label': `Sort by ${column.label}${sort ? `, ${sort.direction}, priority ${sortIndex + 1}` : ''}`,
-        text: `${column.label}${sort ? ` ${sort.direction === 'asc' ? '↑' : '↓'}${view.sorts.length > 1 ? sortIndex + 1 : ''}` : ''}`,
-        onclick: async (event) => {
-          const next = updateViewSort(result.definition, view.id, column.property, event.shiftKey);
-          if (await saveDocument(base, serializeBase(next), false)) { state.baseDefinition = next; state.basePage = 1; renderBases(); }
-        },
-      }));
-      cell.append(makeBaseColumnResizer(base, result.definition, view.id, column.property, cell));
-      headRow.append(cell);
-    }
-    table.append(h('thead', {}, headRow));
-    const body = h('tbody');
-    const appendRows = (rows, group = null) => {
-      if (group != null) body.append(h('tr', { class: 'copal-base-group' }, h('th', { colspan: String(view.columns.length), text: `${view.groupBy}: ${group}` })));
-      for (const row of rows) {
+    const renderTableRow = (row) => {
         const tr = h('tr', { 'data-document-id': row.documentId });
         for (const column of view.columns) {
           const value = formatBaseCell(row.values?.[column.property]);
           const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
-          tr.append(h('td', {}, h('button', {
+          const td = h('td', {});
+          td.append(h('button', {
             class: 'copal-base-cell', type: 'button', text: value,
             title: editable ? `Edit ${column.property}` : `Open ${row.name}`,
             'aria-label': editable ? `Edit ${column.label} for ${row.name}: ${value}` : `Open ${row.name}: ${value}`,
-            onclick: () => editable ? editBaseCell(base, row, column) : openDocument(row.documentId, 'notes'),
-          })));
+            onclick: () => { if (editable) makeInlineCellEditor(base, row, column, td); else openDocument(row.documentId, 'notes'); },
+          }));
+          tr.append(td);
         }
-        body.append(tr);
+        return tr;
+      };
+    let contentWrap;
+    if (view.type === 'card') {
+      contentWrap = h('div', { class: 'copal-base-card-view' });
+      const allRows = result.groups?.length ? result.groups.flatMap((g) => g.rows) : result.rows;
+      for (const row of allRows) {
+        const card = h('div', { class: 'copal-base-card', 'data-document-id': row.documentId });
+        for (const column of view.columns) {
+          const value = formatBaseCell(row.values?.[column.property]);
+          const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
+          const field = h('div', { class: 'copal-base-card-field' }, h('span', { class: 'copal-base-card-label', text: column.label }));
+          const valueEl = h('span', { class: 'copal-base-card-value', text: value });
+          if (editable) {
+            valueEl.style.cursor = 'pointer';
+            valueEl.addEventListener('click', () => {
+              const td = h('td', {});
+              makeInlineCellEditor(base, row, column, td);
+              valueEl.replaceChildren(...td.childNodes);
+            });
+          } else {
+            valueEl.addEventListener('click', () => openDocument(row.documentId, 'notes'));
+          }
+          field.append(valueEl);
+          card.append(field);
+        }
+        contentWrap.append(card);
       }
-    };
-    if (result.groups?.length) for (const group of result.groups) appendRows(group.rows, group.key); else appendRows(result.rows);
-    table.append(body);
-    if (Object.keys(result.summaries || {}).length) {
-      const footer = h('tr');
-      for (const column of view.columns) footer.append(h('td', { text: result.summaries[column.property] == null ? '' : `${view.summaries[column.property]}: ${formatBaseCell(result.summaries[column.property])}` }));
-      table.append(h('tfoot', {}, footer));
+    } else if (view.type === 'list') {
+      contentWrap = h('div', { class: 'copal-base-list-view' });
+      const allRows = result.groups?.length ? result.groups.flatMap((g) => g.rows) : result.rows;
+      for (const row of allRows) {
+        const item = h('div', { class: 'copal-base-list-item', 'data-document-id': row.documentId });
+        const mainCol = view.columns[0];
+        const title = h('span', { class: 'copal-base-list-title', text: mainCol ? formatBaseCell(row.values?.[mainCol.property]) : row.name });
+        title.addEventListener('click', () => openDocument(row.documentId, 'notes'));
+        item.append(title);
+        for (const column of view.columns.slice(1)) {
+          const value = formatBaseCell(row.values?.[column.property]);
+          const editable = !column.formula && !column.property.startsWith('file.') && !['tags', 'links', 'kind', 'name'].includes(column.property);
+          const meta = h('span', { class: 'copal-base-list-meta', text: `${column.label}: ${value}` });
+          if (editable) {
+            meta.style.cursor = 'pointer';
+            meta.addEventListener('click', () => {
+              const td = h('td', {});
+              makeInlineCellEditor(base, row, column, td);
+              meta.replaceChildren(...td.childNodes);
+            });
+          }
+          item.append(meta);
+        }
+        contentWrap.append(item);
+      }
+    } else {
+      const tableWrap = h('div', { class: 'copal-base-table-wrap' });
+      const table = h('table', { class: 'copal-table copal-base-table' });
+      const headRow = h('tr');
+      for (let colIdx = 0; colIdx < view.columns.length; colIdx++) {
+        const column = view.columns[colIdx];
+        const sortIndex = (view.sorts || []).findIndex((sort) => sort.property === column.property);
+        const sort = sortIndex >= 0 ? view.sorts[sortIndex] : null;
+        const cell = h('th', { style: column.width ? `width:${column.width}px` : '' }, h('button', {
+          class: 'copal-base-sort', type: 'button',
+          'aria-label': `Sort by ${column.label}${sort ? `, ${sort.direction}, priority ${sortIndex + 1}` : ''}`,
+          text: `${column.label}${sort ? ` ${sort.direction === 'asc' ? '\u2191' : '\u2193'}${view.sorts.length > 1 ? sortIndex + 1 : ''}` : ''}`,
+          onclick: async (event) => {
+            const next = updateViewSort(result.definition, view.id, column.property, event.shiftKey);
+            if (await saveDocument(base, serializeBase(next), false)) { state.baseDefinition = next; state.basePage = 1; renderBases(); }
+          },
+        }));
+        // D4: Column drag-reorder
+        cell.draggable = true;
+        cell.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(colIdx)); e.dataTransfer.effectAllowed = 'move'; cell.classList.add('copal-base-col-dragging'); });
+        cell.addEventListener('dragend', () => { cell.classList.remove('copal-base-col-dragging'); });
+        cell.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; cell.classList.add('copal-base-col-drop'); });
+        cell.addEventListener('dragleave', () => { cell.classList.remove('copal-base-col-drop'); });
+        cell.addEventListener('drop', async (e) => {
+          e.preventDefault(); cell.classList.remove('copal-base-col-drop');
+          const fromIdx = Number(e.dataTransfer.getData('text/plain'));
+          if (Number.isNaN(fromIdx) || fromIdx === colIdx) return;
+          const reordered = reorderBaseColumn(result.definition, view.id, fromIdx, colIdx);
+          if (reordered && await saveDocument(base, serializeBase(reordered), false)) { state.baseDefinition = reordered; renderBases(); }
+        });
+        cell.append(makeBaseColumnResizer(base, result.definition, view.id, column.property, cell));
+        headRow.append(cell);
+      }
+      table.append(h('thead', {}, headRow));
+      const body = h('tbody');
+      const appendRows = (rows, group = null) => {
+        if (group != null) body.append(h('tr', { class: 'copal-base-group' }, h('th', { colspan: String(view.columns.length), text: `${view.groupBy}: ${group}` })));
+        for (const row of rows) body.append(renderTableRow(row));
+      };
+      if (result.groups?.length) for (const group of result.groups) appendRows(group.rows, group.key); else appendRows(result.rows);
+      table.append(body);
+      if (Object.keys(result.summaries || {}).length) {
+        const footer = h('tr');
+        for (const column of view.columns) footer.append(h('td', { text: result.summaries[column.property] == null ? '' : `${view.summaries[column.property]}: ${formatBaseCell(result.summaries[column.property])}` }));
+        table.append(h('tfoot', {}, footer));
+      }
+      tableWrap.append(table);
+      contentWrap = tableWrap;
+
+      // D3: Keyboard grid navigation
+      const totalRows = body.querySelectorAll('tr[data-document-id]').length;
+      const totalCols = view.columns.length;
+      const setActiveCell = (row, col) => {
+        table.querySelectorAll('.copal-base-active-cell').forEach((el) => el.classList.remove('copal-base-active-cell'));
+        if (row < 0 || row >= totalRows || col < 0 || col >= totalCols) return;
+        const tr = body.querySelectorAll('tr[data-document-id]')[row];
+        if (!tr) return;
+        const td = tr.querySelectorAll('td')[col];
+        if (td) { td.classList.add('copal-base-active-cell'); td.scrollIntoView({ block: 'nearest' }); }
+        state.baseFocusRow = row; state.baseFocusCol = col;
+      };
+      table.addEventListener('click', (e) => {
+        const td = e.target.closest('td');
+        if (!td) return;
+        const tr = td.closest('tr[data-document-id]');
+        if (!tr) return;
+        const rowIdx = [...body.querySelectorAll('tr[data-document-id]')].indexOf(tr);
+        const colIdx = [...tr.querySelectorAll('td')].indexOf(td);
+        if (rowIdx >= 0 && colIdx >= 0) setActiveCell(rowIdx, colIdx);
+      });
+      table.addEventListener('keydown', (e) => {
+        const key = e.key;
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Escape', 'Tab'].includes(key)) return;
+        const r = state.baseFocusRow, c = state.baseFocusCol;
+        if (key === 'ArrowUp') { e.preventDefault(); setActiveCell(Math.max(0, r - 1), c); }
+        else if (key === 'ArrowDown') { e.preventDefault(); setActiveCell(Math.min(totalRows - 1, r + 1), c); }
+        else if (key === 'ArrowLeft') { e.preventDefault(); setActiveCell(r, Math.max(0, c - 1)); }
+        else if (key === 'ArrowRight') { e.preventDefault(); setActiveCell(r, Math.min(totalCols - 1, c + 1)); }
+        else if (key === 'Tab') { e.preventDefault(); const next = e.shiftKey ? c - 1 : c + 1; if (next >= 0 && next < totalCols) setActiveCell(r, next); }
+        else if (key === 'Enter') {
+          e.preventDefault();
+          const tr = body.querySelectorAll('tr[data-document-id]')[r];
+          if (!tr) return;
+          const td = tr.querySelectorAll('td')[c];
+          if (!td) return;
+          const btn = td.querySelector('.copal-base-cell');
+          if (btn) btn.click();
+        }
+        else if (key === 'Escape') { e.preventDefault(); setActiveCell(-1, -1); }
+      });
     }
-    tableWrap.append(table);
+    const pageSizeSelect = h('select', { 'aria-label': 'Page size', class: 'copal-base-page-size' });
+    for (const size of [25, 50, 100, 200, 500]) pageSizeSelect.append(h('option', { value: String(size), text: `${'$'}{size}/page`, selected: size === pageSize }));
+    pageSizeSelect.addEventListener('change', () => { state.basePageSize = Number(pageSizeSelect.value); state.basePage = 1; renderBases(); });
     const pagination = h('nav', { class: 'copal-base-pagination', 'aria-label': 'Base result pages' },
       h('button', { class: 'copal-btn', text: 'Previous', disabled: result.page <= 1, onclick: () => { state.basePage = Math.max(1, result.page - 1); renderBases(); } }),
       h('span', { text: `Page ${result.page} of ${result.pages}` }),
-      h('button', { class: 'copal-btn', text: 'Next', disabled: result.page >= result.pages, onclick: () => { state.basePage = Math.min(result.pages, result.page + 1); renderBases(); } }));
-    main.replaceChildren(toolbar, messages, tableWrap, pagination);
+      h('button', { class: 'copal-btn', text: 'Next', disabled: result.page >= result.pages, onclick: () => { state.basePage = Math.min(result.pages, result.page + 1); renderBases(); } }),
+      pageSizeSelect);
+    main.replaceChildren(toolbar, messages, contentWrap, pagination);
   } catch (error) {
     if (token !== state.baseQueryToken) return;
     main.replaceChildren(h('div', { class: 'copal-empty' }, h('h2', { text: 'Base query failed' }), h('p', { text: error.message }), h('button', { class: 'copal-btn', text: 'Edit Base definition', onclick: () => openDocument(base.id, 'notes') })));
@@ -922,6 +1641,15 @@ function taskItems() {
 }
 
 const treeHouse = createTreeHouseFeature({ h, api, setStatus, renderMarkdown, openDocument });
+planningFeature = createPlanningFeature({
+  h,
+  api,
+  getPlanning: planningData,
+  refresh: () => loadDocuments(true),
+  setStatus,
+  projectionChanged,
+  openDocument,
+});
 notesFeature = createNotesFeature({
   h,
   api,
@@ -941,15 +1669,8 @@ notesFeature = createNotesFeature({
   openDocument,
   persistActiveContext,
   activateNotes:() => activateView('notes'),
-});
-planningFeature = createPlanningFeature({
-  h,
-  api,
-  getPlanning: planningData,
-  refresh: () => loadDocuments(true),
-  setStatus,
-  projectionChanged,
-  openDocument,
+  renderTimeline:(body) => planningFeature.renderTimeline(body),
+  openEventEditor:(eventId) => planningFeature.openEventEditor(eventId),
 });
 
 function renderTreeHouse() {
@@ -975,12 +1696,12 @@ function showForm(title, fields, submit) {
   for (const [name, label, value, type = 'text'] of fields) { const control = h(type === 'textarea' ? 'textarea' : 'input', { name, value: type === 'textarea' ? null : value }); if (type === 'textarea') control.value = value; controls[name] = control; dialog.append(h('label', { text: label }), control); }
   const cancel = h('button', { type: 'button', class: 'copal-btn', text: 'Cancel', onclick: () => dialog.close() });
   const save = h('button', { type: 'button', class: 'copal-btn primary', text: 'Save', onclick: async () => { const values = Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value.trim()])); save.disabled = true; try { await submit(values); dialog.close(); } catch (error) { setStatus(error.message, true); save.disabled = false; } } });
-  dialog.append(h('div', { class: 'copal-dialog-actions' }, cancel, save)); document.body.append(dialog); dialog.addEventListener('close', () => dialog.remove()); dialog.showModal(); controls[fields[0][0]]?.focus();
+  dialog.append(h('div', { class: 'copal-dialog-actions' }, cancel, save)); wireDialog(dialog); document.body.append(dialog); dialog.showModal(); controls[fields[0][0]]?.focus();
 }
 
 function createDocument() {
-  const defaultKind = state.view === 'wiki' ? 'wiki' : state.view === 'treehouse' ? 'lesson' : 'markdown';
-  showForm('New Copal document', [['name', 'Name', state.view === 'treehouse' ? 'TreeHouse/New Lesson.md' : 'Untitled.md'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
+  const defaultKind = state.view === 'wiki' ? 'wiki' : state.view === 'treehouse' ? 'lesson' : 'note';
+  showForm('New Copal document', [['name', 'Name', state.view === 'treehouse' ? 'TreeHouse/New Lesson.md' : 'Untitled'], ['content', 'Starting text', '', 'textarea']], async ({ name, content }) => {
     const result = await api('/documents', { method: 'POST', body: JSON.stringify({ name, kind: defaultKind, content }) });
     state.selected = result.doc.id; await loadDocuments();
   });
@@ -996,7 +1717,7 @@ function importVault() {
     const controller = new AbortController();
     const progress = h('dialog', { class:'copal-dialog copal-import-progress' }, h('h2', { text:'Importing Obsidian vault' }), h('p', { text:file.name }), h('progress', { 'aria-label':'Import in progress' }), h('p', { class:'copal-dialog-hint', text:'Copal validates the archive before committing imported records.' }));
     progress.append(h('div', { class:'copal-dialog-actions' }, h('button', { class:'copal-btn', text:'Cancel import', onclick:() => controller.abort() })));
-    document.body.append(progress); progress.addEventListener('close', () => progress.remove()); progress.showModal();
+    wireDialog(progress, { dismissable:false }); document.body.append(progress); progress.showModal();
     setStatus('Importing vault…');
     try {
       const result = await api('/import/obsidian', { method: 'POST', body: form, signal:controller.signal });
@@ -1053,10 +1774,8 @@ function ensureViewWindow(view) {
   const activate = (callback) => (...args) => { activateView(view); return callback(...args); };
   if (view === 'notes') {
     windowApi.actions.append(
-      h('button', { class:'copal-btn', text:'☰', title:'Toggle Notes files', 'aria-label':'Toggle Notes files', onclick:() => notesFeature?.toggleLeft() }),
       h('button', { class:'copal-btn', text:'⌕', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:() => notesFeature?.showChooser() }),
       h('button', { class:'copal-btn', text:'⌘', title:'Notes commands', 'aria-label':'Notes commands', onclick:() => notesFeature?.showCommands() }),
-      h('button', { class:'copal-btn', text:'◫', title:'Toggle linked views', 'aria-label':'Toggle linked views', onclick:() => notesFeature?.toggleRight() }),
     );
   } else {
     windowApi.actions.append(search);
@@ -1087,7 +1806,31 @@ function connectEvents() {
   state.events = new EventSource(`${state.api}/api/copal/events?workspace=${encodeURIComponent(state.workspace)}`);
   // The mutating client refreshes its own document directly. Ignore the
   // matching SSE echo so it cannot overwrite save/conflict feedback.
-  const refresh = () => { if (Date.now() < state.ignoreEventsUntil) return; clearTimeout(state.reloadTimer); state.reloadTimer = setTimeout(() => { if ([...state.windows.values()].some((context) => context.window.visible)) loadDocuments(); }, 120); };
+  const refresh = (event) => {
+    if (Date.now() < state.ignoreEventsUntil) return;
+    clearTimeout(state.reloadTimer);
+    state.reloadTimer = setTimeout(() => {
+      if (![...state.windows.values()].some((context) => context.window.visible)) return;
+      // D1: Scoped invalidation — check if changed doc is a Base source
+      let docId = null;
+      try { const data = JSON.parse(event?.data || '{}'); docId = data.id || data.documentId; } catch { /* full reload */ }
+      if (state.view === 'bases' && docId && state.baseSourceDocs.size > 0) {
+        const affected = [];
+        for (const [baseId, sources] of state.baseSourceDocs) {
+          if (sources.has(docId) || baseId === docId) affected.push(baseId);
+        }
+        if (affected.length === 0) return; // not a source for any visible Base
+        // Full document reload (needed for other views + selection context) then scoped requery
+        loadDocuments().then(() => {
+          for (const baseId of affected) {
+            if (state.baseId === baseId) { renderBases(); break; }
+          }
+        });
+        return;
+      }
+      loadDocuments();
+    }, 120);
+  };
   state.events.addEventListener('document', refresh); state.events.addEventListener('deleted', refresh);
 }
 
@@ -1106,4 +1849,14 @@ export function init(apiBase = window.location.origin) {
   if (match) { const view = VIEWS.includes(match[1]) ? match[1] : 'notes'; ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
 }
 
-export default { init, open, close };
+export function getNotesSettings() {
+  ensureViewWindow('notes');
+  return notesFeature?.getSettings() || {};
+}
+
+export function updateNotesSettings(patch = {}) {
+  ensureViewWindow('notes');
+  return notesFeature?.updateSettings(patch) || {};
+}
+
+export default { init, open, close, getNotesSettings, updateNotesSettings };

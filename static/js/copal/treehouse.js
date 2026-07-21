@@ -243,11 +243,13 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       h('p', { text: `${modules.length} module${modules.length === 1 ? '' : 's'}${progress ? ` · ${progress.percent}% complete` : ''}` }));
     const actions = h('div', { class: 'copal-treehouse-actions' }, h('button', { class: 'copal-btn', text: ui.selectedCourse === course.id ? 'Hide' : 'Open', onclick: () => { ui.selectedCourse = ui.selectedCourse === course.id ? null : course.id; renderLoaded(); } }));
     if (ui.snapshot.permissions.learner && course.status === 'published' && !currentEnrollment(course.id)) actions.append(h('button', { class: 'copal-btn primary', text: 'Enroll', onclick: () => enroll(course.id) }));
+    if (ui.snapshot.permissions.learner && currentEnrollment(course.id)) actions.append(h('button', { class: 'copal-btn danger', text: 'Unenroll', onclick: () => { if (window.confirm('Withdraw from this course?')) command('enrollment.unenroll', { courseId: course.id }); } }));
     if (ui.snapshot.permissions.author && course.authorIds.includes(ui.actorId) || ui.snapshot.permissions.admin) {
       actions.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editCourse(course) }));
       actions.append(h('button', { class: 'copal-btn', text: '+ Module', onclick: () => createModule(course.id) }));
       if (course.status === 'draft') actions.append(h('button', { class: 'copal-btn primary', text: 'Publish', onclick: () => command('course.publish', { courseId: course.id }) }));
       if (course.status !== 'archived') actions.append(h('button', { class: 'copal-btn danger', text: 'Archive', onclick: () => command('course.archive', { courseId: course.id }) }));
+      actions.append(h('button', { class: 'copal-btn danger', text: 'Delete', onclick: () => { if (window.confirm('Delete this course and all its content? This cannot be undone.')) command('course.delete', { courseId: course.id }); } }));
     }
     card.append(actions); root.append(card);
   }
@@ -255,14 +257,17 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
   function courseDetail(course, root) {
     if (!course) return;
     const state = ui.snapshot.state; const progress = learnerProjection();
+    const moduleProgress = progress.courses?.[course.id]?.modules || {};
     const detail = h('section', { class: 'copal-treehouse-detail' }, h('h2', { text: course.title }));
     for (const [moduleIndex, moduleId] of course.moduleIds.entries()) {
       const module = state.modules[moduleId]; if (!module) continue;
-      const moduleHeader = h('header', {}, h('h3', { text: module.title }), h('small', { text: `${module.activityIds.length} activities · ${module.assignmentIds.length} assignments` }));
+      const mp = moduleProgress[moduleId];
+      const moduleHeader = h('header', {}, h('h3', { text: module.title }), h('small', { text: mp ? `${mp.completed}/${mp.total} items · ${mp.percent}%` : `${module.activityIds.length} activities · ${module.assignmentIds.length} assignments` }));
       if (ui.snapshot.permissions.author) moduleHeader.append(h('div', { class: 'copal-treehouse-order' },
         h('button', { class: 'copal-btn', text: 'Edit', 'aria-label': `Edit ${module.title}`, onclick: () => editModule(module) }),
         h('button', { class: 'copal-btn', text: '↑', title: 'Move module earlier', 'aria-label': `Move ${module.title} earlier`, disabled: moduleIndex === 0, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, -1) }) }),
-        h('button', { class: 'copal-btn', text: '↓', title: 'Move module later', 'aria-label': `Move ${module.title} later`, disabled: moduleIndex === course.moduleIds.length - 1, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, 1) }) })));
+        h('button', { class: 'copal-btn', text: '↓', title: 'Move module later', 'aria-label': `Move ${module.title} later`, disabled: moduleIndex === course.moduleIds.length - 1, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, 1) }) }),
+        h('button', { class: 'copal-btn danger', text: 'Delete', 'aria-label': `Delete ${module.title}`, onclick: () => { if (window.confirm(`Delete module "${module.title}" and all its content?`)) command('module.delete', { moduleId: module.id }); } })));
       const moduleCard = h('article', { class: 'copal-card copal-treehouse-module' }, moduleHeader);
       if (module.description) moduleCard.append(h('p', { text: module.description }));
       for (const [activityIndex, activityId] of module.activityIds.entries()) {
@@ -271,11 +276,12 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
         const row = h('div', { class: `copal-treehouse-activity${complete ? ' complete' : ''}` },
           h('div', {}, h('strong', { text: activity.title }), h('small', { text: `${activity.activityType} · ${activity.points} points${activity.skillIds?.length ? ` · ${activity.skillIds.length} skills` : ''}` })),
           h('span', { text: complete ? 'Completed' : activity.status }));
-        if (activity.content) row.append(h('details', {}, h('summary', { text: 'Open lesson' }), h('div', { class: 'copal-tiddler-body' }, renderMarkdown(activity.content))));
+        if (activity.content) row.append(h('details', {}, h('summary', { text: 'Open lesson' }), h('div', { class: 'copal-meme-body' }, renderMarkdown(activity.content))));
         if (ui.snapshot.permissions.author) row.append(h('div', { class: 'copal-treehouse-order' },
           h('button', { class: 'copal-btn', text: 'Edit', 'aria-label': `Edit ${activity.title}`, onclick: () => editActivity(activity) }),
           h('button', { class: 'copal-btn', text: '↑', title: 'Move activity earlier', 'aria-label': `Move ${activity.title} earlier`, disabled: activityIndex === 0, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, -1), assignmentIds: module.assignmentIds }) }),
-          h('button', { class: 'copal-btn', text: '↓', title: 'Move activity later', 'aria-label': `Move ${activity.title} later`, disabled: activityIndex === module.activityIds.length - 1, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, 1), assignmentIds: module.assignmentIds }) })));
+          h('button', { class: 'copal-btn', text: '↓', title: 'Move activity later', 'aria-label': `Move ${activity.title} later`, disabled: activityIndex === module.activityIds.length - 1, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, 1), assignmentIds: module.assignmentIds }) }),
+          h('button', { class: 'copal-btn danger', text: '×', title: 'Delete activity', 'aria-label': `Delete ${activity.title}`, onclick: () => { if (window.confirm(`Delete activity "${activity.title}"?`)) command('activity.delete', { activityId: activity.id }); } })));
         if (ui.snapshot.permissions.learner && currentEnrollment(course.id) && activity.status === 'published' && !complete) row.append(h('button', { class: 'copal-btn primary', text: 'Mark complete', onclick: () => command('activity.complete', { activityId }) }));
         moduleCard.append(row);
       }
@@ -343,6 +349,27 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     });
   }
 
+  function editBadge(badge) {
+    const state = ui.snapshot.state;
+    openForm(`Edit · ${badge.title}`, [
+      { id: 'title', label: 'Badge title', value: badge.title },
+      { id: 'description', label: 'Description', type: 'textarea', value: badge.description || '' },
+      { id: 'type', label: 'Criteria', type: 'select', value: badge.criteria?.type || 'points', options: [
+        { value: 'points', label: 'Total points' }, { value: 'skill', label: 'Skill points' },
+        { value: 'course', label: 'Course completion' }, { value: 'quest', label: 'Quest completion' },
+      ] },
+      { id: 'target', label: 'Target ID (skill/course/quest)' },
+      { id: 'threshold', label: 'Point threshold', type: 'number', value: badge.criteria?.threshold || 100, min: 0 },
+    ], 'Save badge', ({ title, description, type, target, threshold }) => {
+      const criteria = { type };
+      if (type === 'points') criteria.threshold = Number(threshold);
+      if (type === 'skill') { criteria.skillId = target; criteria.threshold = Number(threshold); }
+      if (type === 'course') criteria.courseId = target;
+      if (type === 'quest') criteria.questId = target;
+      return command('badge.update', { badgeId: badge.id, title, description, criteria });
+    });
+  }
+
   function createQuest() {
     const state = ui.snapshot.state;
     openForm('Create quest', [
@@ -352,6 +379,17 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       { id: 'assignmentIds', label: `Assignment IDs · ${values(state.assignments).map((item) => `${item.title}=${item.id}`).join(', ')}` },
       { id: 'rewardPoints', label: 'Reward points', type: 'number', value: 25, min: 0 },
     ], 'Create quest', ({ title, description, activityIds, assignmentIds, rewardPoints }) => command('quest.create', { title, description, activityIds: csv(activityIds), assignmentIds: csv(assignmentIds), rewardPoints: Number(rewardPoints) }));
+  }
+
+  function editQuest(quest) {
+    const state = ui.snapshot.state;
+    openForm(`Edit · ${quest.title}`, [
+      { id: 'title', label: 'Quest title', value: quest.title },
+      { id: 'description', label: 'Description', type: 'textarea', value: quest.description || '' },
+      { id: 'activityIds', label: 'Activity IDs', value: (quest.activityIds || []).join(', ') },
+      { id: 'assignmentIds', label: 'Assignment IDs', value: (quest.assignmentIds || []).join(', ') },
+      { id: 'rewardPoints', label: 'Reward points', type: 'number', value: quest.rewardPoints, min: 0 },
+    ], 'Save quest', ({ title, description, activityIds, assignmentIds, rewardPoints }) => command('quest.update', { questId: quest.id, title, description, activityIds: csv(activityIds), assignmentIds: csv(assignmentIds), rewardPoints: Number(rewardPoints) }));
   }
 
   function renderSkills(root) {
@@ -376,7 +414,10 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
         h('div', { class: 'copal-progress' }, h('span', { style: `width:${Math.min(100, item.points)}%` })),
         h('p', { text: `${item.points} points · ${item.level} · ${item.evidenceEventIds?.length || 0} evidence events${item.unlocked ? '' : ' · locked'}` }));
       if (ui.snapshot.permissions.learner && item.unlocked) card.append(h('button', { class: 'copal-btn', text: 'Submit evidence', onclick: () => submitEvidence(skill.id) }));
-      if (ui.snapshot.permissions.author) card.append(h('button', { class: 'copal-btn', text: 'Edit skill', onclick: () => editSkill(skill) }));
+      if (ui.snapshot.permissions.author) {
+        card.append(h('button', { class: 'copal-btn', text: 'Edit skill', onclick: () => editSkill(skill) }));
+        card.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete skill', onclick: () => { if (window.confirm(`Delete skill "${skill.title}"?`)) command('skill.delete', { skillId: skill.id }); } }));
+      }
       grid.append(card);
     }
     if (!values(state.skills).length) grid.append(h('div', { class: 'copal-empty', text: 'No skills have been defined.' }));
@@ -390,9 +431,31 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     }
     if (!visible.length) evidence.append(h('p', { text: 'No evidence submissions yet.' }));
     root.append(evidence);
-    const rewards = h('div', { class: 'copal-card-grid' },
-      h('section', { class: 'copal-card' }, h('h3', { text: 'Badges' }), ...values(state.badges).map((badge) => h('p', { text: `${progress.badges?.some((item) => item.badgeId === badge.id) ? '✓' : '○'} ${badge.title}` }))),
-      h('section', { class: 'copal-card' }, h('h3', { text: 'Quests' }), ...values(state.quests).map((quest) => h('p', { text: `${progress.quests?.some((item) => item.questId === quest.id) ? '✓' : '○'} ${quest.title} · ${quest.rewardPoints} points` }))));
+    const rewards = h('div', { class: 'copal-card-grid' });
+    const badgeSection = h('section', { class: 'copal-card' }, h('h3', { text: 'Badges' }));
+    for (const badge of values(state.badges)) {
+      const earned = progress.badges?.some((item) => item.badgeId === badge.id);
+      const row = h('p', { text: `${earned ? '✓' : '○'} ${badge.title}` });
+      if (ui.snapshot.permissions.author) {
+        row.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editBadge(badge) }));
+        row.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete badge', onclick: () => { if (window.confirm(`Delete badge "${badge.title}"?`)) command('badge.delete', { badgeId: badge.id }); } }));
+      }
+      badgeSection.append(row);
+    }
+    if (!values(state.badges).length) badgeSection.append(h('p', { text: 'No badges yet.' }));
+    rewards.append(badgeSection);
+    const questSection = h('section', { class: 'copal-card' }, h('h3', { text: 'Quests' }));
+    for (const quest of values(state.quests)) {
+      const done = progress.quests?.some((item) => item.questId === quest.id);
+      const row = h('p', { text: `${done ? '✓' : '○'} ${quest.title} · ${quest.rewardPoints} points` });
+      if (ui.snapshot.permissions.author) {
+        row.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editQuest(quest) }));
+        row.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete quest', onclick: () => { if (window.confirm(`Delete quest "${quest.title}"?`)) command('quest.delete', { questId: quest.id }); } }));
+      }
+      questSection.append(row);
+    }
+    if (!values(state.quests).length) questSection.append(h('p', { text: 'No quests yet.' }));
+    rewards.append(questSection);
     root.append(rewards);
   }
 
@@ -447,6 +510,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       if (submission) card.append(h('p', { text: `Your submission: ${submission.status} · attempt ${submission.attempts}${submission.grade != null ? ` · ${submission.grade}/${assignment.maxPoints}` : ''}${submission.feedback ? ` · ${submission.feedback}` : ''}` }));
       if (ui.snapshot.permissions.author) card.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editAssignment(assignment) }));
       if (ui.snapshot.permissions.author && assignment.status === 'draft') card.append(h('button', { class: 'copal-btn primary', text: 'Publish', onclick: () => command('assignment.publish', { assignmentId: assignment.id }) }));
+      if (ui.snapshot.permissions.author) card.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete assignment', onclick: () => { if (window.confirm(`Delete assignment "${assignment.title}"?`)) command('assignment.delete', { assignmentId: assignment.id }); } }));
       if (ui.snapshot.permissions.learner && assignment.status === 'published' && currentEnrollment(assignment.courseId)) card.append(h('button', { class: 'copal-btn primary', text: submission ? 'Submit another attempt' : 'Submit', onclick: () => submitAssignment(assignment) }));
       list.append(card);
     }

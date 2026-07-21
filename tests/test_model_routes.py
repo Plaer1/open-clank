@@ -2029,6 +2029,9 @@ def test_manual_refresh_timeout_keeps_cached_models_and_warns(monkeypatch):
 
     assert [m["id"] for m in result] == ["cached-model"]
     assert json.loads(ep.cached_models) == ["cached-model"]
-    assert db.commits == 0
+    # Cached models are preserved, but the secret-free failure classification
+    # is durable so Settings and Agent admission can explain the real cause.
+    assert db.commits == 1
+    assert ep.catalog_probe_status == "unavailable"
     assert response.headers["X-Model-Refresh-Status"] == "failed"
     assert "kept cached models" in response.headers["X-Model-Refresh-Warning"]

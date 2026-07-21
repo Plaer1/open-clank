@@ -3,7 +3,7 @@ import state from './state.js';
 import Storage from '../storage.js';
 import { fetchModels, _persistSelections, getExcludedModels } from './models.js';
 import { showScoreboard } from './scoreboard.js';
-import { EYE_OPEN, EYE_CLOSED, ICON_DICE, ICON_PARALLEL, ICON_SEQUENTIAL, SAVE_ICON, WAVE_FRAMES, CHAT_ICON } from './icons.js';
+import { EYE_OPEN, EYE_CLOSED, ICON_DICE, ICON_PARALLEL, ICON_SEQUENTIAL, SAVE_ICON, WAVE_FRAMES } from './icons.js';
 import { _clearProbeWaves } from './probe.js';
 import uiModule from '../ui.js';
 import spinnerModule from '../spinner.js';
@@ -302,8 +302,8 @@ async function showModelSelector() {
       cur.innerHTML = parts.join(', ');
     }
 
-    // ── Type tabs (Chat / Agent / Search / Research) ──
-    state._compareMode = 'chat';
+    // Compare is a single explicit Agent (read-only) evaluation lane.
+    state._compareMode = 'agent';
     const typeWrap = document.createElement('div');
     typeWrap.className = 'compare-section';
     const typeLabel = document.createElement('div');
@@ -316,19 +316,13 @@ async function showModelSelector() {
     tabBar.className = 'compare-mode-tabs compare-type-tabs';
     // Agent — shell prompt `>_` (matches the bash-toggle-btn icon in the composer)
     const _ICON_AGENT = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
-    const _ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-    // Research — magnifying glass with `+` (matches the sidebar Deep Research icon)
-    const _ICON_RESEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
     const _modes = [
-      { id: 'chat', label: 'Chat', icon: CHAT_ICON },
-      { id: 'agent', label: 'Agent', icon: _ICON_AGENT },
-      { id: 'search', label: 'Search', icon: _ICON_SEARCH },
-      { id: 'research', label: 'Research', icon: _ICON_RESEARCH },
+      { id: 'agent', label: 'Agent (read-only)', icon: _ICON_AGENT },
     ];
     _modes.forEach(m => {
       const tab = document.createElement('button');
       tab.type = 'button';
-      tab.className = 'compare-mode-tab' + (m.id === 'chat' ? ' active' : '');
+      tab.className = 'compare-mode-tab active';
       tab.innerHTML = m.icon + '<span class="compare-toggle-label">' + m.label + '</span>';
       tab.dataset.mode = m.id;
       tab.addEventListener('click', () => setModeTab(m.id));
@@ -340,12 +334,12 @@ async function showModelSelector() {
       const m = _modes.find(x => x.id === mode);
       if (cur && m) cur.innerHTML = m.icon + '<span>' + m.label + '</span>';
     }
-    _updateTypeLabel('chat');
+    _updateTypeLabel('agent');
     typeWrap.appendChild(tabBar);
     body.appendChild(typeWrap);
 
     // Per-tab selection memory
-    const _tabSelections = { chat: null, agent: null, search: null, research: null };
+    const _tabSelections = { agent: null };
 
     function setModeTab(mode) {
       if (!_modelsLoaded) return;
@@ -393,7 +387,7 @@ async function showModelSelector() {
     listContainer.appendChild(_loadingDiv);
 
     // Restore last used selections from storage (per-mode)
-    const _selKey = 'odysseus-compare-selections-' + (state._compareMode || 'chat');
+    const _selKey = 'odysseus-compare-selections-' + (state._compareMode || 'agent');
     let selections = Storage.getJSON(_selKey) || Storage.getJSON('odysseus-compare-selections') || [];
     // Restore synthesis models for search/research
     if (state._compareMode === 'search' || state._compareMode === 'research') {

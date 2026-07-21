@@ -43,14 +43,11 @@ def test_background_session_sort_uses_owner_task_endpoint():
 def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
     src = _src("src/task_scheduler.py")
 
-    assert "resolve_task_candidates(" in src
-    assert "owner=task.owner or None" in src
-    assert 'resolve_endpoint(\n                    "research",' in src
-    assert "owner=task.owner or None" in src
-    assert "headers_from_resolver = False" in src
-    assert "headers_from_resolver = True" in src
+    assert "resolve_task_candidates(" not in src
+    assert "No registered model endpoint configured for research" in src
     assert "from src.auth_helpers import owner_filter" in src
-    assert "owner_filter(ep_q, ModelEndpoint, task.owner or None)" in src
+    assert 'owner_filter(query, ModelEndpoint, task.owner or "")' in src
+    assert "resolve_endpoint_runtime(endpoint, owner=task.owner or None)" in src
 
 
 def test_research_routes_fallbacks_are_owner_scoped():

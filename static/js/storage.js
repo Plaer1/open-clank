@@ -91,11 +91,18 @@ export function remove(key) {
 // ── Toggle state helpers ──
 
 export function loadToggleState() {
-  return getJSON(KEYS.TOGGLES, {});
+  const state = getJSON(KEYS.TOGGLES, {});
+  if (Object.prototype.hasOwnProperty.call(state, 'mode')) {
+    delete state.mode;
+    setJSON(KEYS.TOGGLES, state);
+  }
+  return { ...state, mode: 'agent' };
 }
 
 export function saveToggleState(state) {
-  setJSON(KEYS.TOGGLES, state);
+  const durable = { ...(state || {}) };
+  delete durable.mode;
+  setJSON(KEYS.TOGGLES, durable);
 }
 
 export function getToggle(name, fallback) {

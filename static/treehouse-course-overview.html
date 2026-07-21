@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClank + Copal: System Mastery — Course Overview</title>
+<style>
+  :root {
+    --bg: #0f0f0f; --fg: #e0e0e0; --accent: #4ecdc4; --accent2: #ff6b6b;
+    --muted: #888; --card-bg: #1a1a2e; --border: #2a2a3e;
+    --success: #4ecdc4; --warn: #ffd93d; --danger: #ff6b6b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem; max-width: 900px; margin: 0 auto; }
+  h1 { color: var(--accent); font-size: 1.8rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.3rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { color: var(--warn); font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+  .stat { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
+  .stat .num { font-size: 2rem; color: var(--accent); font-weight: bold; }
+  .stat .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .module { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  .module h3 { margin-top: 0; }
+  .module ul { list-style: none; padding-left: 0; }
+  .module li { padding: 0.3rem 0; color: var(--muted); }
+  .module li::before { content: "→ "; color: var(--accent); }
+  .badge { display: inline-block; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.8rem; margin: 0.3rem; font-size: 0.85rem; }
+  .badge.earned { border-color: var(--accent); color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.6rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
+  code { background: var(--card-bg); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+  .skill-tree { margin: 1rem 0; }
+  .skill-node { display: inline-block; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.8rem; margin: 0.3rem; font-size: 0.85rem; }
+  .skill-node.root { border-color: var(--accent); color: var(--accent); }
+  .arrow { color: var(--muted); margin: 0 0.3rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; text-align: center; }
+  @media print { body { background: white; color: black; } .stat, .module { border-color: #ccc; } }
+</style>
+</head>
+<body>
+
+<h1>OpenClank + Copal: System Mastery</h1>
+<p class="subtitle">A hands-on course teaching you to understand, operate, troubleshoot, and safely extend OpenClank and Copal. Every lesson maps to the actual current app.</p>
+
+<div class="stats">
+  <div class="stat"><div class="num">7</div><div class="label">Modules</div></div>
+  <div class="stat"><div class="num">20</div><div class="label">Lessons</div></div>
+  <div class="stat"><div class="num">7</div><div class="label">Assignments</div></div>
+  <div class="stat"><div class="num">7</div><div class="label">Skills</div></div>
+  <div class="stat"><div class="num">4</div><div class="label">Badges</div></div>
+  <div class="stat"><div class="num">2</div><div class="label">Quests</div></div>
+</div>
+
+<h2>Prerequisite Skill Tree</h2>
+<div class="skill-tree">
+  <span class="skill-node root">System Basics</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Models &amp; Auth</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Agent &amp; Tools</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Memory &amp; Trust</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Copal Views</span>
+  <br>
+  <span class="skill-node root">System Basics</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Security &amp; Privacy</span>
+  <br>
+  <span class="skill-node">Memory &amp; Trust</span> +
+  <span class="skill-node">Copal Views</span> +
+  <span class="skill-node">Security &amp; Privacy</span>
+  <span class="arrow">→</span>
+  <span class="skill-node">Capstone Mastery</span>
+</div>
+
+<h2>Modules</h2>
+
+<div class="module">
+  <h3>1. System Orientation</h3>
+  <p>Start here. Understand what OpenClank is, how it starts, and where things live.</p>
+  <ul>
+    <li>What is OpenClank? — Local-first AI assistant, multi-provider, persistent</li>
+    <li>Data Directories &amp; Startup — ~/.odysseus/, settings, health checks</li>
+    <li>Settings &amp; Configuration — Settings model, providers, env vars</li>
+    <li>Logs, Shutdown &amp; Backup — Graceful shutdown, backup/restore, diagnostics</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>2. Models, Auth &amp; Providers</h3>
+  <p>Configure LLM providers, manage API keys, and understand model routing.</p>
+  <ul>
+    <li>Provider Architecture — OpenAI, Anthropic, Google, Local, MiMo dispatch</li>
+    <li>API Key Management — Secure storage, atomic save, env var overrides</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>3. Agent, Tools &amp; MCP</h3>
+  <p>Master the Agent loop, MCP servers, built-in tools, permissions, and sub-agents.</p>
+  <ul>
+    <li>The Agent Loop — Execution engine, context budget, compaction</li>
+    <li>Built-in Tools — File, shell, knowledge, orchestration tools</li>
+    <li>MCP Server Integration — External tool/resource providers, security</li>
+    <li>Skills &amp; Permissions — Skill files, permission model, sensitive ops</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>4. Memory, Trust &amp; Review</h3>
+  <p>Capture, review, promote, and recall memory. Understand trust boundaries.</p>
+  <ul>
+    <li>Memory Capture — Session, project, global memory layers</li>
+    <li>Trust &amp; Memory Review — Checkpoint-derived, user-stated, auto-discovered</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>5. Copal Views</h3>
+  <p>Work with Notes, Wiki, Events, Timeline, Bases, Tasks, and Calendar.</p>
+  <ul>
+    <li>Notes &amp; Wiki — Database-native documents, versioning, full-text search</li>
+    <li>Events &amp; Timeline — Immutable event ledger, projections, audit trail</li>
+    <li>Bases, Tasks &amp; Calendar — Structured data, task management, CalDAV sync</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>6. Security &amp; Privacy</h3>
+  <p>Understand owner scope, credential handling, backup/restore, and the threat model.</p>
+  <ul>
+    <li>Owner Scope &amp; Access Control — Profiles, roles, workspace isolation</li>
+    <li>Credential Handling &amp; Threat Model — Secrets safety, threat model, backup</li>
+  </ul>
+</div>
+
+<div class="module">
+  <h3>7. Capstone Project</h3>
+  <p>Demonstrate end-to-end mastery with a hands-on project.</p>
+  <ul>
+    <li>Inspect the App — Startup, health, provider, tool verification</li>
+    <li>Build Copal Knowledge — Documents, Bases, Timeline verification</li>
+    <li>Recovery &amp; Restart — Backup, restart, integrity check</li>
+  </ul>
+</div>
+
+<h2>Badges</h2>
+<div>
+  <span class="badge">Course Opener — Complete the first module</span>
+  <span class="badge">Centurion — Earn 100+ points</span>
+  <span class="badge">Security Aware — Complete the security module</span>
+  <span class="badge">OpenClank Master — Complete all modules and earn 500+ points</span>
+</div>
+
+<h2>Assignments</h2>
+<table>
+  <tr><th>Module</th><th>Assignment</th><th>Max Points</th></tr>
+  <tr><td>System Orientation</td><td>System Health Check</td><td>50</td></tr>
+  <tr><td>Models &amp; Auth</td><td>Configure a Provider</td><td>100</td></tr>
+  <tr><td>Agent &amp; Tools</td><td>Tool Usage Exercise</td><td>100</td></tr>
+  <tr><td>Memory</td><td>Memory Audit</td><td>75</td></tr>
+  <tr><td>Copal Views</td><td>Build a Copal Knowledge Base</td><td>100</td></tr>
+  <tr><td>Security</td><td>Security Self-Audit</td><td>75</td></tr>
+  <tr><td>Capstone</td><td>Full System Walkthrough</td><td>200</td></tr>
+</table>
+
+<h2>How It Works</h2>
+<p>TreeHouse tracks your progress through <strong>durable events</strong>, not browser-only counters. Every activity completion, submission, and grade emits an immutable event. Your points, badges, quests, and streak are computed from these events on every read.</p>
+<p>Module-order gating ensures you complete items in sequence. Skill prerequisites gate access to advanced content. The instructor can create, edit, publish, and delete content. Learners enroll, complete, submit, and track their own progress.</p>
+
+<footer>
+  OpenClank + Copal: System Mastery · Generated from live app source · TreeHouse LMS
+</footer>
+
+</body>
+</html>

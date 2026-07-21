@@ -21,6 +21,7 @@ from routes.chat_helpers import (
     PresetInfo,
     save_assistant_response,
 )
+from src.transcript_layout import validate_transcript_layout
 
 
 class _AuthManager:
@@ -356,6 +357,53 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
 
     assert sess.history[-1].metadata["requested_model"] == "selected-model"
     assert sess.history[-1].metadata["model"] == "actual-model"
+
+
+def test_save_assistant_response_builds_valid_reference_layout():
+    sess = _FakeSession()
+
+    save_assistant_response(
+        sess,
+        session_manager=None,
+        session_id="s1",
+        full_response="<think>reason</think>Answer U0001f600",
+        last_metrics={},
+        tool_events=[{"round": 1, "tool": "read", "output": "ok"}],
+        incognito=True,
+    )
+
+    message = sess.history[-1]
+    assert message.content == "Answer U0001f600"
+    assert message.metadata["tool_events"][0]["id"] == "tool-1-1"
+    assert validate_transcript_layout(message.content, message.metadata)
+
+
+def test_transcript_layout_rejects_hash_range_and_tool_tampering():
+    sess = _FakeSession()
+    save_assistant_response(
+        sess,
+        session_manager=None,
+        session_id="s1",
+        full_response="answer",
+        last_metrics={},
+        tool_events=[{"id": "call-1", "round": 1, "tool": "read"}],
+        incognito=True,
+    )
+    message = sess.history[-1]
+
+    for mutation in ("hash", "range", "tool"):
+        metadata = dict(message.metadata)
+        metadata["transcript_v2"] = {
+            **message.metadata["transcript_v2"],
+            "blocks": [dict(block) for block in message.metadata["transcript_v2"]["blocks"]],
+        }
+        if mutation == "hash":
+            metadata["transcript_v2"]["content_sha256"] = "bad"
+        elif mutation == "range":
+            metadata["transcript_v2"]["blocks"][-1]["start"] = 1
+        else:
+            metadata["transcript_v2"]["blocks"][0]["call_id"] = "missing"
+        assert not validate_transcript_layout(message.content, metadata)
 
 
 class _SpinMsg:

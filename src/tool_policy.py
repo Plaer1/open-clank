@@ -18,24 +18,6 @@ GUIDE_ONLY_DIRECTIVE = (
 
 WEB_TOOL_NAMES = frozenset({"web_search", "web_fetch"})
 
-# The HTTP chat leg's lane framing (memory-trust metaplan, PULL-MECH
-# option B). Mirrors mimo's chat.txt: single read-only recall tool, no
-# pretending, and the model KNOWS the full toolset exists in Agent mode
-# instead of denying the app's capabilities.
-CHAT_MODE_TOOL_NOTE = (
-    "You are in Chat mode: the only model-callable tool this turn is "
-    "recall_memory — a read-only lookup over saved memories. Beyond that "
-    "single lookup, never claim to run commands, edit files, browse the "
-    "web, or read the filesystem, and never pretend a tool call happened. "
-    "The application's full toolset (shell and Python, file reading and "
-    "editing, web search, documents, email, notes/calendar/tasks, "
-    "contacts, image generation, and more) exists in Agent mode. If "
-    "completing the request genuinely requires such an action, say what "
-    "action is needed and that the user can switch to Agent mode for it — "
-    "never tell the user the application lacks the capability."
-)
-
-
 def tool_toggle_enabled(value: object) -> bool:
     """Return true only for explicit true-like tool toggle values."""
 

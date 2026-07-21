@@ -37,7 +37,7 @@ const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
 const OP_HEAD_KEY: &str = "op_head";
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// A new change (checkpoint boundary) opens when the head commit is older
 /// than this at write time. Decided in the metaplan (§8 Q2).
@@ -70,12 +70,20 @@ fn err(message: impl Into<String>) -> DbError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocRecord {
+    #[serde(default = "doc_record_schema_version")]
+    pub schema_version: u64,
+    #[serde(default)]
+    pub corpus: String,
     pub kind: String,
     pub created_op: String,
     #[serde(default = "shared_owner")]
     pub owner: String,
     #[serde(default = "global_workspace")]
     pub workspace_id: String,
+}
+
+fn doc_record_schema_version() -> u64 {
+    1
 }
 
 fn shared_owner() -> String {
@@ -86,14 +94,38 @@ fn global_workspace() -> String {
     "global".to_string()
 }
 
+fn hidden_name(name: &str) -> bool {
+    name.split(['/', '\\'])
+        .any(|component| component.starts_with('.') && component.len() > 1)
+}
+
+fn canonical_corpus(kind: &str) -> &'static str {
+    match kind {
+        "markdown" | "note" | "base" | "canvas" => "notes",
+        "wiki" => "wiki",
+        "copal-event" | "copal-tracks" | "planning" | "calendar-projection" => "events",
+        kind if kind.starts_with("treehouse-") => "treehouse",
+        _ => "system",
+    }
+}
+
 /// Commit content. `Conflict` is reserved (jj first-class conflicts); v1
 /// never constructs it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Content {
-    Blob { hash: String },
-    Asset { hash: String, ext: String, size: u64 },
-    Conflict { base: Option<String>, sides: Vec<String> },
+    Blob {
+        hash: String,
+    },
+    Asset {
+        hash: String,
+        ext: String,
+        size: u64,
+    },
+    Conflict {
+        base: Option<String>,
+        sides: Vec<String>,
+    },
     Tombstone,
 }
 
@@ -126,12 +158,17 @@ pub struct OpRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct DocView {
     pub id: String,
+    pub record_schema_version: u64,
+    pub corpus: String,
     pub kind: String,
     pub owner: String,
     pub workspace_id: String,
     pub name: String,
     pub head: String,
     pub ts: u64,
+    /// Derived from the revisioned canonical name, so renames version hidden state.
+    pub hidden: bool,
+    pub deleted: bool,
     pub content: Content,
     /// UTF-8 text for Blob content; None for assets/tombstones.
     pub text: Option<String>,
@@ -139,20 +176,48 @@ pub struct DocView {
 
 #[derive(Debug)]
 pub enum WriteOutcome {
-    Committed { view: DocView, new_change: bool },
-    Unchanged { view: DocView },
+    Committed {
+        view: DocView,
+        new_change: bool,
+    },
+    Unchanged {
+        view: DocView,
+    },
     /// baseCommit didn't match the head: nothing was written; caller rebases
     /// onto the returned authoritative view.
-    Stale { view: DocView },
+    Stale {
+        view: DocView,
+    },
 }
 
 #[derive(Debug, Default, Serialize)]
 pub struct ImportStats {
     pub notes: usize,
     pub assets: usize,
+    pub compatibility: usize,
+    pub unchanged: usize,
     pub planning: bool,
     pub treehouse: bool,
+    pub restored_identities: usize,
+    pub entries: Vec<ImportEntry>,
     pub op: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportIdentity {
+    pub id: String,
+    pub corpus: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportEntry {
+    pub path: String,
+    pub status: String,
+    pub corpus: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ── Data-dir resolution (metaplan §2b: the debug bit) ────────────────────
@@ -177,7 +242,7 @@ fn debug_bit(root: &Path) -> bool {
     match std::env::var("COPAL_DEBUG").ok().as_deref() {
         Some("1") => return true,
         Some("0") => return false,
-        _ => {},
+        _ => {}
     }
     let Ok(text) = fs::read_to_string(root.join("copal.toml")) else {
         return false;
@@ -185,7 +250,10 @@ fn debug_bit(root: &Path) -> bool {
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if let Some(value) = line.strip_prefix("debug") {
-            return value.trim_start().strip_prefix('=').is_some_and(|v| v.trim() == "true");
+            return value
+                .trim_start()
+                .strip_prefix('=')
+                .is_some_and(|v| v.trim() == "true");
         }
     }
     false
@@ -195,7 +263,9 @@ fn xdg_data_home() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     home.join(".local").join("share")
 }
 
@@ -210,10 +280,16 @@ impl Db {
     /// Open (creating if needed) the database at `<data_dir>/copal.redb`
     /// with assets beside it in `<data_dir>/assets/`.
     pub fn open(data_dir: &Path) -> Result<Self> {
+        Self::open_with_name(data_dir, "copal")
+    }
+
+    /// Open (creating if needed) the database at `<data_dir>/<store_name>.redb`
+    /// with assets beside it in `<data_dir>/assets/`.
+    pub fn open_with_name(data_dir: &Path, store_name: &str) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
         let assets_dir = data_dir.join("assets");
         fs::create_dir_all(&assets_dir)?;
-        let database_path = data_dir.join("copal.redb");
+        let database_path = data_dir.join(format!("{store_name}.redb"));
         let database = if database_path.exists() {
             Database::open(&database_path)?
         } else {
@@ -223,16 +299,22 @@ impl Db {
         // TableDoesNotExist on a fresh file, and record the root `init`
         // operation (jj's virtual root op) so there is always an op to
         // restore back to.
-        let current_version = database
-            .begin_read()
-            .ok()
-            .and_then(|txn| {
-                txn.open_table(META)
+        let current_version = database.begin_read().ok().and_then(|txn| {
+            txn.open_table(META).ok().and_then(|table| {
+                table
+                    .get(SCHEMA_VERSION_KEY)
                     .ok()
-                    .and_then(|table| table.get(SCHEMA_VERSION_KEY).ok().flatten().map(|value| value.value().to_string()))
-            });
-        let target_version = SCHEMA_VERSION.to_string();
-        if current_version.as_deref() != Some(target_version.as_str()) {
+                    .flatten()
+                    .and_then(|value| value.value().parse::<u64>().ok())
+            })
+        });
+        if current_version.is_some_and(|version| version > SCHEMA_VERSION) {
+            return Err(err(format!(
+                "database schema {} is newer than supported schema {SCHEMA_VERSION}",
+                current_version.unwrap()
+            )));
+        }
+        if current_version != Some(SCHEMA_VERSION) {
             let txn = database.begin_write()?;
             {
                 txn.open_table(DOCS)?;
@@ -241,13 +323,50 @@ impl Db {
                 txn.open_table(OPS)?;
                 let needs_init = txn.open_table(META)?.get(OP_HEAD_KEY)?.is_none();
                 if needs_init {
-                    put_op(&txn, None, "init", "initialize repository", &BTreeMap::new())?;
+                    put_op(
+                        &txn,
+                        None,
+                        "init",
+                        "initialize repository",
+                        &BTreeMap::new(),
+                    )?;
+                } else {
+                    let (head, view) = {
+                        let meta = txn.open_table(META)?;
+                        let head = meta
+                            .get(OP_HEAD_KEY)?
+                            .ok_or_else(|| err("schema migration has no operation head"))?
+                            .value()
+                            .to_string();
+                        drop(meta);
+                        let ops = txn.open_table(OPS)?;
+                        let record = ops
+                            .get(head.as_str())?
+                            .ok_or_else(|| err("schema migration operation head is missing"))?;
+                        let op: OpRecord = serde_json::from_str(record.value())?;
+                        (head, op.view)
+                    };
+                    put_op(
+                        &txn,
+                        Some(head),
+                        "schema-upgrade",
+                        &format!(
+                            "upgrade database schema {} to {SCHEMA_VERSION}",
+                            current_version.unwrap_or(1)
+                        ),
+                        &view,
+                    )?;
                 }
-                txn.open_table(META)?.insert(SCHEMA_VERSION_KEY, target_version.as_str())?;
+                let target_version = SCHEMA_VERSION.to_string();
+                txn.open_table(META)?
+                    .insert(SCHEMA_VERSION_KEY, target_version.as_str())?;
             }
             txn.commit()?;
         }
-        Ok(Self { database, assets_dir })
+        Ok(Self {
+            database,
+            assets_dir,
+        })
     }
 
     pub fn assets_dir(&self) -> &Path {
@@ -282,20 +401,26 @@ impl Db {
             return Ok(BTreeMap::new());
         };
         let ops = txn.open_table(OPS)?;
-        let record = ops.get(head.value())?.ok_or_else(|| err("op head points at missing op"))?;
+        let record = ops
+            .get(head.value())?
+            .ok_or_else(|| err("op head points at missing op"))?;
         let op: OpRecord = serde_json::from_str(record.value())?;
         Ok(op.view)
     }
 
     fn load_commit(&self, txn: &redb::ReadTransaction, id: &str) -> Result<CommitRecord> {
         let commits = txn.open_table(COMMITS)?;
-        let record = commits.get(id)?.ok_or_else(|| err(format!("missing commit {id}")))?;
+        let record = commits
+            .get(id)?
+            .ok_or_else(|| err(format!("missing commit {id}")))?;
         Ok(serde_json::from_str(record.value())?)
     }
 
     fn doc_record(&self, txn: &redb::ReadTransaction, id: &str) -> Result<DocRecord> {
         let docs = txn.open_table(DOCS)?;
-        let record = docs.get(id)?.ok_or_else(|| err(format!("missing doc {id}")))?;
+        let record = docs
+            .get(id)?
+            .ok_or_else(|| err(format!("missing doc {id}")))?;
         Ok(serde_json::from_str(record.value())?)
     }
 
@@ -304,20 +429,33 @@ impl Db {
         let text = match &commit.content {
             Content::Blob { hash } => {
                 let blobs = txn.open_table(BLOBS)?;
-                let bytes = blobs.get(hash.as_str())?.ok_or_else(|| err(format!("missing blob {hash}")))?;
+                let bytes = blobs
+                    .get(hash.as_str())?
+                    .ok_or_else(|| err(format!("missing blob {hash}")))?;
                 Some(String::from_utf8_lossy(bytes.value()).into_owned())
-            },
+            }
             _ => None,
         };
         let doc = self.doc_record(txn, id)?;
+        let hidden = hidden_name(&commit.name);
+        let deleted = matches!(commit.content, Content::Tombstone);
+        let corpus = if doc.corpus.is_empty() {
+            canonical_corpus(&doc.kind).to_string()
+        } else {
+            doc.corpus.clone()
+        };
         Ok(DocView {
             id: id.to_string(),
+            record_schema_version: doc.schema_version,
+            corpus,
             kind: doc.kind,
             owner: doc.owner,
             workspace_id: doc.workspace_id,
             name: commit.name,
             head: head.to_string(),
             ts: commit.ts,
+            hidden,
+            deleted,
             content: commit.content,
             text,
         })
@@ -334,14 +472,18 @@ impl Db {
                 out.push(doc_view);
             }
         }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.sort_by(|a, b| {
+            (&a.name, &a.corpus, &a.kind, &a.id).cmp(&(&b.name, &b.corpus, &b.kind, &b.id))
+        });
         Ok(out)
     }
 
     pub fn get_doc(&self, id: &str) -> Result<Option<DocView>> {
         let txn = self.database.begin_read()?;
         let view = self.read_view(&txn)?;
-        let Some(head) = view.get(id) else { return Ok(None) };
+        let Some(head) = view.get(id) else {
+            return Ok(None);
+        };
         let doc_view = self.view_of(&txn, id, head)?;
         if matches!(doc_view.content, Content::Tombstone) {
             return Ok(None);
@@ -358,7 +500,7 @@ impl Db {
         let exact_names = docs
             .iter()
             .filter(|doc| doc.owner == owner && doc.workspace_id == workspace_id)
-            .map(|doc| doc.name.clone())
+            .map(|doc| (doc.corpus.clone(), doc.kind.clone(), doc.name.clone()))
             .collect::<BTreeSet<_>>();
         Ok(docs
             .into_iter()
@@ -366,13 +508,24 @@ impl Db {
                 (doc.owner == owner && doc.workspace_id == workspace_id)
                     || (doc.owner == "shared"
                         && doc.workspace_id == "global"
-                        && !exact_names.contains(&doc.name))
+                        && !exact_names.contains(&(
+                            doc.corpus.clone(),
+                            doc.kind.clone(),
+                            doc.name.clone(),
+                        )))
             })
             .collect())
     }
 
-    pub fn get_doc_scoped(&self, id: &str, owner: &str, workspace_id: &str) -> Result<Option<DocView>> {
-        Ok(self.get_doc(id)?.filter(|doc| scope_allows(doc, owner, workspace_id)))
+    pub fn get_doc_scoped(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Option<DocView>> {
+        Ok(self
+            .get_doc(id)?
+            .filter(|doc| scope_allows(doc, owner, workspace_id)))
     }
 
     pub fn find_doc_by_name_scoped(
@@ -387,13 +540,42 @@ impl Db {
             .find(|doc| doc.name == name))
     }
 
-    pub fn list_deleted_docs_scoped(&self, owner: &str, workspace_id: &str) -> Result<Vec<DocView>> {
+    pub fn find_doc_by_name_kind_scoped(
+        &self,
+        name: &str,
+        kind: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Option<DocView>> {
+        self.find_doc_by_identity_scoped(name, kind, canonical_corpus(kind), owner, workspace_id)
+    }
+
+    pub fn find_doc_by_identity_scoped(
+        &self,
+        name: &str,
+        kind: &str,
+        corpus: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Option<DocView>> {
+        Ok(self
+            .list_docs_scoped(owner, workspace_id)?
+            .into_iter()
+            .find(|doc| doc.name == name && doc.kind == kind && doc.corpus == corpus))
+    }
+
+    pub fn list_deleted_docs_scoped(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<DocView>> {
         let txn = self.database.begin_read()?;
         let view = self.read_view(&txn)?;
         let mut deleted = Vec::new();
         for (doc_id, head) in &view {
             let doc = self.view_of(&txn, doc_id, head)?;
-            if matches!(doc.content, Content::Tombstone) && scope_allows(&doc, owner, workspace_id) {
+            if matches!(doc.content, Content::Tombstone) && scope_allows(&doc, owner, workspace_id)
+            {
                 deleted.push(doc);
             }
         }
@@ -412,7 +594,9 @@ impl Db {
     pub fn history(&self, id: &str) -> Result<Value> {
         let txn = self.database.begin_read()?;
         let view = self.read_view(&txn)?;
-        let Some(head) = view.get(id) else { return Err(err("doc not found")) };
+        let Some(head) = view.get(id) else {
+            return Err(err("doc not found"));
+        };
         let mut changes = Vec::new();
         let mut cursor = Some(head.clone());
         while let Some(commit_id) = cursor {
@@ -421,7 +605,9 @@ impl Db {
             let mut pred = commit.predecessors.first().cloned();
             while let Some(pred_id) = pred {
                 let pred_commit = self.load_commit(&txn, &pred_id)?;
-                amends.push(json!({ "commit": pred_id, "ts": pred_commit.ts, "name": pred_commit.name }));
+                amends.push(
+                    json!({ "commit": pred_id, "ts": pred_commit.ts, "name": pred_commit.name }),
+                );
                 pred = pred_commit.predecessors.first().cloned();
             }
             changes.push(json!({
@@ -445,9 +631,11 @@ impl Db {
             match commit.content {
                 Content::Blob { hash } => {
                     let blobs = txn.open_table(BLOBS)?;
-                    let bytes = blobs.get(hash.as_str())?.ok_or_else(|| err("missing blob"))?;
+                    let bytes = blobs
+                        .get(hash.as_str())?
+                        .ok_or_else(|| err("missing blob"))?;
                     Ok(String::from_utf8_lossy(bytes.value()).into_owned())
-                },
+                }
                 Content::Tombstone => Ok(String::new()),
                 _ => Err(err("diff only supports text content")),
             }
@@ -496,7 +684,13 @@ impl Db {
     // exactly one operation, then advances the op head. redb serializes
     // writers, so this is the whole concurrency story.
 
-    pub fn create_doc(&self, kind: &str, name: &str, content: &str, message: Option<&str>) -> Result<DocView> {
+    pub fn create_doc(
+        &self,
+        kind: &str,
+        name: &str,
+        content: &str,
+        message: Option<&str>,
+    ) -> Result<DocView> {
         self.create_doc_scoped("shared", "global", kind, name, content, message)
     }
 
@@ -512,7 +706,10 @@ impl Db {
         if owner.trim().is_empty() || workspace_id.trim().is_empty() {
             return Err(err("owner and workspace are required"));
         }
-        if self.find_doc_by_name_scoped(name, owner, workspace_id)?.is_some() {
+        if self
+            .find_doc_by_name_kind_scoped(name, kind, owner, workspace_id)?
+            .is_some()
+        {
             return Err(err(format!("name already exists: {name}")));
         }
         let doc_id = new_ulid();
@@ -521,6 +718,8 @@ impl Db {
         {
             let mut docs = txn.open_table(DOCS)?;
             let record = DocRecord {
+                schema_version: doc_record_schema_version(),
+                corpus: canonical_corpus(kind).to_string(),
                 kind: kind.to_string(),
                 created_op: "pending".to_string(),
                 owner: owner.to_string(),
@@ -553,7 +752,7 @@ impl Db {
         owner: &str,
         workspace_id: &str,
     ) -> Result<WriteOutcome> {
-        self.require_scope(id, owner, workspace_id)?;
+        self.require_write_scope(id, owner, workspace_id)?;
         self.write_doc(id, content, base)
     }
 
@@ -569,8 +768,17 @@ impl Db {
         owner: &str,
         workspace_id: &str,
     ) -> Result<DocView> {
-        self.require_scope(id, owner, workspace_id)?;
-        if let Some(existing) = self.find_doc_by_name_scoped(new_name, owner, workspace_id)? {
+        self.require_write_scope(id, owner, workspace_id)?;
+        let current = self
+            .get_doc(id)?
+            .ok_or_else(|| err("doc not found in this scope"))?;
+        if let Some(existing) = self.find_doc_by_identity_scoped(
+            new_name,
+            &current.kind,
+            &current.corpus,
+            owner,
+            workspace_id,
+        )? {
             if existing.id != id {
                 return Err(err(format!("name already exists: {new_name}")));
             }
@@ -579,7 +787,7 @@ impl Db {
     }
 
     pub fn delete_doc_scoped(&self, id: &str, owner: &str, workspace_id: &str) -> Result<()> {
-        self.require_scope(id, owner, workspace_id)?;
+        self.require_write_scope(id, owner, workspace_id)?;
         self.delete_doc(id)
     }
 
@@ -590,7 +798,7 @@ impl Db {
         owner: &str,
         workspace_id: &str,
     ) -> Result<DocView> {
-        self.require_scope(id, owner, workspace_id)?;
+        self.require_write_scope(id, owner, workspace_id)?;
         self.checkpoint(id, message)
     }
 
@@ -601,7 +809,7 @@ impl Db {
         owner: &str,
         workspace_id: &str,
     ) -> Result<DocView> {
-        self.require_scope(id, owner, workspace_id)?;
+        self.require_write_scope(id, owner, workspace_id)?;
         self.restore_doc(id, commit_id)
     }
 
@@ -613,13 +821,20 @@ impl Db {
     ) -> Result<DocView> {
         let txn = self.database.begin_read()?;
         let view = self.read_view(&txn)?;
-        let head = view.get(id).ok_or_else(|| err("doc not found in this scope"))?;
+        let head = view
+            .get(id)
+            .ok_or_else(|| err("doc not found in this scope"))?;
         let deleted = self.view_of(&txn, id, head)?;
-        if !scope_allows(&deleted, owner, workspace_id) || !matches!(deleted.content, Content::Tombstone) {
+        if deleted.owner != owner
+            || deleted.workspace_id != workspace_id
+            || !matches!(deleted.content, Content::Tombstone)
+        {
             return Err(err("doc not found in this scope"));
         }
         let tombstone = self.load_commit(&txn, head)?;
-        let previous = tombstone.parent.ok_or_else(|| err("deleted doc has no restorable parent"))?;
+        let previous = tombstone
+            .parent
+            .ok_or_else(|| err("deleted doc has no restorable parent"))?;
         drop(txn);
         self.restore_doc(id, &previous)
     }
@@ -627,6 +842,16 @@ impl Db {
     fn require_scope(&self, id: &str, owner: &str, workspace_id: &str) -> Result<()> {
         if self.get_doc_scoped(id, owner, workspace_id)?.is_none() {
             return Err(err("doc not found in this scope"));
+        }
+        Ok(())
+    }
+
+    fn require_write_scope(&self, id: &str, owner: &str, workspace_id: &str) -> Result<()> {
+        let Some(doc) = self.get_doc(id)? else {
+            return Err(err("doc not found in this scope"));
+        };
+        if doc.owner != owner || doc.workspace_id != workspace_id {
+            return Err(err("document is read-only in this scope"));
         }
         Ok(())
     }
@@ -657,9 +882,11 @@ impl Db {
         let current_text = match &head_commit.content {
             Content::Blob { hash } => {
                 let blobs = txn.open_table(BLOBS)?;
-                let bytes = blobs.get(hash.as_str())?.ok_or_else(|| err("missing blob"))?;
+                let bytes = blobs
+                    .get(hash.as_str())?
+                    .ok_or_else(|| err("missing blob"))?;
                 Some(String::from_utf8_lossy(bytes.value()).into_owned())
-            },
+            }
             _ => None,
         };
         if current_text.as_deref() == Some(content) {
@@ -672,8 +899,16 @@ impl Db {
         let hash = put_blob(&txn, content.as_bytes())?;
         let commit = CommitRecord {
             doc: id.to_string(),
-            parent: if new_change { Some(head.clone()) } else { head_commit.parent.clone() },
-            predecessors: if new_change { Vec::new() } else { vec![head.clone()] },
+            parent: if new_change {
+                Some(head.clone())
+            } else {
+                head_commit.parent.clone()
+            },
+            predecessors: if new_change {
+                Vec::new()
+            } else {
+                vec![head.clone()]
+            },
             name: head_commit.name.clone(),
             content: Content::Blob { hash },
             ts: now,
@@ -681,10 +916,19 @@ impl Db {
         };
         let commit_id = put_commit(&txn, &commit)?;
         view.insert(id.to_string(), commit_id);
-        put_op(&txn, parent_op, "snapshot", &format!("snapshot {}", head_commit.name), &view)?;
+        put_op(
+            &txn,
+            parent_op,
+            "snapshot",
+            &format!("snapshot {}", head_commit.name),
+            &view,
+        )?;
         txn.commit()?;
         let updated = self.get_doc(id)?.ok_or_else(|| err("write failed"))?;
-        Ok(WriteOutcome::Committed { view: updated, new_change })
+        Ok(WriteOutcome::Committed {
+            view: updated,
+            new_change,
+        })
     }
 
     /// Freeze the current head as a named history unit; subsequent writes
@@ -704,13 +948,26 @@ impl Db {
         };
         let commit_id = put_commit(&txn, &commit)?;
         view.insert(id.to_string(), commit_id);
-        put_op(&txn, parent_op, "checkpoint", &format!("checkpoint {}", current.name), &view)?;
+        put_op(
+            &txn,
+            parent_op,
+            "checkpoint",
+            &format!("checkpoint {}", current.name),
+            &view,
+        )?;
         txn.commit()?;
         Ok(self.get_doc(id)?.ok_or_else(|| err("checkpoint failed"))?)
     }
 
     pub fn rename_doc(&self, id: &str, new_name: &str) -> Result<DocView> {
-        if let Some(existing) = self.find_doc_by_name(new_name)? {
+        let current = self.get_doc(id)?.ok_or_else(|| err("doc not found"))?;
+        if let Some(existing) = self.find_doc_by_identity_scoped(
+            new_name,
+            &current.kind,
+            &current.corpus,
+            &current.owner,
+            &current.workspace_id,
+        )? {
             if existing.id != id {
                 return Err(err(format!("name already exists: {new_name}")));
             }
@@ -735,8 +992,20 @@ impl Db {
                 continue;
             }
             let reference_scope = load_doc_record_in_txn(&txn, reference_id)?;
+            let reference_corpus = if reference_scope.corpus.is_empty() {
+                canonical_corpus(&reference_scope.kind)
+            } else {
+                &reference_scope.corpus
+            };
+            let target_corpus = if target_scope.corpus.is_empty() {
+                canonical_corpus(&target_scope.kind)
+            } else {
+                &target_scope.corpus
+            };
             if reference_scope.owner != target_scope.owner
                 || reference_scope.workspace_id != target_scope.workspace_id
+                || reference_corpus != target_corpus
+                || matches!(reference_scope.kind.as_str(), "note" | "wiki")
             {
                 continue;
             }
@@ -753,7 +1022,12 @@ impl Db {
             };
             let rewritten = rewrite_wikilinks(&text, &old_name, new_name);
             if rewritten != text {
-                reference_updates.push((reference_id.clone(), reference_head.clone(), reference_commit, rewritten));
+                reference_updates.push((
+                    reference_id.clone(),
+                    reference_head.clone(),
+                    reference_commit,
+                    rewritten,
+                ));
             }
         }
 
@@ -812,7 +1086,13 @@ impl Db {
         };
         let commit_id = put_commit(&txn, &commit)?;
         view.insert(id.to_string(), commit_id);
-        put_op(&txn, parent_op, "delete", &format!("delete {}", current.name), &view)?;
+        put_op(
+            &txn,
+            parent_op,
+            "delete",
+            &format!("delete {}", current.name),
+            &view,
+        )?;
         txn.commit()?;
         Ok(())
     }
@@ -826,7 +1106,11 @@ impl Db {
             return Err(err("commit does not belong to doc"));
         }
         drop(txn_read);
-        let head = self.current_view()?.get(id).cloned().ok_or_else(|| err("doc not found"))?;
+        let head = self
+            .current_view()?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| err("doc not found"))?;
         let txn = self.database.begin_write()?;
         let (mut view, parent_op) = self.write_view(&txn)?;
         let commit = CommitRecord {
@@ -840,7 +1124,13 @@ impl Db {
         };
         let new_commit = put_commit(&txn, &commit)?;
         view.insert(id.to_string(), new_commit);
-        put_op(&txn, parent_op, "restore", &format!("restore {} to {commit_id}", old.name), &view)?;
+        put_op(
+            &txn,
+            parent_op,
+            "restore",
+            &format!("restore {} to {commit_id}", old.name),
+            &view,
+        )?;
         txn.commit()?;
         Ok(self.get_doc(id)?.ok_or_else(|| err("restore failed"))?)
     }
@@ -856,14 +1146,18 @@ impl Db {
             Some(id) => id.to_string(),
             None => {
                 let ops = txn.open_table(OPS)?;
-                let record = ops.get(current_op.as_str())?.ok_or_else(|| err("missing current op"))?;
+                let record = ops
+                    .get(current_op.as_str())?
+                    .ok_or_else(|| err("missing current op"))?;
                 let op: OpRecord = serde_json::from_str(record.value())?;
                 op.parent.ok_or_else(|| err("nothing to undo"))?
-            },
+            }
         };
         let restored_view: BTreeMap<String, String> = {
             let ops = txn.open_table(OPS)?;
-            let record = ops.get(target.as_str())?.ok_or_else(|| err("target op not found"))?;
+            let record = ops
+                .get(target.as_str())?
+                .ok_or_else(|| err("target op not found"))?;
             let op: OpRecord = serde_json::from_str(record.value())?;
             op.view
         };
@@ -878,7 +1172,13 @@ impl Db {
                 changed.push(doc.clone());
             }
         }
-        put_op(&txn, parent_op, "undo", &format!("restore repo to op {target}"), &restored_view)?;
+        put_op(
+            &txn,
+            parent_op,
+            "undo",
+            &format!("restore repo to op {target}"),
+            &restored_view,
+        )?;
         txn.commit()?;
         Ok(changed)
     }
@@ -889,16 +1189,9 @@ impl Db {
     /// amend the AssetRef doc named `name`. Old versions stay on disk;
     /// the doc's history is the chain of hashes.
     pub fn put_asset(&self, name: &str, ext: &str, bytes: &[u8]) -> Result<DocView> {
-        let hash = blake3::hash(bytes).to_hex().to_string();
-        let ext = ext.trim_start_matches('.').to_ascii_lowercase();
-        let file = self.assets_dir.join(format!("{hash}.{ext}"));
-        if !file.exists() {
-            let tmp = self.assets_dir.join(format!("{hash}.{ext}.tmp"));
-            fs::write(&tmp, bytes)?;
-            fs::rename(&tmp, &file)?;
-        }
-        let content = Content::Asset { hash: hash.clone(), ext: ext.clone(), size: bytes.len() as u64 };
-        match self.find_doc_by_name(name)? {
+        let ext = safe_asset_ext(ext.trim_start_matches('.'));
+        let content = store_import_asset(&self.assets_dir, &ext, bytes)?;
+        match self.find_doc_by_name_kind_scoped(name, "asset", "shared", "global")? {
             Some(existing) => {
                 if existing.content == content {
                     return Ok(existing);
@@ -916,10 +1209,18 @@ impl Db {
                 };
                 let commit_id = put_commit(&txn, &commit)?;
                 view.insert(existing.id.clone(), commit_id);
-                put_op(&txn, parent_op, "asset-update", &format!("update asset {name}"), &view)?;
+                put_op(
+                    &txn,
+                    parent_op,
+                    "asset-update",
+                    &format!("update asset {name}"),
+                    &view,
+                )?;
                 txn.commit()?;
-                Ok(self.get_doc(&existing.id)?.ok_or_else(|| err("asset update failed"))?)
-            },
+                Ok(self
+                    .get_doc(&existing.id)?
+                    .ok_or_else(|| err("asset update failed"))?)
+            }
             None => {
                 let doc_id = new_ulid();
                 let txn = self.database.begin_write()?;
@@ -927,6 +1228,8 @@ impl Db {
                 {
                     let mut docs = txn.open_table(DOCS)?;
                     let record = DocRecord {
+                        schema_version: doc_record_schema_version(),
+                        corpus: "system".to_string(),
                         kind: "asset".to_string(),
                         created_op: "pending".to_string(),
                         owner: shared_owner(),
@@ -945,10 +1248,18 @@ impl Db {
                 };
                 let commit_id = put_commit(&txn, &commit)?;
                 view.insert(doc_id.clone(), commit_id);
-                put_op(&txn, parent_op, "asset-update", &format!("add asset {name}"), &view)?;
+                put_op(
+                    &txn,
+                    parent_op,
+                    "asset-update",
+                    &format!("add asset {name}"),
+                    &view,
+                )?;
                 txn.commit()?;
-                Ok(self.get_doc(&doc_id)?.ok_or_else(|| err("asset create failed"))?)
-            },
+                Ok(self
+                    .get_doc(&doc_id)?
+                    .ok_or_else(|| err("asset create failed"))?)
+            }
         }
     }
 
@@ -963,7 +1274,11 @@ impl Db {
     /// `planning` doc — all recorded as one `import` operation (undoable as
     /// a unit). Existing docs with the same name are updated only when
     /// content differs.
-    pub fn import_vault(&self, vault_dir: &Path, planning_file: Option<&Path>) -> Result<ImportStats> {
+    pub fn import_vault(
+        &self,
+        vault_dir: &Path,
+        planning_file: Option<&Path>,
+    ) -> Result<ImportStats> {
         self.import_vault_scoped(vault_dir, planning_file, "shared", "global")
     }
 
@@ -976,169 +1291,440 @@ impl Db {
         owner: &str,
         workspace_id: &str,
     ) -> Result<ImportStats> {
+        self.import_vault_scoped_as(vault_dir, planning_file, owner, workspace_id, "markdown")
+    }
+
+    /// Import note-like Markdown into an explicit canonical corpus kind. The
+    /// route prepares `note`/`wiki` envelopes; direct legacy callers retain
+    /// `markdown` behavior through `import_vault_scoped`.
+    pub fn import_vault_scoped_as(
+        &self,
+        vault_dir: &Path,
+        planning_file: Option<&Path>,
+        owner: &str,
+        workspace_id: &str,
+        note_kind: &str,
+    ) -> Result<ImportStats> {
+        self.import_vault_scoped_as_with_ids(
+            vault_dir,
+            planning_file,
+            owner,
+            workspace_id,
+            note_kind,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Restore a Copal export while retaining its stable document identities.
+    /// Every supplied identity must reconcile to exactly one imported path.
+    pub fn import_vault_scoped_as_with_ids(
+        &self,
+        vault_dir: &Path,
+        planning_file: Option<&Path>,
+        owner: &str,
+        workspace_id: &str,
+        note_kind: &str,
+        restore_ids: &BTreeMap<String, ImportIdentity>,
+    ) -> Result<ImportStats> {
         if owner.trim().is_empty() || workspace_id.trim().is_empty() {
             return Err(err("owner and workspace are required"));
         }
+        if !matches!(note_kind, "markdown" | "note" | "wiki") {
+            return Err(err("note kind must be markdown, note, or wiki"));
+        }
+        for (path, identity) in restore_ids {
+            if path.is_empty()
+                || identity.id.is_empty()
+                || identity.id.len() > 128
+                || !identity
+                    .id
+                    .chars()
+                    .all(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-'))
+                || identity.corpus.is_empty()
+                || identity.kind.is_empty()
+            {
+                return Err(err("restore identity map contains invalid fields"));
+            }
+        }
+        let canonical_root = fs::canonicalize(vault_dir)?;
+        if let Some(planning) = planning_file {
+            let metadata = fs::symlink_metadata(planning)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || !fs::canonicalize(planning)?.starts_with(&canonical_root)
+            {
+                return Err(err(
+                    "planning file must be a real file inside the import root",
+                ));
+            }
+        }
         const NOTE_SUFFIXES: &[&str] = &["md", "markdown", "base", "canvas", "dclg"];
-        const ASSET_SUFFIXES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
         let mut files = Vec::new();
-        collect_files(vault_dir, &mut files);
-        let existing: BTreeMap<String, DocView> = self
+        collect_files(vault_dir, &mut files)?;
+        let existing: BTreeMap<(String, String, String), DocView> = self
             .list_docs()?
             .into_iter()
             .filter(|doc| doc.owner == owner && doc.workspace_id == workspace_id)
-            .map(|doc| (doc.name.clone(), doc))
+            .map(|doc| {
+                (
+                    (doc.corpus.clone(), doc.kind.clone(), doc.name.clone()),
+                    doc,
+                )
+            })
             .collect();
 
         let mut stats = ImportStats::default();
+        let mut restored_paths = BTreeSet::new();
         let txn = self.database.begin_write()?;
         let (mut view, parent_op) = self.write_view(&txn)?;
 
-        let create_doc_in_txn = |txn: &redb::WriteTransaction,
-                                     view: &mut BTreeMap<String, String>,
-                                     kind: &str,
-                                     name: &str,
-                                     parent: Option<String>,
-                                     predecessors: Vec<String>,
-                                     content: Content,
-                                     doc_id: Option<String>|
-         -> Result<()> {
-            let doc_id = match doc_id {
-                Some(id) => id,
-                None => {
-                    let id = new_ulid();
-                    let mut docs = txn.open_table(DOCS)?;
-                    let record = DocRecord {
-                        kind: kind.to_string(),
-                        created_op: "pending".to_string(),
-                        owner: owner.to_string(),
-                        workspace_id: workspace_id.to_string(),
-                    };
-                    docs.insert(id.as_str(), serde_json::to_string(&record)?.as_str())?;
-                    id
-                },
-            };
-            let commit = CommitRecord {
-                doc: doc_id.clone(),
-                parent,
-                predecessors,
-                name: name.to_string(),
-                content,
-                ts: now_ms(),
-                message: Some("import".to_string()),
-            };
-            let commit_id = put_commit(txn, &commit)?;
-            view.insert(doc_id, commit_id);
-            Ok(())
-        };
-
         for path in files {
-            let Ok(rel) = path.strip_prefix(vault_dir) else { continue };
-            let rel_name = rel.to_string_lossy().replace('\\', "/");
-            if rel.components().any(|part| part.as_os_str().to_string_lossy().starts_with('.')) {
+            let rel = path
+                .strip_prefix(vault_dir)
+                .map_err(|_| err("import path escaped its vault root"))?;
+            let archive_name = rel.to_string_lossy().replace('\\', "/");
+            let restore_identity = restore_ids.get(&archive_name);
+            let is_planning = planning_file.is_some_and(|planning| planning == path);
+            let is_treehouse = archive_name == ".copal/treehouse-state.json";
+            if is_planning || is_treehouse {
                 continue;
             }
-            let ext = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
-            if NOTE_SUFFIXES.contains(&ext.as_str()) {
-                let Ok(content) = fs::read_to_string(&path) else { continue };
-                let kind = match ext.as_str() {
-                    "base" => "base",
-                    "canvas" => "canvas",
-                    _ => "markdown",
+            let wiki_relative = rel
+                .strip_prefix(Path::new(".copal/wiki"))
+                .ok()
+                .filter(|value| !value.as_os_str().is_empty());
+            let event_relative = rel
+                .strip_prefix(Path::new(".events"))
+                .ok()
+                .filter(|value| !value.as_os_str().is_empty());
+            let record_relative = wiki_relative.unwrap_or(rel);
+            let rel_name = record_relative.to_string_lossy().replace('\\', "/");
+            let effective_note_kind = if wiki_relative.is_some() {
+                "wiki"
+            } else {
+                note_kind
+            };
+            let corpus = if event_relative.is_some() {
+                "events"
+            } else {
+                match effective_note_kind {
+                    "wiki" => "wiki",
+                    "markdown" | "note" => "notes",
+                    _ => "system",
+                }
+            };
+            let hidden = record_relative
+                .components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'));
+            let raw_ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let reserved_event_note =
+                event_relative.is_some() && matches!(raw_ext.as_str(), "md" | "markdown");
+            if let Some(kind) = match archive_name.as_str() {
+                ".copal/tracks.json" => Some("copal-tracks"),
+                ".copal/planning-migration.json" => Some("copal-migration"),
+                _ => None,
+            } {
+                let bytes = fs::read(&path)?;
+                let valid = std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<Value>(content).ok())
+                    .is_some_and(|value| {
+                        value.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+                    });
+                let (stored_kind, content, reason) = if valid {
+                    let hash = put_blob(&txn, &bytes)?;
+                    (kind, Content::Blob { hash }, None)
+                } else {
+                    (
+                        "compatibility",
+                        store_import_asset(&self.assets_dir, "json", &bytes)?,
+                        Some("invalid or future reserved JSON preserved inertly".to_string()),
+                    )
                 };
-                match existing.get(&rel_name) {
-                    Some(doc) if doc.text.as_deref() == Some(content.as_str()) => {},
-                    Some(doc) => {
-                        let hash = put_blob(&txn, content.as_bytes())?;
-                        create_doc_in_txn(
+                let status = import_content_in_txn(
+                    &txn,
+                    &mut view,
+                    &existing,
+                    owner,
+                    workspace_id,
+                    "events",
+                    stored_kind,
+                    &archive_name,
+                    content,
+                    restore_identity,
+                )?;
+                if restore_identity.is_some() {
+                    restored_paths.insert(archive_name.clone());
+                    stats.restored_identities += 1;
+                }
+                if status == "unchanged" {
+                    stats.unchanged += 1;
+                } else if reason.is_some() {
+                    stats.compatibility += 1;
+                } else {
+                    stats.notes += 1;
+                }
+                stats.entries.push(ImportEntry {
+                    path: archive_name,
+                    status: status.to_string(),
+                    corpus: "events".to_string(),
+                    kind: stored_kind.to_string(),
+                    reason,
+                });
+                continue;
+            }
+            if (!hidden || reserved_event_note) && NOTE_SUFFIXES.contains(&raw_ext.as_str()) {
+                let content = match fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                        let bytes = fs::read(&path)?;
+                        let ext = safe_asset_ext(&raw_ext);
+                        let asset = store_import_asset(&self.assets_dir, &ext, &bytes)?;
+                        let status = import_content_in_txn(
                             &txn,
                             &mut view,
-                            kind,
+                            &existing,
+                            owner,
+                            workspace_id,
+                            corpus,
+                            "compatibility",
                             &rel_name,
-                            Some(doc.head.clone()),
-                            Vec::new(),
-                            Content::Blob { hash },
-                            Some(doc.id.clone()),
+                            asset,
+                            restore_identity,
                         )?;
-                        stats.notes += 1;
-                    },
-                    None => {
-                        let hash = put_blob(&txn, content.as_bytes())?;
-                        create_doc_in_txn(&txn, &mut view, kind, &rel_name, None, Vec::new(), Content::Blob { hash }, None)?;
-                        stats.notes += 1;
-                    },
+                        if restore_identity.is_some() {
+                            restored_paths.insert(archive_name.clone());
+                            stats.restored_identities += 1;
+                        }
+                        if status == "unchanged" {
+                            stats.unchanged += 1;
+                        } else {
+                            stats.compatibility += 1;
+                        }
+                        stats.entries.push(ImportEntry {
+                            path: archive_name,
+                            status: status.to_string(),
+                            corpus: corpus.to_string(),
+                            kind: "compatibility".to_string(),
+                            reason: Some("non-UTF-8 note preserved as inert bytes".to_string()),
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let invalid_reserved_event =
+                    reserved_event_note && !is_copal_event_record(&content);
+                let invalid_canonical_note = !reserved_event_note
+                    && matches!(raw_ext.as_str(), "md" | "markdown")
+                    && matches!(effective_note_kind, "note" | "wiki")
+                    && !is_copal_note_record(&content);
+                if invalid_reserved_event || invalid_canonical_note {
+                    let ext = safe_asset_ext(&raw_ext);
+                    let asset = store_import_asset(&self.assets_dir, &ext, content.as_bytes())?;
+                    let status = import_content_in_txn(
+                        &txn,
+                        &mut view,
+                        &existing,
+                        owner,
+                        workspace_id,
+                        corpus,
+                        "compatibility",
+                        &rel_name,
+                        asset,
+                        restore_identity,
+                    )?;
+                    if restore_identity.is_some() {
+                        restored_paths.insert(archive_name.clone());
+                        stats.restored_identities += 1;
+                    }
+                    if status == "unchanged" {
+                        stats.unchanged += 1;
+                    } else {
+                        stats.compatibility += 1;
+                    }
+                    stats.entries.push(ImportEntry {
+                        path: archive_name,
+                        status: status.to_string(),
+                        corpus: corpus.to_string(),
+                        kind: "compatibility".to_string(),
+                        reason: Some(if invalid_reserved_event {
+                            "invalid or future event record preserved as inert bytes".to_string()
+                        } else {
+                            "unprepared or oversized Markdown preserved as inert bytes".to_string()
+                        }),
+                    });
+                    continue;
                 }
-            } else if ASSET_SUFFIXES.contains(&ext.as_str()) {
-                let Ok(bytes) = fs::read(&path) else { continue };
-                let hash = blake3::hash(&bytes).to_hex().to_string();
-                let file = self.assets_dir.join(format!("{hash}.{ext}"));
-                if !file.exists() {
-                    fs::write(&file, &bytes)?;
+                let kind = if reserved_event_note {
+                    "copal-event"
+                } else {
+                    match raw_ext.as_str() {
+                        "base" => "base",
+                        "canvas" => "canvas",
+                        "md" | "markdown" => effective_note_kind,
+                        _ => "markdown",
+                    }
+                };
+                let hash = put_blob(&txn, content.as_bytes())?;
+                let status = import_content_in_txn(
+                    &txn,
+                    &mut view,
+                    &existing,
+                    owner,
+                    workspace_id,
+                    corpus,
+                    kind,
+                    &rel_name,
+                    Content::Blob { hash },
+                    restore_identity,
+                )?;
+                if restore_identity.is_some() {
+                    restored_paths.insert(archive_name.clone());
+                    stats.restored_identities += 1;
                 }
-                let content = Content::Asset { hash, ext: ext.clone(), size: bytes.len() as u64 };
-                match existing.get(&rel_name) {
-                    Some(doc) if doc.content == content => {},
-                    Some(doc) => {
-                        create_doc_in_txn(&txn, &mut view, "asset", &rel_name, Some(doc.head.clone()), Vec::new(), content, Some(doc.id.clone()))?;
-                        stats.assets += 1;
-                    },
-                    None => {
-                        create_doc_in_txn(&txn, &mut view, "asset", &rel_name, None, Vec::new(), content, None)?;
-                        stats.assets += 1;
-                    },
+                if status == "unchanged" {
+                    stats.unchanged += 1;
+                } else {
+                    stats.notes += 1;
                 }
+                stats.entries.push(ImportEntry {
+                    path: archive_name,
+                    status: status.to_string(),
+                    corpus: corpus.to_string(),
+                    kind: kind.to_string(),
+                    reason: None,
+                });
+            } else {
+                let bytes = fs::read(&path)?;
+                let ext = safe_asset_ext(&raw_ext);
+                let content = store_import_asset(&self.assets_dir, &ext, &bytes)?;
+                let kind = if hidden { "compatibility" } else { "asset" };
+                let status = import_content_in_txn(
+                    &txn,
+                    &mut view,
+                    &existing,
+                    owner,
+                    workspace_id,
+                    corpus,
+                    kind,
+                    &rel_name,
+                    content,
+                    restore_identity,
+                )?;
+                if restore_identity.is_some() {
+                    restored_paths.insert(archive_name.clone());
+                    stats.restored_identities += 1;
+                }
+                if status == "unchanged" {
+                    stats.unchanged += 1;
+                } else if hidden {
+                    stats.compatibility += 1;
+                } else {
+                    stats.assets += 1;
+                }
+                stats.entries.push(ImportEntry {
+                    path: archive_name,
+                    status: status.to_string(),
+                    corpus: corpus.to_string(),
+                    kind: kind.to_string(),
+                    reason: hidden.then(|| "dot-namespace data preserved inertly".to_string()),
+                });
             }
         }
 
         if let Some(planning) = planning_file {
-            if let Ok(content) = fs::read_to_string(planning) {
-                if serde_json::from_str::<Value>(&content).is_ok() {
-                    match existing.get("move-data.json") {
-                        Some(doc) if doc.text.as_deref() == Some(content.as_str()) => {},
-                        Some(doc) => {
-                            let hash = put_blob(&txn, content.as_bytes())?;
-                            create_doc_in_txn(&txn, &mut view, "planning", "move-data.json", Some(doc.head.clone()), Vec::new(), Content::Blob { hash }, Some(doc.id.clone()))?;
-                            stats.planning = true;
-                        },
-                        None => {
-                            let hash = put_blob(&txn, content.as_bytes())?;
-                            create_doc_in_txn(&txn, &mut view, "planning", "move-data.json", None, Vec::new(), Content::Blob { hash }, None)?;
-                            stats.planning = true;
-                        },
-                    }
-                }
+            let content = fs::read_to_string(planning)?;
+            serde_json::from_str::<Value>(&content)
+                .map_err(|error| err(format!("planning JSON is invalid: {error}")))?;
+            let hash = put_blob(&txn, content.as_bytes())?;
+            let planning_name = planning
+                .strip_prefix(vault_dir)
+                .unwrap_or(planning)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let restore_identity = restore_ids.get(&planning_name);
+            let status = import_content_in_txn(
+                &txn,
+                &mut view,
+                &existing,
+                owner,
+                workspace_id,
+                "events",
+                "planning",
+                "move-data.json",
+                Content::Blob { hash },
+                restore_identity,
+            )?;
+            if restore_identity.is_some() {
+                restored_paths.insert(planning_name.clone());
+                stats.restored_identities += 1;
             }
+            stats.planning = status != "unchanged";
+            if status == "unchanged" {
+                stats.unchanged += 1;
+            }
+            stats.entries.push(ImportEntry {
+                path: planning_name,
+                status: status.to_string(),
+                corpus: "events".to_string(),
+                kind: "planning".to_string(),
+                reason: None,
+            });
         }
 
-        // Copal exports its durable LMMS aggregate under .copal. General
-        // hidden files stay ignored, but this one versioned recovery artifact
-        // round-trips explicitly.
         let treehouse = vault_dir.join(".copal/treehouse-state.json");
-        if let Ok(content) = fs::read_to_string(&treehouse) {
-            if serde_json::from_str::<Value>(&content).is_ok() {
-                let name = ".copal/treehouse-state.json";
-                match existing.get(name) {
-                    Some(doc) if doc.text.as_deref() == Some(content.as_str()) => {},
-                    Some(doc) => {
-                        let hash = put_blob(&txn, content.as_bytes())?;
-                        create_doc_in_txn(&txn, &mut view, "treehouse-state", name, Some(doc.head.clone()), Vec::new(), Content::Blob { hash }, Some(doc.id.clone()))?;
-                        stats.treehouse = true;
-                    },
-                    None => {
-                        let hash = put_blob(&txn, content.as_bytes())?;
-                        create_doc_in_txn(&txn, &mut view, "treehouse-state", name, None, Vec::new(), Content::Blob { hash }, None)?;
-                        stats.treehouse = true;
-                    },
-                }
+        if treehouse.is_file() {
+            let content = fs::read_to_string(&treehouse)?;
+            serde_json::from_str::<Value>(&content)
+                .map_err(|error| err(format!("TreeHouse state JSON is invalid: {error}")))?;
+            let name = ".copal/treehouse-state.json";
+            let hash = put_blob(&txn, content.as_bytes())?;
+            let status = import_content_in_txn(
+                &txn,
+                &mut view,
+                &existing,
+                owner,
+                workspace_id,
+                "treehouse",
+                "treehouse-state",
+                name,
+                Content::Blob { hash },
+                restore_ids.get(name),
+            )?;
+            if restore_ids.contains_key(name) {
+                restored_paths.insert(name.to_string());
+                stats.restored_identities += 1;
             }
+            stats.treehouse = status != "unchanged";
+            if status == "unchanged" {
+                stats.unchanged += 1;
+            }
+            stats.entries.push(ImportEntry {
+                path: name.to_string(),
+                status: status.to_string(),
+                corpus: "treehouse".to_string(),
+                kind: "treehouse-state".to_string(),
+                reason: None,
+            });
+        }
+
+        if restored_paths.len() != restore_ids.len() {
+            return Err(err(
+                "restore identity map did not reconcile every imported path",
+            ));
         }
 
         let description = format!(
-            "import vault {}: {} notes, {} assets{}{}",
-            vault_dir.file_name().and_then(|value| value.to_str()).unwrap_or("?"),
+            "scoped vault import: {} notes, {} assets, {} compatibility, {} unchanged{}{}",
             stats.notes,
             stats.assets,
+            stats.compatibility,
+            stats.unchanged,
             if stats.planning { ", planning" } else { "" },
             if stats.treehouse { ", treehouse" } else { "" },
         );
@@ -1150,15 +1736,22 @@ impl Db {
     // ── Internals ─────────────────────────────────────────────────────────
 
     /// Current view + current op id, readable inside a write transaction.
-    fn write_view(&self, txn: &redb::WriteTransaction) -> Result<(BTreeMap<String, String>, Option<String>)> {
+    fn write_view(
+        &self,
+        txn: &redb::WriteTransaction,
+    ) -> Result<(BTreeMap<String, String>, Option<String>)> {
         let meta = txn.open_table(META)?;
-        let head = meta.get(OP_HEAD_KEY)?.map(|value| value.value().to_string());
+        let head = meta
+            .get(OP_HEAD_KEY)?
+            .map(|value| value.value().to_string());
         drop(meta);
         let Some(head) = head else {
             return Ok((BTreeMap::new(), None));
         };
         let ops = txn.open_table(OPS)?;
-        let record = ops.get(head.as_str())?.ok_or_else(|| err("op head points at missing op"))?;
+        let record = ops
+            .get(head.as_str())?
+            .ok_or_else(|| err("op head points at missing op"))?;
         let op: OpRecord = serde_json::from_str(record.value())?;
         Ok((op.view, Some(head)))
     }
@@ -1166,13 +1759,17 @@ impl Db {
 
 fn load_commit_in_txn(txn: &redb::WriteTransaction, id: &str) -> Result<CommitRecord> {
     let commits = txn.open_table(COMMITS)?;
-    let record = commits.get(id)?.ok_or_else(|| err(format!("missing commit {id}")))?;
+    let record = commits
+        .get(id)?
+        .ok_or_else(|| err(format!("missing commit {id}")))?;
     Ok(serde_json::from_str(record.value())?)
 }
 
 fn load_doc_record_in_txn(txn: &redb::WriteTransaction, id: &str) -> Result<DocRecord> {
     let docs = txn.open_table(DOCS)?;
-    let record = docs.get(id)?.ok_or_else(|| err(format!("missing doc {id}")))?;
+    let record = docs
+        .get(id)?
+        .ok_or_else(|| err(format!("missing doc {id}")))?;
     Ok(serde_json::from_str(record.value())?)
 }
 
@@ -1216,17 +1813,196 @@ fn put_op(
     Ok(op_id)
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
+fn safe_asset_ext(extension: &str) -> String {
+    let normalized = extension.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.len() > 16
+        || !normalized.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        "bin".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn is_copal_note_record(content: &str) -> bool {
+    serde_json::from_str::<Value>(content).is_ok_and(|record| {
+        record.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+            && record
+                .get("body")
+                .and_then(Value::as_object)
+                .is_some_and(|body| {
+                    body.get("type").and_then(Value::as_str) == Some("doc")
+                        && body.get("blocks").and_then(Value::as_array).is_some()
+                })
+    })
+}
+
+fn is_copal_event_record(content: &str) -> bool {
+    let Some(frontmatter) = content.strip_prefix("---\n") else {
+        return false;
+    };
+    let Some(end) = frontmatter.find("\n---") else {
+        return false;
+    };
+    let mut event = false;
+    let mut schema = None;
+    for line in frontmatter[..end].lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "copal_type" => {
+                event = value.trim().trim_matches(['\'', '"']) == "event";
+            }
+            "copal_schema" => {
+                schema = value.trim().trim_matches(['\'', '"']).parse::<u64>().ok();
+            }
+            _ => {}
+        }
+    }
+    event && schema == Some(1)
+}
+
+fn store_import_asset(assets_dir: &Path, extension: &str, bytes: &[u8]) -> Result<Content> {
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    let destination = assets_dir.join(format!("{hash}.{extension}"));
+    if destination.is_file() {
+        if fs::read(&destination)? != bytes {
+            return Err(err(
+                "stored content-addressed asset failed integrity verification",
+            ));
+        }
+    } else {
+        let temporary = assets_dir.join(format!(".{hash}.{extension}.{}.tmp", new_ulid()));
+        fs::write(&temporary, bytes)?;
+        match fs::rename(&temporary, &destination) {
+            Ok(()) => {}
+            Err(_error) if destination.is_file() => {
+                fs::remove_file(&temporary)?;
+                if fs::read(&destination)? != bytes {
+                    return Err(err("content-addressed asset collision"));
+                }
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(error.into());
+            }
+        }
+    }
+    Ok(Content::Asset {
+        hash,
+        ext: extension.to_string(),
+        size: bytes.len() as u64,
+    })
+}
+
+fn import_content_in_txn(
+    txn: &redb::WriteTransaction,
+    view: &mut BTreeMap<String, String>,
+    existing: &BTreeMap<(String, String, String), DocView>,
+    owner: &str,
+    workspace_id: &str,
+    corpus: &str,
+    kind: &str,
+    name: &str,
+    content: Content,
+    restore_identity: Option<&ImportIdentity>,
+) -> Result<&'static str> {
+    let key = (corpus.to_string(), kind.to_string(), name.to_string());
+    if let Some(identity) = restore_identity {
+        if identity.corpus != corpus || identity.kind != kind {
+            return Err(err(
+                "restore identity does not match imported corpus and kind",
+            ));
+        }
+    }
+    if let Some(document) = existing.get(&key) {
+        if restore_identity.is_some_and(|identity| identity.id != document.id) {
+            return Err(err("restore identity conflicts with the existing document"));
+        }
+        if document.content == content {
+            return Ok("unchanged");
+        }
+        let commit = CommitRecord {
+            doc: document.id.clone(),
+            parent: Some(document.head.clone()),
+            predecessors: Vec::new(),
+            name: name.to_string(),
+            content,
+            ts: now_ms(),
+            message: Some("import".to_string()),
+        };
+        let commit_id = put_commit(txn, &commit)?;
+        view.insert(document.id.clone(), commit_id);
+        return Ok("updated");
+    }
+
+    let document_id = restore_identity
+        .map(|identity| identity.id.clone())
+        .unwrap_or_else(new_ulid);
+    {
+        let mut docs = txn.open_table(DOCS)?;
+        if docs.get(document_id.as_str())?.is_some() {
+            return Err(err("restore identity is already owned by another document"));
+        }
+        let record = DocRecord {
+            schema_version: doc_record_schema_version(),
+            corpus: corpus.to_string(),
+            kind: kind.to_string(),
+            created_op: "pending".to_string(),
+            owner: owner.to_string(),
+            workspace_id: workspace_id.to_string(),
+        };
+        docs.insert(
+            document_id.as_str(),
+            serde_json::to_string(&record)?.as_str(),
+        )?;
+    }
+    let commit = CommitRecord {
+        doc: document_id.clone(),
+        parent: None,
+        predecessors: Vec::new(),
+        name: name.to_string(),
+        content,
+        ts: now_ms(),
+        message: Some("import".to_string()),
+    };
+    let commit_id = put_commit(txn, &commit)?;
+    view.insert(document_id, commit_id);
+    Ok("created")
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let root_metadata = fs::symlink_metadata(dir)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(err("import root must be a real directory"));
+    }
+    let mut entries =
+        fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, std::io::Error>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, out);
-        } else {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(err(format!(
+                "symbolic links are not permitted in imports: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_files(&path, out)?;
+        } else if metadata.is_file() {
             out.push(path);
+        } else {
+            return Err(err(format!(
+                "special files are not permitted in imports: {}",
+                path.display()
+            )));
         }
     }
     out.sort();
+    Ok(())
 }
 
 fn scope_allows(doc: &DocView, owner: &str, workspace_id: &str) -> bool {
@@ -1254,7 +2030,7 @@ fn rewrite_wikilinks(text: &str, old_name: &str, new_name: &str) -> String {
         let start = cursor + relative_start;
         output.push_str(&text[cursor..start + 2]);
         let inner_start = start + 2;
-        let Some(relative_end) = text[inner_start..].find("]]" ) else {
+        let Some(relative_end) = text[inner_start..].find("]]") else {
             output.push_str(&text[inner_start..]);
             return output;
         };
@@ -1275,7 +2051,7 @@ fn rewrite_wikilinks(text: &str, old_name: &str, new_name: &str) -> String {
         } else {
             output.push_str(inner);
         }
-        output.push_str("]]" );
+        output.push_str("]]");
         cursor = end + 2;
     }
     output.push_str(&text[cursor..]);
@@ -1283,7 +2059,10 @@ fn rewrite_wikilinks(text: &str, old_name: &str, new_name: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn new_ulid() -> String {
@@ -1304,12 +2083,18 @@ mod tests {
     #[test]
     fn create_write_amend_and_history() {
         let (db, _dir) = temp_db();
-        let doc = db.create_doc("markdown", "Notes/Hello.md", "# Hello\n", None).unwrap();
+        let doc = db
+            .create_doc("markdown", "Notes/Hello.md", "# Hello\n", None)
+            .unwrap();
         assert_eq!(doc.text.as_deref(), Some("# Hello\n"));
 
         // Amend: same change, predecessor chain grows.
-        let outcome = db.write_doc(&doc.id, "# Hello\nWorld\n", Some(&doc.head)).unwrap();
-        let WriteOutcome::Committed { view, new_change } = outcome else { panic!("expected commit") };
+        let outcome = db
+            .write_doc(&doc.id, "# Hello\nWorld\n", Some(&doc.head))
+            .unwrap();
+        let WriteOutcome::Committed { view, new_change } = outcome else {
+            panic!("expected commit")
+        };
         assert!(!new_change);
         assert_ne!(view.head, doc.head);
 
@@ -1319,7 +2104,9 @@ mod tests {
 
         // Stale base writes nothing and returns the authoritative head.
         let outcome = db.write_doc(&doc.id, "clobber", Some(&doc.head)).unwrap();
-        let WriteOutcome::Stale { view: stale_view } = outcome else { panic!("expected stale") };
+        let WriteOutcome::Stale { view: stale_view } = outcome else {
+            panic!("expected stale")
+        };
         assert_eq!(stale_view.text.as_deref(), Some("# Hello\nWorld\n"));
 
         let history = db.history(&doc.id).unwrap();
@@ -1338,7 +2125,9 @@ mod tests {
         let history = db.history(&doc.id).unwrap();
         assert!(history["changes"].as_array().unwrap().len() >= 2);
 
-        let diff = db.diff(&doc.head, &db.get_doc(&doc.id).unwrap().unwrap().head).unwrap();
+        let diff = db
+            .diff(&doc.head, &db.get_doc(&doc.id).unwrap().unwrap().head)
+            .unwrap();
         assert!(diff.contains("+two"));
 
         let restored = db.restore_doc(&doc.id, &checkpointed.head).unwrap();
@@ -1363,6 +2152,23 @@ mod tests {
     }
 
     #[test]
+    fn rename_does_not_rewrite_structured_note_blobs() {
+        let (db, _dir) = temp_db();
+        let target = db.create_doc("markdown", "Old.md", "target", None).unwrap();
+        let envelope = r#"{"schemaVersion":1,"body":{"type":"doc","blocks":[{"id":"blk_1","type":"paragraph","text":"[[Old]]"}]},"properties":[],"relations":[]}"#;
+        let note = db
+            .create_doc("note", "Native note", envelope, None)
+            .unwrap();
+
+        db.rename_doc(&target.id, "New \"quoted\".md").unwrap();
+
+        assert_eq!(
+            db.get_doc(&note.id).unwrap().unwrap().text.as_deref(),
+            Some(envelope)
+        );
+    }
+
+    #[test]
     fn duplicate_names_rejected() {
         let (db, _dir) = temp_db();
         db.create_doc("markdown", "same.md", "a", None).unwrap();
@@ -1381,11 +2187,21 @@ mod tests {
 
         assert_eq!(db.list_docs_scoped("alice", "home").unwrap().len(), 1);
         assert_eq!(db.list_docs_scoped("bob", "home").unwrap().len(), 1);
-        assert!(db.get_doc_scoped(&alice.id, "bob", "home").unwrap().is_none());
+        assert!(db
+            .get_doc_scoped(&alice.id, "bob", "home")
+            .unwrap()
+            .is_none());
         assert!(db
             .write_doc_scoped(&bob.id, "clobber", None, "alice", "home")
             .is_err());
-        assert_eq!(db.get_doc_scoped(&bob.id, "bob", "home").unwrap().unwrap().text.as_deref(), Some("bob"));
+        assert_eq!(
+            db.get_doc_scoped(&bob.id, "bob", "home")
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("bob")
+        );
 
         let alice_ref = db
             .create_doc_scoped(
@@ -1428,6 +2244,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_documents_are_visible_but_read_only_to_scoped_clients() {
+        let (db, _dir) = temp_db();
+        let shared = db
+            .create_doc("note", "OpenClank/Start Here", "shared knowledge", None)
+            .unwrap();
+
+        assert!(db
+            .get_doc_scoped(&shared.id, "alice", "home")
+            .unwrap()
+            .is_some());
+        assert!(db.history_scoped(&shared.id, "alice", "home").is_ok());
+        assert!(db
+            .write_doc_scoped(&shared.id, "changed", None, "alice", "home")
+            .is_err());
+        assert!(db
+            .rename_doc_scoped(&shared.id, "Changed", "alice", "home")
+            .is_err());
+        assert!(db
+            .checkpoint_scoped(&shared.id, Some("checkpoint"), "alice", "home")
+            .is_err());
+        assert!(db
+            .restore_doc_scoped(&shared.id, &shared.head, "alice", "home")
+            .is_err());
+        assert!(db.delete_doc_scoped(&shared.id, "alice", "home").is_err());
+        assert_eq!(
+            db.get_doc(&shared.id).unwrap().unwrap().text.as_deref(),
+            Some("shared knowledge")
+        );
+    }
+
+    #[test]
     fn scoped_trash_restores_deleted_content() {
         let (db, _dir) = temp_db();
         let doc = db
@@ -1435,25 +2282,38 @@ mod tests {
             .unwrap();
         db.delete_doc_scoped(&doc.id, "alice", "home").unwrap();
 
-        assert_eq!(db.list_deleted_docs_scoped("alice", "home").unwrap().len(), 1);
-        assert!(db.list_deleted_docs_scoped("bob", "home").unwrap().is_empty());
+        assert_eq!(
+            db.list_deleted_docs_scoped("alice", "home").unwrap().len(),
+            1
+        );
+        assert!(db
+            .list_deleted_docs_scoped("bob", "home")
+            .unwrap()
+            .is_empty());
 
         let restored = db
             .restore_deleted_doc_scoped(&doc.id, "alice", "home")
             .unwrap();
         assert_eq!(restored.text.as_deref(), Some("keep me"));
-        assert!(db.list_deleted_docs_scoped("alice", "home").unwrap().is_empty());
+        assert!(db
+            .list_deleted_docs_scoped("alice", "home")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn assets_are_files_with_history() {
         let (db, dir) = temp_db();
         let v1 = db.put_asset("img/pic.png", "png", b"AAAA").unwrap();
-        let Content::Asset { hash: h1, .. } = v1.content.clone() else { panic!() };
+        let Content::Asset { hash: h1, .. } = v1.content.clone() else {
+            panic!()
+        };
         assert!(dir.join("assets").join(format!("{h1}.png")).is_file());
 
         let v2 = db.put_asset("img/pic.png", "png", b"BBBB").unwrap();
-        let Content::Asset { hash: h2, .. } = v2.content.clone() else { panic!() };
+        let Content::Asset { hash: h2, .. } = v2.content.clone() else {
+            panic!()
+        };
         assert_ne!(h1, h2);
         // Old version stays on disk; history records the chain.
         assert!(dir.join("assets").join(format!("{h1}.png")).is_file());
@@ -1498,9 +2358,15 @@ mod tests {
         fs::write(vault.join("Welcome.md"), "# Welcome\n").unwrap();
         let planning = vault.join(".copal/planning.json");
         fs::write(&planning, "{\"tracks\":[]}").unwrap();
-        fs::write(vault.join(".copal/treehouse-state.json"), "{\"schemaVersion\":1}").unwrap();
+        fs::write(
+            vault.join(".copal/treehouse-state.json"),
+            "{\"schemaVersion\":1}",
+        )
+        .unwrap();
 
-        let stats = db.import_vault_scoped(&vault, Some(&planning), "alice", "school").unwrap();
+        let stats = db
+            .import_vault_scoped(&vault, Some(&planning), "alice", "school")
+            .unwrap();
         assert_eq!(stats.notes, 1);
         assert!(stats.planning);
         assert!(stats.treehouse);
@@ -1514,24 +2380,451 @@ mod tests {
     #[test]
     fn scoped_import_shadows_but_never_rewrites_shared_seed_documents() {
         let (db, _dir) = temp_db();
-        let shared_note = db.create_doc("markdown", "Welcome.md", "shared", None).unwrap();
-        let shared_planning = db.create_doc("planning", "move-data.json", "{\"tracks\":[\"shared\"]}", None).unwrap();
+        let shared_note = db
+            .create_doc("markdown", "Welcome.md", "shared", None)
+            .unwrap();
+        let shared_planning = db
+            .create_doc(
+                "planning",
+                "move-data.json",
+                "{\"tracks\":[\"shared\"]}",
+                None,
+            )
+            .unwrap();
         let vault = std::env::temp_dir().join(format!("copal-overlay-import-{}", new_ulid()));
         fs::create_dir_all(&vault).unwrap();
         fs::write(vault.join("Welcome.md"), "private").unwrap();
         let planning = vault.join("planning.json");
         fs::write(&planning, "{\"tracks\":[\"private\"]}").unwrap();
 
-        let stats = db.import_vault_scoped(&vault, Some(&planning), "alice", "school").unwrap();
+        let stats = db
+            .import_vault_scoped(&vault, Some(&planning), "alice", "school")
+            .unwrap();
         assert_eq!(stats.notes, 1);
         assert!(stats.planning);
         let alice = db.list_docs_scoped("alice", "school").unwrap();
         assert_eq!(alice.len(), 2);
-        assert_eq!(alice.iter().find(|doc| doc.name == "Welcome.md").unwrap().text.as_deref(), Some("private"));
-        assert_eq!(db.get_doc(&shared_note.id).unwrap().unwrap().text.as_deref(), Some("shared"));
-        assert_eq!(db.get_doc(&shared_planning.id).unwrap().unwrap().text.as_deref(), Some("{\"tracks\":[\"shared\"]}"));
+        assert_eq!(
+            alice
+                .iter()
+                .find(|doc| doc.name == "Welcome.md")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("private")
+        );
+        assert_eq!(
+            db.get_doc(&shared_note.id)
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("shared")
+        );
+        assert_eq!(
+            db.get_doc(&shared_planning.id)
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("{\"tracks\":[\"shared\"]}")
+        );
         assert_eq!(db.list_docs_scoped("bob", "school").unwrap().len(), 2);
         fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn canonical_wiki_import_preserves_every_file_and_reports_deterministically() {
+        let (db, data_dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-complete-import-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::create_dir_all(vault.join("Media")).unwrap();
+        let envelope = r##"{"schemaVersion":1,"body":{"type":"doc","blocks":[{"id":"blk_fixed","type":"heading","text":"Article","source":"# Article"}]},"properties":[],"relations":[],"extensions":{"interchange":{"format":"markdown","source":"# Article\n","projectionHash":"fixed","modified":false}}}"##;
+        fs::write(vault.join("Article.md"), envelope).unwrap();
+        fs::write(vault.join("Media/diagram.pdf"), b"PDF bytes").unwrap();
+        fs::write(vault.join("Media/movie.mp4"), b"MP4 bytes").unwrap();
+        fs::write(vault.join("opaque.xyz"), b"opaque bytes").unwrap();
+        fs::write(
+            vault.join(".obsidian/community-plugins.json"),
+            br#"["dataview"]"#,
+        )
+        .unwrap();
+
+        let stats = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "wiki")
+            .unwrap();
+        assert_eq!(stats.notes, 1);
+        assert_eq!(stats.assets, 3);
+        assert_eq!(stats.compatibility, 1);
+        assert_eq!(stats.unchanged, 0);
+        assert_eq!(stats.entries.len(), 5);
+        let paths = stats
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                ".obsidian/community-plugins.json",
+                "Article.md",
+                "Media/diagram.pdf",
+                "Media/movie.mp4",
+                "opaque.xyz",
+            ]
+        );
+        let documents = db.list_docs_scoped("alice", "home").unwrap();
+        assert_eq!(documents.len(), 5);
+        assert_eq!(
+            documents
+                .iter()
+                .find(|document| document.name == "Article.md")
+                .unwrap()
+                .corpus,
+            "wiki"
+        );
+        assert!(documents.iter().all(|document| document.corpus == "wiki"));
+        for (name, expected) in [
+            ("Media/diagram.pdf", b"PDF bytes".as_slice()),
+            ("Media/movie.mp4", b"MP4 bytes".as_slice()),
+            ("opaque.xyz", b"opaque bytes".as_slice()),
+            (
+                ".obsidian/community-plugins.json",
+                br#"["dataview"]"#.as_slice(),
+            ),
+        ] {
+            let document = documents
+                .iter()
+                .find(|document| document.name == name)
+                .unwrap();
+            let Content::Asset { hash, ext, .. } = &document.content else {
+                panic!("{name} was not preserved as an asset")
+            };
+            assert_eq!(
+                fs::read(data_dir.join("assets").join(format!("{hash}.{ext}"))).unwrap(),
+                expected
+            );
+        }
+
+        let repeated = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "wiki")
+            .unwrap();
+        assert_eq!(repeated.notes + repeated.assets + repeated.compatibility, 0);
+        assert_eq!(repeated.unchanged, 5);
+        assert!(repeated
+            .entries
+            .iter()
+            .all(|entry| entry.status == "unchanged"));
+        assert_eq!(db.list_docs_scoped("alice", "home").unwrap().len(), 5);
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn copal_export_restore_keeps_stable_ids_and_rejects_identity_conflicts() {
+        let (db, _data_dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-identity-import-{}", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        let envelope = r##"{"schemaVersion":1,"body":{"type":"doc","blocks":[]},"properties":[],"relations":[],"extensions":{}}"##;
+        fs::write(vault.join("Stable.md"), envelope).unwrap();
+        let stable_id = new_ulid();
+        let identities = BTreeMap::from([(
+            "Stable.md".to_string(),
+            ImportIdentity {
+                id: stable_id.clone(),
+                corpus: "notes".to_string(),
+                kind: "note".to_string(),
+            },
+        )]);
+
+        let first = db
+            .import_vault_scoped_as_with_ids(&vault, None, "alice", "home", "note", &identities)
+            .unwrap();
+        assert_eq!(first.restored_identities, 1);
+        assert_eq!(
+            db.list_docs_scoped("alice", "home").unwrap()[0].id,
+            stable_id
+        );
+
+        let second = db
+            .import_vault_scoped_as_with_ids(&vault, None, "alice", "home", "note", &identities)
+            .unwrap();
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.restored_identities, 1);
+
+        let conflicting = BTreeMap::from([(
+            "Stable.md".to_string(),
+            ImportIdentity {
+                id: new_ulid(),
+                corpus: "notes".to_string(),
+                kind: "note".to_string(),
+            },
+        )]);
+        assert!(db
+            .import_vault_scoped_as_with_ids(&vault, None, "alice", "home", "note", &conflicting,)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts"));
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn note_and_wiki_corpora_can_hold_the_same_scoped_name() {
+        let (db, _dir) = temp_db();
+        db.create_doc_scoped("alice", "home", "note", "Same.md", "note", None)
+            .unwrap();
+        db.create_doc_scoped("alice", "home", "wiki", "Same.md", "wiki", None)
+            .unwrap();
+
+        let documents = db.list_docs_scoped("alice", "home").unwrap();
+        assert_eq!(documents.len(), 2);
+        assert!(documents
+            .iter()
+            .any(|document| document.kind == "note" && document.corpus == "notes"));
+        assert!(documents
+            .iter()
+            .any(|document| document.kind == "wiki" && document.corpus == "wiki"));
+    }
+
+    #[test]
+    fn mixed_export_layout_reimports_note_and_wiki_records_and_assets_separately() {
+        let (db, data_dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-mixed-corpus-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".copal/wiki")).unwrap();
+        let note = r#"{"schemaVersion":1,"body":{"type":"doc","blocks":[]},"properties":[],"relations":[]}"#;
+        fs::write(vault.join("Same.md"), note).unwrap();
+        fs::write(vault.join(".copal/wiki/Same.md"), note).unwrap();
+        fs::write(vault.join("same.bin"), b"notes asset").unwrap();
+        fs::write(vault.join(".copal/wiki/same.bin"), b"wiki asset").unwrap();
+
+        let stats = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+            .unwrap();
+        assert_eq!(stats.notes, 2);
+        assert_eq!(stats.assets, 2);
+        assert_eq!(stats.entries.len(), 4);
+        let documents = db.list_docs_scoped("alice", "home").unwrap();
+        let same_notes = documents
+            .iter()
+            .filter(|document| document.name == "Same.md")
+            .collect::<Vec<_>>();
+        assert_eq!(same_notes.len(), 2);
+        assert!(same_notes
+            .iter()
+            .any(|document| document.kind == "note" && document.corpus == "notes"));
+        assert!(same_notes
+            .iter()
+            .any(|document| document.kind == "wiki" && document.corpus == "wiki"));
+        let same_assets = documents
+            .iter()
+            .filter(|document| document.name == "same.bin")
+            .collect::<Vec<_>>();
+        assert_eq!(same_assets.len(), 2);
+        for (corpus, expected) in [
+            ("notes", b"notes asset".as_slice()),
+            ("wiki", b"wiki asset".as_slice()),
+        ] {
+            let asset = same_assets
+                .iter()
+                .find(|document| document.corpus == corpus)
+                .unwrap();
+            let Content::Asset { hash, ext, .. } = &asset.content else {
+                panic!()
+            };
+            assert_eq!(
+                fs::read(data_dir.join("assets").join(format!("{hash}.{ext}"))).unwrap(),
+                expected
+            );
+        }
+
+        let repeated = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+            .unwrap();
+        assert_eq!(repeated.unchanged, 4);
+        assert_eq!(repeated.notes + repeated.assets + repeated.compatibility, 0);
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn reserved_event_namespace_restores_supported_records_and_preserves_future_data() {
+        let (db, _dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-events-import-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".events")).unwrap();
+        fs::create_dir_all(vault.join(".copal")).unwrap();
+        fs::write(
+            vault.join(".events/current.md"),
+            "---\ncopal_type: \"event\"\ncopal_schema: 1\ntitle: \"Current\"\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join(".events/future.md"),
+            "---\ncopal_type: \"event\"\ncopal_schema: 2\ntitle: \"Future\"\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.join(".copal/tracks.json"),
+            r#"{"schemaVersion":1,"tracks":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            vault.join(".copal/planning-migration.json"),
+            r#"{"schemaVersion":9,"state":"future"}"#,
+        )
+        .unwrap();
+
+        let stats = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+            .unwrap();
+
+        assert_eq!(stats.notes, 2);
+        assert_eq!(stats.compatibility, 2);
+        let documents = db.list_docs_scoped("alice", "home").unwrap();
+        assert!(documents.iter().any(|document| {
+            document.kind == "copal-event"
+                && document.corpus == "events"
+                && document.name == ".events/current.md"
+                && document.hidden
+        }));
+        assert!(documents.iter().any(|document| {
+            document.kind == "copal-tracks"
+                && document.corpus == "events"
+                && document.name == ".copal/tracks.json"
+        }));
+        assert!(documents.iter().any(|document| {
+            document.kind == "compatibility"
+                && document.corpus == "events"
+                && document.name == ".events/future.md"
+        }));
+        assert!(documents.iter().any(|document| {
+            document.kind == "compatibility"
+                && document.corpus == "events"
+                && document.name == ".copal/planning-migration.json"
+        }));
+        let repeated = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+            .unwrap();
+        assert_eq!(repeated.unchanged, 4);
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn record_contract_exposes_schema_hidden_and_deleted_state() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.schema_version().unwrap(), 3);
+        let event = db
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "copal-event",
+                ".events/move.md",
+                "event",
+                None,
+            )
+            .unwrap();
+        assert_eq!(event.record_schema_version, 1);
+        assert_eq!(event.corpus, "events");
+        assert!(event.hidden);
+        assert!(!event.deleted);
+
+        db.delete_doc_scoped(&event.id, "alice", "home").unwrap();
+        let deleted = db
+            .list_deleted_docs_scoped("alice", "home")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(deleted.hidden);
+        assert!(deleted.deleted);
+    }
+
+    #[test]
+    fn asset_updates_do_not_overwrite_an_unlike_same_named_document() {
+        let (db, _dir) = temp_db();
+        let note = db
+            .create_doc("note", "same.bin", "note payload", None)
+            .unwrap();
+        let asset = db.put_asset("same.bin", "bin", b"asset payload").unwrap();
+
+        assert_ne!(note.id, asset.id);
+        assert_eq!(asset.kind, "asset");
+        assert_eq!(
+            db.get_doc(&note.id).unwrap().unwrap().text.as_deref(),
+            Some("note payload")
+        );
+    }
+
+    #[test]
+    fn unprepared_canonical_markdown_is_preserved_as_compatibility_data() {
+        let (db, data_dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-unprepared-import-{}", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("Too-Large.md"), b"# preserved raw\n").unwrap();
+
+        let stats = db
+            .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+            .unwrap();
+        assert_eq!(stats.notes, 0);
+        assert_eq!(stats.compatibility, 1);
+        let document = db.list_docs_scoped("alice", "home").unwrap().pop().unwrap();
+        assert_eq!(document.kind, "compatibility");
+        let Content::Asset { hash, ext, .. } = document.content else {
+            panic!()
+        };
+        assert_eq!(
+            fs::read(data_dir.join("assets").join(format!("{hash}.{ext}"))).unwrap(),
+            b"# preserved raw\n"
+        );
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn planning_file_outside_import_root_is_rejected_without_database_writes() {
+        let (db, _dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-root-import-{}", new_ulid()));
+        let external = std::env::temp_dir().join(format!("copal-external-{}.json", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("Note.md"), "note").unwrap();
+        fs::write(&external, "{}").unwrap();
+
+        assert!(db.import_vault(&vault, Some(&external)).is_err());
+        assert!(db.list_docs().unwrap().is_empty());
+        fs::remove_file(external).unwrap();
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn invalid_planning_rolls_back_files_processed_in_the_same_import() {
+        let (db, _dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-atomic-import-{}", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("Note.md"), "note payload").unwrap();
+        let planning = vault.join("planning.json");
+        fs::write(&planning, "{invalid").unwrap();
+
+        assert!(db.import_vault(&vault, Some(&planning)).is_err());
+        assert!(db.list_docs().unwrap().is_empty());
+        fs::write(&planning, "{\"tracks\":[]}").unwrap();
+        let recovered = db.import_vault(&vault, Some(&planning)).unwrap();
+        assert_eq!(recovered.notes, 1);
+        assert!(recovered.planning);
+        assert_eq!(db.list_docs().unwrap().len(), 2);
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_rejects_symbolic_links_without_database_writes() {
+        use std::os::unix::fs::symlink;
+
+        let (db, _dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-symlink-import-{}", new_ulid()));
+        let external = std::env::temp_dir().join(format!("copal-symlink-target-{}", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(&external, "outside").unwrap();
+        symlink(&external, vault.join("linked.md")).unwrap();
+
+        assert!(db.import_vault(&vault, None).is_err());
+        assert!(db.list_docs().unwrap().is_empty());
+        fs::remove_dir_all(vault).unwrap();
+        fs::remove_file(external).unwrap();
     }
 
     /// Oldest op with an empty view — the state before the import.
@@ -1553,5 +2846,60 @@ mod tests {
         assert_eq!(resolve_data_dir(&root), root.join("db"));
         fs::write(root.join("copal.toml"), "# nothing\ndebug = false\n").unwrap();
         assert!(resolve_data_dir(&root).ends_with("copal"));
+    }
+
+    #[test]
+    fn schema_upgrade_is_recorded_without_changing_document_heads() {
+        let (db, data_dir) = temp_db();
+        let note = db.create_doc("note", "Upgrade", "payload", None).unwrap();
+        {
+            let txn = db.database.begin_write().unwrap();
+            txn.open_table(META)
+                .unwrap()
+                .insert(SCHEMA_VERSION_KEY, "2")
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+
+        let upgraded = Db::open(&data_dir).unwrap();
+
+        assert_eq!(upgraded.schema_version().unwrap(), 3);
+        assert_eq!(upgraded.get_doc(&note.id).unwrap().unwrap().head, note.head);
+        let operations = upgraded.ops(1, None).unwrap();
+        assert_eq!(operations["ops"][0]["kind"], "schema-upgrade");
+        assert!(operations["ops"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("2 to 3"));
+    }
+
+    #[test]
+    fn future_database_schema_is_rejected_without_downgrade() {
+        let (db, data_dir) = temp_db();
+        {
+            let txn = db.database.begin_write().unwrap();
+            txn.open_table(META)
+                .unwrap()
+                .insert(SCHEMA_VERSION_KEY, "99")
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+
+        let error = Db::open(&data_dir).err().unwrap();
+
+        assert!(error.to_string().contains("newer than supported schema 3"));
+        let database = Database::open(data_dir.join("copal.redb")).unwrap();
+        let txn = database.begin_read().unwrap();
+        assert_eq!(
+            txn.open_table(META)
+                .unwrap()
+                .get(SCHEMA_VERSION_KEY)
+                .unwrap()
+                .unwrap()
+                .value(),
+            "99"
+        );
     }
 }

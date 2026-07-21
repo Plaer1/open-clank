@@ -10,6 +10,7 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import { normalizeAssistantTranscript } from './chatTranscript.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -2457,6 +2458,42 @@ export function renderPermissionCard(payload, sessionId) {
   return card;
 }
 
+export function renderActorAccounting(wrap, accounting) {
+  if (!wrap || !accounting || typeof accounting !== 'object') return null;
+  wrap.querySelector(':scope > .actor-accounting')?.remove();
+  const state = String(accounting.state || 'not_recorded');
+  const total = Number.isInteger(accounting.total) ? accounting.total : null;
+  const label = total === null
+    ? `Sub-agents: ${state === 'unavailable' ? 'unavailable' : 'not recorded'}`
+    : `Sub-agents: ${total}`;
+  let node;
+  if (total > 0) {
+    node = document.createElement('details');
+    node.className = 'actor-accounting';
+    const summary = document.createElement('summary');
+    summary.textContent = label;
+    node.appendChild(summary);
+    const list = document.createElement('ol');
+    list.className = 'actor-accounting-list';
+    for (const actor of accounting.actors || []) {
+      const item = document.createElement('li');
+      item.dataset.actorId = actor.id || '';
+      if (actor.parent_id) item.dataset.parentActorId = actor.parent_id;
+      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}`;
+      if (actor.parent_id) item.title = `Child of ${actor.parent_id}`;
+      list.appendChild(item);
+    }
+    node.appendChild(list);
+  } else {
+    node = document.createElement('div');
+    node.className = 'actor-accounting';
+    node.textContent = label;
+  }
+  const footer = wrap.querySelector(':scope > .msg-footer');
+  wrap.insertBefore(node, footer || null);
+  return node;
+}
+
 /**
  * Add a message to the chat history.
  */
@@ -2476,12 +2513,22 @@ export function addMessage(role, content, modelName, metadata) {
 
     // --- Agent multi-bubble reconstruction from saved metadata ---
     if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
-      const roundTexts = metadata.round_texts || [];
       const toolEvents = metadata.tool_events;
+      const transcript = Array.isArray(metadata?._history_round_texts)
+        ? {
+            roundTexts: metadata._history_round_texts,
+            source: metadata._history_transcript_source || 'history-normalized',
+          }
+        : normalizeAssistantTranscript(
+            typeof textRaw === 'string' ? textRaw : String(textRaw || ''),
+            metadata,
+          );
+      const roundTexts = transcript.roundTexts;
       let pendingAskUser = null;
       let lastWrap = null;
       let firstMsgAi = null;
       let lastMsgAi = null;
+      let thinkingRendered = false;
 
       const toolsByRound = {};
       for (const ev of toolEvents) {
@@ -2498,7 +2545,9 @@ export function addMessage(role, content, modelName, metadata) {
 
         if (txt) {
           const wrap = document.createElement('div');
-          wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '');
+          const isFirstText = !firstMsgAi;
+          wrap.className = 'msg msg-ai' + (isFirstText ? '' : ' msg-continuation');
+          wrap.dataset.transcriptSource = transcript.source;
           const roleEl = document.createElement('div');
           roleEl.className = 'role';
           const pair = replyModelPair(modelName, metadata);
@@ -2508,7 +2557,7 @@ export function addMessage(role, content, modelName, metadata) {
             roleEl.title = pair.requestedModel + ' -> ' + contModel;
           }
           applyModelColor(roleEl, contModel);
-          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
+          if (isFirstText) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
           body.className = 'body';
@@ -2531,7 +2580,16 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          let displayText = txt;
+          if (!thinkingRendered && metadata?.thinking && !/<think(?:\s|>)/i.test(txt)) {
+            const thinkTime = metadata.thinking_time || null;
+            displayText = '<think' + (thinkTime ? ' time="' + thinkTime + '"' : '') + '>' +
+              metadata.thinking + '</think>\n\n' + txt;
+            thinkingRendered = true;
+          } else if (/<think(?:\s|>)/i.test(txt)) {
+            thinkingRendered = true;
+          }
+          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(displayText)) + agentFindingsSuffix;
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
@@ -2612,6 +2670,7 @@ export function addMessage(role, content, modelName, metadata) {
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
         firstWrap.appendChild(createMsgFooter(firstWrap));
+        if (metadata?.actor_accounting) renderActorAccounting(firstWrap, metadata.actor_accounting);
         if (metadata) displayMetrics(firstWrap, metadata);
       }
 
@@ -2934,6 +2993,7 @@ export function addMessage(role, content, modelName, metadata) {
       // history reloads need this assignment).
       if (metadata?.memories_used?.length) wrap._memoriesUsed = metadata.memories_used;
       wrap.appendChild(createMsgFooter(wrap));
+      if (metadata?.actor_accounting) renderActorAccounting(wrap, metadata.actor_accounting);
       if (metadata) displayMetrics(wrap, metadata);
     } else {
       // Add timestamp to user header (like AI messages)
@@ -2977,6 +3037,7 @@ const chatRenderer = {
   removeAskUserCards,
   renderAskUserCard,
   renderPermissionCard,
+  renderActorAccounting,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,

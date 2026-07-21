@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ class CopalBridge:
         self.data_dir = Path(data_dir or os.environ.get("COPAL_DATA_DIR", _DEFAULT_DATA)).expanduser()
         self._process: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
         self._request_id = 0
         self._stderr_task: asyncio.Task | None = None
 
@@ -61,23 +63,26 @@ class CopalBridge:
             raise CopalBridgeError(f"Copal bridge binary missing after build: {self.command}")
 
     async def start(self) -> None:
-        if self.is_alive():
-            return
-        await self._build()
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["COPAL_DATA_DIR"] = str(self.data_dir)
-        self._process = await asyncio.create_subprocess_exec(
-            str(self.command),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            limit=_BRIDGE_STREAM_LIMIT,
-        )
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-        await self.call("status", timeout=10, _ensure_started=False)
-        logger.info("Copal Redb bridge started pid=%s", self.pid)
+        async with self._start_lock:
+            if self.is_alive():
+                return
+            await self._build()
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            env = os.environ.copy()
+            env["COPAL_DATA_DIR"] = str(self.data_dir)
+            # Wiki store lives beside the notes store in the same data dir.
+            env["COPAL_WIKI_DATA_DIR"] = str(self.data_dir)
+            self._process = await asyncio.create_subprocess_exec(
+                str(self.command),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                limit=_BRIDGE_STREAM_LIMIT,
+            )
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+            await self.call("status", timeout=10, _ensure_started=False)
+            logger.info("Copal Redb bridge started pid=%s", self.pid)
 
     async def _drain_stderr(self) -> None:
         process = self._process
@@ -94,46 +99,73 @@ class CopalBridge:
         timeout: float = 20,
         _ensure_started: bool = True,
     ) -> Any:
-        if _ensure_started:
-            await self.start()
-        process = self._process
-        if not process or not process.stdin or not process.stdout or process.returncode is not None:
-            raise CopalBridgeError("Copal bridge is not running")
-        async with self._lock:
-            self._request_id += 1
-            request_id = self._request_id
-            payload = json.dumps(
-                {"id": request_id, "op": operation, "args": args or {}},
-                separators=(",", ":"),
-            ).encode() + b"\n"
-            process.stdin.write(payload)
-            await process.stdin.drain()
-            line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
-            if not line:
-                raise CopalBridgeError("Copal bridge closed its output")
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise CopalBridgeError("Copal bridge returned invalid JSON") from exc
-            if response.get("id") != request_id:
-                raise CopalBridgeError("Copal bridge response was out of sequence")
-            if not response.get("ok"):
-                raise CopalBridgeError(str(response.get("error") or "Copal operation failed"))
-            return response.get("result")
+        while True:
+            if _ensure_started:
+                await self.start()
+            async with self._lock:
+                process = self._process
+                if not process or not process.stdin or not process.stdout or process.returncode is not None:
+                    if _ensure_started:
+                        continue
+                    raise CopalBridgeError("Copal bridge is not running")
+                self._request_id += 1
+                request_id = self._request_id
+                payload = json.dumps(
+                    {"id": request_id, "op": operation, "args": args or {}},
+                    separators=(",", ":"),
+                ).encode() + b"\n"
+                try:
+                    process.stdin.write(payload)
+                    await process.stdin.drain()
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
+                    if not line:
+                        raise CopalBridgeError("Copal bridge closed its output")
+                    try:
+                        response = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise CopalBridgeError("Copal bridge returned invalid JSON") from exc
+                    if response.get("id") != request_id:
+                        raise CopalBridgeError("Copal bridge response was out of sequence")
+                except BaseException:
+                    # Once a request may have reached the child, a timeout or caller
+                    # cancellation leaves its eventual line ambiguous. Retire that
+                    # process before another call so responses can never be paired
+                    # with the wrong request. Redb rolls back an interrupted write;
+                    # a just-committed import is safe to retry because it is idempotent.
+                    await self._retire_process(process, graceful=False)
+                    raise
+                if not response.get("ok"):
+                    raise CopalBridgeError(str(response.get("error") or "Copal operation failed"))
+                return response.get("result")
 
-    async def stop(self) -> None:
-        process = self._process
-        self._process = None
+    async def _retire_process(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        graceful: bool,
+    ) -> None:
+        if self._process is process:
+            self._process = None
         if process and process.returncode is None:
-            if process.stdin:
-                process.stdin.close()
+            if graceful and process.stdin:
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    process.stdin.close()
+            elif not graceful:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=3)
             except asyncio.TimeoutError:
-                process.terminate()
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await process.wait()
         if self._stderr_task:
             self._stderr_task.cancel()
             await asyncio.gather(self._stderr_task, return_exceptions=True)
             self._stderr_task = None
+
+    async def stop(self) -> None:
+        process = self._process
+        if process:
+            await self._retire_process(process, graceful=True)
         logger.info("Copal Redb bridge stopped")

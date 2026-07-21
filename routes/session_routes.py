@@ -336,7 +336,7 @@ def setup_session_routes(
             db.close()
 
         sessions = [{"id": s.id, "name": s.name, "model": _public_model(s.name, s.model),
-                     "endpoint_url": s.endpoint_url, "rag": s.rag,
+                     "endpoint_url": s.endpoint_url, "endpoint_id": getattr(s, "endpoint_id", None), "rag": s.rag,
                      "archived": s.archived, "folder": folder_map.get(s.id),
                      "total_tokens": token_map.get(s.id, 0),
                      "is_important": important_map.get(s.id, False),
@@ -386,7 +386,7 @@ def setup_session_routes(
             if model not in _ids:
                 raise HTTPException(400, f"Model not in mimo catalog ({len(_ids)} models). Pick from /api/models.")
             endpoint_url = "mimo://acp"
-            endpoint_id = ""
+            endpoint_id = "mimo"
             skip_val = True
         if endpoint_id and endpoint_id.strip():
             from core.database import ModelEndpoint
@@ -489,6 +489,7 @@ def setup_session_routes(
                 name=name or "Nobody",
                 endpoint_url=endpoint_url or "",
                 model=model_to_use,
+                endpoint_id=endpoint_id.strip() or None,
                 rag=False,
                 owner=user,
                 incognito=True,
@@ -502,6 +503,7 @@ def setup_session_routes(
                 model=model_to_use,
                 rag=str(rag).lower() == "true" if rag else False,
                 owner=user,
+                endpoint_id=endpoint_id.strip() or None,
             )
         # Set auth headers for custom API-key endpoints
         resolved_key = request_api_key
@@ -574,8 +576,8 @@ def setup_session_routes(
                 if model not in [m.get("modelId", "") for m in _catalog]:
                     raise HTTPException(400, f"Model not in mimo catalog ({len(_catalog)} models). Pick from /api/models.")
                 endpoint_url = "mimo://acp"
-                endpoint_id = ""
-            if endpoint_id:
+                endpoint_id = "mimo"
+            elif endpoint_id:
                 from core.database import ModelEndpoint
                 from src.auth_helpers import owner_filter
                 from src.endpoint_resolver import build_chat_url, normalize_base
@@ -605,6 +607,7 @@ def setup_session_routes(
             await _prepare_context_mutation(request, sid)
             session.model = model
             session.endpoint_url = endpoint_url
+            session.endpoint_id = endpoint_id or None
             # Update auth headers from the endpoint's stored API key
             if endpoint_api_key:
                 from src.endpoint_resolver import build_headers
@@ -618,6 +621,7 @@ def setup_session_routes(
                 if db_session:
                     db_session.model = model
                     db_session.endpoint_url = endpoint_url
+                    db_session.endpoint_id = endpoint_id or None
                     db_session.headers = session.headers or {}
                     db_session.updated_at = utcnow_naive()
                     db.commit()
@@ -625,6 +629,7 @@ def setup_session_routes(
                 db.close()
             result["model"] = model
             result["endpoint_url"] = endpoint_url
+            result["endpoint_id"] = endpoint_id or None
         return result
 
     @router.get("/session/{sid}/mimo-state")

@@ -232,24 +232,24 @@ portable across users / hosts.
 async def _call_teacher(teacher_model_spec: str, prompt: str,
                         owner: Optional[str] = None) -> Optional[str]:
     """Call the configured teacher endpoint with the escalation prompt."""
-    from src.llm_core import llm_call_async
-    from src.ai_interaction import _resolve_model, _TEACHER_SYSTEM_PROMPT
+    from src.ai_interaction import _resolve_model_target, _TEACHER_SYSTEM_PROMPT
+    from src.model_dispatch import AuxiliaryRequest, run_auxiliary_inference
     try:
-        url, model, headers = await asyncio.to_thread(_resolve_model, teacher_model_spec, owner=owner)
+        target = await asyncio.to_thread(_resolve_model_target, teacher_model_spec, owner=owner)
     except Exception as e:
         logger.warning(f"teacher endpoint not resolvable ({teacher_model_spec!r}): {e}")
         return None
     try:
-        return await llm_call_async(
-            url, model,
-            [
+        return await run_auxiliary_inference(AuxiliaryRequest(
+            purpose="teacher_skill_distillation",
+            target=target,
+            messages=[
                 {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            headers=headers,
-            timeout=120,
             owner=owner,
-        )
+            timeout=120,
+        ))
     except Exception as e:
         logger.warning(f"teacher call failed: {e}")
         return None
@@ -395,8 +395,8 @@ async def evaluate_turn_llm(
     owner: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Use a fast LLM (resolved via utility endpoint) to evaluate a turn."""
-    from src.endpoint_resolver import resolve_endpoint
-    from src.llm_core import llm_call_async
+    from src.endpoint_resolver import resolve_endpoint, resolve_model_target
+    from src.model_dispatch import AuxiliaryRequest, run_auxiliary_inference
 
     # Resolve utility model (falls back to default model, then student_endpoint_url)
     url, model, headers = resolve_endpoint(
@@ -415,12 +415,13 @@ async def evaluate_turn_llm(
     )
 
     try:
-        response = await llm_call_async(
-            url, model,
-            [{"role": "user", "content": prompt}],
-            headers=headers,
+        response = await run_auxiliary_inference(AuxiliaryRequest(
+            purpose="teacher_turn_evaluation",
+            target=resolve_model_target(url, model, headers),
+            messages=[{"role": "user", "content": prompt}],
+            owner=owner,
             timeout=20,
-        )
+        ))
         if response:
             cleaned_response = response.strip().strip("'\"").lower()
             if cleaned_response == "failure":
@@ -621,8 +622,8 @@ async def run_teacher_inline(
 
     # Resolve teacher endpoint
     try:
-        from src.ai_interaction import _resolve_model
-        teacher_url, teacher_model, teacher_headers = await asyncio.to_thread(_resolve_model, teacher_spec, owner=owner)
+        from src.ai_interaction import _resolve_model_target
+        teacher_target = await asyncio.to_thread(_resolve_model_target, teacher_spec, owner=owner)
     except Exception as e:
         logger.warning(f"teacher endpoint not resolvable ({teacher_spec!r}): {e}")
         yield (
@@ -667,17 +668,24 @@ async def run_teacher_inline(
     captured_text_parts: List[str] = []
 
     teacher_target = resolve_model_target(
-        teacher_url,
-        teacher_model,
-        teacher_headers,
+        teacher_target.endpoint_url,
+        teacher_target.model_id,
+        teacher_target.headers,
+        endpoint_id=teacher_target.endpoint_id,
+        provider_id=teacher_target.provider_id,
         lifecycle="ephemeral",
     )
+    teacher_runtime_id = f"teacher-{_uuid.uuid4().hex}"
     async for evt_str in stream_agent_target(
         teacher_target,
         teacher_messages,
-        session_id=session_id or f"teacher-{_uuid.uuid4().hex}",
+        session_id=teacher_runtime_id,
         owner=owner,
         cwd=workspace,
+        turn_envelope={
+            "parent_session_id": session_id or "",
+            "interaction_policy": "interactive",
+        },
         _is_teacher_run=True,
     ):
         # Swallow teacher's own [DONE] — outer loop emits the real one

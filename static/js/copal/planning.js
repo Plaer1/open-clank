@@ -102,6 +102,40 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     }));
   }
 
+  // ── Task view state persistence ──────────────────────────────────────
+  const DEFAULT_VIEWS = [
+    { id:'all-open', name:'All Open', config:{ sourceFilter:'all', dateFilter:'all', learningFilter:'all', statusFilter:'pending', priorityFilter:'all', sortKey:'start', hideDone:true, groupBy:'none', columns:null } },
+    { id:'due-today', name:'Due Today', config:{ sourceFilter:'all', dateFilter:'due', learningFilter:'all', statusFilter:'all', priorityFilter:'all', sortKey:'due', hideDone:false, groupBy:'none', columns:null } },
+    { id:'by-track', name:'By Track', config:{ sourceFilter:'all', dateFilter:'all', learningFilter:'all', statusFilter:'all', priorityFilter:'all', sortKey:'start', hideDone:false, groupBy:'track', columns:null } },
+    { id:'high-priority', name:'High Priority', config:{ sourceFilter:'all', dateFilter:'all', learningFilter:'all', statusFilter:'all', priorityFilter:'high', sortKey:'priority', hideDone:false, groupBy:'none', columns:null } },
+  ];
+  const DEFAULT_COLUMNS = [
+    { id:'title', label:'Title', visible:true, order:0 },
+    { id:'status', label:'Status', visible:true, order:1 },
+    { id:'priority', label:'Priority', visible:true, order:2 },
+    { id:'start', label:'Start', visible:true, order:3 },
+    { id:'due', label:'Due', visible:true, order:4 },
+    { id:'track', label:'Track', visible:true, order:5 },
+    { id:'tags', label:'Tags', visible:false, order:6 },
+    { id:'stages', label:'Stages', visible:false, order:7 },
+  ];
+  function taskStorageKey() { return `odysseus-copal-taskview-v1:${workspace}`; }
+  function loadTaskSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(taskStorageKey()) || '{}');
+      return {
+        columns: Array.isArray(saved.columns) ? saved.columns : null,
+        views: Array.isArray(saved.views) ? saved.views : null,
+      };
+    } catch (_) { return { columns:null, views:null }; }
+  }
+  function persistTaskSettings(settings) {
+    localStorage.setItem(taskStorageKey(), JSON.stringify({
+      columns: settings.columns,
+      views: settings.views,
+    }));
+  }
+
   async function patchEvent(event, patch) {
     setStatus('Saving event…');
     try {
@@ -246,6 +280,53 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     }
     form.append(stages);
 
+    const recurrenceSection = h('section', { class:'copal-recurrence-editor' });
+    const hasRecurrence = !!draft.recurrence;
+    const recurrenceToggle = h('button', { type:'button', class:`copal-btn${hasRecurrence ? ' active' : ''}`, text:hasRecurrence ? 'Recurs' : 'Repeat…', 'aria-label':'Toggle recurrence' });
+    recurrenceToggle.addEventListener('click', () => {
+      if (draft.recurrence) { draft.recurrence = null; } else { draft.recurrence = { frequency:'weekly', interval:1, count:0, until:null, exceptionDates:[], allDay:false }; }
+      markEditorDirty(); renderEventEditor();
+    });
+    recurrenceSection.append(recurrenceToggle);
+
+    if (draft.recurrence) {
+      const rec = draft.recurrence;
+      const freq = control('select', { 'aria-label':'Frequency' });
+      for (const [value, label] of [['daily','Daily'],['weekly','Weekly'],['monthly','Monthly']]) freq.append(h('option', { value, text:label }));
+      freq.value = rec.frequency || 'weekly';
+      freq.addEventListener('change', () => { rec.frequency = freq.value; markEditorDirty(); });
+
+      const interval = control('input', { type:'number', min:'1', max:'99', 'aria-label':'Interval' }, String(rec.interval || 1));
+      interval.addEventListener('input', () => { rec.interval = Math.max(1, parseInt(interval.value) || 1); markEditorDirty(); });
+
+      const boundedBy = rec.count != null ? 'count' : 'until';
+      const countInput = control('input', { type:'number', min:'0', max:'500', 'aria-label':'Repeat count (0 = forever)' }, boundedBy === 'count' ? String(rec.count ?? 10) : '');
+      const untilInput = control('input', { type:'date', 'aria-label':'Repeat until' }, boundedBy === 'until' ? (rec.until || '') : '');
+      countInput.addEventListener('input', () => { if (countInput.value !== '') { rec.count = parseInt(countInput.value) || 0; rec.until = null; } markEditorDirty(); });
+      untilInput.addEventListener('change', () => { if (untilInput.value) { rec.until = untilInput.value; rec.count = null; } markEditorDirty(); });
+
+      const excDates = h('div', { class:'copal-recurrence-exceptions' });
+      for (const exc of (rec.exceptionDates || [])) {
+        const chip = h('span', { class:'copal-recurrence-chip' }, exc, h('button', { type:'button', class:'copal-btn', text:'×', 'aria-label':`Remove exception ${exc}`, onclick:() => { rec.exceptionDates = rec.exceptionDates.filter((d) => d !== exc); markEditorDirty(); renderEventEditor(); } }));
+        excDates.append(chip);
+      }
+      const addExc = control('input', { type:'date', 'aria-label':'Add exception date' });
+      addExc.addEventListener('change', () => {
+        if (addExc.value && !(rec.exceptionDates || []).includes(addExc.value)) { rec.exceptionDates = [...(rec.exceptionDates || []), addExc.value]; addExc.value = ''; markEditorDirty(); renderEventEditor(); }
+      });
+
+      const allDayCheck = control('input', { type:'checkbox', 'aria-label':'All-day events' }); allDayCheck.checked = !!rec.allDay;
+      allDayCheck.addEventListener('change', () => { rec.allDay = allDayCheck.checked; markEditorDirty(); });
+
+      recurrenceSection.append(
+        h('div', { class:'copal-form-grid' }, field('Every', h('div', { class:'copal-recurrence-interval' }, interval, h('span', { text: rec.frequency === 'daily' ? 'day(s)' : rec.frequency === 'weekly' ? 'week(s)' : 'month(s)' }))),
+          field('Ends', h('div', { class:'copal-recurrence-end' }, h('label', { class:'copal-check' }, h('input', { type:'radio', name:'rec-end', value:'count', checked: boundedBy === 'count' ? '' : null }), 'After'), countInput, h('span', { class:'copal-recurrence-hint', text:(rec.count === 0 || rec.count === null) ? '(0 = forever)' : 'occurrences' }), h('label', { class:'copal-check' }, h('input', { type:'radio', name:'rec-end', value:'until', checked: boundedBy === 'until' ? '' : null }), 'On'), untilInput))),
+        field('Skip dates', h('div', { class:'copal-recurrence-skip' }, excDates, addExc)),
+        h('label', { class:'copal-check' }, allDayCheck, 'All day (no timezone)')
+      );
+    }
+    form.append(recurrenceSection);
+
     const advanced = h('details', { class:'copal-event-advanced' }, h('summary', { text:'Compatibility and fade details' }));
     for (const [key, label, type] of [['linkId','Linked event id','text'],['fadeDays','Fade days','number'],['titleStart','Start label','text'],['titleEnd','End label','text']]) {
       const input = control('input', { type, min:type === 'number' ? '0' : null }, draft[key] ?? '');
@@ -265,7 +346,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
         const button = event.currentTarget;
         button.disabled = true;
         try {
-          const patch = Object.fromEntries(['title','description','startDate','dueDate','status','priority','trackId','sharedTrackIds','tags','linkId','fuzzy','fadeDays','titleStart','titleEnd','stages','floating'].map((key) => [key, draft[key] ?? null]));
+          const patch = Object.fromEntries(['title','description','startDate','dueDate','status','priority','trackId','sharedTrackIds','tags','linkId','fuzzy','fadeDays','titleStart','titleEnd','stages','floating','recurrence','allDay'].map((key) => [key, draft[key] ?? null]));
           await patchEvent(source, patch); editorState.dirty = false; const fresh = uniqueEvents(getPlanning()).find((item) => item.id === source.id); editorState.draft = fresh ? structuredClone(fresh) : null; renderEventEditor();
         } finally { button.disabled = false; }
       } }));
@@ -580,20 +661,295 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
       scroll.scrollLeft = options.left;
       if (options.extensionComplete) requestAnimationFrame(() => { timeline.extending = false; });
     } else {
-      const anchor = options.anchorDate || previousAnchor || savedAnchor() || today;
-      scroll.scrollLeft = Math.max(0, LABEL_WIDTH + daysBetween(start, anchor) * dayWidth - scroll.clientWidth / 2);
+      // On first load (no previousScroll), left-align with today ~3 days from left edge.
+      // On re-renders, prefer explicit anchor → previous position → saved anchor → today.
+      const anchor = options.anchorDate || previousAnchor || (previousScroll ? savedAnchor() : null) || today;
+      const leftPad = previousScroll ? (LABEL_WIDTH + daysBetween(start, anchor) * dayWidth - scroll.clientWidth / 2) : (LABEL_WIDTH + daysBetween(start, addDays(anchor, -3)) * dayWidth);
+      scroll.scrollLeft = Math.max(0, leftPad);
     }
   }
 
   function renderTodo(body, markdownItems = []) {
     const data = getPlanning(); const byTrack = trackMap(data); const events = uniqueEvents(data);
-    const root = h('section', { class:'copal-meatbag-tasks copal-pane' }, h('header', { class:'copal-pane-header' }, h('strong', { text:`Meatbag Tasks · ${events.length + markdownItems.length}` }), h('button', { class:'copal-btn primary', text:'+ Task', onclick:() => createEvent({ startDate:null, dueDate:null, trackId:null, floating:true }) })));
-    for (const event of events) {
-      const checkbox = control('input', { type:'checkbox', 'aria-label':`Complete ${event.title}` }); checkbox.checked = event.status === 'done'; checkbox.addEventListener('change', async() => { checkbox.disabled = true; try { await patchEvent(event, { status:checkbox.checked ? 'done' : 'pending' }); } catch (_) { checkbox.checked = !checkbox.checked; } });
-      root.append(h('div', { class:`copal-task-row${checkbox.checked ? ' done' : ''}` }, checkbox, h('button', { class:'copal-task-title', text:event.title, onclick:(click) => openEventEditor(event.id, click.currentTarget) }), h('small', { text:event.trackId ? `${glyphFor(byTrack.get(event.trackId)?.icon)} ${byTrack.get(event.trackId)?.name || 'Unknown track'}` : 'Unscheduled' })));
-    }
-    for (const item of markdownItems) root.append(item);
-    if (!events.length && !markdownItems.length) root.append(h('div', { class:'copal-empty', text:'No Meatbag Tasks yet.' }));
+    const allItems = [...events.map((event) => ({ type:'event', event, title:event.title, description:event.description || '', status:event.status || 'pending', priority:event.priority || 'medium', startDate:event.startDate, dueDate:event.dueDate, trackId:event.trackId, tags:event.tags || [], stages:event.stages || [] })),
+      ...markdownItems.map((item) => ({ type:'markdown', title:item.task?.text || '', description:'', status:item.task?.done ? 'done' : 'pending', priority:'medium', startDate:null, dueDate:null, trackId:null, tags:[], stages:[], mdItem:item }))];
+
+    const saved = loadTaskSettings();
+    let activeViewId = 'all-open';
+    let columns = saved.columns || JSON.parse(JSON.stringify(DEFAULT_COLUMNS));
+    let views = saved.views || JSON.parse(JSON.stringify(DEFAULT_VIEWS));
+    let sourceFilter = 'all', dateFilter = 'all', learningFilter = 'all';
+    let statusFilter = 'all', priorityFilter = 'all', sortKey = 'start', hideDone = false;
+    let groupBy = 'none', focusedIdx = -1;
+
+    // Apply default view config
+    const applyView = (viewConfig) => {
+      sourceFilter = viewConfig.sourceFilter || 'all';
+      dateFilter = viewConfig.dateFilter || 'all';
+      learningFilter = viewConfig.learningFilter || 'all';
+      statusFilter = viewConfig.statusFilter || 'all';
+      priorityFilter = viewConfig.priorityFilter || 'all';
+      sortKey = viewConfig.sortKey || 'start';
+      hideDone = !!viewConfig.hideDone;
+      groupBy = viewConfig.groupBy || 'none';
+      if (viewConfig.columns) columns = JSON.parse(JSON.stringify(viewConfig.columns));
+    };
+    applyView(views.find((v) => v.id === activeViewId) || views[0]);
+
+    const root = h('section', { class:'copal-meatbag-tasks copal-pane' });
+    const header = h('header', { class:'copal-pane-header' });
+    const count = h('strong', { text:`Meatbag Tasks · ${allItems.length}` });
+    header.append(count, h('button', { class:'copal-btn primary', text:'+ Task', onclick:() => createEvent({ startDate:null, dueDate:null, trackId:null, floating:true }) }));
+
+    // ── Controls row 1: search + core filters ──
+    const controls = h('div', { class:'copal-tasks-controls' });
+    const search = h('input', { type:'search', placeholder:'Search tasks…', 'aria-label':'Search tasks', style:'flex:1;min-width:120px' });
+    const statusSel = h('select', { 'aria-label':'Status filter' },
+      h('option', { value:'all', text:'All status' }), h('option', { value:'pending', text:'Pending' }), h('option', { value:'in-progress', text:'In progress' }), h('option', { value:'done', text:'Done' }));
+    const prioritySel = h('select', { 'aria-label':'Priority filter' },
+      h('option', { value:'all', text:'All priority' }), h('option', { value:'high', text:'High' }), h('option', { value:'medium', text:'Medium' }), h('option', { value:'low', text:'Low' }));
+    const sortSel = h('select', { 'aria-label':'Sort tasks' },
+      h('option', { value:'start', text:'Sort by start' }), h('option', { value:'due', text:'Sort by due' }), h('option', { value:'priority', text:'Sort by priority' }));
+    const hideDoneCheck = h('input', { type:'checkbox', 'aria-label':'Hide done tasks' });
+    const hideLabel = h('label', { class:'copal-check' }, hideDoneCheck, h('span', { text:'Hide done' }));
+    controls.append(search, statusSel, prioritySel, sortSel, hideLabel);
+
+    // ── Controls row 2: source / date / learning / group ──
+    const controls2 = h('div', { class:'copal-tasks-controls' });
+    const sourceSel = h('select', { 'aria-label':'Source filter' },
+      h('option', { value:'all', text:'All sources' }), h('option', { value:'vault', text:'Vault' }), h('option', { value:'timeline', text:'Timeline' }));
+    const dateSel = h('select', { 'aria-label':'Date filter' },
+      h('option', { value:'all', text:'All dates' }), h('option', { value:'due', text:'Due' }), h('option', { value:'scheduled', text:'Scheduled' }), h('option', { value:'undated', text:'Undated' }), h('option', { value:'overdue', text:'Overdue' }));
+    const learningSel = h('select', { 'aria-label':'Learning filter' },
+      h('option', { value:'all', text:'All learning' }), h('option', { value:'course', text:'Course' }), h('option', { value:'skill', text:'Skill' }));
+    const groupSel = h('select', { 'aria-label':'Group by' },
+      h('option', { value:'none', text:'No grouping' }), h('option', { value:'track', text:'Group: Track' }), h('option', { value:'status', text:'Group: Status' }), h('option', { value:'priority', text:'Group: Priority' }));
+    controls2.append(sourceSel, dateSel, learningSel, groupSel);
+
+    // ── Controls row 3: view selector + columns button ──
+    const controls3 = h('div', { class:'copal-tasks-controls' });
+    const viewSel = h('select', { 'aria-label':'Saved views' });
+    for (const v of views) viewSel.append(h('option', { value:v.id, text:v.name }));
+    const saveViewBtn = h('button', { class:'copal-btn', text:'Save view', title:'Save current filters as a view' });
+    const colsBtn = h('button', { class:'copal-btn', text:'Columns', title:'Toggle column visibility' });
+    controls3.append(viewSel, saveViewBtn, colsBtn);
+
+    // ── Column chooser panel ──
+    const colsPanel = h('div', { class:'copal-tasks-cols-panel' });
+    colsPanel.style.display = 'none';
+    const buildColsPanel = () => {
+      colsPanel.replaceChildren();
+      const sorted = [...columns].sort((a, b) => a.order - b.order);
+      for (const col of sorted) {
+        const cb = h('input', { type:'checkbox', 'aria-label':`Show ${col.label} column` });
+        cb.checked = col.visible;
+        cb.addEventListener('change', () => { col.visible = cb.checked; persistTaskSettings({ columns, views }); draw(); });
+        colsPanel.append(h('label', { class:'copal-check' }, cb, h('span', { text:col.label })));
+      }
+    };
+    buildColsPanel();
+    colsBtn.addEventListener('click', () => { colsPanel.style.display = colsPanel.style.display === 'none' ? '' : 'none'; });
+
+    // ── Save current state as a view ──
+    saveViewBtn.addEventListener('click', () => {
+      const name = window.prompt('View name:');
+      if (!name?.trim()) return;
+      const id = `custom-${Date.now().toString(36)}`;
+      views.push({ id, name:name.trim(), config:{ sourceFilter, dateFilter, learningFilter, statusFilter, priorityFilter, sortKey, hideDone, groupBy, columns:JSON.parse(JSON.stringify(columns)) } });
+      persistTaskSettings({ columns, views });
+      viewSel.append(h('option', { value:id, text:name.trim() }));
+      viewSel.value = id;
+    });
+
+    // ── View selector ──
+    viewSel.addEventListener('change', () => {
+      const v = views.find((item) => item.id === viewSel.value);
+      if (v) { activeViewId = v.id; applyView(v.config); syncControlsFromState(); draw(); }
+    });
+
+    const syncControlsFromState = () => {
+      statusSel.value = statusFilter;
+      prioritySel.value = priorityFilter;
+      sortSel.value = sortKey;
+      hideDoneCheck.checked = hideDone;
+      sourceSel.value = sourceFilter;
+      dateSel.value = dateFilter;
+      learningSel.value = learningFilter;
+      groupSel.value = groupBy;
+      buildColsPanel();
+    };
+    syncControlsFromState();
+
+    const list = h('div', { class:'copal-tasks-list', tabindex:'0', role:'grid', 'aria-label':'Task list' });
+    const doneCount = h('span', { class:'copal-tasks-done-count' });
+
+    const buildRow = (item) => {
+      const isEvent = item.type === 'event';
+      const visibleCols = columns.filter((c) => c.visible).sort((a, b) => a.order - b.order);
+      const checkbox = control('input', { type:'checkbox', 'aria-label':`Complete ${item.title}`, tabindex:'-1' });
+      checkbox.checked = item.status === 'done';
+      checkbox.addEventListener('change', async() => {
+        checkbox.disabled = true;
+        try { if (isEvent) await patchEvent(item.event, { status:checkbox.checked ? 'done' : 'pending' }); }
+        catch (_) { checkbox.checked = !checkbox.checked; }
+        checkbox.disabled = false;
+      });
+      const trackName = item.trackId ? `${glyphFor(byTrack.get(item.trackId)?.icon)} ${byTrack.get(item.trackId)?.name || 'Unknown track'}` : '';
+      const trackText = isEvent ? (trackName || 'Unscheduled') : (item.mdItem?.label || '');
+      const startLabel = item.startDate ? (item.startDate === 'FUZZY' ? '?' : item.startDate) : '';
+      const dueLabel = item.dueDate || '';
+      const cellMap = {
+        title: h('button', { class:'copal-task-title', tabindex:'-1', text:item.title || 'Untitled', onclick:() => isEvent ? openEventEditor(item.event.id) : item.mdItem?.doc && openDocument(item.mdItem.doc.id, 'notes') }),
+        status: h('span', { class:`copal-task-status status-${item.status}`, text:item.status }),
+        priority: item.priority && item.priority !== 'medium' ? h('span', { class:`copal-badge priority-${item.priority}`, text:item.priority }) : h('span', { class:'copal-task-status', text:'medium' }),
+        start: h('small', { class:'copal-task-dates', text:startLabel || '—' }),
+        due: h('small', { class:'copal-task-dates', text:dueLabel || '—' }),
+        track: h('small', { class:'copal-task-track', text:trackText }),
+        tags: h('small', { class:'copal-task-tags', text:(item.tags || []).join(', ') || '—' }),
+        stages: h('small', { class:'copal-task-stages', text:(item.stages || []).join(', ') || '—' }),
+      };
+      const cells = [h('div', { class:'copal-task-cell copal-task-cell-check' }, checkbox)];
+      for (const col of visibleCols) cells.push(h('div', { class:`copal-task-cell copal-task-cell-${col.id}` }, cellMap[col.id] || h('span', { text:'' })));
+      const row = h('div', { class:`copal-task-row${checkbox.checked ? ' done' : ''}`, role:'row', tabindex:'-1' }, ...cells);
+      row._taskItem = item;
+      return row;
+    };
+
+    const priorityOrder = { high:0, medium:1, low:2 };
+    const today = formatLocalDate(new Date());
+
+    const draw = () => {
+      focusedIdx = -1;
+      const query = search.value.trim().toLowerCase();
+      statusFilter = statusSel.value;
+      priorityFilter = prioritySel.value;
+      sortKey = sortSel.value;
+      hideDone = hideDoneCheck.checked;
+      sourceFilter = sourceSel.value;
+      dateFilter = dateSel.value;
+      learningFilter = learningSel.value;
+      groupBy = groupSel.value;
+
+      const filtered = allItems.filter((item) => {
+        if (hideDone && item.status === 'done') return false;
+        if (statusFilter !== 'all' && item.status !== statusFilter) return false;
+        if (priorityFilter !== 'all' && item.priority !== priorityFilter) return false;
+        // E1: source filter
+        if (sourceFilter !== 'all' && item.type !== sourceFilter) return false;
+        // E2: date filter
+        if (dateFilter === 'due' && !item.dueDate) return false;
+        if (dateFilter === 'scheduled' && !item.startDate) return false;
+        if (dateFilter === 'undated' && (item.startDate || item.dueDate)) return false;
+        if (dateFilter === 'overdue' && !(item.dueDate && item.dueDate < today && item.status !== 'done')) return false;
+        // E3: learning filter
+        if (learningFilter !== 'all') {
+          const prefix = learningFilter + '/';
+          if (!item.tags.some((t) => t.startsWith(prefix))) return false;
+        }
+        // E4: search scope — title + description + tags
+        if (query) {
+          const haystack = `${item.title} ${item.description} ${(item.tags || []).join(' ')}`.toLowerCase();
+          if (!haystack.includes(query)) return false;
+        }
+        return true;
+      });
+
+      filtered.sort((a, b) => {
+        if (sortKey === 'priority') return (priorityOrder[a.priority] ?? 1) - (priorityOrder[b.priority] ?? 1);
+        const av = sortKey === 'due' ? a.dueDate : a.startDate;
+        const bv = sortKey === 'due' ? b.dueDate : b.startDate;
+        if (!av && !bv) return 0;
+        if (!av) return 1;
+        if (!bv) return -1;
+        return av.localeCompare(bv);
+      });
+
+      const doneTotal = allItems.filter((item) => item.status === 'done').length;
+      doneCount.textContent = doneTotal ? `${doneTotal} done` : '';
+      count.textContent = `Meatbag Tasks · ${filtered.length}${filtered.length !== allItems.length ? ` of ${allItems.length}` : ''}`;
+      list.replaceChildren();
+
+      if (!filtered.length) {
+        list.append(h('div', { class:'copal-empty', text:allItems.length ? 'No tasks match the current filters.' : 'No Meatbag Tasks yet.' }));
+        return;
+      }
+
+      // E7: grouping
+      if (groupBy !== 'none') {
+        const groupKey = groupBy;
+        const groupMap = new Map();
+        for (const item of filtered) {
+          let key;
+          if (groupKey === 'track') key = item.trackId ? (byTrack.get(item.trackId)?.name || 'Unknown') : 'Unscheduled';
+          else if (groupKey === 'status') key = item.status;
+          else if (groupKey === 'priority') key = item.priority;
+          else key = 'Other';
+          if (!groupMap.has(key)) groupMap.set(key, []);
+          groupMap.get(key).push(item);
+        }
+        for (const [groupName, groupItems] of groupMap) {
+          const header = h('div', { class:'copal-task-group-header', role:'row' },
+            h('span', { class:'copal-task-group-toggle', text:'▸' }),
+            h('span', { text:`${groupName} (${groupItems.length})` }));
+          const body = h('div', { class:'copal-task-group-body' });
+          for (const item of groupItems) body.append(buildRow(item));
+          header.addEventListener('click', () => {
+            const collapsed = body.style.display === 'none';
+            body.style.display = collapsed ? '' : 'none';
+            header.querySelector('.copal-task-group-toggle').textContent = collapsed ? '▸' : '▾';
+          });
+          list.append(header, body);
+        }
+      } else {
+        for (const item of filtered) list.append(buildRow(item));
+      }
+    };
+
+    // Wire filter change events
+    search.addEventListener('input', draw);
+    statusSel.addEventListener('change', draw);
+    prioritySel.addEventListener('change', draw);
+    sortSel.addEventListener('change', draw);
+    hideDoneCheck.addEventListener('change', draw);
+    sourceSel.addEventListener('change', draw);
+    dateSel.addEventListener('change', draw);
+    learningSel.addEventListener('change', draw);
+    groupSel.addEventListener('change', draw);
+
+    // E8: keyboard grid navigation
+    list.addEventListener('keydown', (e) => {
+      const rows = [...list.querySelectorAll('.copal-task-row')];
+      if (!rows.length) return;
+      const key = e.key;
+      if (key === 'ArrowDown') { e.preventDefault(); focusedIdx = Math.min(focusedIdx + 1, rows.length - 1); rows[focusedIdx]?.focus(); }
+      else if (key === 'ArrowUp') { e.preventDefault(); focusedIdx = Math.max(focusedIdx - 1, 0); rows[focusedIdx]?.focus(); }
+      else if (key === 'Enter') {
+        e.preventDefault();
+        const row = rows[focusedIdx] || rows[0];
+        if (row?._taskItem) {
+          const item = row._taskItem;
+          if (item.type === 'event') openEventEditor(item.event.id);
+          else item.mdItem?.doc && openDocument(item.mdItem.doc.id, 'notes');
+        }
+      }
+      else if (key === ' ') {
+        e.preventDefault();
+        const row = rows[focusedIdx] || rows[0];
+        const cb = row?.querySelector('input[type="checkbox"]');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+      }
+    });
+    list.addEventListener('focusin', (e) => {
+      const row = e.target.closest('.copal-task-row');
+      if (row) {
+        const rows = [...list.querySelectorAll('.copal-task-row')];
+        focusedIdx = rows.indexOf(row);
+        rows.forEach((r, i) => r.classList.toggle('copal-task-focused', i === focusedIdx));
+      }
+    });
+
+    root.append(header, controls, controls2, controls3, colsPanel, list, doneCount);
+    draw();
     body.replaceChildren(root);
   }
 

@@ -184,6 +184,22 @@ async def test_detached_replay_has_monotonic_ids_and_cursor_resume():
     assert resumed == all_frames[1:]
 
 
+@pytest.mark.asyncio
+async def test_detached_typed_error_remains_error_after_done_sentinel():
+    session_id = "sess-detached-typed-error"
+    agent_runs._RUNS.pop(session_id, None)
+
+    async def events():
+        yield 'event: error\ndata: {"code":"MODEL_CAPABILITY_UNKNOWN","status":409}\n\n'
+        yield "data: [DONE]\n\n"
+
+    run = agent_runs.start(session_id, events())
+    await run.task
+
+    assert run.status == "error"
+    assert agent_runs.get_status(session_id) == "error"
+
+
 # --------------------------------------------------------------------------- #
 # chat_stream: Compare panes must NOT be detached, so the Stop button (closing
 # the SSE) cancels the upstream generator promptly — exercising the same

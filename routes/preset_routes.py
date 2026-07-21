@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from src.request_models import PresetUpdateRequest
 from core.middleware import require_admin
-from src.auth_helpers import effective_user
+from src.auth_helpers import effective_user, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,12 @@ def setup_preset_routes(preset_manager) -> APIRouter:
 
     def _persona_owner(request: Request) -> str:
         owner = effective_user(request)
-        if not owner:
-            raise HTTPException(401, "Not authenticated")
-        return owner
+        if owner is not None:
+            return owner
+        # Reuse the shared route boundary so explicit single-user mode and
+        # first-run loopback behave like every other owner-aware endpoint,
+        # while configured auth still fails closed.
+        return require_user(request)
 
     @router.get("/api/presets/default-persona")
     async def get_default_persona_route(request: Request) -> Dict[str, Any]:

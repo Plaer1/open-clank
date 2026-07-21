@@ -6,18 +6,21 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 
-EVENT_KIND = "markdown"
+EVENT_KIND = "copal-event"
 TRACKS_KIND = "copal-tracks"
 MIGRATION_KIND = "copal-migration"
 TRACKS_NAME = ".copal/tracks.json"
 MIGRATION_NAME = ".copal/planning-migration.json"
-EVENT_SCHEMA = 1
+EVENT_SCHEMA = 2
 TRACK_SCHEMA = 1
+
+MAX_RECURRENCE_EXPANSION = 500
+_FREQUENCIES = {"daily", "weekly", "monthly"}
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -38,6 +41,8 @@ _EVENT_FIELDS = (
     "titleEnd",
     "stages",
     "floating",
+    "recurrence",
+    "allDay",
 )
 _RESERVED_FRONTMATTER = {"copal_type", "copal_schema", "copal_legacy_id", "copal_extra", *_EVENT_FIELDS}
 _STATUS = {"pending", "in-progress", "done", "ongoing"}
@@ -110,6 +115,50 @@ def _strings(value: Any, field: str) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
+
+
+def _validate_recurrence(value: Any) -> dict[str, Any] | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        raise PlanningValidationError("recurrence must be an object")
+    r = deepcopy(value)
+    freq = str(r.get("frequency") or "").strip().lower()
+    if freq not in _FREQUENCIES:
+        raise PlanningValidationError(f"recurrence.frequency must be one of {sorted(_FREQUENCIES)}")
+    r["frequency"] = freq
+    interval = r.get("interval")
+    if interval in (None, ""):
+        interval = 1
+    if not isinstance(interval, (int, float)) or int(interval) < 1:
+        raise PlanningValidationError("recurrence.interval must be an integer >= 1")
+    r["interval"] = int(interval)
+    has_count = "count" in r and r["count"] not in (None, "")
+    has_until = "until" in r and r["until"] not in (None, "")
+    if not has_count and not has_until:
+        raise PlanningValidationError("recurrence requires either count or until")
+    if has_count and has_until:
+        raise PlanningValidationError("recurrence must have either count or until, not both")
+    if has_count:
+        c = r["count"]
+        if not isinstance(c, (int, float)) or int(c) < 0:
+            raise PlanningValidationError("recurrence.count must be an integer >= 0")
+        r["count"] = int(c) if int(c) > 0 else None  # 0 = repeat forever (no count limit)
+        r["until"] = None
+    if has_until:
+        r["until"] = _iso_day(r["until"], "recurrence.until")
+        r["count"] = None
+    exceptions = r.get("exceptionDates") or []
+    if not isinstance(exceptions, list):
+        raise PlanningValidationError("recurrence.exceptionDates must be a list")
+    cleaned: list[str] = []
+    for item in exceptions:
+        d = _iso_day(item, "recurrence.exceptionDates item")
+        if d and d not in cleaned:
+            cleaned.append(d)
+    r["exceptionDates"] = cleaned
+    r["allDay"] = bool(r.get("allDay"))
+    return r
 
 
 def validate_event(event: dict[str, Any], tracks: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
@@ -192,6 +241,8 @@ def validate_event(event: dict[str, Any], tracks: Iterable[dict[str, Any]] = ())
         normalized_stages.append(current)
     value["stages"] = normalized_stages
     value["floating"] = bool(value.get("floating") or not primary)
+    value["recurrence"] = _validate_recurrence(value.get("recurrence"))
+    value["allDay"] = bool(value.get("allDay"))
     if not isinstance(value.get("copal_extra", {}), dict):
         raise PlanningValidationError("copal_extra must be an object")
     return value
@@ -419,9 +470,109 @@ def event_document_name(event: dict[str, Any]) -> str:
     legacy = str(event.get("legacyId") or event.get("id") or "event")
     title = _SLUG_RE.sub("-", str(event.get("title") or "event").lower()).strip("-")[:48] or "event"
     suffix = hashlib.sha1(legacy.encode()).hexdigest()[:10]
-    return f"Events/{title}--{suffix}.md"
+    return f".events/{title}--{suffix}.md"
 
 
 def revision_fingerprint(docs: Iterable[dict[str, Any]]) -> str:
     heads = sorted(f"{doc.get('id')}:{doc.get('head')}" for doc in docs)
     return hashlib.sha256("\n".join(heads).encode()).hexdigest()
+
+
+def _next_date(current: date, frequency: str, interval: int, *, original_day: int | None = None) -> date:
+    if frequency == "daily":
+        return current + timedelta(days=interval)
+    if frequency == "weekly":
+        return current + timedelta(weeks=interval)
+    if frequency == "monthly":
+        # Use original_day to restore the day when possible (e.g. Jan 31 → Feb 28 → Mar 31)
+        ref_day = original_day if original_day is not None else current.day
+        year = current.year + (current.month + interval - 1) // 12
+        month = (current.month + interval - 1) % 12 + 1
+        day = min(ref_day, _month_end(year, month))
+        return date(year, month, day)
+    raise PlanningValidationError(f"Unknown frequency: {frequency}")
+
+
+def _month_end(year: int, month: int) -> int:
+    if month == 12:
+        return 31
+    return (date(year, month + 1, 1) - timedelta(days=1)).day
+
+
+def expand_recurrence(
+    event: dict[str, Any],
+    window_start: str | date,
+    window_end: str | date,
+) -> list[dict[str, Any]]:
+    """Expand a recurring event into occurrences within a date window.
+
+    Returns a list of occurrence dicts, each with:
+      - eventId: the series event id
+      - occurrenceKey: ISO date string of the occurrence
+      - startDate, dueDate: shifted dates for this occurrence
+      - allDay: whether this is a date-only event
+
+    Hard-capped at MAX_RECURRENCE_EXPANSION per window.
+    Occurrences are projections, never stored as duplicate events.
+    """
+    recurrence = event.get("recurrence")
+    if not recurrence:
+        return []
+
+    if isinstance(window_start, str):
+        window_start = date.fromisoformat(window_start)
+    if isinstance(window_end, str):
+        window_end = date.fromisoformat(window_end)
+
+    start_str = event.get("startDate")
+    if not start_str or not isinstance(start_str, str) or not _DATE_RE.fullmatch(start_str):
+        return []
+    series_start = date.fromisoformat(start_str)
+
+    due_str = event.get("dueDate")
+    duration_days = 0
+    if due_str and isinstance(due_str, str) and _DATE_RE.fullmatch(due_str):
+        due_date = date.fromisoformat(due_str)
+        if due_date >= series_start:
+            duration_days = (due_date - series_start).days
+
+    frequency = recurrence["frequency"]
+    interval = recurrence["interval"]
+    count = recurrence.get("count")
+    until_str = recurrence.get("until")
+    until = date.fromisoformat(until_str) if until_str else None
+    exceptions = set(recurrence.get("exceptionDates") or [])
+    all_day = recurrence.get("allDay", False)
+
+    occurrences: list[dict[str, Any]] = []
+    current = series_start
+    seen_count = 0
+    original_day = series_start.day if frequency == "monthly" else None
+
+    while len(occurrences) < MAX_RECURRENCE_EXPANSION:
+        if count is not None and seen_count >= count:
+            break
+        if until is not None and current > until:
+            break
+
+        if current >= window_start and current <= window_end:
+            occ_key = current.isoformat()
+            if occ_key not in exceptions:
+                occ_start = current
+                occ_due = current + timedelta(days=duration_days) if duration_days else None
+                occurrences.append({
+                    "eventId": event.get("id") or event.get("documentId") or "",
+                    "occurrenceKey": occ_key,
+                    "startDate": occ_start.isoformat(),
+                    "dueDate": occ_due.isoformat() if occ_due else None,
+                    "allDay": all_day,
+                })
+
+        current = _next_date(current, frequency, interval, original_day=original_day)
+        seen_count += 1
+
+        # Safety: if we've gone way past the window and have a bounded series, stop
+        if current > window_end and (count is not None or until is not None):
+            break
+
+    return occurrences

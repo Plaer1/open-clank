@@ -61,7 +61,7 @@ def _normalize_base_for_compare(url: str) -> str:
 _FIRST_PARTY_API_HOSTS = (
     "openai.com", "deepseek.com", "anthropic.com", "mistral.ai",
     "groq.com", "x.ai", "moonshot.ai", "moonshot.cn", "cerebras.ai",
-    "nvidia.com",
+    "nvidia.com", "z.ai",
 )
 
 
@@ -91,6 +91,8 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
                 kind = (getattr(ep, "endpoint_kind", None) or "auto").strip().lower()
                 if kind in ("local", "api", "proxy"):
                     return kind
+                if getattr(ep, "api_key", None) and is_first_party_api_host(base):
+                    return "api"
                 if getattr(ep, "api_key", None) and not is_first_party_api_host(base):
                     parsed = urlparse(base)
                     host = (parsed.hostname or "").lower()
@@ -425,7 +427,16 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     # Large OpenAI-compatible proxies can make /models expensive. If the
     # endpoint is explicitly configured as API/proxy, prefer known context
     # metadata (or the default) over downloading the full catalog.
-    if configured_kind in ("api", "proxy"):
+    if configured_kind == "api":
+        # Credentials are intentionally not part of this low-level cache API.
+        # Never make a predictably unauthenticated catalog request to a keyed
+        # first-party cloud endpoint just to refine a context estimate.
+        if known:
+            logger.info(f"Using known context window for {model}: {known}")
+            return known, True
+        return DEFAULT_CONTEXT, False
+
+    if configured_kind == "proxy":
         if known:
             logger.info(f"Using known context window for {model}: {known}")
             return known, True

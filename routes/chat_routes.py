@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import re
 import time
 import logging
 from datetime import datetime
@@ -14,17 +13,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from core.models import ChatMessage
-from src.request_models import ChatRequest
 from src.llm_core import stream_llm
 from src import agent_runs
-from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import (
-    build_chat_url,
-    normalize_base as _normalize_base,
-    resolve_model_target,
-)
-from src.model_dispatch import call_model_target, stream_agent_target, stream_chat_target
+from src.endpoint_resolver import resolve_model_target
+from src.model_dispatch import stream_agent_target
 from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
@@ -42,10 +35,9 @@ from routes.chat_helpers import (
     build_chat_context,
     save_assistant_response,
     run_post_response_tasks,
-    clean_thinking_for_save,
     _enforce_chat_privileges,
 )
-from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
+from src.action_intents import classify_tool_intent as _classify_tool_intent
 from src.tool_policy import (
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
@@ -66,6 +58,12 @@ def _resolved_session_target(sess):
             sess.endpoint_url,
             sess.model,
             sess.headers,
+            endpoint_id=getattr(sess, "endpoint_id", None),
+            provider_id=(
+                f"ody-{sess.endpoint_id}"
+                if getattr(sess, "endpoint_id", None) not in (None, "", "mimo")
+                else "mimo" if getattr(sess, "endpoint_id", None) == "mimo" else None
+            ),
             lifecycle="ephemeral" if str(sess.endpoint_url).startswith("mimo://") else "persistent",
         )
     except PermissionError as exc:
@@ -85,6 +83,29 @@ def _stream_set(session_id: str, **fields) -> None:
     if rec is None:
         return
     rec.update(fields)
+
+
+def _agent_error_from_sse(frame: str) -> Optional[dict]:
+    """Extract the safe typed payload from one Agent error SSE frame."""
+    if not frame.startswith("event: error"):
+        return None
+    for line in frame.splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return {
+            key: payload[key]
+            for key in (
+                "code", "error", "phase", "retryable", "status", "actions", "details"
+            )
+            if key in payload
+        }
+    return None
 
 
 def _transcript_revision(session_id: str) -> int:
@@ -115,6 +136,7 @@ def _turn_envelope(
     mode: str,
     incognito: bool,
     disabled_tools=(),
+    allowed_tools=None,
     forced_tools=(),
     max_tool_calls: int = 0,
     max_rounds: int = 0,
@@ -138,12 +160,17 @@ def _turn_envelope(
         "owner": owner or "",
         "workspace": workspace or "",
         "model": model,
-        "mode": mode or "chat",
+        "mode": mode or "agent",
         "incognito": bool(incognito),
         "no_memory": bool(no_memory),
         "compare_mode": bool(compare_mode),
         "is_admin": bool(is_admin),
         "disabled_tools": sorted(str(name) for name in (disabled_tools or ())),
+        "allowed_tools": (
+            sorted(str(name) for name in allowed_tools)
+            if allowed_tools is not None
+            else None
+        ),
         "forced_tools": sorted(str(name) for name in (forced_tools or ())),
         "max_tool_calls": max(0, int(max_tool_calls or 0)),
         # max_rounds is NOT mirrored into the envelope: the native loop
@@ -205,37 +232,6 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
     return repaired
 
 
-_WEB_FOLLOWUP_RE = re.compile(
-    r"^\s*(?:(?:can|could|would|will)\s+you\s+)?"
-    r"(?:check|try\s+again|look(?:\s+now|\s+it\s+up)?|search(?:\s+now|\s+online|\s+it)?|"
-    r"do\s+it|again)\??\s*$",
-    re.I,
-)
-_RECENT_WEB_CONTEXT_RE = re.compile(
-    r"\b(?:weather|forecast|rain|raining|hourly|news|headlines|rate|exchange|currency|"
-    r"price|current|latest|search|look\s+up|online)\b",
-    re.I,
-)
-
-
-def _recent_session_text(sess, limit: int = 8, max_chars: int = 2000) -> str:
-    history = getattr(sess, "history", None) or getattr(sess, "_history", None) or []
-    chunks: List[str] = []
-    for msg in history[-limit:]:
-        content = getattr(msg, "content", None)
-        if content is None and isinstance(msg, dict):
-            content = msg.get("content")
-        text = _message_plain_text(content).strip()
-        if text:
-            chunks.append(text)
-    return " ".join(chunks)[-max_chars:]
-
-
-def _is_contextual_web_followup(message: str, sess) -> bool:
-    """Treat short retry/check replies as web lookups when recent context was web."""
-    if not message or not _WEB_FOLLOWUP_RE.search(message):
-        return False
-    return bool(_RECENT_WEB_CONTEXT_RE.search(_recent_session_text(sess)))
 
 
 def _resolve_request_workspace(request, raw_value) -> tuple:
@@ -265,44 +261,38 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     return workspace, (requested if not workspace else "")
 
 
-def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
-    if not session_url or not endpoint_base:
-        return False
-    sess = session_url.rstrip("/")
-    base = _normalize_base(endpoint_base).rstrip("/")
-    variants = {
-        base,
-        base + "/chat/completions",
-        build_chat_url(base).rstrip("/"),
-    }
-    return sess in variants or sess.startswith(base + "/")
-
-
 def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
-    """Clear a session model if its endpoint was deleted from ModelEndpoint."""
+    """Clear a session model only when its persisted endpoint identity is gone."""
     if not getattr(sess, "endpoint_url", ""):
         return False
-    # mimo:// sessions are served by the agent brain over ACP — they have no
-    # ModelEndpoint row and are never orphaned.
-    if sess.endpoint_url.startswith("mimo://"):
+    endpoint_id = getattr(sess, "endpoint_id", None)
+    if endpoint_id == "mimo":
+        return False
+    # Legacy ambiguous/unregistered rows fail explicitly at Agent admission;
+    # never mutate them by guessing a same-URL endpoint.
+    if not endpoint_id:
         return False
     db = SessionLocal()
     try:
-        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        q = db.query(ModelEndpoint).filter(
+            ModelEndpoint.id == endpoint_id,
+            ModelEndpoint.is_enabled == True,
+        )
         if owner:
             from src.auth_helpers import owner_filter
+
             q = owner_filter(q, ModelEndpoint, owner)
-        endpoints = q.all()
-        for ep in endpoints:
-            if _session_url_matches_endpoint(sess.endpoint_url or "", ep.base_url or ""):
-                return False
+        if q.first() is not None:
+            return False
         db_session = db.query(DBSession).filter(DBSession.id == sess.id).first()
         if db_session:
             db_session.endpoint_url = ""
+            db_session.endpoint_id = None
             db_session.model = ""
             db_session.updated_at = datetime.utcnow()
             db.commit()
         sess.endpoint_url = ""
+        sess.endpoint_id = None
         sess.model = ""
         sess.headers = {}
         return True
@@ -353,18 +343,23 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
 
     db = SessionLocal()
     try:
-        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        endpoint_id = getattr(sess, "endpoint_id", None)
+        if not endpoint_id or endpoint_id == "mimo":
+            return False
+        q = db.query(ModelEndpoint).filter(
+            ModelEndpoint.id == endpoint_id,
+            ModelEndpoint.is_enabled == True,
+        )
         if owner:
             from src.auth_helpers import owner_filter
             q = owner_filter(q, ModelEndpoint, owner)
-        endpoints = q.all()
-        for endpoint in endpoints:
-            if (getattr(endpoint, "model_type", None) or "llm") != "image":
-                continue
-            if not _session_url_matches_endpoint(endpoint_url, getattr(endpoint, "base_url", "") or ""):
-                continue
-            if _endpoint_cache_contains_model(endpoint, model):
-                return True
+        endpoint = q.first()
+        if (
+            endpoint is not None
+            and (getattr(endpoint, "model_type", None) or "llm") == "image"
+            and _endpoint_cache_contains_model(endpoint, model)
+        ):
+            return True
     except Exception:
         return False
     finally:
@@ -398,16 +393,16 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
         # user already pointed this session at that endpoint, so its first
         # cached model is the most defensible default.
         ep = None
-        if getattr(sess, "endpoint_url", ""):
-            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        endpoint_id = getattr(sess, "endpoint_id", None)
+        if endpoint_id and endpoint_id != "mimo":
+            q = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == endpoint_id,
+                ModelEndpoint.is_enabled == True,
+            )
             if owner:
                 from src.auth_helpers import owner_filter
                 q = owner_filter(q, ModelEndpoint, owner)
-            endpoints = q.all()
-            for cand in endpoints:
-                if _session_url_matches_endpoint(sess.endpoint_url or "", cand.base_url or ""):
-                    ep = cand
-                    break
+            ep = q.first()
         if not ep:
             return False
         if not is_chatgpt_subscription:
@@ -521,150 +516,6 @@ def setup_chat_routes(
     router = APIRouter(tags=["chat"])
 
     # ------------------------------------------------------------------ #
-    # POST /api/chat (non-streaming)
-    # ------------------------------------------------------------------ #
-    @router.post("/api/chat", response_model=Dict[str, str])
-    async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, str]:
-        _set_user_time_from_request(request)
-
-        message = chat_request.message
-        session = chat_request.session
-        att_ids = chat_request.attachments or []
-        use_web = chat_request.use_web
-        use_research = chat_request.use_research
-        time_filter = chat_request.time_filter
-        preset_id = chat_request.preset_id
-        incognito = bool(getattr(chat_request, "incognito", False))
-
-        # Verify the caller owns this session before loading it.
-        # Without this, any authenticated user can post into another user's chat.
-        _verify_session_owner(request, session)
-
-        try:
-            sess = session_manager.get_session(session)
-        except KeyError:
-            raise HTTPException(404, f"Session '{session}' not found")
-        owner = effective_user(request)
-        if _clear_orphaned_session_endpoint(sess, owner=owner):
-            raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
-
-        # Empty model + live endpoint = setup race (Issue #587). Repair from
-        # the endpoint's cached model list before privilege checks, which
-        # otherwise see "" and behave inconsistently with the allowlist.
-        _recover_empty_session_model(sess, session, owner=owner)
-        if not getattr(sess, "model", "").strip():
-            raise HTTPException(
-                400,
-                "No model selected for this chat. Open the model picker and choose one before sending.",
-            )
-
-        # Same allowed_models + daily-cap gate as chat_stream (mirror so the
-        # non-streaming path can't be used to bypass).
-        _enforce_chat_privileges(request, sess)
-        resolve_session_auth(sess, session, owner=owner)
-        model_target = _resolved_session_target(sess)
-
-        tool_policy = build_effective_tool_policy(last_user_message=message)
-        allow_tool_preprocessing = not incognito and not tool_policy.block_all_tool_calls
-
-        # Inline memory command
-        memory_response = None
-        if not tool_policy.blocks("manage_memory"):
-            is_memory_cmd, _ = memory_manager.process_inline_memory_command(message)
-            if is_memory_cmd:
-                from src.auth_helpers import require_privilege
-                require_privilege(request, "can_manage_memory")
-            memory_response = await chat_handler.handle_memory_command(
-                sess,
-                message,
-                owner=owner,
-                incognito=incognito,
-            )
-        if memory_response:
-            return {"response": memory_response}
-
-        # Build shared context (preset, preprocess, preface, compact)
-        ctx = await build_chat_context(
-            sess, request, chat_handler, chat_processor,
-            message=message,
-            session_id=session,
-            preset_id=preset_id,
-            att_ids=att_ids,
-            use_web=use_web,
-            time_filter=time_filter,
-            incognito=incognito,
-            webhook_manager=webhook_manager,
-            allow_tool_preprocessing=allow_tool_preprocessing,
-            structured_resources=model_target.transport == "acp",
-        )
-
-        # Research injection
-        research_blocked_by_policy = (
-            tool_policy.blocks("trigger_research")
-            or tool_policy.blocks("manage_research")
-        )
-        if use_research and not incognito and not research_blocked_by_policy:
-            try:
-                _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
-                research_ctx = await research_handler.call_research_service(
-                    message,
-                    _r_ep,
-                    _r_model,
-                    llm_headers=_r_headers,
-                    owner=owner or "",
-                    session_id=session,
-                )
-                ctx.messages.insert(
-                    len(ctx.preface),
-                    untrusted_context_message("research context", research_ctx),
-                )
-            except Exception as e:
-                logger.error(f"Research failed: {e}")
-
-        reply = await call_model_target(
-            model_target,
-            ctx.messages,
-            session_id=session,
-            owner=owner,
-            supervisor=getattr(request.app.state, "mimo_supervisor", None),
-            temperature=ctx.preset.temperature,
-            max_tokens=ctx.preset.max_tokens,
-            prompt_type=preset_id,
-            turn_envelope=_turn_envelope(
-                session_id=session,
-                owner=owner,
-                workspace="",
-                model=sess.model,
-                mode="chat",
-                incognito=incognito,
-                preset=ctx.preset,
-                is_admin=_request_owner_is_admin(request, owner),
-            ),
-        )
-        _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
-        if incognito:
-            sess.history.append(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
-            sess.message_count = len(sess.history)
-        else:
-            sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
-            from core.database import update_session_last_accessed
-            update_session_last_accessed(session)
-            session_manager.save_sessions()
-
-        # Background tasks (memory, webhook, auto-name)
-        run_post_response_tasks(
-            sess, session_manager, session, message, reply, None,
-            ctx.uprefs, memory_manager, memory_vector, webhook_manager,
-            character_name=ctx.preset.character_name,
-            owner=ctx.user,
-            incognito=incognito,
-            allow_background_extraction=(not tool_policy.block_all_tool_calls),
-            memory_provider=chat_processor.memory_provider,
-        )
-
-        return {"response": reply}
-
-    # ------------------------------------------------------------------ #
     # POST /api/chat_stream
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
@@ -698,12 +549,15 @@ def setup_chat_routes(
         allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
-        compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
-        incognito = str(form_data.get("incognito", "")).lower() == "true"
-        # Plan mode is not part of the merge-ready UI. Ignore stale clients or
-        # manual form posts that still send plan_mode=true.
-        plan_mode = False
-        chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        compare_mode = str(form_data.get("compare_mode") or (body or {}).get("compare_mode") or "").lower() == "true"
+        incognito = str(form_data.get("incognito") or (body or {}).get("incognito") or "").lower() == "true"
+        plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
+        requested_mode = str(form_data.get("mode") or (body or {}).get("mode") or "").lower()
+        if requested_mode == "chat":
+            raise HTTPException(410, "Chat mode was removed. Send this request as Agent instead.")
+        if requested_mode not in ("", "agent"):
+            raise HTTPException(400, f"Unsupported mode: {requested_mode!r}")
+        chat_mode = "agent"
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -719,32 +573,9 @@ def setup_chat_routes(
         approved_plan = ""
         if not plan_mode:
             approved_plan = (form_data.get("approved_plan") or "").strip()[:8192]
-        # Did the USER explicitly pick agent mode? (vs. us auto-escalating
-        # below). Skill extraction should only learn from real agent sessions,
-        # not chats we quietly promoted for a notes/calendar intent.
-        user_requested_agent = (chat_mode == "agent")
+        user_requested_agent = True
         _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
-        # Intent auto-escalation: if the user is clearly asking the assistant
-        # to create a todo, reminder, or calendar event, promote chat → agent
-        # for this turn so the LLM has access to manage_notes / manage_calendar.
-        # This is a LIGHT promotion — see the disabled_tools block below, which
-        # withholds shell/code/file tools so the model doesn't try to `bash`
-        # its way through a plain chat request (and fail, especially with the
-        # shell disabled).
-        auto_escalated = False
-        _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
-        if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
-            chat_mode = "agent"
-            auto_escalated = True
-            logger.info(
-                "chat→agent auto-escalation: category=%s reason=%s",
-                _tool_intent.category,
-                _tool_intent.reason,
-            )
-        elif chat_mode == "chat" and _search_enabled:
-            chat_mode = "agent"
-            auto_escalated = True
-            logger.info("chat→agent auto-escalation: search enabled")
+        _tool_intent = None
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
@@ -818,6 +649,7 @@ def setup_chat_routes(
             message, session = coerce_message_and_session(
                 body, message, session, session_manager, allow_empty=_has_atts,
             )
+            _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
             # Verify ownership AFTER coerce (which may resolve a default session)
             # but BEFORE loading. Prevents cross-user session hijack.
             _verify_session_owner(request, session)
@@ -836,20 +668,6 @@ def setup_chat_routes(
                 raise HTTPException(
                     400,
                     "No model selected for this chat. Open the model picker and choose one before sending.",
-                )
-            if (
-                chat_mode == "chat"
-                and isinstance(message, str)
-                and (not _tool_intent or not _tool_intent.needs_tools)
-                and _is_contextual_web_followup(message, sess)
-            ):
-                _tool_intent = ToolIntent(True, "web", "contextual web lookup follow-up")
-                chat_mode = "agent"
-                auto_escalated = True
-                logger.info(
-                    "chat→agent auto-escalation: category=%s reason=%s",
-                    _tool_intent.category,
-                    _tool_intent.reason,
                 )
         except SessionNotFoundError as e:
             raise HTTPException(404, str(e))
@@ -1025,6 +843,7 @@ def setup_chat_routes(
 
         # Build disabled-tools set from frontend toggles + user privileges
         disabled_tools = set()
+        allowed_tools = None
         # Only disable bash when the caller *explicitly* set it to a falsy
         # value. When unset (None), defer to per-user privilege checks below.
         # Web search is per-turn opt-in: either the chat pre-search setting
@@ -1098,45 +917,27 @@ def setup_chat_routes(
             if not _privs.get("can_use_research", True):
                 _research_flags["do"] = False
             if not _privs.get("can_use_agent", True):
-                _effective_mode = 'chat'
-                chat_mode = 'chat'
+                raise HTTPException(403, "Agent access is disabled for this account.")
         # Global admin disabled tools
         from src.settings import get_setting
         _global_disabled = get_setting("disabled_tools", [])
         if _global_disabled and isinstance(_global_disabled, list):
             disabled_tools.update(_global_disabled)
 
-        # Light auto-escalation: the user is in chat mode and just expressed a
-        # notes/calendar/email intent. Grant the relevant managers but withhold
-        # the heavy "do things on the computer" tools — otherwise the model
-        # tries to shell out for a request that never needed it, then fails
-        # (and looks broken when the shell is disabled).
-        if auto_escalated:
-            disabled_tools.update({
-                "bash", "python", "read_file", "write_file", "builtin_browser",
-            })
-
-        # Disable document tools in compare sessions — they break the pane UI
-        if sess.name and sess.name.startswith("[CMP]"):
-            disabled_tools.update({"create_document", "edit_document", "update_document"})
-
-        # Compare mode: disable tools based on compare type
+        # Compare is a server-owned positive read-only capability gate. Client
+        # flags can narrow it through disabled_tools, never widen it.
         if compare_mode:
-            _compare_strip = {
-                "create_document", "edit_document", "update_document",
-                "chat_with_model", "create_session", "list_sessions",
-                "send_to_session",
-                "pipeline", "manage_session", "manage_memory", "list_models",
-                "generate_image", "ui_control",
-            }
-            disabled_tools.update(_compare_strip)
-            # In chat mode compare, disable ALL agent tools (no bash, python, file ops)
-            if chat_mode == 'chat':
-                disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "web_fetch", "search_chats", "manage_tasks"})
+            from src.tool_security import (
+                COMPARE_READONLY_TOOLS,
+                compare_mode_disabled_tools,
+            )
+
+            allowed_tools = set(COMPARE_READONLY_TOOLS)
+            disabled_tools.update(compare_mode_disabled_tools())
 
         # Plan mode: investigate read-only, propose a plan, don't mutate. Block
-        # every tool not on the read-only allowlist. (stream_agent_loop enforces
-        # this again + drops MCP, so this is belt-and-suspenders.)
+        # every tool not on the read-only allowlist; the ACP envelope enforces
+        # the same authority server-side.
         if plan_mode:
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
@@ -1154,20 +955,12 @@ def setup_chat_routes(
             do_research and _research_flags["do"] and not research_blocked_by_policy
         )
 
-        # Persist session mode after policy/privilege gates so blocked research
-        # turns remain ordinary chat/agent streams and saved messages.
-        _effective_mode = 'research' if effective_do_research else (chat_mode or 'chat')
-        if _effective_mode in ('agent', 'research', 'chat'):
-            set_session_mode(session, _effective_mode)
+        _effective_mode = 'research' if effective_do_research else 'agent'
+        set_session_mode(session, _effective_mode)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
-            # model_target IS reassigned (the mimo agent-mode ACP rewrite),
-            # so it must be nonlocal — a bare assignment would shadow it as
-            # a closure local and blow up every earlier read with
-            # UnboundLocalError (live 500, 2026-07-17).
-            nonlocal model_target
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -1247,9 +1040,14 @@ def setup_chat_routes(
                                 _md["research_sources"] = _sources
                             if _findings:
                                 _md["research_findings"] = _findings
-                            _clean_res, _md = clean_thinking_for_save(_result, _md)
-                            _s.add_message(ChatMessage("assistant", _clean_res, metadata=_md))
-                            session_manager.save_sessions()
+                            save_assistant_response(
+                                _s,
+                                session_manager,
+                                _sid,
+                                _result,
+                                _md,
+                                research_sources=_sources,
+                            )
                             logger.info(f"Research result persisted to DB for session {_sid}")
                         except Exception as _e:
                             logger.error(f"Failed to persist research to DB: {_e}")
@@ -1401,234 +1199,23 @@ def setup_chat_routes(
                 full_response = _desc
                 yield f'data: {json.dumps({"delta": _desc})}\n\n'
                 # Save to session history
-                if not incognito:
-                    _ev = {"round": 1, "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
-                    for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
-                        if _img_result.get(_ek):
-                            _ev[_ek] = _img_result[_ek]
-                    sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
-                    session_manager.save_sessions()
+                _ev = {"round": 1, "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
+                for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
+                    if _img_result.get(_ek):
+                        _ev[_ek] = _img_result[_ek]
+                save_assistant_response(
+                    sess,
+                    session_manager,
+                    session,
+                    full_response,
+                    {"model": sess.model},
+                    tool_events=[_ev],
+                    incognito=incognito,
+                )
                 yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'
                 yield "data: [DONE]\n\n"
                 _active_streams.pop(session, None)
                 return
-            elif chat_mode == "chat":
-                _chat_start = time.time()
-                _answered_by = None  # set if the selected model failed and a fallback answered
-                _requested_model = sess.model
-                _actual_model = None
-                # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
-                try:
-                    _chat_envelope = _turn_envelope(
-                        session_id=session,
-                        owner=_user,
-                        workspace=workspace,
-                        model=sess.model,
-                        mode="chat",
-                        incognito=incognito,
-                        disabled_tools=disabled_tools,
-                        preset=ctx.preset,
-                        active_document=active_doc,
-                        active_email=active_email_ctx,
-                        no_memory=no_memory,
-                        compare_mode=compare_mode,
-                        is_admin=_request_owner_is_admin(request, _user),
-                    )
-                    # T8 pull affordance (PULL-MECH option B): on the HTTP leg,
-                    # chat mode runs the SAME agent loop with exactly one
-                    # read-only tool — recall_memory — so the model can pull a
-                    # memory it saw in the index pitch. Everything else stays
-                    # denied; tiny call/round budget. Incognito and no-memory
-                    # turns keep the historical no-tools stream. The ACP leg
-                    # ignores these kwargs: mimo's chat agent enforces the same
-                    # single-tool policy natively (hardPermission memory allow).
-                    _memory_pull = (
-                        not incognito
-                        and not no_memory
-                        and chat_processor.memory_provider is not None
-                        and hasattr(chat_processor.memory_provider, "digest")
-                    )
-                    if _memory_pull and model_target.transport != "acp":
-                        from src.tool_policy import CHAT_MODE_TOOL_NOTE, known_tool_names
-
-                        # Lane framing parity with mimo's chat.txt: the model
-                        # knows this is Chat mode with one read-only tool AND
-                        # that the full toolset exists in Agent mode — so it
-                        # points the user there instead of denying the
-                        # capability exists.
-                        _pull_messages = list(messages) + [
-                            {"role": "system", "content": CHAT_MODE_TOOL_NOTE}
-                        ]
-                        _chunk_iter = stream_agent_target(
-                            model_target,
-                            _pull_messages,
-                            session_id=session,
-                            owner=_user,
-                            cwd=workspace or None,
-                            supervisor=getattr(request.app.state, "mimo_supervisor", None),
-                            fallbacks=_fallback_candidates,
-                            temperature=ctx.preset.temperature,
-                            max_tokens=ctx.preset.max_tokens,
-                            prompt_type=preset_id,
-                            relevant_tools={"recall_memory"},
-                            disabled_tools=known_tool_names() - {"recall_memory"},
-                            max_tool_calls=2,
-                            max_rounds=3,
-                            turn_envelope=_chat_envelope,
-                        )
-                    else:
-                        _chunk_iter = stream_chat_target(
-                            model_target,
-                            messages,
-                            session_id=session,
-                            owner=_user,
-                            cwd=workspace or None,
-                            supervisor=getattr(request.app.state, "mimo_supervisor", None),
-                            fallbacks=_fallback_candidates,
-                            temperature=ctx.preset.temperature,
-                            # Respect the preset; 0/unset = let the server decide (no
-                            # cap), matching agent mode. The old hard 4096 fallback
-                            # truncated reasoning models mid-<think> — they'd burn the
-                            # whole budget thinking and never emit the answer (seen in
-                            # Compare on heavy generation prompts).
-                            max_tokens=ctx.preset.max_tokens,
-                            prompt_type=preset_id,
-                            tools=None,
-                            turn_envelope=_chat_envelope,
-                        )
-                    async for chunk in _chunk_iter:
-                        if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                            try:
-                                data = json.loads(chunk[6:])
-                                if "delta" in data:
-                                    # Reasoning tokens arrive flagged thinking:true.
-                                    # Forward them so the client can show a thinking
-                                    # indicator, but don't fold them into the saved
-                                    # reply (mirrors the rewrite path below).
-                                    if data.get("thinking"):
-                                        thinking_response += data["delta"]
-                                    else:
-                                        full_response += data["delta"]
-                                        _stream_set(session, partial=full_response)
-                                    yield chunk
-                                elif data.get("type") in (
-                                    "tool_start", "tool_progress", "tool_output",
-                                    "user_replay", "ask_user", "plan_update",
-                                    "permission_request", "commands_update",
-                                    "mode_update", "config_update", "session_info",
-                                    "protocol_error", "config_error", "rounds_exhausted",
-                                ):
-                                    yield chunk
-                                elif data.get("type") == "fallback":
-                                    # Selected model failed; a fallback answered.
-                                    # Forward the notice and remember the real model.
-                                    _answered_by = data.get("answered_by") or _answered_by
-                                    _actual_model = _actual_model or _answered_by
-                                    data["selected_model"] = data.get("selected_model") or _requested_model
-                                    yield chunk
-                                elif data.get("type") == "model_actual":
-                                    _actual_model = data.get("model") or _actual_model
-                                    data["requested_model"] = _requested_model
-                                    yield f'data: {json.dumps(data)}\n\n'
-                                elif data.get("type") == "usage":
-                                    last_metrics = data.get("data", {})
-                                    _reported_model = last_metrics.get("model")
-                                    last_metrics["requested_model"] = _requested_model
-                                    last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
-                                    if ctx.context_trimmed:
-                                        last_metrics["context_trimmed"] = True
-                                        last_metrics["context_messages_before_trim"] = ctx.context_messages_before_trim
-                                        last_metrics["context_messages_after_trim"] = ctx.context_messages_after_trim
-                                        last_metrics["context_tokens_before_trim"] = ctx.context_tokens_before_trim
-                                        last_metrics["context_tokens_after_trim"] = ctx.context_tokens_after_trim
-                                    if ctx.context_length and last_metrics.get("input_tokens"):
-                                        pct = min(round((last_metrics["input_tokens"] / ctx.context_length) * 100, 1), 100.0)
-                                        last_metrics["context_percent"] = pct
-                                        last_metrics["context_length"] = ctx.context_length
-                                    # The frontend reads `tokens_per_second`; the raw usage event
-                                    # carries the backend's true gen speed as `gen_tps` (llama.cpp
-                                    # timings). Map it through so this direct-chat path shows real
-                                    # t/s instead of "n/a" → falling back to a bare token count.
-                                    if last_metrics.get("gen_tps") and not last_metrics.get("tokens_per_second"):
-                                        last_metrics["tokens_per_second"] = last_metrics["gen_tps"]
-                                        last_metrics["tps_source"] = "backend"
-                                    # Wall-clock response time for the stats popup ("Time").
-                                    last_metrics.setdefault("response_time", round(time.time() - _chat_start, 2))
-                                    yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
-                            except json.JSONDecodeError:
-                                yield chunk
-                        elif chunk.startswith("event: error"):
-                            logger.warning(f"Stream error for {sess.model} on {sess.endpoint_url}: {chunk!r}")
-                            yield chunk
-                        elif chunk.startswith("event: "):
-                            yield chunk
-                        elif chunk == "data: [DONE]\n\n":
-                            # Generate fallback metrics if LLM didn't send usage
-                            if not last_metrics and full_response:
-                                _elapsed = time.time() - _chat_start
-                                _est_in = estimate_tokens(messages)
-                                _est_out = len(full_response) // 4
-                                _tps = round(_est_out / _elapsed, 2) if _elapsed > 0 else 0
-                                _ctx_pct = min(round((_est_in / ctx.context_length) * 100, 1), 100.0) if ctx.context_length else 0
-                                last_metrics = {
-                                    "response_time": round(_elapsed, 2),
-                                    "input_tokens": _est_in,
-                                    "output_tokens": _est_out,
-                                    "tokens_per_second": _tps,
-                                    "context_percent": _ctx_pct,
-                                    "context_length": ctx.context_length,
-                                    "model": _actual_model or _answered_by or _requested_model,
-                                    "requested_model": _requested_model,
-                                    "usage_source": "estimated",
-                                }
-                                yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
-                            if full_response:
-                                _metrics_to_save = dict(last_metrics or {})
-                                if thinking_response.strip() and not _metrics_to_save.get("thinking"):
-                                    _metrics_to_save["thinking"] = thinking_response.strip()
-                                _saved_id = save_assistant_response(
-                                    sess, session_manager, session, full_response, _metrics_to_save,
-                                    character_name=ctx.preset.character_name,
-                                    web_sources=web_sources,
-                                    rag_sources=ctx.rag_sources,
-                                    research_sources=research_sources,
-                                    used_memories=ctx.used_memories,
-                                    do_research=effective_do_research,
-                                    incognito=incognito,
-                                )
-                                if _saved_id:
-                                    yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
-                                run_post_response_tasks(
-                                    sess, session_manager, session, message, full_response,
-                                    _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
-                                    incognito=incognito, compare_mode=compare_mode,
-                                    character_name=ctx.preset.character_name,
-                                    owner=_user,
-                                    allow_background_extraction=(not tool_policy.block_all_tool_calls),
-                                    memory_provider=chat_processor.memory_provider,
-                                )
-                            _stream_set(session, status="done")
-                            yield chunk
-                except (asyncio.CancelledError, GeneratorExit):
-                    if full_response:
-                        logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
-                        _stopped_content, _stopped_md = clean_thinking_for_save(
-                            full_response,
-                            {
-                                "stopped": True,
-                                "model": _actual_model or _answered_by or _requested_model,
-                                "requested_model": _requested_model,
-                            },
-                        )
-                        if incognito:
-                            sess.history.append(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
-                            sess.message_count = len(sess.history)
-                        else:
-                            sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
-                            session_manager.save_sessions()
-                    raise
-                finally:
-                    _active_streams.pop(session, None)
             else:
                 # ── Agent mode: full agent loop with tools ──
                 _agent_rounds = 0
@@ -1637,6 +1224,7 @@ def setup_chat_routes(
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
+                _agent_error = None
                 try:
                     from src.settings import get_setting
                     from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
@@ -1668,6 +1256,7 @@ def setup_chat_routes(
                         mode="plan" if plan_mode else "agent",
                         incognito=incognito,
                         disabled_tools=disabled_tools,
+                        allowed_tools=allowed_tools,
                         forced_tools=_forced_tools,
                         max_tool_calls=_tool_budget,
                         max_rounds=_max_rounds,
@@ -1679,22 +1268,12 @@ def setup_chat_routes(
                         is_admin=_request_owner_is_admin(request, _user),
                     )
 
-                    # MiMo drives agent mode (e's ruling 2026-07-17): when the
-                    # session's model is servable through a projected endpoint
-                    # provider, rewrite the target to ACP so mimo's native tool
-                    # engine runs the turn. The homegrown loop only serves
-                    # models mimo cannot. When mimo takes the turn it also owns
-                    # retries — drop the http fallback chain.
-                    from src.model_dispatch import mimo_agent_target
-
-                    _acp_target = await mimo_agent_target(
-                        model_target,
-                        owner=_user,
-                        supervisor=getattr(request.app.state, "mimo_supervisor", None),
-                    )
-                    if _acp_target is not None:
-                        model_target = _acp_target
-                        _fallback_candidates = []
+                    # stream_agent_target -> run_agent is the one strict Agent
+                    # admission door. It owns endpoint-to-ACP projection and
+                    # converts expected preflight failures into terminal typed
+                    # SSE results. Keeping a second route-level rewrite here
+                    # bypassed that contract and turned admissions into 500s.
+                    _fallback_candidates = []
 
                     _chunk_source = stream_agent_target(
                         model_target,
@@ -1747,6 +1326,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "permission_request",
+                                    "actor_accounting", "actor_accounting_failure",
                                     "user_replay", "usage", "commands_update",
                                     "mode_update", "config_update", "session_info",
                                     "protocol_error", "config_error",
@@ -1755,10 +1335,11 @@ def setup_chat_routes(
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
-                                    elif model_target.transport == "acp" and data.get("type") == "tool_output":
+                                    elif data.get("type") == "tool_output":
                                         raw = data.get("data") if isinstance(data.get("data"), dict) else {}
                                         raw_input = raw.get("rawInput")
                                         event = {
+                                            "id": data.get("id") or raw.get("toolCallId") or raw.get("tool_call_id"),
                                             "round": max(1, _agent_rounds or 1),
                                             "tool": data.get("tool") or raw.get("title") or "tool",
                                             "command": json.dumps(raw_input, ensure_ascii=False) if raw_input else "",
@@ -1774,8 +1355,9 @@ def setup_chat_routes(
                                                 }
                                                 break
                                         _agent_tool_events.append(event)
-                                    elif model_target.transport == "acp" and data.get("type") == "ask_user":
+                                    elif data.get("type") == "ask_user":
                                         _agent_tool_events.append({
+                                            "id": data.get("id") or (data.get("data") or {}).get("id"),
                                             "round": max(1, _agent_rounds or 1),
                                             "tool": "question",
                                             "output": "",
@@ -1811,10 +1393,34 @@ def setup_chat_routes(
                             except json.JSONDecodeError:
                                 yield chunk
                         elif chunk.startswith("event: "):
+                            _parsed_error = _agent_error_from_sse(chunk)
+                            if _parsed_error is not None:
+                                _agent_error = _parsed_error
+                                _stream_set(session, status="error", error=_agent_error)
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
                             _has_tool_events = bool((last_metrics or {}).get("tool_events"))
-                            if full_response or _agent_tool_events or _has_tool_events:
+                            if _agent_error is not None:
+                                _metrics_to_save = {
+                                    "agent_status": "error",
+                                    "error": _agent_error,
+                                    "model": _actual_model or _requested_model,
+                                    "requested_model": _requested_model,
+                                }
+                                _response_to_save = f"Agent could not start: {_agent_error.get('error') or 'Unknown admission error.'}"
+                                _saved_id = save_assistant_response(
+                                    sess,
+                                    session_manager,
+                                    session,
+                                    _response_to_save,
+                                    _metrics_to_save,
+                                    character_name=ctx.preset.character_name,
+                                    incognito=incognito,
+                                )
+                                if _saved_id:
+                                    yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                _stream_set(session, status="error", error=_agent_error)
+                            elif full_response or _agent_tool_events or _has_tool_events:
                                 _response_to_save = full_response or "Done."
                                 _metrics_to_save = dict(last_metrics or {})
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
@@ -1830,6 +1436,14 @@ def setup_chat_routes(
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                    _root_turn_id = str(_metrics_to_save.get("root_turn_id") or "")
+                                    if _root_turn_id:
+                                        from src.agent_actor_accounting import close_agent_turn
+
+                                        _actor_accounting = close_agent_turn(_root_turn_id, _saved_id)
+                                        yield f'data: {json.dumps({"type": "actor_accounting", "data": _actor_accounting})}\n\n'
+                                        if _actor_accounting.get("state") == "unavailable":
+                                            yield f'data: {json.dumps({"type": "actor_accounting_failure", "data": _actor_accounting})}\n\n'
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, _response_to_save,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
@@ -1843,7 +1457,8 @@ def setup_chat_routes(
                                     allow_background_extraction=(not tool_policy.block_all_tool_calls),
                                     memory_provider=chat_processor.memory_provider,
                                 )
-                            _stream_set(session, status="done")
+                            if _agent_error is None:
+                                _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
                     # Client disconnected — save partial response. Wrap
@@ -1855,20 +1470,19 @@ def setup_chat_routes(
                     try:
                         if full_response:
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
-                            _stopped_content2, _stopped_md2 = clean_thinking_for_save(
+                            save_assistant_response(
+                                sess,
+                                session_manager,
+                                session,
                                 full_response,
                                 {
                                     "stopped": True,
                                     "model": _actual_model or _answered_by or _requested_model,
                                     "requested_model": _requested_model,
                                 },
+                                tool_events=_agent_tool_events or None,
+                                incognito=incognito,
                             )
-                            if incognito:
-                                sess.history.append(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
-                                sess.message_count = len(sess.history)
-                            else:
-                                sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
-                                session_manager.save_sessions()
                     except Exception:
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise

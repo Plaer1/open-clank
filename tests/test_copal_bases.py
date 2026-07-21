@@ -155,3 +155,95 @@ def test_frontmatter_edit_is_revision_payload_friendly_and_rejects_file_fields()
     assert inserted.startswith("---\nscore: 7\n---\n")
     with pytest.raises(BaseDefinitionError):
         set_frontmatter_property("# Note", "file.name", "nope")
+
+
+def test_card_and_list_view_types_are_accepted():
+    definition, _ = parse_base_definition("""
+version: 1
+views:
+  - name: Cards
+    type: card
+    columns:
+      - file.name
+      - status
+  - name: List
+    type: list
+    columns:
+      - file.name
+""")
+    assert definition["views"][0]["type"] == "card"
+    assert definition["views"][1]["type"] == "list"
+
+
+def test_unsupported_view_type_rejected():
+    with pytest.raises(BaseDefinitionError) as exc:
+        parse_base_definition("""
+version: 1
+views:
+  - name: Board
+    type: board
+    columns:
+      - file.name
+""")
+    assert exc.value.diagnostics[0]["code"] == "unsupported_view"
+
+
+def test_view_type_preserved_through_round_trip():
+    source = {
+        "version": 1,
+        "views": [
+            {"name": "Cards", "type": "card", "columns": ["file.name"]},
+            {"name": "List", "type": "list", "columns": ["file.name"]},
+        ],
+    }
+    first, _ = parse_base_definition(dump_base_definition(source))
+    assert first["views"][0]["type"] == "card"
+    assert first["views"][1]["type"] == "list"
+    second, _ = parse_base_definition(dump_base_definition(first))
+    assert second == first
+
+
+def test_nested_filter_preserved_through_canonicalization():
+    definition, _ = parse_base_definition("""
+version: 1
+views:
+  - name: Nested
+    columns:
+      - file.name
+    filters:
+      and:
+        - property: status
+          operator: eq
+          value: active
+        - or:
+          - property: category
+            operator: eq
+            value: tools
+          - property: category
+            operator: eq
+            value: supplies
+""")
+    filters = definition["views"][0]["filters"]
+    assert "and" in filters
+    assert len(filters["and"]) == 2
+    assert "or" in filters["and"][1]
+    assert len(filters["and"][1]["or"]) == 2
+
+
+def test_query_base_works_with_card_view():
+    definition, _ = parse_base_definition("""
+version: 1
+views:
+  - name: Cards
+    type: card
+    columns:
+      - file.name
+      - status
+""")
+    documents = [
+        _doc("A", "Task1.md", status="active"),
+        _doc("B", "Task2.md", status="done"),
+    ]
+    result = query_base(definition, documents, page=1, page_size=10)
+    assert result["total"] == 2
+    assert result["view"]["type"] == "card"

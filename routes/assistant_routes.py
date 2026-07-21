@@ -34,6 +34,7 @@ class AssistantSettingsUpdate(BaseModel):
     personality: Optional[str] = None
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
+    endpoint_id: Optional[str] = None
     enabled_tools: Optional[list[str]] = None
     allow_autonomous_email: Optional[bool] = None  # convenience toggle
     timezone: Optional[str] = None
@@ -55,6 +56,7 @@ def _crew_to_dict(c: CrewMember) -> dict:
         "personality": c.personality,
         "model": c.model,
         "endpoint_url": c.endpoint_url,
+        "endpoint_id": getattr(c, "endpoint_id", None),
         "greeting": c.greeting,
         "enabled_tools": tools,
         "session_id": c.session_id,
@@ -186,14 +188,36 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                 )
             if payload.model is not None:
                 crew_db.model = payload.model or None
-            if payload.endpoint_url is not None:
-                crew_db.endpoint_url = payload.endpoint_url or None
+            if "endpoint_id" in payload.model_fields_set:
+                if payload.endpoint_id:
+                    from core.database import ModelEndpoint
+                    from src.auth_helpers import owner_filter
+                    from src.endpoint_resolver import build_chat_url, normalize_base
+                    query = db.query(ModelEndpoint).filter(
+                        ModelEndpoint.id == payload.endpoint_id,
+                        ModelEndpoint.is_enabled == True,  # noqa: E712
+                    )
+                    endpoint = owner_filter(query, ModelEndpoint, owner).first()
+                    if endpoint is None:
+                        raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
+                    crew_db.endpoint_id = endpoint.id
+                    crew_db.endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
+                else:
+                    crew_db.endpoint_id = None
+                    crew_db.endpoint_url = None
+            elif payload.endpoint_url is not None:
+                raise HTTPException(400, "Assistant model settings require endpoint_id")
             if payload.timezone is not None:
                 crew_db.timezone = payload.timezone or None
 
             # Tool list: either explicit list, or implicit toggle.
             if payload.enabled_tools is not None:
-                crew_db.enabled_tools = json.dumps(payload.enabled_tools)
+                from src.tool_policy import known_tool_names
+                enabled = sorted({str(tool).strip() for tool in payload.enabled_tools if str(tool).strip()})
+                unknown = set(enabled) - known_tool_names()
+                if unknown:
+                    raise HTTPException(400, f"Unknown assistant tools: {', '.join(sorted(unknown))}")
+                crew_db.enabled_tools = json.dumps(enabled)
             if payload.allow_autonomous_email is not None:
                 try:
                     existing = json.loads(crew_db.enabled_tools) if crew_db.enabled_tools else []
@@ -231,6 +255,11 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                         task.prompt = ci.prompt
                     if ci.enabled is not None:
                         task.status = "active" if ci.enabled else "paused"
+                    task.endpoint_id = crew_db.endpoint_id
+                    task.endpoint_url = crew_db.endpoint_url
+                    task.model = crew_db.model
+                    task.allowed_tools = crew_db.enabled_tools or "[]"
+                    task.interaction_policy = "fail_on_interaction"
                     if time_changed or ci.enabled is True:
                         task.next_run = compute_next_run(
                             task.schedule or "daily",
@@ -258,6 +287,16 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                             t.schedule, t.scheduled_time, t.scheduled_day, t.scheduled_date,
                             after=now_utc, cron_expression=t.cron_expression, tz_name=tz_name,
                         )
+
+            # The pinned assistant chat and its headless tasks share one exact
+            # registered endpoint identity; never let URL-only copies drift.
+            if crew_db.session_id:
+                from core.database import Session as DbSession
+                pinned = db.query(DbSession).filter(DbSession.id == crew_db.session_id).first()
+                if pinned:
+                    pinned.endpoint_id = crew_db.endpoint_id
+                    pinned.endpoint_url = crew_db.endpoint_url or ""
+                    pinned.model = crew_db.model or ""
 
             db.commit()
 

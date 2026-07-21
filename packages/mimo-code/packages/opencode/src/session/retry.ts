@@ -21,6 +21,23 @@ export function isRateLimitMessage(message: string): boolean {
   )
 }
 
+// Quota / credit exhaustion — 429s that will not clear for hours or days
+// (weekly/monthly caps, spent credit balance). Retrying before the reset
+// burns requests and hangs the turn in an invisible loop, so these are
+// terminal even though the transport status says "retryable".
+const QUOTA_EXHAUSTED_PATTERNS = [
+  /limit exhausted/i, // z.ai "Weekly/Monthly Limit Exhausted. Your limit will reset at …"
+  /insufficient_quota/i, // openai error code
+  /exceeded your current quota/i, // openai message
+  /credit balance is too low/i, // anthropic
+  /out of credits/i, // openrouter
+  /quota exceeded/i, // google + generic
+]
+
+export function isQuotaExhaustedMessage(text: string): boolean {
+  return QUOTA_EXHAUSTED_PATTERNS.some((pattern) => pattern.test(text))
+}
+
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
@@ -42,6 +59,9 @@ const RETRYABLE_HTTP_STATUS = new Set([429, 500, 502, 503, 504, 529])
  */
 export function isRetryableTransientError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
+
+  const detail = `${error.message} ${(error as { responseBody?: string }).responseBody ?? ""}`
+  if (isQuotaExhaustedMessage(detail)) return false
 
   const status =
     (error as { status?: number }).status ??
@@ -97,6 +117,13 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
 export function retryable(error: Err) {
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
+
+  // Quota exhaustion is terminal: surface it instead of retrying into a wall
+  // that only moves at the provider's weekly/monthly reset.
+  const quotaText = [error.data?.message, (error.data as { responseBody?: string } | undefined)?.responseBody]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+  if (quotaText && isQuotaExhaustedMessage(quotaText)) return undefined
 
   // Catch raw Error / network / SSE-timeout BEFORE APIError narrowing.
   // SessionRetry.policy unwraps Cause<unknown> via opts.parse, but raw

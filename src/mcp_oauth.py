@@ -140,7 +140,7 @@ class DbTokenStorage:
 
 def build_provider(server_id: str, url: str, on_redirect=None):
     """Construct an OAuthClientProvider that drives the browser flow via the
-    Odysseus callback route.
+    Open Clank callback route.
 
     on_redirect(authorization_url): optional sync callback invoked the moment
     the authorization URL is known (after discovery + DCR). The manager uses it
@@ -151,7 +151,7 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     from mcp.shared.auth import OAuthClientMetadata
 
     client_metadata = OAuthClientMetadata(
-        client_name="Odysseus",
+        client_name="Open Clank",
         redirect_uris=[REDIRECT_URI],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],

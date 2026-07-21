@@ -13,6 +13,9 @@ import re
 import shutil
 import signal
 import socket
+import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import timezone
 from pathlib import Path
 from typing import Optional
@@ -45,11 +48,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # single read (asyncio's default is 64 KiB — a live worker-killer).
 ACP_STDOUT_LIMIT = 32 * 1024 * 1024
 
-_RESTART_DELAY_INITIAL = 1.0
+_READINESS_BUDGET = float(os.environ.get("ODYSSEUS_MIMO_READINESS_BUDGET", "30"))
+_RESTART_DELAY_INITIAL = 0.25
 _RESTART_DELAY_MAX = 5.0
 _RESTART_DELAY_MULTIPLIER = 2.0
-_MAX_RESTART_ATTEMPTS = 10
-_RESTART_WINDOW = 60.0  # reset attempt counter after this many seconds of stability
 
 # Model ids that cannot hold a chat conversation — never a small_model pick.
 _NON_CHAT_MODEL_RE = re.compile(r"tts|voice|embed|rerank|image|audio|video|ocr|asr", re.IGNORECASE)
@@ -85,7 +87,10 @@ _OPENCLAW_PROVIDER_ENV = {
     "xiaomi": "XIAOMI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
 }
-_MAX_PROVIDER_KEY_LENGTH = 1024
+# OAuth access JWTs are routinely larger than static API keys (the ChatGPT
+# subscription token is currently ~2.3 KiB). Keep the handoff bounded while
+# allowing a normal HTTP authorization credential through.
+_MAX_PROVIDER_KEY_LENGTH = 8192
 
 
 def _mimo_child_environment() -> dict[str, str]:
@@ -214,22 +219,20 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
     (cached + pinned − hidden; no probing at spawn). Keys ride the
     credential dict for the pipe FD, NEVER the config content or env.
 
-    This is why mimo can drive the agent lane for operator models
-    (e's ruling 2026-07-17): mimo's native tool engine takes any
-    OpenAI-compatible provider, so the homegrown loop only remains for
-    models that don't project. supports_tools == False rows are
-    skipped — agent mode is function calling.
+    MiMo can drive every OpenAI-compatible model here. Per-model Tools
+    preferences control the turn's tool policy, not whether the model exists
+    in the runtime catalog.
     """
-    if os.environ.get("ODYSSEUS_PROJECT_ENDPOINTS", "").strip().lower() in {"0", "false", "no"}:
-        return {}, {}
     try:
         from core.database import SessionLocal, ModelEndpoint
         from src.auth_helpers import owner_filter
         from src.endpoint_resolver import (
             _endpoint_enabled_models,
+            build_headers,
             normalize_base,
             resolve_endpoint_runtime,
         )
+        from src.chatgpt_subscription import is_chatgpt_subscription_base
     except Exception as exc:  # pragma: no cover - import cycle guard
         logger.warning("endpoint projection unavailable: %s", exc)
         return {}, {}
@@ -241,45 +244,54 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
         query = owner_filter(query, ModelEndpoint, owner or "")
         rows = query.all()
+        for ep in rows:
+            if (getattr(ep, "model_type", None) or "llm") != "llm":
+                continue
+            try:
+                base, api_key = resolve_endpoint_runtime(ep, owner=owner or None)
+            except Exception as exc:
+                logger.warning("endpoint %s credential resolution failed: %s", ep.id, exc)
+                continue
+            base = normalize_base(base or "")
+            if not base.startswith(("http://", "https://")):
+                continue
+            model_ids = _endpoint_enabled_models(ep)
+            if not model_ids:
+                continue
+            provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
+            is_chatgpt_subscription = is_chatgpt_subscription_base(base)
+            adapter = (
+                "@ai-sdk/openai"
+                if is_chatgpt_subscription
+                else "@ai-sdk/openai-compatible"
+            )
+            options = {"baseURL": base}
+            if is_chatgpt_subscription:
+                headers = build_headers(api_key, base)
+                headers.pop("Authorization", None)
+                options["headers"] = headers
+            providers[provider_id] = {
+                "name": ep.name or ep.id,
+                "npm": adapter,
+                "api": base,
+                "options": options,
+                "models": {
+                    model_id: {
+                        "id": model_id,
+                        "name": model_id,
+                        "provider": {"npm": adapter, "api": base},
+                    }
+                    for model_id in model_ids
+                },
+                "only_configured_models": True,
+            }
+            if isinstance(api_key, str) and 0 < len(api_key) <= _MAX_PROVIDER_KEY_LENGTH:
+                credentials[provider_id] = api_key
     except Exception as exc:
         logger.warning("endpoint projection query failed: %s", exc)
         return {}, {}
     finally:
         db.close()
-
-    for ep in rows:
-        if getattr(ep, "supports_tools", None) is False:
-            continue
-        try:
-            base, api_key = resolve_endpoint_runtime(ep, owner=owner or None)
-        except Exception as exc:
-            logger.warning("endpoint %s credential resolution failed: %s", ep.id, exc)
-            continue
-        base = normalize_base(base or "")
-        if not base.startswith(("http://", "https://")):
-            continue
-        model_ids = _endpoint_enabled_models(ep)
-        if not model_ids:
-            continue
-        provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
-        adapter = "@ai-sdk/openai-compatible"
-        providers[provider_id] = {
-            "name": ep.name or ep.id,
-            "npm": adapter,
-            "api": base,
-            "options": {"baseURL": base},
-            "models": {
-                model_id: {
-                    "id": model_id,
-                    "name": model_id,
-                    "provider": {"npm": adapter, "api": base},
-                }
-                for model_id in model_ids
-            },
-            "only_configured_models": True,
-        }
-        if isinstance(api_key, str) and 0 < len(api_key) <= _MAX_PROVIDER_KEY_LENGTH:
-            credentials[provider_id] = api_key
 
     return ({"provider": providers} if providers else {}), credentials
 
@@ -359,14 +371,15 @@ class MimoSupervisor:
         partitioned: bool = False,
         inherit_host_providers: bool = False,
         grant_store=None,
+        projection_snapshot=None,
+        projection_generation: int = 0,
+        crash_callback=None,
     ) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
         self._client: ACPClient | None = None
         self._bridge: ACPBridge | None = None
         self._health_task: asyncio.Task | None = None
-        self._restart_count = 0
-        self._last_restart_time = 0.0
         self._stopping = False
         self._owner = owner
         self._permission_handler = permission_handler
@@ -376,6 +389,10 @@ class MimoSupervisor:
         self._runtime_home = runtime_home
         self._partitioned = partitioned
         self._inherit_host_providers = inherit_host_providers
+        self.projection_snapshot = projection_snapshot
+        self.installed_fingerprint = getattr(projection_snapshot, "fingerprint", "")
+        self.installed_generation = projection_generation
+        self._crash_callback = crash_callback
         self._provider_apis: dict[str, str] = {}
         self._mimocode_home: str | None = None
         # The ACP command already owns an HTTP server. Pin its loopback port so
@@ -456,28 +473,20 @@ class MimoSupervisor:
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
         self._mimocode_home = env["MIMOCODE_HOME"]
         self._reconcile_auth_store()
-        merged_providers: dict[str, dict] = {}
-        merged_credentials: dict[str, str] = {}
-        if self._inherit_host_providers:
-            provider_config, provider_credentials = _load_openclaw_providers()
-            if provider_config:
-                merged_providers.update(provider_config["provider"])
-                merged_credentials.update(provider_credentials)
-        # The operator's own endpoint registry projects unconditionally —
-        # this is what lets mimo drive the agent lane for every
-        # OpenAI-compatible model Odysseus knows (e's ruling 2026-07-17).
-        registry_config, registry_credentials = _endpoint_registry_providers(self._owner)
-        if registry_config:
-            # Openclaw entries win on id collision; the ody- namespace
-            # should make collisions impossible anyway.
-            for pid, cfg in registry_config["provider"].items():
-                merged_providers.setdefault(pid, cfg)
-            for pid, key in registry_credentials.items():
-                merged_credentials.setdefault(pid, key)
+        snapshot = self.projection_snapshot
+        if snapshot is None:
+            from src.openclank.mimo_projection import build_projection_snapshot
+            snapshot = build_projection_snapshot(
+                self._owner, inherit_host_providers=self._inherit_host_providers
+            )
+            self.projection_snapshot = snapshot
+            self.installed_fingerprint = snapshot.fingerprint
+        merged_providers = dict(snapshot.providers)
+        merged_credentials = dict(snapshot.credentials)
         if merged_providers:
             config_content = json.loads(env.get("MIMOCODE_CONFIG_CONTENT", "{}"))
             config_content.setdefault("provider", {}).update(merged_providers)
-            small_model = _pick_small_model(merged_providers)
+            small_model = snapshot.small_model
             if small_model and "small_model" not in config_content:
                 config_content["small_model"] = small_model
                 logger.info("mimo small_model pinned: %s", small_model)
@@ -610,7 +619,7 @@ class MimoSupervisor:
         # only in the isolated mimo store; Odysseus never lists it.
         catalog_session = None
         try:
-            catalog_session = await self._bridge.open_session()
+            catalog_session = await self._bridge.open_session(with_agent_tools=False)
             logger.info(
                 "mimo model catalog warmed: %d models", len(self._bridge.available_models)
             )
@@ -673,7 +682,7 @@ class MimoSupervisor:
             pass
 
     async def _handle_crash(self, returncode: int | None = None) -> None:
-        """Handle child crash: fail in-flight requests, restart with backoff, reconcile."""
+        """Fail this generation; the pool owns single-flight cold recovery."""
         if self._stopping:
             return
         # SIGINT/SIGTERM death usually means host shutdown (systemd kills the
@@ -690,42 +699,12 @@ class MimoSupervisor:
 
         await self._teardown_child()
 
-        # Restart with bounded backoff
-        await self._restart_with_backoff()
-
-        if not self._client or not self._bridge:
-            logger.error("mimo restart failed — no client available")
-            return
-
-        # Reconcile in-flight sessions — DB-driven: query thesius DB for
-        # recent ses_-prefixed sessions and resume each one.
-        await self._reconcile_sessions()
+        if self._crash_callback:
+            await self._crash_callback(self, returncode)
 
     async def _restart_with_backoff(self) -> None:
-        """Restart the child with bounded exponential backoff."""
-        import time
-        now = time.time()
-
-        # Reset counter if we've been stable long enough
-        if now - self._last_restart_time > _RESTART_WINDOW:
-            self._restart_count = 0
-
-        delay = _RESTART_DELAY_INITIAL
-        for attempt in range(_MAX_RESTART_ATTEMPTS):
-            self._restart_count += 1
-            self._last_restart_time = time.time()
-            logger.info("mimo restart attempt %d/%d (delay %.1fs)", attempt + 1, _MAX_RESTART_ATTEMPTS, delay)
-            await asyncio.sleep(delay)
-
-            try:
-                await self._spawn_and_init()
-                logger.info("mimo restarted successfully")
-                return
-            except Exception as e:
-                logger.error("mimo restart attempt %d failed: %s", attempt + 1, e)
-                delay = min(delay * _RESTART_DELAY_MULTIPLIER, _RESTART_DELAY_MAX)
-
-        logger.error("mimo restart exhausted %d attempts — giving up", _MAX_RESTART_ATTEMPTS)
+        """Compatibility entry point: one pool-owned readiness campaign replaces it."""
+        raise RuntimeError("MiMo restart is coordinated by MimoSupervisorPool")
 
     async def _reconcile_sessions(self) -> None:
         """Discard interrupted projections; the next turn replays canonical history."""
@@ -759,12 +738,18 @@ class MimoSupervisor:
                 await self._bridge.terminal_manager.close()
             except Exception as exc:
                 logger.warning("MiMo terminal cleanup failed: %s", exc)
-        if self._health_task and not self._health_task.done():
+        if (
+            self._health_task
+            and self._health_task is not asyncio.current_task()
+            and not self._health_task.done()
+        ):
             self._health_task.cancel()
             try:
                 await self._health_task
             except asyncio.CancelledError:
                 pass
+            self._health_task = None
+        elif self._health_task is asyncio.current_task():
             self._health_task = None
 
         if self._stderr_task and not self._stderr_task.done():
@@ -1016,6 +1001,79 @@ class MimoSupervisor:
         return f"http://127.0.0.1:{self._http_port}"
 
 
+class SupervisorAdmissionError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        phase: str = "readiness",
+        retryable: bool = True,
+        status: int = 503,
+        actions: tuple[str, ...] = (),
+        details: dict | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.phase = phase
+        self.retryable = retryable
+        self.status = status
+        self.actions = tuple(actions)
+        self.details = dict(details or {})
+
+    def as_dict(self) -> dict:
+        payload = {
+            "code": self.code,
+            "error": str(self),
+            "phase": self.phase,
+            "retryable": self.retryable,
+            "status": self.status,
+        }
+        if self.actions:
+            payload["actions"] = list(self.actions)
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+
+@dataclass
+class _OwnerLifecycle:
+    active: MimoSupervisor | None = None
+    snapshot: object | None = None
+    generation: int = 0
+    fence: str = ""
+    status: str = "stopped"
+    in_flight: dict[object, int] = field(default_factory=dict)
+    drain_events: dict[object, asyncio.Event] = field(default_factory=dict)
+    breaker_open_until: dict[str, float] = field(default_factory=dict)
+    last_failure: str | None = None
+
+
+class AgentWorkerLease:
+    """One generation-fenced Agent admission; release is idempotent."""
+
+    def __init__(self, pool, owner: str, worker, *, projection_pending: bool = False):
+        self._pool = pool
+        self.owner = owner
+        self.worker = worker
+        self.projection_pending = projection_pending
+        self.generation = getattr(worker, "installed_generation", 0)
+        self.fingerprint = getattr(worker, "installed_fingerprint", "")
+        self._released = False
+
+    async def release(self, *, successful_terminal: bool = False) -> None:
+        if self._released:
+            return
+        self._released = True
+        await self._pool._release_lease(self.owner, self.worker, successful_terminal)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.release(successful_terminal=exc_type is None)
+
+
 class MimoSupervisorPool:
     """Lazy owner-keyed MiMo runtimes; auth-disabled mode keeps one worker."""
 
@@ -1029,6 +1087,9 @@ class MimoSupervisorPool:
         host_provider_owner: str = "",
         data_dir: Path | None = None,
         grant_store=None,
+        readiness_budget: float = _READINESS_BUDGET,
+        clock=None,
+        sleep=None,
     ) -> None:
         self._memory_provider = memory_provider
         self._safe_dirs = safe_dirs
@@ -1036,7 +1097,12 @@ class MimoSupervisorPool:
         self._initial_owner = self._key(initial_owner) if initial_owner else ""
         self._host_provider_owner = self._key(host_provider_owner) if host_provider_owner else ""
         self._workers: dict[str, MimoSupervisor] = {}
-        self._lock = asyncio.Lock()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._states: dict[str, _OwnerLifecycle] = {}
+        self._background_tasks: set[asyncio.Task] = set()
+        self._readiness_budget = max(0.0, float(readiness_budget))
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or asyncio.sleep
         from src.constants import DATA_DIR
         from src.openclank.permission_grants import GrantStore
 
@@ -1051,6 +1117,151 @@ class MimoSupervisorPool:
     def _runtime_home(self, owner: str) -> Path:
         digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()
         return self._owners_root / digest
+
+    def _owner_lock(self, owner: str) -> asyncio.Lock:
+        return self._locks.setdefault(owner, asyncio.Lock())
+
+    def _owner_state(self, owner: str) -> _OwnerLifecycle:
+        return self._states.setdefault(owner, _OwnerLifecycle())
+
+    def _inherit_host(self, owner: str) -> bool:
+        return not self._auth_enabled or owner == self._host_provider_owner
+
+    def _new_worker(self, owner: str, snapshot, generation: int, fence: str) -> MimoSupervisor:
+        runtime_home = None
+        if self._auth_enabled:
+            runtime_home = self._runtime_home(owner) / "generations" / f"{generation}-{fence}"
+        return MimoSupervisor(
+            owner=owner,
+            memory_provider=self._memory_provider,
+            safe_dirs=self._safe_dirs,
+            runtime_home=runtime_home,
+            partitioned=self._auth_enabled,
+            inherit_host_providers=self._inherit_host(owner),
+            grant_store=self._grant_store,
+            projection_snapshot=snapshot,
+            projection_generation=generation,
+            crash_callback=self._worker_crashed,
+        )
+
+    async def _start_campaign(self, owner: str, snapshot, generation: int, fence: str):
+        deadline = self._clock() + self._readiness_budget
+        delay = _RESTART_DELAY_INITIAL
+        last_error: Exception | None = None
+        while True:
+            candidate = self._new_worker(owner, snapshot, generation, fence)
+            try:
+                await candidate.start()
+                candidate.installed_fingerprint = snapshot.fingerprint
+                candidate.installed_generation = generation
+                return candidate
+            except Exception as exc:
+                last_error = exc
+                await candidate.stop()
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                break
+            await self._sleep(min(delay, remaining))
+            delay = min(delay * _RESTART_DELAY_MULTIPLIER, _RESTART_DELAY_MAX)
+        if isinstance(last_error, SupervisorAdmissionError):
+            raise last_error
+        raise SupervisorAdmissionError(
+            "SUPERVISOR_CRASHLOOP",
+            "MiMo readiness campaign exhausted its deadline",
+            phase="startup",
+        ) from last_error
+
+    async def _ensure_worker(self, owner: str) -> MimoSupervisor:
+        from src.openclank.mimo_projection import (
+            build_projection_snapshot,
+            mark_projection,
+            reconcile_projection,
+            safe_additive_delta,
+        )
+
+        lock = self._owner_lock(owner)
+        async with lock:
+            # Coalesce drift until the candidate is built from the newest
+            # committed snapshot immediately before publication.
+            while True:
+                snapshot = build_projection_snapshot(
+                    owner, inherit_host_providers=self._inherit_host(owner)
+                )
+                desired = reconcile_projection(snapshot, materializing=True)
+                generation = int(desired["generation"])
+                state = self._owner_state(owner)
+                active = state.active
+                if (
+                    active is not None
+                    and active.is_alive()
+                    and getattr(active, "installed_fingerprint", "") == snapshot.fingerprint
+                    and getattr(active, "installed_generation", 0) == generation
+                ):
+                    state.status = "ready"
+                    return active
+
+                now = self._clock()
+                if state.breaker_open_until.get(snapshot.fingerprint, 0) > now:
+                    raise SupervisorAdmissionError(
+                        "SUPERVISOR_CRASHLOOP",
+                        "MiMo readiness breaker is open for this projection",
+                        phase="startup",
+                    )
+
+                old = active if active is not None and active.is_alive() else None
+                old_snapshot = state.snapshot
+                state.status = "swapping" if old else "starting"
+                fence = uuid.uuid4().hex[:12]
+                state.fence = fence
+                try:
+                    candidate = await self._start_campaign(owner, snapshot, generation, fence)
+                except SupervisorAdmissionError as exc:
+                    state.breaker_open_until[snapshot.fingerprint] = now + self._readiness_budget
+                    state.last_failure = exc.code
+                    state.status = "open"
+                    mark_projection(
+                        owner, snapshot.fingerprint, generation,
+                        status="failed", error_code=exc.code,
+                    )
+                    if old is not None and not (
+                        old_snapshot is not None and safe_additive_delta(old_snapshot, snapshot)
+                    ):
+                        state.active = None
+                        self._workers.pop(owner, None)
+                        await old.stop()
+                    raise
+
+                current = build_projection_snapshot(
+                    owner, inherit_host_providers=self._inherit_host(owner)
+                )
+                current_state = reconcile_projection(current, materializing=True)
+                if current.fingerprint != snapshot.fingerprint:
+                    await candidate.stop()
+                    continue
+
+                candidate.installed_fingerprint = current.fingerprint
+                candidate.installed_generation = int(current_state["generation"])
+                state.active = candidate
+                state.snapshot = current
+                state.generation = candidate.installed_generation
+                state.status = "ready"
+                state.last_failure = None
+                self._workers[owner] = candidate
+                mark_projection(
+                    owner, current.fingerprint, state.generation,
+                    status="installed",
+                )
+                if old is not None and old is not candidate:
+                    if old_snapshot is not None and safe_additive_delta(old_snapshot, current):
+                        self._schedule_background(self._retire_when_drained(owner, old))
+                    else:
+                        await old.stop()
+                return candidate
+
+    def _schedule_background(self, coroutine) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def start(self) -> None:
         if not self._auth_enabled:
@@ -1072,32 +1283,90 @@ class MimoSupervisorPool:
             raise RuntimeError("authenticated MiMo execution requires an owner")
         if not self._auth_enabled:
             key = ""
-        existing = self._workers.get(key)
-        if existing and existing.is_alive():
-            return existing
-        async with self._lock:
-            existing = self._workers.get(key)
-            if existing and existing.is_alive():
-                return existing
-            worker = MimoSupervisor(
-                owner=key,
-                memory_provider=self._memory_provider,
-                safe_dirs=self._safe_dirs,
-                runtime_home=self._runtime_home(key) if self._auth_enabled else None,
-                partitioned=self._auth_enabled,
-                inherit_host_providers=(
-                    not self._auth_enabled or key == self._host_provider_owner
-                ),
-                grant_store=self._grant_store,
+        return await self._ensure_worker(key)
+
+    async def admit_agent(self, owner: str | None, provider_id: str, model_id: str) -> AgentWorkerLease:
+        """Reconcile projection and acquire one generation-scoped Agent lease."""
+        from src.openclank.mimo_projection import build_projection_snapshot, safe_additive_delta
+
+        key = self._key(owner)
+        if self._auth_enabled and not key:
+            raise SupervisorAdmissionError(
+                "SUPERVISOR_UNAVAILABLE", "Authenticated Agent execution requires an owner",
+                phase="identity", retryable=False,
             )
-            self._workers[key] = worker
-            try:
-                await worker.start()
-            except Exception:
-                self._workers.pop(key, None)
-                await worker.stop()
+        if not self._auth_enabled:
+            key = ""
+        pending = False
+        try:
+            worker = await self._ensure_worker(key)
+        except SupervisorAdmissionError:
+            desired = build_projection_snapshot(key, inherit_host_providers=self._inherit_host(key))
+            state = self._owner_state(key)
+            old = state.active
+            if not (
+                old is not None and old.is_alive() and state.snapshot is not None
+                and safe_additive_delta(state.snapshot, desired)
+                and state.snapshot.run_closure(provider_id, model_id) == desired.run_closure(provider_id, model_id)
+                and desired.run_closure(provider_id, model_id) is not None
+            ):
                 raise
-            return worker
+            worker = old
+            pending = True
+
+        async with self._owner_lock(key):
+            snapshot = getattr(worker, "projection_snapshot", None)
+            if snapshot is None or snapshot.run_closure(provider_id, model_id) is None:
+                raise SupervisorAdmissionError(
+                    "MODEL_NOT_PROJECTED",
+                    f"Endpoint model {provider_id}/{model_id} is not in the current MiMo spawn config",
+                    phase="routing", retryable=False,
+                )
+            qualified_model = f"{provider_id}/{model_id}"
+            available = {
+                str(item.get("modelId"))
+                for item in (worker.available_models() or [])
+                if item.get("modelId")
+            }
+            if qualified_model not in available:
+                raise SupervisorAdmissionError(
+                    "MODEL_NOT_PROJECTED",
+                    f"MiMo did not advertise the selected endpoint/model {qualified_model}",
+                    phase="catalog", retryable=False,
+                )
+            state = self._owner_state(key)
+            state.in_flight[worker] = state.in_flight.get(worker, 0) + 1
+            state.drain_events.setdefault(worker, asyncio.Event()).clear()
+        return AgentWorkerLease(self, key, worker, projection_pending=pending)
+
+    async def _release_lease(self, owner: str, worker, successful_terminal: bool) -> None:
+        async with self._owner_lock(owner):
+            state = self._owner_state(owner)
+            remaining = max(0, state.in_flight.get(worker, 0) - 1)
+            state.in_flight[worker] = remaining
+            if remaining == 0:
+                state.drain_events.setdefault(worker, asyncio.Event()).set()
+            if successful_terminal:
+                state.breaker_open_until.pop(getattr(worker, "installed_fingerprint", ""), None)
+
+    async def _retire_when_drained(self, owner: str, worker) -> None:
+        async with self._owner_lock(owner):
+            state = self._owner_state(owner)
+            event = state.drain_events.setdefault(worker, asyncio.Event())
+            if state.in_flight.get(worker, 0) == 0:
+                event.set()
+        await event.wait()
+        await worker.stop()
+
+    async def _worker_crashed(self, worker, returncode=None) -> None:
+        owner = self._key(getattr(worker, "_owner", ""))
+        async with self._owner_lock(owner):
+            state = self._owner_state(owner)
+            if state.active is worker:
+                state.active = None
+                state.status = "restarting"
+                state.last_failure = "IN_FLIGHT_INTERRUPTED"
+                self._workers.pop(owner, None)
 
     def worker_for_owner(self, owner: str | None) -> MimoSupervisor | None:
         key = self._key(owner) if self._auth_enabled else ""
@@ -1220,25 +1489,32 @@ class MimoSupervisorPool:
         return worker.http_base_url
 
     async def stop(self) -> None:
-        workers = list(self._workers.values())
+        workers = {
+            worker
+            for state in self._states.values()
+            for worker in [state.active, *state.in_flight.keys()]
+            if worker is not None
+        }
         self._workers.clear()
+        for state in self._states.values():
+            state.active = None
+            state.status = "stopped"
+        for task in list(self._background_tasks):
+            task.cancel()
         await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
 
     async def refresh_endpoint_projection(self) -> None:
-        """The endpoint registry changed: provider config is spawn-time
-        env, so stop the workers — the next turn lazily respawns them
-        with a freshly projected config. Best-effort; endpoint edits
-        are rare admin actions and a dropped in-flight turn surfaces as
-        a clean stream error."""
-        async with self._lock:
-            workers = list(self._workers.values())
-            self._workers.clear()
-        if workers:
-            logger.info(
-                "endpoint registry changed — recycling %d mimo worker(s) for reprojection",
-                len(workers),
-            )
-        await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
+        """Eager convergence hint; admission-time reconciliation is authoritative."""
+        owners = list(self._workers)
+        if not owners:
+            return
+        results = await asyncio.gather(
+            *(self._ensure_worker(owner) for owner in owners),
+            return_exceptions=True,
+        )
+        for owner, result in zip(owners, results):
+            if isinstance(result, BaseException):
+                logger.warning("MiMo reprojection pending for owner %r: %s", owner, result)
 
     async def rename_owner(self, old_owner: str, new_owner: str) -> None:
         old_key = self._key(old_owner)
@@ -1246,6 +1522,8 @@ class MimoSupervisorPool:
         worker = self._workers.pop(old_key, None)
         if worker:
             await worker.stop()
+        self._states.pop(old_key, None)
+        self._locks.pop(old_key, None)
         self._grant_store.rename_owner(old_key, new_key)
         old_path = self._runtime_home(old_key)
         new_path = self._runtime_home(new_key)
@@ -1277,6 +1555,8 @@ class MimoSupervisorPool:
         worker = self._workers.pop(key, None)
         if worker:
             await worker.stop()
+        self._states.pop(key, None)
+        self._locks.pop(key, None)
         self._grant_store.purge_owner(key)
         path = self._runtime_home(key)
         if path.exists():
