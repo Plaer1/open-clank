@@ -174,7 +174,13 @@ async def test_maybe_escalate_tier2_disabled_by_default(monkeypatch):
 async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     # Settings and gates
     monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: {"teacher_enabled": True, "teacher_model": "teacher-model", "teacher_tier2_enabled": True}.get(key, default))
-    monkeypatch.setattr("src.ai_interaction._resolve_model", lambda spec, owner=None: ("http://teacher.local/v1", "teacher-model", {}))
+    from src.endpoint_resolver import resolve_model_target
+    monkeypatch.setattr(
+        "src.ai_interaction._resolve_model_target",
+        lambda spec, owner=None: resolve_model_target(
+            "http://teacher.local/v1", "teacher-model", endpoint_id="teacher-endpoint",
+        ),
+    )
 
     # Regex evaluation says "ok"
     monkeypatch.setattr("src.teacher_escalation.evaluate_turn_regex", lambda *args: ("ok", None))
@@ -184,12 +190,12 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
         return "failure", "LLM flagged failure"
     monkeypatch.setattr("src.teacher_escalation.evaluate_turn_llm", fake_evaluate_turn_llm)
 
-    # Mock stream_agent_loop recursively called by run_teacher_inline
-    async def fake_stream_agent_loop(*args, **kwargs):
+    # Mock the strict Agent door recursively called by run_teacher_inline.
+    async def fake_stream_agent_target(*args, **kwargs):
         yield "data: {\"type\": \"tool_output\", \"tool\": \"bash\"}\n\n"
         yield "data: {\"type\": \"text\", \"delta\": \"Teacher reply\"}\n\n"
         yield "data: [DONE]\n\n"
-    monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_stream_agent_loop)
+    monkeypatch.setattr("src.model_dispatch.stream_agent_target", fake_stream_agent_target)
 
     # Mock _call_teacher returning a skill definition
     async def fake_call_teacher(spec, prompt, owner=None):

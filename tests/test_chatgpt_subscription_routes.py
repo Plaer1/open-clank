@@ -47,7 +47,12 @@ def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
         assert ep.provider_auth_id == auth.id
         assert ep.endpoint_kind == "api"
         assert ep.model_refresh_mode == "manual"
-        assert ep.supports_tools is False
+        assert ep.supports_tools is None
+        from core.database import ModelCapability
+        assert {
+            row.model_id: row.tools_declared
+            for row in db.query(ModelCapability).filter(ModelCapability.endpoint_id == ep.id)
+        } == {}
         assert json.loads(ep.cached_models) == ["gpt-5.5", "o4-mini"]
     finally:
         db.close()
@@ -58,6 +63,14 @@ def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch):
     monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token, **kwargs: ["gpt-5.5"])
 
     first = csr._provision_endpoint({"access_token": "OLD", "refresh_token": "OLD-RT"}, "bob")
+    db = TestSessionLocal()
+    try:
+        ep = db.get(ModelEndpoint, first["id"])
+        from src.model_capabilities import set_declared
+        set_declared(db, ep, "gpt-5.5", False)
+        db.commit()
+    finally:
+        db.close()
     second = csr._provision_endpoint({"access_token": "NEW", "refresh_token": "NEW-RT"}, "bob")
 
     assert first["id"] == second["id"]
@@ -70,6 +83,8 @@ def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch):
         assert auth_rows[0].access_token == "NEW"
         assert auth_rows[0].refresh_token == "NEW-RT"
         assert ep_rows[0].provider_auth_id == auth_rows[0].id
+        from core.database import ModelCapability
+        assert db.get(ModelCapability, (first["id"], "gpt-5.5")).tools_declared is False
     finally:
         db.close()
 

@@ -939,8 +939,7 @@ async function handleSetupWizard(mode, input) {
     const custom = tm && tm.getCustomThemes ? tm.getCustomThemes() : {};
     const colors = (tm && tm.THEMES && tm.THEMES[name]) || custom[name];
     if (tm && colors) {
-      tm.applyColors(colors);
-      tm.save(name, colors);
+      tm.applyTheme(name, colors);
       await typewriterReply(`Theme switched to "${name}".`);
     } else if (tm && tm.applyTheme) {
       tm.applyTheme(name);
@@ -1542,7 +1541,7 @@ async function _cmdTheme(args, ctx) {
     const saveName = args[1].toLowerCase().replace(/\s+/g, '-');
     if (tm.THEMES[saveName]) { slashReply('Cannot overwrite a built-in theme.'); return true; }
     const s = tm.getSaved();
-    const colors = s ? s.colors : tm.THEMES.dark;
+    const colors = s ? s.colors : tm.THEMES['clanker-dark'];
     tm.saveCustomTheme(saveName, colors);
     tm.save(saveName, colors);
     await typewriterReply(`Custom theme "${saveName}" saved`);
@@ -1568,14 +1567,7 @@ async function _cmdTheme(args, ctx) {
     slashReply(`Unknown theme "${name}". Available: ${presetNames.join(', ')}${customLabel}`);
     return true;
   }
-  tm.applyColors(colors);
-  tm.save(name, colors);
-  const grid = document.getElementById('themeGrid');
-  if (grid) {
-    grid.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'));
-    const sw = grid.querySelector(`[data-theme="${name}"]`);
-    if (sw) sw.classList.add('active');
-  }
+  tm.applyTheme(name, colors);
   await typewriterReply(`Theme: ${name}`);
   return true;
 }
@@ -2545,23 +2537,13 @@ async function _cmdDemo(args, ctx) {
   // Beat between the welcome line and the first hint so it doesn't snap in.
   await delay(900);
 
-  // Reset to a known starting state so the interactive steps (switch to Agent,
-  // turn Web on) actually have something to do.
+  // Reset Web so the interactive tool step has something to do.
   try {
-    const _agentBtn = document.getElementById('mode-agent-btn');
-    const _chatBtn  = document.getElementById('mode-chat-btn');
-    if (_agentBtn && _chatBtn) {
-      _agentBtn.classList.remove('active');
-      _chatBtn.classList.add('active');
-      const _t = _agentBtn.closest('.mode-toggle');
-      if (_t) _t.classList.add('mode-chat');
-    }
-    // Web is persisted per-mode under web_chat / web_agent. Zero both so the
-    // toggle is genuinely off when the user reaches the "turn it on" step.
+    // Keep the Agent tool preference genuinely off until the tour step.
     const _st = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-    _st.mode = 'chat';
-    _st.web_chat = false;
     _st.web_agent = false;
+    delete _st.mode;
+    delete _st.web_chat;
     Storage.setJSON(Storage.KEYS.TOGGLES, _st);
     // If the web button is currently on, click it to fully unwind it via the
     // existing handler (covers any state the click handler tracks that we
@@ -2579,7 +2561,6 @@ async function _cmdDemo(args, ctx) {
     { sel: '#sidebar-new-chat-btn', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
       before() { if (sidebar?.classList.contains('hidden')) sidebar.classList.remove('hidden'); } },
     { sel: '#model-picker-btn',   text: 'Pick your LLM, Local or API.', advanceOnClick: true },
-    { sel: '#mode-agent-btn',     text: '<b>Agent mode</b> gives Odysseus more control of the app when your model supports tools: create a theme, download a model, make a daily task, organize things, and more.', mode: 'click' },
     { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Odysseus comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
     { sel: '#overflow-plus-btn',  text: 'More tools can be found here, or in your sidebar. <b>Click to peek.</b>',
       advanceOnClick: true, pulseNext: true, afterDelay: 2200 },
@@ -5218,8 +5199,7 @@ async function _cmdSetup(args, ctx) {
       if (themeName && tm) {
         const colors = (tm.THEMES && tm.THEMES[themeName]) || customObj[themeName];
         if (colors) {
-          tm.applyColors(colors);
-          tm.save(themeName, colors);
+          tm.applyTheme(themeName, colors);
           await typewriterReply(`Theme: ${themeName}`);
         } else {
           const customLabel = customKeys.length ? ` | Custom: ${customKeys.join(', ')}` : '';
@@ -5228,7 +5208,7 @@ async function _cmdSetup(args, ctx) {
         return true;
       }
 
-      const current = (Storage.getJSON(Storage.KEYS.THEME, {}).name) || 'dark';
+      const current = (Storage.getJSON(Storage.KEYS.THEME, {}).name) || 'clanker-dark';
       const customLabel = customKeys.length ? `\n\nCustom: ${customKeys.join(', ')}` : '';
       await typewriterReply(`Current theme: ${current}\n\nAvailable: ${presets.join(', ')}${customLabel}\n\nType a theme name to switch.`);
       setupMode = 'theme';

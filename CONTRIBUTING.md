@@ -1,17 +1,10 @@
-# Contributing to Odysseus
+# Contributing to Open Clank
 
 Thanks for helping. The project is moving quickly, so the best contributions are focused, easy to review, and easy to test.
 
 ## Branch model
 
-Odysseus has two branches:
-
-- **`dev`** — where all PRs land. Things can be in flux here; the merge button gets used freely.
-- **`main`** — what users run. Curated and tested by the maintainer. Fast-forwarded to a stable `dev` commit at each release.
-
-**Open your PR against `dev`, not `main`.** The GitHub "base" dropdown defaults to `dev`. If you opened a PR against `main` by accident, click "Edit" on the PR and change the base — no rebase needed.
-
-End-users cloning the repo will land on `dev` by default. To run the curated/stable version: `git checkout main` after clone.
+Open Clank currently uses **`main`** for the Build Week snapshot and pull requests.
 
 ## Before You Start
 
@@ -25,8 +18,8 @@ End-users cloning the repo will land on `dev` by default. To run the curated/sta
 Docker is the recommended path for normal testing:
 
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
-cd odysseus
+git clone https://github.com/Plaer1/open-clank.git
+cd open-clank
 cp .env.example .env
 docker compose up -d --build
 ```
@@ -130,4 +123,3 @@ Issues with only "help", "does not work", or a screenshot without context may be
 Do not post secrets, API keys, private logs, personal documents, or public IPs in issues or pull requests.
 
 For security reports, follow [SECURITY.md](SECURITY.md).
-

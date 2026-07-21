@@ -128,6 +128,7 @@ class SessionManager:
             name=db_session.name,
             endpoint_url=db_session.endpoint_url,
             model=db_session.model,
+            endpoint_id=getattr(db_session, "endpoint_id", None),
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
@@ -186,6 +187,7 @@ class SessionManager:
             name=db_session.name,
             endpoint_url=db_session.endpoint_url,
             model=db_session.model,
+            endpoint_id=getattr(db_session, "endpoint_id", None),
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
@@ -218,7 +220,18 @@ class SessionManager:
         session._history = session.history
         session.message_count = len(session.history)
 
-        self._persist_message(session_id, message)
+        try:
+            persisted = self._persist_message(session_id, message)
+            if not persisted:
+                raise RuntimeError(f"Session {session_id} no longer exists")
+        except Exception:
+            if session.history and session.history[-1] is message:
+                session.history.pop()
+            else:
+                session.history = [item for item in session.history if item is not message]
+            session._history = session.history
+            session.message_count = len(session.history)
+            raise
 
     def _persist_message(self, session_id: str, message: ChatMessage):
         """Persist a single message to the database."""
@@ -231,7 +244,7 @@ class SessionManager:
                 # any stale cached session so later writes fail closed too.
                 self.sessions.pop(session_id, None)
                 logger.warning("Dropping message for deleted session %s", session_id)
-                return
+                return False
 
             missing_upload_id = reserve_message_upload_references(
                 getattr(self, "upload_handler", None),
@@ -280,10 +293,12 @@ class SessionManager:
             message.metadata['_db_id'] = msg_id
 
             logger.debug(f"Persisted message to session {session_id}")
+            return True
 
         except Exception as e:
             logger.error(f"Error persisting message: {e}")
             db.rollback()
+            raise
         finally:
             db.close()
 
@@ -438,6 +453,7 @@ class SessionManager:
                     headers = {}
             session.name = db_session.name
             session.endpoint_url = db_session.endpoint_url or ""
+            session.endpoint_id = getattr(db_session, "endpoint_id", None)
             session.model = db_session.model or ""
             session.headers = headers or {}
             session.rag = db_session.rag
@@ -500,7 +516,8 @@ class SessionManager:
         endpoint_url: str,
         model: str,
         rag: bool = False,
-        owner: str = None
+        owner: str = None,
+        endpoint_id: str | None = None,
     ) -> Session:
         """Create a new session and save to database."""
         db = SessionLocal()
@@ -509,6 +526,7 @@ class SessionManager:
                 id=session_id,
                 name=name,
                 endpoint_url=endpoint_url,
+                endpoint_id=endpoint_id,
                 model=model,
                 rag=rag,
                 headers={},
@@ -524,6 +542,7 @@ class SessionManager:
                 name=name,
                 endpoint_url=endpoint_url,
                 model=model,
+                endpoint_id=endpoint_id,
                 rag=rag,
                 headers={},
                 owner=owner,
@@ -658,7 +677,16 @@ class SessionManager:
     def save_sessions(self):
         """No-op for DB compatibility."""
 
-    def ensure_task_session(self, session_id: str, name: str, endpoint_url: str, model: str, owner: str = None, task: object = None) -> Session:
+    def ensure_task_session(
+        self,
+        session_id: str,
+        name: str,
+        endpoint_url: str,
+        model: str,
+        owner: str = None,
+        task: object = None,
+        endpoint_id: str | None = None,
+    ) -> Session:
         """Create a task session if it doesn't exist, or return the existing one.
 
         Unlike create_session, this checks the cache first and does NOT
@@ -668,7 +696,10 @@ class SessionManager:
         if session_id in self.sessions:
             return self.sessions[session_id]
 
-        session = self.create_session(session_id, name, endpoint_url, model, owner=owner)
+        session = self.create_session(
+            session_id, name, endpoint_url, model,
+            owner=owner, endpoint_id=endpoint_id,
+        )
         if task is not None:
             task.session_id = session_id
         return session

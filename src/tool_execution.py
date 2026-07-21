@@ -790,7 +790,7 @@ async def _execute_tool_block_impl(
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
     elif tool == "manage_tasks":
         desc = "manage_tasks"
-        result = await do_manage_tasks(content, owner=owner)
+        result = await do_manage_tasks(content, owner=owner, session_id=session_id)
     elif tool == "manage_skills":
         desc = "manage_skills"
         result = await do_manage_skills(content, owner=owner)

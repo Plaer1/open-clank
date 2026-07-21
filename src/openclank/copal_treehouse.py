@@ -401,11 +401,21 @@ def compute_treehouse_projections(state: dict[str, Any]) -> dict[str, Any]:
             projection["streak"] = streak
 
         for course_id, course in state["courses"].items():
-            published_activities = [item["id"] for item in state["activities"].values() if item.get("courseId") == course_id and item.get("status") == "published"]
-            published_assignments = [item["id"] for item in state["assignments"].values() if item.get("courseId") == course_id and item.get("status") == "published"]
+            published_activities = [item["id"] for item in state["activities"].values() if item.get("courseId") == course_id and item.get("status") == "published" and not item.get("deletedAt")]
+            published_assignments = [item["id"] for item in state["assignments"].values() if item.get("courseId") == course_id and item.get("status") == "published" and not item.get("deletedAt")]
             done = len(set(published_activities) & completed) + len(set(published_assignments) & graded_assignments)
             total = len(published_activities) + len(published_assignments)
-            projection["courses"][course_id] = {"completed": done, "total": total, "percent": round(done / total * 100) if total else 0, "complete": total > 0 and done == total}
+            modules = {}
+            for module_id in course.get("moduleIds", []):
+                module = state["modules"].get(module_id)
+                if not module or module.get("deletedAt"):
+                    continue
+                mod_activities = [item["id"] for item in state["activities"].values() if item.get("moduleId") == module_id and item.get("status") == "published" and not item.get("deletedAt")]
+                mod_assignments = [item["id"] for item in state["assignments"].values() if item.get("moduleId") == module_id and item.get("status") == "published" and not item.get("deletedAt")]
+                mod_done = len(set(mod_activities) & completed) + len(set(mod_assignments) & graded_assignments)
+                mod_total = len(mod_activities) + len(mod_assignments)
+                modules[module_id] = {"completed": mod_done, "total": mod_total, "percent": round(mod_done / mod_total * 100) if mod_total else 0}
+            projection["courses"][course_id] = {"completed": done, "total": total, "percent": round(done / total * 100) if total else 0, "complete": total > 0 and done == total, "modules": modules}
 
     leaderboard = sorted(
         ({"profileId": profile_id, "displayName": state["profiles"][profile_id]["displayName"], "points": data["points"]} for profile_id, data in by_profile.items()),
@@ -430,6 +440,31 @@ def _require_skills_unlocked(state: dict[str, Any], actor_id: str, skill_ids: li
     blocked = [skill_id for skill_id in skill_ids if not projection["skills"].get(skill_id, {}).get("unlocked", True)]
     if blocked:
         raise TreeHouseError("Complete prerequisite skills first", code="prerequisites_unmet", status=409, details={"skillIds": blocked})
+
+
+def _require_module_order(state: dict[str, Any], actor_id: str, module_id: str, item_id: str, item_type: str) -> None:
+    """Gate completion/submit on sequential module progress."""
+    module = state["modules"].get(module_id)
+    if not module:
+        return
+    projection = compute_treehouse_projections(state)["learners"].get(actor_id, {})
+    completed_activities = set(projection.get("completedActivityIds", []))
+    graded_submissions = set(projection.get("gradedSubmissionIds", []))
+    all_items = module.get("activityIds", []) + module.get("assignmentIds", [])
+    if item_id not in all_items:
+        return
+    for prior_id in all_items:
+        if prior_id == item_id:
+            break
+        prior_activity = state["activities"].get(prior_id)
+        prior_assignment = state["assignments"].get(prior_id)
+        if prior_activity and prior_activity.get("status") == "published" and not prior_activity.get("deletedAt"):
+            if prior_id not in completed_activities:
+                raise TreeHouseError("Complete previous module items first", code="module_order_unmet", status=409, details={"requiredActivityId": prior_id})
+        elif prior_assignment and prior_assignment.get("status") == "published" and not prior_assignment.get("deletedAt"):
+            submission_key = _submission_key(prior_id, actor_id)
+            if submission_key not in graded_submissions:
+                raise TreeHouseError("Complete previous module items first", code="module_order_unmet", status=409, details={"requiredAssignmentId": prior_id})
 
 
 def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: str, command_id: str, at: str) -> dict[str, Any]:
@@ -497,6 +532,17 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         emit("course.created", actor_id, "course", course_id, {})
         return {"courseId": course_id}
 
+    if kind == "course.delete":
+        course_id = _id(payload.get("courseId"), "courseId")
+        course = _course_author(state, actor_id, course_id)
+        if course.get("deletedAt"):
+            raise TreeHouseError("Course already deleted", code="already_deleted", status=409)
+        course["deletedAt"] = at
+        course["updatedAt"] = at
+        emit("course.deleted", actor_id, "course", course_id, {})
+        sync_course_enrollments(course_id)
+        return {"courseId": course_id}
+
     if kind in {"course.update", "course.publish", "course.archive", "course.author.add", "course.reorder_modules"}:
         course_id = _id(payload.get("courseId"), "courseId")
         course = _course_author(state, actor_id, course_id)
@@ -549,6 +595,28 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         if "description" in payload: module["description"] = _text(payload["description"], "description", maximum=8_192, required=False)
         module["updatedAt"] = at
         emit("module.updated", actor_id, "module", module_id, {})
+        return {"moduleId": module_id}
+
+    if kind == "module.delete":
+        module_id = _id(payload.get("moduleId"), "moduleId")
+        module = _entity(state, "modules", module_id, "Module")
+        _course_author(state, actor_id, module["courseId"])
+        if module.get("deletedAt"):
+            raise TreeHouseError("Module already deleted", code="already_deleted", status=409)
+        module["deletedAt"] = at
+        module["updatedAt"] = at
+        for activity_id in module.get("activityIds", []):
+            if activity_id in state["activities"] and not state["activities"][activity_id].get("deletedAt"):
+                state["activities"][activity_id]["deletedAt"] = at
+                state["activities"][activity_id]["updatedAt"] = at
+                emit("activity.deleted", actor_id, "activity", activity_id, {})
+        for assignment_id in module.get("assignmentIds", []):
+            if assignment_id in state["assignments"] and not state["assignments"][assignment_id].get("deletedAt"):
+                state["assignments"][assignment_id]["deletedAt"] = at
+                state["assignments"][assignment_id]["updatedAt"] = at
+                emit("assignment.deleted", actor_id, "assignment", assignment_id, {})
+        emit("module.deleted", actor_id, "module", module_id, {"courseId": module["courseId"]})
+        sync_course_enrollments(module["courseId"])
         return {"moduleId": module_id}
 
     if kind == "module.reorder_items":
@@ -605,14 +673,42 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         sync_course_enrollments(state["activities"][activity_id]["courseId"])
         return {"activityId": activity_id}
 
+    if kind == "activity.delete":
+        activity_id = _id(payload.get("activityId"), "activityId")
+        activity = _entity(state, "activities", activity_id, "Activity")
+        _course_author(state, actor_id, activity["courseId"])
+        if activity.get("deletedAt"):
+            raise TreeHouseError("Activity already deleted", code="already_deleted", status=409)
+        activity["deletedAt"] = at
+        activity["updatedAt"] = at
+        emit("activity.deleted", actor_id, "activity", activity_id, {"courseId": activity["courseId"], "moduleId": activity["moduleId"]})
+        sync_course_enrollments(activity["courseId"])
+        return {"activityId": activity_id}
+
     if kind == "enrollment.enroll":
         _require_role(state, actor_id, "learner")
         course_id = _id(payload.get("courseId"), "courseId"); _published_course(state, course_id)
         key = _enrollment_key(course_id, actor_id)
-        if key in state["enrollments"]:
+        existing = state["enrollments"].get(key)
+        if existing and existing.get("status") == "active":
             return {"enrollmentId": key, "alreadyEnrolled": True}
-        state["enrollments"][key] = {"id": key, "courseId": course_id, "profileId": actor_id, "status": "active", "enrolledAt": at, "updatedAt": at}
+        state["enrollments"][key] = {"id": key, "courseId": course_id, "profileId": actor_id, "status": "active", "enrolledAt": existing.get("enrolledAt", at) if existing else at, "updatedAt": at}
         emit("enrollment.created", actor_id, "enrollment", key, {"courseId": course_id})
+        return {"enrollmentId": key}
+
+    if kind == "enrollment.unenroll":
+        _require_role(state, actor_id, "learner", "admin")
+        course_id = _id(payload.get("courseId"), "courseId")
+        key = _enrollment_key(course_id, actor_id)
+        enrollment = state["enrollments"].get(key)
+        if not enrollment:
+            raise TreeHouseError("Not enrolled in this course", code="not_enrolled", status=404)
+        if enrollment.get("status") == "withdrawn":
+            raise TreeHouseError("Already withdrawn", code="already_withdrawn", status=409)
+        enrollment["status"] = "withdrawn"
+        enrollment["withdrawnAt"] = at
+        enrollment["updatedAt"] = at
+        emit("enrollment.withdrawn", actor_id, "enrollment", key, {"courseId": course_id})
         return {"enrollmentId": key}
 
     if kind == "activity.complete":
@@ -624,6 +720,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         if any(event["type"] == "activity.completed" and event["subjectId"] == actor_id and event["entityId"] == activity_id for event in state["events"]):
             return {"activityId": activity_id, "alreadyComplete": True}
         _require_skills_unlocked(state, actor_id, activity.get("skillIds", []))
+        _require_module_order(state, actor_id, activity["moduleId"], activity_id, "activity")
         skills = [{"skillId": item, "points": activity["points"]} for item in activity.get("skillIds", [])]
         event = emit("activity.completed", actor_id, "activity", activity_id, {"courseId": activity["courseId"], "points": activity["points"], "skills": skills})
         sync_course_completion(activity["courseId"], actor_id)
@@ -668,6 +765,18 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         sync_course_enrollments(assignment["courseId"])
         return {"assignmentId": assignment_id, "status": assignment["status"]}
 
+    if kind == "assignment.delete":
+        assignment_id = _id(payload.get("assignmentId"), "assignmentId")
+        assignment = _entity(state, "assignments", assignment_id, "Assignment")
+        _course_author(state, actor_id, assignment["courseId"])
+        if assignment.get("deletedAt"):
+            raise TreeHouseError("Assignment already deleted", code="already_deleted", status=409)
+        assignment["deletedAt"] = at
+        assignment["updatedAt"] = at
+        emit("assignment.deleted", actor_id, "assignment", assignment_id, {"courseId": assignment["courseId"], "moduleId": assignment["moduleId"]})
+        sync_course_enrollments(assignment["courseId"])
+        return {"assignmentId": assignment_id}
+
     if kind == "submission.submit":
         _require_role(state, actor_id, "learner")
         assignment_id = _id(payload.get("assignmentId"), "assignmentId")
@@ -677,6 +786,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         if assignment.get("dueAt") and datetime.fromisoformat(assignment["dueAt"].replace("Z", "+00:00")) < datetime.fromisoformat(at.replace("Z", "+00:00")):
             raise TreeHouseError("Assignment deadline has passed", code="assignment_past_due", status=409)
         _require_skills_unlocked(state, actor_id, assignment.get("skillIds", []))
+        _require_module_order(state, actor_id, assignment["moduleId"], assignment_id, "assignment")
         key = _submission_key(assignment_id, actor_id); submission = state["submissions"].get(key)
         if submission and submission.get("status") == "graded" and not assignment.get("allowRetries"):
             raise TreeHouseError("This assignment does not allow another attempt", code="retry_not_allowed", status=409)
@@ -736,6 +846,20 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         emit(event_type, actor_id, "skill", skill_id, {})
         return {"skillId": skill_id}
 
+    if kind == "skill.delete":
+        _require_role(state, actor_id, "admin", "instructor")
+        skill_id = _id(payload.get("skillId"), "skillId")
+        skill = _entity(state, "skills", skill_id, "Skill")
+        if skill.get("deletedAt"):
+            raise TreeHouseError("Skill already deleted", code="already_deleted", status=409)
+        referencing = [a["id"] for a in state["activities"].values() if skill_id in a.get("skillIds", []) and not a.get("deletedAt")]
+        if referencing:
+            raise TreeHouseError("Skill is referenced by active activities", code="in_use", status=409, details={"activityIds": referencing})
+        skill["deletedAt"] = at
+        skill["updatedAt"] = at
+        emit("skill.deleted", actor_id, "skill", skill_id, {})
+        return {"skillId": skill_id}
+
     if kind == "evidence.submit":
         _require_role(state, actor_id, "learner")
         skill_id = _id(payload.get("skillId"), "skillId"); _entity(state, "skills", skill_id, "Skill")
@@ -787,6 +911,76 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         emit("quest.created", actor_id, "quest", quest_id, {})
         return {"questId": quest_id}
 
+    if kind == "badge.update":
+        _require_role(state, actor_id, "admin", "instructor")
+        badge_id = _id(payload.get("badgeId"), "badgeId")
+        badge = _entity(state, "badges", badge_id, "Badge")
+        if "title" in payload: badge["title"] = _text(payload["title"], "title", maximum=256)
+        if "description" in payload: badge["description"] = _text(payload["description"], "description", maximum=8_192, required=False)
+        if "criteria" in payload:
+            criteria = payload["criteria"]
+            if not isinstance(criteria, dict) or criteria.get("type") not in {"points", "skill", "course", "quest"}:
+                raise TreeHouseError("Invalid badge criteria", code="invalid_criteria")
+            criteria = copy.deepcopy(criteria); criteria_type = criteria["type"]
+            if criteria_type == "points": criteria["threshold"] = _integer(criteria.get("threshold"), "threshold", maximum=10_000_000)
+            elif criteria_type == "skill":
+                criteria["skillId"] = _id(criteria.get("skillId"), "skillId"); _entity(state, "skills", criteria["skillId"], "Skill")
+                criteria["threshold"] = _integer(criteria.get("threshold", 60), "threshold", maximum=1_000_000)
+            elif criteria_type == "course":
+                criteria["courseId"] = _id(criteria.get("courseId"), "courseId"); _entity(state, "courses", criteria["courseId"], "Course")
+            else:
+                criteria["questId"] = _id(criteria.get("questId"), "questId"); _entity(state, "quests", criteria["questId"], "Quest")
+            badge["criteria"] = criteria
+        emit("badge.updated", actor_id, "badge", badge_id, {})
+        return {"badgeId": badge_id}
+
+    if kind == "badge.delete":
+        _require_role(state, actor_id, "admin", "instructor")
+        badge_id = _id(payload.get("badgeId"), "badgeId")
+        badge = _entity(state, "badges", badge_id, "Badge")
+        if badge.get("deletedAt"):
+            raise TreeHouseError("Badge already deleted", code="already_deleted", status=409)
+        badge["deletedAt"] = at
+        emit("badge.deleted", actor_id, "badge", badge_id, {})
+        return {"badgeId": badge_id}
+
+    if kind == "quest.update":
+        _require_role(state, actor_id, "admin", "instructor")
+        quest_id = _id(payload.get("questId"), "questId")
+        quest = _entity(state, "quests", quest_id, "Quest")
+        if "title" in payload: quest["title"] = _text(payload["title"], "title", maximum=256)
+        if "description" in payload: quest["description"] = _text(payload["description"], "description", maximum=8_192, required=False)
+        if "rewardPoints" in payload: quest["rewardPoints"] = _integer(payload["rewardPoints"], "rewardPoints", maximum=10_000)
+        if "activityIds" in payload:
+            activity_ids = _list_ids(payload["activityIds"], "activityIds")
+            if any(item not in state["activities"] for item in activity_ids):
+                raise TreeHouseError("Quest references missing activities", code="entity_not_found")
+            quest["activityIds"] = activity_ids
+        if "assignmentIds" in payload:
+            assignment_ids = _list_ids(payload["assignmentIds"], "assignmentIds")
+            if any(item not in state["assignments"] for item in assignment_ids):
+                raise TreeHouseError("Quest references missing assignments", code="entity_not_found")
+            quest["assignmentIds"] = assignment_ids
+        if not quest.get("activityIds") and not quest.get("assignmentIds"):
+            raise TreeHouseError("Quest needs an activity or assignment", code="empty_quest")
+        if "status" in payload:
+            if payload["status"] not in {"active", "retired"}:
+                raise TreeHouseError("Invalid quest status", code="invalid_status")
+            quest["status"] = payload["status"]
+        emit("quest.updated", actor_id, "quest", quest_id, {})
+        return {"questId": quest_id}
+
+    if kind == "quest.delete":
+        _require_role(state, actor_id, "admin", "instructor")
+        quest_id = _id(payload.get("questId"), "questId")
+        quest = _entity(state, "quests", quest_id, "Quest")
+        if quest.get("deletedAt"):
+            raise TreeHouseError("Quest already deleted", code="already_deleted", status=409)
+        quest["deletedAt"] = at
+        quest["status"] = "retired"
+        emit("quest.deleted", actor_id, "quest", quest_id, {})
+        return {"questId": quest_id}
+
     raise TreeHouseError(f"Unsupported TreeHouse command: {kind}", code="unsupported_command", status=400)
 
 
@@ -826,6 +1020,15 @@ def public_treehouse_snapshot(state: dict[str, Any], actor_id: str) -> dict[str,
     is_staff = _has_role(actor, "admin", "instructor")
     snapshot = copy.deepcopy(state)
     snapshot.pop("processedCommands", None)
+    # Filter deleted entities from snapshot
+    snapshot["courses"] = {k: v for k, v in snapshot["courses"].items() if not v.get("deletedAt")}
+    snapshot["modules"] = {k: v for k, v in snapshot["modules"].items() if not v.get("deletedAt")}
+    snapshot["activities"] = {k: v for k, v in snapshot["activities"].items() if not v.get("deletedAt")}
+    snapshot["assignments"] = {k: v for k, v in snapshot["assignments"].items() if not v.get("deletedAt")}
+    snapshot["skills"] = {k: v for k, v in snapshot["skills"].items() if not v.get("deletedAt")}
+    snapshot["badges"] = {k: v for k, v in snapshot["badges"].items() if not v.get("deletedAt")}
+    snapshot["quests"] = {k: v for k, v in snapshot["quests"].items() if not v.get("deletedAt")}
+    snapshot["enrollments"] = {k: v for k, v in snapshot["enrollments"].items() if v.get("status") != "withdrawn"}
     if not is_staff:
         snapshot["courses"] = {key: value for key, value in snapshot["courses"].items() if value.get("status") == "published" or actor_id in value.get("authorIds", [])}
         visible_courses = set(snapshot["courses"])

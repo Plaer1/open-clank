@@ -24,6 +24,9 @@ class _FakeQuery:
     def all(self):
         return list(self.rows)
 
+    def first(self):
+        return self.rows[0] if self.rows else None
+
 
 class _FakeDb:
     def __init__(self, rows):
@@ -37,13 +40,14 @@ class _FakeDb:
         self.closed = True
 
 
-def _session(model="qwen3.5:latest", endpoint_url="http://localhost:11434/v1/chat/completions"):
-    return SimpleNamespace(model=model, endpoint_url=endpoint_url)
+def _session(model="qwen3.5:latest", endpoint_url="http://localhost:11434/v1/chat/completions", endpoint_id="image-endpoint"):
+    return SimpleNamespace(model=model, endpoint_url=endpoint_url, endpoint_id=endpoint_id)
 
 
 def _endpoint(base_url, model_type="image", models=None):
     cached_models = None if models is None else json.dumps(models)
     return SimpleNamespace(
+        id="image-endpoint",
         base_url=base_url,
         model_type=model_type,
         is_enabled=True,

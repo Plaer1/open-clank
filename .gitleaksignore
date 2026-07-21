@@ -1,0 +1,8 @@
+# Synthetic redaction fixtures.
+2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
+2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
+
+# Public Stripe browser key and keyboard-shortcut literals.
+6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/console/app/package.json:generic-api-key:9
+6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1082
+6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1089

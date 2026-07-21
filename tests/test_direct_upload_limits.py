@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException, UploadFile
 
-from src.upload_limits import format_byte_limit, read_upload_limited
+from src.upload_limits import copy_upload_limited, format_byte_limit, read_upload_limited
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -24,9 +24,30 @@ async def test_read_upload_limited_accepts_exact_limit():
 async def test_read_upload_limited_rejects_oversized_upload():
     with pytest.raises(HTTPException) as exc:
         await read_upload_limited(_upload("too-big.bin", b"abcde"), 4, "Test upload")
-
     assert exc.value.status_code == 413
     assert exc.value.detail == "Test upload exceeds 4 bytes limit"
+
+
+@pytest.mark.asyncio
+async def test_copy_upload_limited_streams_exact_limit_to_disk(tmp_path):
+    target = tmp_path / "payload.bin"
+    size = await copy_upload_limited(
+        _upload("ok.bin", b"abcdefgh"), target, 8, "Test upload", chunk_size=3
+    )
+    assert size == 8
+    assert target.read_bytes() == b"abcdefgh"
+
+
+@pytest.mark.asyncio
+async def test_copy_upload_limited_rejects_oversized_upload(tmp_path):
+    target = tmp_path / "partial.bin"
+    with pytest.raises(HTTPException) as exc:
+        await copy_upload_limited(
+            _upload("too-big.bin", b"abcde"), target, 4, "Test upload", chunk_size=2
+        )
+    assert exc.value.status_code == 413
+    assert exc.value.detail == "Test upload exceeds 4 bytes limit"
+    assert not target.exists()
 
 
 def test_upload_limit_formatting_is_human_readable():

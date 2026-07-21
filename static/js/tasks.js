@@ -1506,8 +1506,8 @@ function _showForm(existing, initTaskType, initTriggerType) {
     renderOutputExtra();
   });
 
-  // Populate model dropdown from /api/models. Value is "endpoint_url::model"
-  // so a single field encodes both the model name and which endpoint to call.
+  // Populate model dropdown from /api/models. Value is "endpoint_id::model"
+  // so scheduled work retains an unambiguous registered endpoint identity.
   // Blank value (option 0) = inherit session default.
   fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' })
     .then(r => r.json())
@@ -1515,8 +1515,8 @@ function _showForm(existing, initTaskType, initTriggerType) {
       const modelSel = document.getElementById('task-form-model');
       if (!modelSel) return;
       const items = (data.items || []).filter(it => (it.model_type || 'llm') === 'llm');
-      const curKey = existing?.endpoint_url && existing?.model
-        ? `${existing.endpoint_url}::${existing.model}`
+      const curKey = existing?.endpoint_id && existing?.model
+        ? `${existing.endpoint_id}::${existing.model}`
         : '';
       for (const it of items) {
         if (it.offline || !it.models || it.models.length === 0) continue;
@@ -1525,7 +1525,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         const all = sortModelIds([...(it.models || []), ...(it.models_extra || [])]);
         for (const m of all) {
           const opt = document.createElement('option');
-          opt.value = `${it.url}::${m}`;
+          opt.value = `${it.endpoint_id}::${m}`;
           opt.textContent = m;
           if (opt.value === curKey) opt.selected = true;
           group.appendChild(opt);
@@ -1604,17 +1604,17 @@ function _showForm(existing, initTaskType, initTriggerType) {
     if (nameEl) payload.name = nameEl.value.trim() || undefined;
 
     // Model / endpoint override. Blank = inherit session default. Otherwise
-    // value is `endpoint_url::model_id`.
+    // value is `endpoint_id::model_id`.
     const modelVal = document.getElementById('task-form-model')?.value || '';
     if (modelVal) {
       const idx = modelVal.indexOf('::');
       if (idx > 0) {
-        payload.endpoint_url = modelVal.slice(0, idx);
+        payload.endpoint_id = modelVal.slice(0, idx);
         payload.model = modelVal.slice(idx + 2);
       }
     } else {
       // Explicitly clear so a previously-pinned task can return to default.
-      payload.endpoint_url = '';
+      payload.endpoint_id = '';
       payload.model = '';
     }
 

@@ -25,9 +25,29 @@
 const EDGE = 7;          // px proximity to a border that arms a resize grip
 const MIN_W = 320;       // smallest a window may be dragged to
 const MIN_H = 200;
+export const WINDOW_SIZE_VERSION = 2;
 // Controls that must keep their own click/drag behaviour even when they sit
 // within EDGE px of the window border (close buttons, sliders, inputs, links).
 const INTERACTIVE = 'button, input, select, textarea, a, [contenteditable=""], [contenteditable="true"]';
+
+export function normalizeWindowSizeRecord(value, viewport = {}) {
+  if (!value || typeof value !== 'object') return null;
+  const rawWidth = Number(value.width ?? value.w);
+  const rawHeight = Number(value.height ?? value.h);
+  const viewportWidth = Number(viewport.width);
+  const viewportHeight = Number(viewport.height);
+  if (![rawWidth, rawHeight, viewportWidth, viewportHeight].every(Number.isFinite)
+      || rawWidth <= 0 || rawHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0) return null;
+  const requestedMinWidth = Number.isFinite(Number(viewport.minWidth)) ? Number(viewport.minWidth) : MIN_W;
+  const requestedMinHeight = Number.isFinite(Number(viewport.minHeight)) ? Number(viewport.minHeight) : MIN_H;
+  const minimumWidth = Math.min(viewportWidth, Math.max(1, requestedMinWidth));
+  const minimumHeight = Math.min(viewportHeight, Math.max(1, requestedMinHeight));
+  return {
+    version:WINDOW_SIZE_VERSION,
+    width:Math.round(Math.min(viewportWidth, Math.max(minimumWidth, rawWidth))),
+    height:Math.round(Math.min(viewportHeight, Math.max(minimumHeight, rawHeight))),
+  };
+}
 
 export function makeWindowResizable(content, options = {}) {
   if (!content) return;
@@ -147,7 +167,13 @@ export function makeWindowResizable(content, options = {}) {
     clearHoverCursor();
     const r = content.getBoundingClientRect();
     if (storageKey) {
-      try { localStorage.setItem(storageKey, JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height) })); } catch (_) {}
+      try {
+        const record = normalizeWindowSizeRecord(
+          { width:r.width, height:r.height },
+          { width:window.innerWidth, height:window.innerHeight, minWidth:minW, minHeight:minH },
+        );
+        if (record) localStorage.setItem(storageKey, JSON.stringify(record));
+      } catch (_) {}
     }
     if (onResizeEnd) { try { onResizeEnd({ rect: r }); } catch (_) {} }
   }
@@ -214,20 +240,65 @@ export function makeWindowResizable(content, options = {}) {
   // frame lets that settle so we can re-check _skip() and NOT stretch a
   // docked/fullscreen window to a stale windowed size. The open animation masks
   // the one-frame delay, so there is no visible jump.
-  if (storageKey) {
-    requestAnimationFrame(() => {
-      if (_skip() || !content.isConnected) return;
+  function normalizedCurrentSize(value = null) {
+    const rect = value || content.getBoundingClientRect();
+    return normalizeWindowSizeRecord(
+      { width:rect.width, height:rect.height },
+      { width:window.innerWidth, height:window.innerHeight, minWidth:minW, minHeight:minH },
+    );
+  }
+
+  function clampToViewport() {
+    if (_skip() || !content.isConnected) return;
+    const rect = content.getBoundingClientRect();
+    const size = normalizedCurrentSize(rect);
+    if (!size) return;
+    const fixed = getComputedStyle(content).position === 'fixed';
+    const outside = rect.left < 0 || rect.top < 0
+      || rect.right > window.innerWidth || rect.bottom > window.innerHeight;
+    if (Math.round(rect.width) !== size.width || Math.round(rect.height) !== size.height) {
+      content.style.width = size.width + 'px';
+      content.style.height = size.height + 'px';
+      content.style.maxWidth = 'none';
+      content.style.maxHeight = 'none';
+    }
+    if (fixed || outside) {
+      content.style.position = 'fixed';
+      content.style.margin = '0';
+      content.style.transform = 'none';
+      content.style.left = Math.max(0, Math.min(rect.left, window.innerWidth - size.width)) + 'px';
+      content.style.top = Math.max(0, Math.min(rect.top, window.innerHeight - size.height)) + 'px';
+    }
+  }
+
+  let clampFrame = 0;
+  const scheduleClamp = () => {
+    cancelAnimationFrame(clampFrame);
+    clampFrame = requestAnimationFrame(clampToViewport);
+  };
+  window.addEventListener('resize', scheduleClamp);
+  window.visualViewport?.addEventListener('resize', scheduleClamp);
+
+  requestAnimationFrame(() => {
+    if (_skip() || !content.isConnected) return;
+    if (storageKey) {
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
-        if (saved && saved.w && saved.h) {
-          const w = Math.max(minW, Math.min(saved.w, window.innerWidth));
-          const h = Math.max(minH, Math.min(saved.h, window.innerHeight));
-          content.style.width = w + 'px';
-          content.style.height = h + 'px';
+        const record = normalizeWindowSizeRecord(saved, {
+          width:window.innerWidth,
+          height:window.innerHeight,
+          minWidth:minW,
+          minHeight:minH,
+        });
+        if (record) {
+          content.style.width = record.width + 'px';
+          content.style.height = record.height + 'px';
           content.style.maxWidth = 'none';
           content.style.maxHeight = 'none';
+          localStorage.setItem(storageKey, JSON.stringify(record));
         }
       } catch (_) {}
-    });
-  }
+    }
+    requestAnimationFrame(clampToViewport);
+  });
 }

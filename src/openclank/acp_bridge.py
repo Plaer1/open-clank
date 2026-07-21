@@ -246,6 +246,7 @@ class _TurnState:
         "usage",
         "max_tool_calls",
         "policy_stopped",
+        "error_streamed",
     )
 
     def __init__(self, max_tool_calls: int = 0) -> None:
@@ -259,13 +260,14 @@ class _TurnState:
         self.usage: Optional[dict] = None
         self.max_tool_calls = max(0, int(max_tool_calls or 0))
         self.policy_stopped = False
+        self.error_streamed = False
 
 
 class ACPBridge:
     """Translates ACP session/update notifications into odysseus chat SSE strings.
 
-    One bridge per ACP client. Manages per-turn state and yields SSE strings
-    that the chat_routes handler can consume identically to stream_agent_loop().
+    One bridge per ACP client. Manages per-turn state and yields the canonical
+    OpenClank Agent SSE contract.
     """
 
     def __init__(
@@ -540,6 +542,8 @@ class ACPBridge:
         owner: Optional[str] = None,
         odysseus_session: str = "",
         extra_mcp_servers: Optional[list[dict]] = None,
+        with_agent_tools: bool = True,
+        with_memory: bool = True,
     ) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
@@ -547,18 +551,16 @@ class ACPBridge:
         can match thesius model names to mimo model IDs later.
         """
         target_cwd = cwd or self._cwd
-        mcp_servers = [
+        mcp_servers = ([
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
                 workspace=target_cwd,
             ),
-            frankenmemory_mcp_descriptor(
+        ] + ([frankenmemory_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
-            ),
-            *(extra_mcp_servers or []),
-        ]
+            )] if with_memory else []) + list(extra_mcp_servers or [])) if with_agent_tools else []
         result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
         session_id = result["sessionId"]
         self._capture_handshake(session_id, result)
@@ -818,31 +820,35 @@ class ACPBridge:
         owner: Optional[str] = None,
         turn_envelope: Optional[dict] = None,
     ) -> AsyncGenerator[str, None]:
-        """Run a prompt turn via ACP, yielding SSE strings identical to stream_agent_loop.
+        """Run a prompt turn via ACP, yielding the canonical Agent SSE contract.
 
-        This is the drop-in replacement for the agent branch in chat_routes.py.
         cwd: per-chat workspace override (else the bridge's global default).
         """
         if odysseus_session in self._session_map and self._delete_session_callback:
             await self._delete_session_callback(odysseus_session)
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
         incognito = bool(envelope.get("incognito"))
+        auxiliary = envelope.get("lane") == "auxiliary"
         extra_mcp_servers, mcp_disabled = odysseus_mcp_descriptors(
             is_admin=bool(envelope.get("is_admin")) and not incognito
         )
         envelope.setdefault("disabled_tools", []).extend(mcp_disabled)
-        if incognito:
+        if incognito or auxiliary:
             mimo_session = await self.open_session(
                 cwd=cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
+                with_agent_tools=not auxiliary,
+                with_memory=False,
             )
             self._session_context[mimo_session] = {
                 "odysseus_session_id": odysseus_session,
                 "owner": owner if owner is not None else self._owner,
                 "workspace": cwd or self._cwd,
                 "incognito": True,
+                "auxiliary": auxiliary,
                 "is_admin": bool(envelope.get("is_admin")),
+                "interaction_policy": envelope.get("interaction_policy", "interactive"),
             }
         else:
             mimo_session = await self.ensure_session(
@@ -855,10 +861,22 @@ class ACPBridge:
                 "workspace": cwd or self._cwd,
                 "incognito": False,
                 "is_admin": bool(envelope.get("is_admin")),
+                "interaction_policy": envelope.get("interaction_policy", "interactive"),
             })
         turn_id = _turn_source_id(messages)
+        envelope["root_turn_id"] = turn_id
+        if not incognito and not auxiliary and not turn_id.startswith("turn-"):
+            from src.agent_actor_accounting import begin_agent_turn
+
+            if not begin_agent_turn(turn_id, mimo_session):
+                yield f'data: {json.dumps({"type": "actor_accounting_failure", "data": {"state": "unavailable", "root_turn_id": turn_id}})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"error": "Agent actor accounting could not attach to the persisted turn", "status": 500})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
         control_state = self._session_state.get(mimo_session, {})
         try:
+            if auxiliary:
+                raise KeyError("auxiliary turns have no transcript projection")
             from src.openclank.transcript_projection import canonical_snapshot, record_projection
 
             snapshot = canonical_snapshot(
@@ -941,7 +959,7 @@ class ACPBridge:
 
         # Build the prompt parts from odysseus messages
         messages, trusted_block = await self._maybe_inject_digest(
-            messages, owner=owner, incognito=incognito
+            messages, owner=owner, incognito=incognito or auxiliary
         )
         if trusted_block:
             # T6: endorsed guidance rides the persona seam to TRUE system
@@ -1000,7 +1018,10 @@ class ACPBridge:
                 result = prompt_task.result()
             except Exception as e:
                 logger.error("ACP prompt failed: %s", e)
-                yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 500})}\n\n'
+                # A forwarded session.error already put the real provider
+                # message on the stream — don't repeat it as a second card.
+                if not state.error_streamed:
+                    yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 500})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
 
@@ -1013,6 +1034,7 @@ class ACPBridge:
                 "response_time": round(elapsed, 2),
                 "model": model or "mimo",
                 "stop_reason": state.stop_reason,
+                "root_turn_id": turn_id,
                 **state.metrics,
             }
             if state.usage:
@@ -1182,6 +1204,24 @@ class ACPBridge:
 
         elif update_type == "session_info_update":
             sses.append(f'data: {json.dumps({"type": "session_info", "data": _sanitize_event_value(update)})}\n\n')
+
+        elif update_type == "_odysseus_error":
+            # mimo forwards session.error bus events (provider/LLM failures
+            # that its server otherwise resolves as a clean 200 prompt).
+            message = str(update.get("message") or update.get("name") or "Model provider error")
+            state.error_streamed = True
+            sses.append(f'event: error\ndata: {json.dumps({"error": message, "status": 502})}\n\n')
+
+        elif update_type == "_odysseus_retry":
+            data = _sanitize_event_value(update)
+            data.pop("sessionUpdate", None)
+            sses.append(f'data: {json.dumps({"type": "retry_notice", "data": data})}\n\n')
+
+        elif update_type == "_odysseus_actor_snapshot":
+            from src.agent_actor_accounting import apply_actor_feed
+
+            aggregate = apply_actor_feed(_sanitize_event_value(update))
+            sses.append(f'data: {json.dumps({"type": "actor_accounting", "data": aggregate})}\n\n')
 
         elif update_type == "_permission_request":
             # C1: synthetic update injected by _surface_permission — ride the
@@ -1474,15 +1514,16 @@ _MIMO_TOOL_ALIASES = {
 
 
 def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
-    if envelope.get("incognito"):
+    if envelope.get("lane") == "auxiliary":
         return {"*": False}
-    if envelope.get("mode") == "chat":
-        # T8 pull affordance: the read-only memory search is chat mode's ONE
-        # tool. The chat agent's hardPermission allows it regardless (hard
-        # tier merges last), but the session tier should state the same
-        # intent instead of fighting it. Incognito stays a full deny above.
-        return {"*": False, "memory": True}
-    policy: dict[str, bool] = {}
+    allowed = envelope.get("allowed_tools")
+    policy: dict[str, bool] = {"*": False} if allowed is not None else {}
+    for raw_name in allowed or []:
+        name = str(raw_name)
+        normalized = name.replace("mcp__", "").replace(":", "_")
+        for alias in _MIMO_TOOL_ALIASES.get(name, {normalized}):
+            policy[alias] = True
+        policy[f"lifetools_*_{normalized}"] = True
     for raw_name in envelope.get("disabled_tools") or []:
         name = str(raw_name)
         normalized = name.replace("mcp__", "").replace(":", "_")
@@ -1492,6 +1533,8 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
         policy[f"lifetools_*_{normalized}"] = False
     for raw_name in envelope.get("forced_tools") or []:
         name = str(raw_name)
+        if allowed is not None and name not in allowed:
+            continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {name}):
             policy.setdefault(alias, True)
     return policy
@@ -1655,13 +1698,21 @@ class QuestionHandler:
         context = self._context_resolver(mimo_session) if self._context_resolver else {}
         odysseus_session = str(context.get("odysseus_session_id") or "")
         owner = str(context.get("owner") or "")
-        if not mimo_session or not odysseus_session or not owner or context.get("incognito"):
+        incognito = bool(context.get("incognito"))
+        if (
+            not mimo_session
+            or not odysseus_session
+            or not owner
+            or context.get("interaction_policy") == "fail_on_interaction"
+        ):
             return {"rejected": True}
-        from src.openclank.transcript_projection import get_projection
+        projection = {}
+        if not incognito:
+            from src.openclank.transcript_projection import get_projection
 
-        projection = get_projection(odysseus_session, owner=owner)
-        if not projection or projection.get("mimo_session_id") != mimo_session:
-            return {"rejected": True}
+            projection = get_projection(odysseus_session, owner=owner)
+            if not projection or projection.get("mimo_session_id") != mimo_session:
+                return {"rejected": True}
         req = PendingQuestion(
             mimo_request_id=str(params.get("requestId") or ""),
             mimo_session_id=mimo_session,
@@ -1698,18 +1749,19 @@ class QuestionHandler:
         req = self.pending_requests.get(request_id)
         if req is None or req.owner != owner or req.odysseus_session_id != session_id:
             return False
-        from src.openclank.transcript_projection import get_projection
-
-        projection = get_projection(session_id, owner=owner)
         context = self._context_resolver(req.mimo_session_id) if self._context_resolver else {}
-        if (
-            not projection
-            or projection.get("mimo_session_id") != req.mimo_session_id
-            or projection.get("active_turn_id") != req.turn_id
-            or int(projection.get("transcript_revision") or 0) != req.revision
-            or int(context.get("plan_revision") or 0) != req.plan_revision
-        ):
-            return False
+        if not context.get("incognito"):
+            from src.openclank.transcript_projection import get_projection
+
+            projection = get_projection(session_id, owner=owner)
+            if (
+                not projection
+                or projection.get("mimo_session_id") != req.mimo_session_id
+                or projection.get("active_turn_id") != req.turn_id
+                or int(projection.get("transcript_revision") or 0) != req.revision
+                or int(context.get("plan_revision") or 0) != req.plan_revision
+            ):
+                return False
         if rejected:
             return req.resolve({"rejected": True})
         if not isinstance(answers, list) or len(answers) != len(req.questions):
@@ -1861,14 +1913,16 @@ class PermissionHandler:
         incognito = bool(context.get("incognito"))
         is_admin = bool(context.get("is_admin"))
 
-        if incognito or (owner and not is_admin):
+        if context.get("interaction_policy") == "fail_on_interaction":
+            return self._approve("reject")
+        if owner and not is_admin:
             return self._approve("reject")
 
         # ── safe-dirs auto-approve ──
         # Any request whose target file is inside a configured safe dir is
         # approved immediately so the always-on assistant doesn't block on
         # known workspaces.
-        allowed_roots = [workspace] if workspace else self._safe_dirs
+        allowed_roots = [] if incognito else ([workspace] if workspace else self._safe_dirs)
         if filepath and allowed_roots and any(
             _path_within(filepath, root) for root in allowed_roots
         ):
@@ -1876,7 +1930,7 @@ class PermissionHandler:
             return self._approve()
 
         # ── stored durable grants ──
-        if self._grant_store is not None and self._grant_store.match(
+        if not incognito and self._grant_store is not None and self._grant_store.match(
             title,
             filepath=filepath or None,
             owner=owner,
@@ -1892,7 +1946,7 @@ class PermissionHandler:
             return self._approve("reject")
 
         projection = {}
-        if owner or odysseus_session:
+        if not incognito and (owner or odysseus_session):
             from src.openclank.transcript_projection import get_projection
 
             projection = get_projection(odysseus_session, owner=owner)
@@ -1924,8 +1978,10 @@ class PermissionHandler:
                 return self._approve("reject")
 
             option_id = await req.wait()
+            if incognito and option_id == "always":
+                option_id = "once"
 
-            if option_id == "always" and self._grant_store is not None:
+            if not incognito and option_id == "always" and self._grant_store is not None:
                 from src.openclank.permission_grants import derive_pattern
                 pattern = derive_pattern(raw_input)
                 self._grant_store.add(

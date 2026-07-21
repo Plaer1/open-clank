@@ -124,6 +124,7 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
     # touched on this path, so a bare task object is enough to exercise it.
     task = SimpleNamespace(
         crew_member_id=None,
+        endpoint_id="endpoint-1",
         endpoint_url="http://endpoint",
         model="util-model",
         session_id="sess-1",
@@ -134,7 +135,14 @@ async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):
         character_id=None,
     )
 
-    result = await scheduler._execute_llm_task(task, db=None)
+    class _Db:
+        class _Query:
+            def filter(self, *args): return self
+            def first(self): return None
+        def query(self, *args): return self._Query()
+        def commit(self): pass
+
+    result = await scheduler._execute_llm_task(task, db=_Db())
     assert result == "done"
 
     # Enforcement side: the global list reached the agent loop, so the

@@ -79,6 +79,39 @@ def test_result_text_reports_killed(store):
     assert "killed" in bg_jobs.result_text(bg_jobs.get("job0001")).lower()
 
 
+def test_followup_claim_is_atomic_and_token_fenced(store):
+    _seed(job_id="done01", status="done")
+    first = bg_jobs.claim_pending_followups("monitor-a")
+    second = bg_jobs.claim_pending_followups("monitor-b")
+
+    assert [row["id"] for row in first] == ["done01"]
+    assert second == []
+    token = first[0]["_claim_token"]
+    assert not bg_jobs.finish_followup("done01", "stale-token")
+    assert bg_jobs.finish_followup("done01", token)
+    assert bg_jobs.claim_pending_followups("monitor-b") == []
+
+
+def test_followup_retry_budget_is_bounded(store, monkeypatch):
+    _seed(job_id="done01", status="done")
+    now = 1000.0
+    monkeypatch.setattr(bg_jobs.time, "time", lambda: now)
+
+    for attempt in range(bg_jobs._FOLLOWUP_MAX_ATTEMPTS):
+        claimed = bg_jobs.claim_pending_followups("monitor")
+        assert len(claimed) == 1
+        state = bg_jobs.fail_followup("done01", claimed[0]["_claim_token"], "down")
+        if attempt + 1 < bg_jobs._FOLLOWUP_MAX_ATTEMPTS:
+            assert state == "pending"
+            now = float(bg_jobs._load()["done01"]["next_followup_at"])
+        else:
+            assert state == "failed"
+
+    record = bg_jobs._load()["done01"]
+    assert record["followed_up"] is True
+    assert bg_jobs.claim_pending_followups("monitor") == []
+
+
 # ── manage_bg_jobs tool ─────────────────────────────────────────────────────
 
 def test_no_session_is_rejected(store):

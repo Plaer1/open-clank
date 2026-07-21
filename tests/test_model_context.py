@@ -323,3 +323,21 @@ class TestGetContextLength:
 
         endpoint = "http://100.117.136.97:34521/v1/chat/completions"
         assert model_context.get_context_length(endpoint, "unknown-proxy-model") == model_context.DEFAULT_CONTEXT
+
+    def test_keyed_zai_endpoint_never_makes_unauthenticated_context_probe(self, monkeypatch):
+        _install_endpoint_db(monkeypatch, [
+            types.SimpleNamespace(
+                base_url="https://api.z.ai/api/coding/paas/v4",
+                endpoint_kind="auto",
+                api_key="fake-key",
+                is_enabled=True,
+            )
+        ])
+
+        def fake_get(*args, **kwargs):
+            raise AssertionError("keyed first-party context lookup must not send an unauthenticated request")
+
+        monkeypatch.setattr(model_context.httpx, "get", fake_get)
+
+        endpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        assert model_context.get_context_length(endpoint, "glm-5.2") == model_context.DEFAULT_CONTEXT

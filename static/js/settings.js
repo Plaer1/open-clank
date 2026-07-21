@@ -15,6 +15,7 @@ import mimoProviders from './mimoProviders.js';
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
+let _copalModule = null;
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
@@ -108,6 +109,7 @@ function initTabs() {
       // they flip toggles instead of having to close + reopen the modal.
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
+      if (tab === 'appearance') syncCopalNotesSettings();
       if (tab === 'ai') { refreshAiModelEndpoints(); loadDefaultPersonaPanel(); }
       if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
       if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
@@ -2027,6 +2029,7 @@ async function initAgentSettings() {
 function initAppearance() {
   syncAppearanceCheckboxes();
   syncPrivacyCheckboxes();
+  syncCopalNotesSettings();
 
   modalEl.querySelectorAll('[data-ui-key]').forEach(function(chk) {
     chk.addEventListener('change', async function() {
@@ -2079,6 +2082,16 @@ function initAppearance() {
     });
   });
 
+  modalEl.querySelectorAll('[data-copal-notes-setting]').forEach(function(control) {
+    control.addEventListener('change', function() {
+      if (!_copalModule?.updateNotesSettings) return;
+      const key = control.dataset.copalNotesSetting;
+      const value = control.type === 'checkbox' ? control.checked : control.value;
+      _copalModule.updateNotesSettings({ [key]:value });
+      syncCopalNotesSettings();
+    });
+  });
+
   // Per-section reset buttons (arrow-circle-back icon in each card's h2).
   // Removes only the keys belonging to this section from the persisted
   // visibility map so other sections keep their user settings.
@@ -2097,6 +2110,16 @@ function initAppearance() {
       syncPrivacyCheckboxes();
       if (window.applyUIVis) window.applyUIVis(s);
     });
+  });
+}
+
+function syncCopalNotesSettings() {
+  if (!modalEl || !_copalModule?.getNotesSettings) return;
+  const settings = _copalModule.getNotesSettings();
+  modalEl.querySelectorAll('[data-copal-notes-setting]').forEach(function(control) {
+    const value = settings[control.dataset.copalNotesSetting];
+    if (control.type === 'checkbox') control.checked = value === true;
+    else if (value != null) control.value = String(value);
   });
 }
 
@@ -6062,6 +6085,7 @@ async function loadPermissionGrants() {
 export function open(tab) {
   if (!initialized) initAll();
   syncAppearanceCheckboxes();
+  syncCopalNotesSettings();
   if (modalEl.classList.contains('hidden')) {
     resetWindowPlacement();
   }
@@ -6088,6 +6112,11 @@ export function open(tab) {
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
+}
+
+export function setCopalModule(copalModule) {
+  _copalModule = copalModule;
+  syncCopalNotesSettings();
 }
 
 export function close() {
@@ -6143,7 +6172,7 @@ export function close() {
   _tryOpen();
 })();
 
-const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+const settingsModule = { open, close, setCopalModule, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 
 
 export default settingsModule;

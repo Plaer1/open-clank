@@ -20,9 +20,9 @@ const state = {
   _compareElements: [],            // elements we added to container (for cleanup)
   _savedToggles: null,             // tool toggle states saved before compare
   _savedIndicatorDisplay: {},      // display state of toolbar indicators before compare
-  _savedMode: 'chat',              // agent/chat mode saved before compare
+  _savedMode: 'agent',             // compatibility field for legacy compare state
   _hasVisibleResults: false,       // compare results still on screen after close
-  _compareMode: 'chat',            // 'chat', 'agent', 'search', or 'research'
+  _compareMode: 'agent',           // server-enforced Agent (read-only)
   _lastPrompt: '',                 // last prompt sent (for rematch)
   _cachedModels: [],               // cached model list for pane dropdowns
   _probed: new Set(),              // model IDs that have been successfully probed

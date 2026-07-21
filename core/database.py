@@ -185,6 +185,7 @@ class Session(TimestampMixin, Base):
     # Session metadata
     name = Column(String, nullable=False)
     endpoint_url = Column(String, nullable=False)
+    endpoint_id = Column(String, nullable=True, index=True)
     model = Column(String, nullable=False)
     owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
     
@@ -244,6 +245,7 @@ class Session(TimestampMixin, Base):
             'name': self.name,
             'model': self.model,
             'endpoint_url': self.endpoint_url,
+            'endpoint_id': self.endpoint_id,
             'rag': self.rag,
             'archived': self.archived,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -285,6 +287,65 @@ class ChatMessage(Base):
     # Indexes - optimized composite
     __table_args__ = (
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
+    )
+
+
+class AgentTurn(Base):
+    """Durable actor-accounting state for one persisted Agent turn."""
+
+    __tablename__ = "agent_turns"
+
+    root_turn_id = Column(
+        String,
+        ForeignKey("chat_messages.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    assistant_message_id = Column(
+        String,
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    mimo_session_id = Column(String, nullable=False, index=True)
+    actor_accounting_version = Column(Integer, nullable=False, default=1)
+    actor_accounting_state = Column(String, nullable=False, default="pending", index=True)
+    last_source_revision = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    updated_at = Column(DateTime, nullable=False, default=utcnow_naive, onupdate=utcnow_naive)
+    closed_at = Column(DateTime, nullable=True)
+
+
+class TurnActor(Base):
+    """One MiMo actor projected into the Agent turn that spawned it."""
+
+    __tablename__ = "turn_actors"
+
+    root_turn_id = Column(
+        String,
+        ForeignKey("agent_turns.root_turn_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    actor_id = Column(String, primary_key=True)
+    mimo_session_id = Column(String, nullable=False, index=True)
+    parent_actor_id = Column(String, nullable=True)
+    mode = Column(String, nullable=False)
+    agent = Column(String, nullable=False)
+    description = Column(Text, nullable=False, default="")
+    background = Column(Boolean, nullable=False, default=False)
+    lifecycle = Column(String, nullable=False, default="ephemeral")
+    counts_toward_total = Column(Boolean, nullable=False, default=False)
+    status = Column(String, nullable=False, default="pending", index=True)
+    outcome = Column(String, nullable=True)
+    last_error = Column(Text, nullable=True)
+    source_revision = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    updated_at = Column(DateTime, nullable=False, default=utcnow_naive, onupdate=utcnow_naive)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_turn_actors_session_actor", "mimo_session_id", "actor_id"),
+        Index("ix_turn_actors_root_parent", "root_turn_id", "parent_actor_id"),
     )
 
 
@@ -506,11 +567,14 @@ class ModelEndpoint(TimestampMixin, Base):
     model_refresh_mode = Column(String, nullable=True, default="auto")
     model_refresh_interval = Column(Integer, nullable=True, default=None)
     model_refresh_timeout = Column(Integer, nullable=True, default=None)
-    # Whether models on this endpoint accept OpenAI-style function
-    # schemas + emit `tool_calls`. Auto-detected at Cookbook auto-
-    # register time from `--enable-auto-tool-choice` in the serve cmd;
-    # can be toggled per-endpoint in the UI. NULL = unknown, falls
-    # back to the model-name keyword heuristic in agent_loop.py.
+    # Last model-catalog probe is kept separate from per-model tool evidence.
+    # A catalog 401 must not erase a previously certified tool capability, and
+    # an unknown capability must not be misreported as an authentication error.
+    catalog_probe_status = Column(String, nullable=True)
+    catalog_probe_http_status = Column(Integer, nullable=True)
+    catalog_probed_at = Column(DateTime, nullable=True)
+    # Dormant compatibility column. Startup migrates any old true/false value
+    # into ModelCapability rows and clears it; new authority is per model.
     supports_tools = Column(Boolean, nullable=True, default=None)
     # Per-user ownership. NULL = legacy/shared (visible to every user) — this
     # is the historical default. When non-null, the model picker only shows
@@ -519,6 +583,38 @@ class ModelEndpoint(TimestampMixin, Base):
     # Optional OAuth/session-backed credential row. Used by subscription-backed
     # providers that need refresh tokens instead of a static API key.
     provider_auth_id = Column(String, nullable=True, index=True)
+
+
+class ModelCapability(Base):
+    """Per-model tool declaration and verification evidence."""
+
+    __tablename__ = "model_capabilities"
+
+    endpoint_id = Column(
+        String,
+        ForeignKey("model_endpoints.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    model_id = Column(String, primary_key=True)
+    tools_declared = Column(Boolean, nullable=True)
+    declaration_fingerprint = Column(String, nullable=True)
+    tools_verified = Column(Boolean, nullable=True)
+    tools_verified_at = Column(DateTime, nullable=True)
+    verification_fingerprint = Column(String, nullable=True)
+
+
+class MimoProjectionState(Base):
+    """Committed desired MiMo provider projection for one owner."""
+
+    __tablename__ = "mimo_projection_states"
+
+    owner_id = Column(String, primary_key=True, default="")
+    desired_fingerprint = Column(String, nullable=False, default="")
+    generation = Column(Integer, nullable=False, default=0)
+    status = Column(String, nullable=False, default="not_materialized")
+    last_error_code = Column(String, nullable=True)
+    requested_at = Column(DateTime, nullable=True)
+    installed_at = Column(DateTime, nullable=True)
 
 
 class ProviderAuthSession(TimestampMixin, Base):
@@ -697,6 +793,7 @@ class CrewMember(TimestampMixin, Base):
     personality   = Column(Text, nullable=True)             # system prompt
     model         = Column(String, nullable=True)
     endpoint_url  = Column(String, nullable=True)
+    endpoint_id   = Column(String, ForeignKey("model_endpoints.id", ondelete="SET NULL"), nullable=True)
     greeting      = Column(Text, nullable=True)
     enabled_tools = Column(Text, nullable=True)             # JSON array or "all"
     session_id    = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
@@ -734,6 +831,11 @@ class ScheduledTask(TimestampMixin, Base):
     session_id     = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
     model          = Column(String, nullable=True)
     endpoint_url   = Column(String, nullable=True)
+    endpoint_id    = Column(String, ForeignKey("model_endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
+    workspace      = Column(String, nullable=True)
+    allowed_tools  = Column(Text, nullable=False, default="[]")
+    interaction_policy = Column(String, nullable=False, default="fail_on_interaction")
+    max_tool_calls = Column(Integer, nullable=False, default=20)
     run_count      = Column(Integer, default=0)
 
     cron_expression = Column(String, nullable=True)           # cron string e.g. "*/5 * * * *"
@@ -1118,6 +1220,31 @@ def _migrate_add_model_endpoint_refresh_columns():
         except Exception:
             pass
 
+
+def _migrate_add_model_endpoint_probe_columns():
+    """Add durable, secret-free model-catalog probe evidence columns."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(model_endpoints)")}
+        additions = {
+            "catalog_probe_status": "TEXT",
+            "catalog_probe_http_status": "INTEGER",
+            "catalog_probed_at": "DATETIME",
+        }
+        for name, sql_type in additions.items():
+            if columns and name not in columns:
+                conn.execute(f"ALTER TABLE model_endpoints ADD COLUMN {name} {sql_type}")
+        conn.commit()
+    except Exception as exc:
+        logger.warning("model_endpoints catalog-probe migration failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
 def _migrate_add_task_run_model_column():
     """Add model column to task_runs if it doesn't exist (records which model ran)."""
     import sqlite3
@@ -1337,6 +1464,133 @@ def _migrate_add_mimo_session_id_column():
             conn.close()
         except Exception:
             pass
+
+
+def _migrate_add_session_endpoint_id_column():
+    """Persist endpoint identity; backfill only unambiguous owner-visible rows."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "endpoint_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN endpoint_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_sessions_endpoint_id ON sessions(endpoint_id)")
+
+        def _base(value: str) -> str:
+            value = (value or "").strip().rstrip("/")
+            for suffix in ("/chat/completions", "/completions", "/models", "/v1/messages"):
+                if value.endswith(suffix):
+                    value = value[:-len(suffix)].rstrip("/")
+            return value
+
+        endpoints = conn.execute(
+            "SELECT id, base_url, owner FROM model_endpoints WHERE is_enabled = 1"
+        ).fetchall()
+        sessions = conn.execute(
+            "SELECT id, endpoint_url, owner FROM sessions WHERE endpoint_id IS NULL"
+        ).fetchall()
+        for session in sessions:
+            url = (session["endpoint_url"] or "").strip()
+            if url.rstrip("/") == "mimo://acp":
+                conn.execute("UPDATE sessions SET endpoint_id = 'mimo' WHERE id = ?", (session["id"],))
+                continue
+            normalized = _base(url)
+            matches = [
+                endpoint["id"]
+                for endpoint in endpoints
+                if (endpoint["owner"] is None or endpoint["owner"] == session["owner"])
+                and _base(endpoint["base_url"]) == normalized
+            ]
+            if len(matches) == 1:
+                conn.execute("UPDATE sessions SET endpoint_id = ? WHERE id = ?", (matches[0], session["id"]))
+        conn.commit()
+    except Exception as exc:
+        logger.warning("Migration check for sessions.endpoint_id failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _migrate_add_background_agent_contract_columns():
+    """Persist strict Agent identity and authority for scheduled work."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        task_columns = {row[1] for row in conn.execute("PRAGMA table_info(scheduled_tasks)")}
+        for name, definition in {
+            "endpoint_id": "TEXT",
+            "workspace": "TEXT",
+            "allowed_tools": "TEXT NOT NULL DEFAULT '[]'",
+            "interaction_policy": "TEXT NOT NULL DEFAULT 'fail_on_interaction'",
+            "max_tool_calls": "INTEGER NOT NULL DEFAULT 20",
+        }.items():
+            if name not in task_columns:
+                conn.execute(f"ALTER TABLE scheduled_tasks ADD COLUMN {name} {definition}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_scheduled_tasks_endpoint_id "
+            "ON scheduled_tasks(endpoint_id)"
+        )
+
+        crew_columns = {row[1] for row in conn.execute("PRAGMA table_info(crew_members)")}
+        if "endpoint_id" not in crew_columns:
+            conn.execute("ALTER TABLE crew_members ADD COLUMN endpoint_id TEXT")
+
+        # A linked session carries the canonical endpoint identity. URL-only
+        # legacy rows are backfilled only when one owner-visible endpoint is an
+        # exact normalized match; ambiguity deliberately remains NULL.
+        conn.execute(
+            "UPDATE scheduled_tasks SET endpoint_id = "
+            "(SELECT endpoint_id FROM sessions WHERE sessions.id = scheduled_tasks.session_id) "
+            "WHERE endpoint_id IS NULL AND session_id IS NOT NULL"
+        )
+        conn.execute(
+            "UPDATE crew_members SET endpoint_id = "
+            "(SELECT endpoint_id FROM sessions WHERE sessions.id = crew_members.session_id) "
+            "WHERE endpoint_id IS NULL AND session_id IS NOT NULL"
+        )
+
+        def _base(value: str) -> str:
+            value = (value or "").strip().rstrip("/")
+            for suffix in ("/chat/completions", "/completions", "/models", "/v1/messages"):
+                if value.endswith(suffix):
+                    value = value[:-len(suffix)].rstrip("/")
+            return value
+
+        endpoints = conn.execute(
+            "SELECT id, base_url, owner FROM model_endpoints WHERE is_enabled = 1"
+        ).fetchall()
+        for table in ("scheduled_tasks", "crew_members"):
+            rows = conn.execute(
+                f"SELECT id, endpoint_url, owner FROM {table} "
+                "WHERE endpoint_id IS NULL AND endpoint_url IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                normalized = _base(row["endpoint_url"])
+                matches = [
+                    endpoint["id"]
+                    for endpoint in endpoints
+                    if (endpoint["owner"] is None or endpoint["owner"] == row["owner"])
+                    and _base(endpoint["base_url"]) == normalized
+                ]
+                if len(matches) == 1:
+                    conn.execute(
+                        f"UPDATE {table} SET endpoint_id = ? WHERE id = ?",
+                        (matches[0], row["id"]),
+                    )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("Background Agent contract migration failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _migrate_add_transcript_revision_column():
@@ -2077,7 +2331,16 @@ def init_db():
     Should be called when starting the application.
     """
     _migrate_model_endpoints()
+    # Existing tables must gain ORM-declared columns before any post-create
+    # query selects ModelEndpoint rows.
+    _migrate_add_model_endpoint_probe_columns()
     Base.metadata.create_all(bind=engine)
+    # A full process restart ends any process-local actor feed. Preserve
+    # acknowledged totals while making unfinished lifecycle state honest.
+    from src.agent_actor_accounting import recover_actor_accounting_after_restart
+    recover_actor_accounting_after_restart()
+    from src.model_capabilities import migrate_legacy_model_capabilities
+    migrate_legacy_model_capabilities()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for
@@ -2125,6 +2388,8 @@ def init_db():
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
+    _migrate_add_session_endpoint_id_column()
+    _migrate_add_background_agent_contract_columns()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()

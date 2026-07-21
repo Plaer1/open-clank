@@ -19,6 +19,8 @@ single migration pass rewrites them.
 """
 
 import os
+import hashlib
+import hmac
 import logging
 from pathlib import Path
 
@@ -85,3 +87,9 @@ def decrypt(value: str) -> str:
 
 def is_encrypted(value: str) -> bool:
     return bool(value) and value.startswith(_PREFIX)
+
+
+def keyed_digest(value: str, *, context: str) -> str:
+    """Stable secret-sensitive digest that cannot be tested without app key."""
+    message = f"{context}\0{value}".encode("utf-8")
+    return hmac.new(_load_or_create_key(), message, hashlib.sha256).hexdigest()

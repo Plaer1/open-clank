@@ -53,6 +53,7 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+settingsModule.setCopalModule(copalModule);
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -530,7 +531,7 @@ function initializeEventListeners() {
       e.stopPropagation();
       exportMenu.classList.remove('open');
       const meta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-      const sessionName = meta ? meta.name : 'Odysseus Chat';
+      const sessionName = meta ? meta.name : 'Open Clank Chat';
       const originalTitle = document.title;
       document.title = sessionName;
       const chatHistory = document.getElementById('chat-history');
@@ -854,9 +855,6 @@ function initializeEventListeners() {
     const _overflowRes = el('overflow-research-btn');
     if (_overflowRes) _overflowRes.classList.remove('active');
     if (typeof updatePlusDot === 'function') updatePlusDot();
-    // Reset agent mode to Chat
-    const modeToggle = el('agent-mode-toggle');
-    if (modeToggle && modeToggle.checked) { modeToggle.checked = false; modeToggle.dispatchEvent(new Event('change')); }
     // Clear character/persona
     if (presetsModule && presetsModule.deactivateCharacter) presetsModule.deactivateCharacter();
   }
@@ -1330,10 +1328,13 @@ function initializeEventListeners() {
       if (d.privileges) {
         window._userPrivileges = d.privileges;
         const p = d.privileges;
-        // Hide agent mode toggle
+        // Agent is the only composer lane; disable submit controls when the
+        // account lacks authority.
         if (!p.can_use_agent) {
-          const modeToggle = document.getElementById('mode-toggle');
-          if (modeToggle) modeToggle.closest('.chat-input-toggle')?.style.setProperty('display', 'none');
+          document.querySelectorAll('.send-btn, #message').forEach(control => {
+            control.disabled = true;
+            control.title = 'Agent access is disabled for this account';
+          });
         }
         // Hide bash toggle
         if (!p.can_use_bash) {
@@ -1714,8 +1715,8 @@ function initializeEventListeners() {
     Storage.saveToggleState(state);
   }
 
-  // Mode-affected tools: default ON in Agent mode, default OFF in Chat mode,
-  // but the user's explicit per-mode override is persisted and honored.
+  // Agent tool toggles retain their historical `_agent` storage keys so
+  // existing preferences survive removal of the old Chat-mode UX.
   const MODE_TOOLS = [
     { btnId: 'web-toggle-btn',  checkboxId: 'web-toggle',  stateKey: 'web' },
     { btnId: 'bash-toggle-btn', checkboxId: 'bash-toggle', stateKey: 'bash' },
@@ -1723,16 +1724,16 @@ function initializeEventListeners() {
 
   function _modeKey(stateKey, mode) { return `${stateKey}_${mode}`; }
 
-  function loadToolPref(stateKey, mode) {
+  function loadToolPref(stateKey) {
     const state = loadToggleState();
-    const key = _modeKey(stateKey, mode);
+    const key = _modeKey(stateKey, 'agent');
     if (Object.prototype.hasOwnProperty.call(state, key)) return !!state[key];
-    return mode === 'agent'; // default: ON in agent, OFF in chat
+    return true;
   }
 
-  function saveToolPref(stateKey, mode, value) {
+  function saveToolPref(stateKey, _legacyMode, value) {
     const state = loadToggleState();
-    state[_modeKey(stateKey, mode)] = value;
+    state[_modeKey(stateKey, 'agent')] = value;
     saveToggleState(state);
   }
 
@@ -1751,61 +1752,17 @@ function initializeEventListeners() {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
-      // Hide bash button in chat mode
-      if (mode === 'chat' && stateKey === 'bash') {
-        btn.style.display = 'none';
-        return;
-      }
-      // Show buttons in agent mode (or for web toggle in any mode)
       btn.style.display = '';
-      if (btn.style.display === 'none') return;
-      const on = loadToolPref(stateKey, mode);
+      const on = loadToolPref(stateKey);
       btn.classList.toggle('active', on);
       if (checkboxId) { const chk = el(checkboxId); if (chk) chk.checked = on; }
     });
   }
 
-  // ── Agent / Chat mode toggle ──
-  (function initModeToggle() {
-    const agentBtn = el('mode-agent-btn');
-    const chatBtn = el('mode-chat-btn');
-    if (!agentBtn || !chatBtn) return;
-    const state = loadToggleState();
-    let currentMode = state.mode || 'chat';
-
-    // Immediately hide bash button in chat mode on page load
-    if (currentMode === 'chat') {
-      const bashBtn = el('bash-toggle-btn');
-      if (bashBtn) bashBtn.style.display = 'none';
-    }
-
-    function setMode(mode) {
-      currentMode = mode;
-      const st = loadToggleState();
-      st.mode = mode;
-      saveToggleState(st);
-      agentBtn.classList.toggle('active', mode === 'agent');
-      chatBtn.classList.toggle('active', mode === 'chat');
-      agentBtn.setAttribute('aria-pressed', String(mode === 'agent'));
-      chatBtn.setAttribute('aria-pressed', String(mode === 'chat'));
-      // Slide the pill to the active button
-      const toggle = agentBtn.closest('.mode-toggle');
-      if (toggle) toggle.classList.toggle('mode-chat', mode === 'chat');
-      // Workspace pill + overflow entry are agent-only - hide immediately (no flash).
-      try { workspaceModule.applyMode(mode); } catch (_) {}
-      // Delay tool glow-up for a staggered effect
-      setTimeout(() => applyModeToToggles(mode), 500);
-    }
-    window.__odysseusSetChatMode = setMode;
-    agentBtn.addEventListener('click', () => {
-      // Agent mode turns off research if active
-      const resChk = el('research-toggle');
-      if (resChk && resChk.checked) _syncResearchIndicator(false);
-      setMode('agent');
-    });
-    chatBtn.addEventListener('click', () => setMode('chat'));
-    setMode(currentMode);
-  })();
+  // The composer is always Agent. Storage.loadToggleState() performs the
+  // one-time cleanup of legacy mode=chat state.
+  applyModeToToggles('agent');
+  try { workspaceModule.applyMode('agent'); } catch (_) {}
 
   // ── Tool splash explainer messages (shown first 2 times per tool) ──
   const SPLASH_COUNT_KEY = 'odysseus-tool-splash-counts';
@@ -1838,24 +1795,21 @@ function initializeEventListeners() {
     if (uiModule) uiModule.scrollHistory();
   }
 
-  // ── Checkbox-backed toggle buttons (with per-mode persistence) ──
+  // ── Checkbox-backed Agent tool toggles ──
   function setupToggle(btnId, checkboxId, stateKey) {
     const btn = el(btnId);
     if (!btn) return;
-    // Restore per-mode saved state for both Agent and Chat modes.
-    const mode = (loadToggleState().mode) || 'chat';
-    const saved = loadToolPref(stateKey, mode);
+    const saved = loadToolPref(stateKey);
     const chk = el(checkboxId);
     if (chk) chk.checked = saved;
     btn.classList.toggle('active', saved);
     btn.setAttribute('aria-pressed', String(saved));
     btn.addEventListener('click', () => {
-      const curMode = (loadToggleState().mode) || 'chat';
       const chk = el(checkboxId);
       chk.checked = !chk.checked;
       btn.classList.toggle('active', chk.checked);
       btn.setAttribute('aria-pressed', String(chk.checked));
-      saveToolPref(stateKey, curMode, chk.checked);
+      saveToolPref(stateKey, 'agent', chk.checked);
       showToolToggleToast(stateKey, chk.checked);
       if (chk.checked) _showToolSplash(stateKey);
       // Web search and Research are mutually exclusive — Research takes priority
@@ -2143,16 +2097,6 @@ function initializeEventListeners() {
             if (webBtn) webBtn.classList.remove('active');
             saveToolPref('web', (loadToggleState().mode || 'chat'), false);
           }
-          // Research requires chat mode — force switch from agent
-          const rs = loadToggleState();
-          if (rs.mode === 'agent') {
-            rs.mode = 'chat';
-            saveToggleState(rs);
-            const ab = el('mode-agent-btn'), cb = el('mode-chat-btn');
-            if (ab) ab.classList.remove('active');
-            if (cb) cb.classList.add('active');
-            applyModeToToggles('chat');
-          }
         }
       });
     }
@@ -2316,7 +2260,7 @@ function initializeEventListeners() {
       // Keep a prompt inside the composer even when the picker crowds the row.
       // A blank placeholder makes the mobile/compact empty state feel broken.
       if (textarea) {
-        textarea.setAttribute('placeholder', w < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...');
+        textarea.setAttribute('placeholder', w < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Open Clank...');
       }
       // Hide entire bottom toolbar (tools, mode toggle) — only send button remains
       if (inputBottom) {
@@ -2396,16 +2340,6 @@ function initializeEventListeners() {
           if (webBtn) webBtn.classList.remove('active');
           saveToolPref('web', (loadToggleState().mode || 'chat'), false);
         }
-        // Research requires chat mode
-        const rs2 = loadToggleState();
-        if (rs2.mode === 'agent') {
-          rs2.mode = 'chat';
-          saveToggleState(rs2);
-          const ab2 = el('mode-agent-btn'), cb2 = el('mode-chat-btn');
-          if (ab2) ab2.classList.remove('active');
-          if (cb2) cb2.classList.add('active');
-          applyModeToToggles('chat');
-        }
       }
     });
   }
@@ -2480,13 +2414,13 @@ function initializeEventListeners() {
       chk.checked = !chk.checked;
       incognitoBtn.classList.toggle('active', chk.checked);
       const tipEl = el('welcome-tip');
-      incognitoBtn.title = chk.checked ? 'Disable Nobody mode' : 'Enable Nobody mode — no memory, no history saved';
+      incognitoBtn.title = chk.checked ? 'Disable Temporary Agent' : 'Enable Temporary Agent — no memory or history saved';
       const welcomeName = document.querySelector('.welcome-name');
       if (chk.checked) {
-        incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Nobody</span>';
+        incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Temporary Agent</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
-          welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Nobody';
+          welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Temporary Agent';
           // Restart the L→R clip-wipe reveal on the new label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2496,43 +2430,15 @@ function initializeEventListeners() {
         const welcomeSub = el('welcome-sub');
         if (welcomeSub) {
           if (!welcomeSub.dataset.originalText) welcomeSub.dataset.originalText = welcomeSub.textContent;
-          welcomeSub.textContent = "Who am I? I'm nobody.";
+          welcomeSub.textContent = 'A fresh Agent session for this window only.';
           welcomeSub.style.display = '';
         }
-        if (tipEl) { tipEl.dataset.originalTip = tipEl.textContent; tipEl.textContent = 'Temporary session \u2014 won\u2019t be saved and no memory activation.'; tipEl.style.opacity = '0.5'; tipEl.style.marginTop = '8px'; }
-        // Default to plain chat: disable tools visually, switch to chat mode.
-        // IMPORTANT: don't overwrite the user's persisted per-mode tool prefs
-        // (`web_agent`, `bash_agent`, `web_chat`, `bash_chat`). Nobody mode is
-        // ephemeral — their agent-mode defaults must come back on toggle-off.
-        const beforeNobody = Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {};
-        if (!beforeNobody.nobody_prev_mode) beforeNobody.nobody_prev_mode = beforeNobody.mode || 'agent';
-        Storage.setJSON(Storage.KEYS.TOGGLES, beforeNobody);
-        const _offIds = ['web-toggle', 'bash-toggle', 'research-toggle'];
-        _offIds.forEach(id => { const c = el(id); if (c) c.checked = false; });
-        ['web-toggle-btn', 'bash-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
-        if (typeof window.__odysseusSetChatMode === 'function') {
-          window.__odysseusSetChatMode('chat');
-        } else {
-          const _ab = el('mode-agent-btn'), _cb = el('mode-chat-btn');
-          if (_ab) {
-            _ab.classList.remove('active');
-            _ab.setAttribute('aria-pressed', 'false');
-          }
-          if (_cb) {
-            _cb.classList.add('active');
-            _cb.setAttribute('aria-pressed', 'true');
-          }
-          const _toggle = _ab?.closest('.mode-toggle') || _cb?.closest('.mode-toggle');
-          if (_toggle) _toggle.classList.add('mode-chat');
-          const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-          ts.mode = 'chat';
-          Storage.setJSON(Storage.KEYS.TOGGLES, ts);
-        }
+        if (tipEl) { tipEl.dataset.originalTip = tipEl.textContent; tipEl.textContent = 'Not saved and memory stays off. Approved files, commands, and external actions are not undone.'; tipEl.style.opacity = '0.5'; tipEl.style.marginTop = '8px'; }
         const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
         ts.research = false;
         Storage.setJSON(Storage.KEYS.TOGGLES, ts);
       } else {
-        incognitoBtn.innerHTML = INCOGNITO_EYE_OPEN + '<span class="incognito-label">Nobody</span>';
+        incognitoBtn.innerHTML = INCOGNITO_EYE_OPEN + '<span class="incognito-label">Temporary Agent</span>';
         if (welcomeName && welcomeName.dataset.originalHtml) {
           welcomeName.innerHTML = welcomeName.dataset.originalHtml;
           // Restart the L→R clip-wipe reveal on the restored label
@@ -2550,21 +2456,12 @@ function initializeEventListeners() {
           welcomeSub2.style.display = '';
         }
         if (tipEl && tipEl.dataset.originalTip) { tipEl.textContent = tipEl.dataset.originalTip; tipEl.style.opacity = ''; tipEl.style.marginTop = ''; }
-        // Heal any previously-persisted false values from the old Nobody bug
-        // so agent-mode defaults (web/bash ON) come back.
+        // Remove stale state left by the retired Nobody/Chat implementation.
         const _ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-        const _restoreMode = _ts.nobody_prev_mode || 'agent';
         delete _ts.nobody_prev_mode;
-        ['web_agent', 'bash_agent', 'web_chat', 'bash_chat'].forEach(k => {
-          if (_ts[k] === false) delete _ts[k];
-        });
+        delete _ts.mode;
         Storage.setJSON(Storage.KEYS.TOGGLES, _ts);
-        if (typeof window.__odysseusSetChatMode === 'function') {
-          window.__odysseusSetChatMode(_restoreMode === 'chat' ? 'chat' : 'agent');
-        }
-        // Reapply the current mode's real defaults to the visible toggles
-        const _curMode = (Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {}).mode || 'chat';
-        try { applyModeToToggles(_curMode); } catch (_) {}
+        try { applyModeToToggles('agent'); } catch (_) {}
       }
       // If toggled off mid-chat (welcome screen hidden), hide the button
       if (!chk.checked && ws && ws.classList.contains('hidden')) {
@@ -2632,7 +2529,6 @@ function initializeEventListeners() {
     'rag-toggle-btn':      '#overflow-rag-btn',
     'bash-toggle-btn':     '#bash-toggle-btn',
     'overflow-plus-btn':   '.overflow-wrapper',
-    'mode-toggle':         '.mode-toggle',
     'preset-mini-btn':     '#overflow-preset-btn',
     'attach-btn':          '#overflow-attach-btn',
     'research-btn':        '#overflow-research-btn',

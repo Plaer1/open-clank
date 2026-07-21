@@ -674,176 +674,6 @@ def _host_match(url: str, *domains: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
-# Kimi Code subscription keys (api.kimi.com/coding/v1) require a whitelisted
-# coding-agent User-Agent; otherwise the API returns 403 access_terminated_error.
-# Tried in order; first success is cached per base URL for later requests.
-KIMI_CODE_USER_AGENTS: tuple[str, ...] = (
-    "claude-code/0.1.0",
-    "claude-code/1.0.0",
-    "KimiCLI/1.0",
-    "Kilo-Code/1.0",
-    "Roo-Code/1.0",
-    "Cursor/1.0",
-)
-KIMI_CODE_USER_AGENT = KIMI_CODE_USER_AGENTS[0]
-_kimi_code_ua_cache: dict[str, str] = {}
-
-
-def _is_kimi_code_url(url: str) -> bool:
-    if not url or not _host_match(url, "kimi.com"):
-        return False
-    try:
-        return "/coding" in (urlparse(url).path or "")
-    except Exception:
-        return False
-
-
-def _kimi_code_base_key(url: str) -> str:
-    """Normalize a Kimi Code chat/models URL to its OpenAI base (.../coding/v1)."""
-    parsed = urlparse(url)
-    path = (parsed.path or "").rstrip("/")
-    for suffix in ("/chat/completions", "/models", "/completions"):
-        if path.endswith(suffix):
-            path = path[: -len(suffix)]
-    path = path.rstrip("/") or "/coding/v1"
-    return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-
-def _is_kimi_code_access_denied(status: int, body: bytes | str) -> bool:
-    if status != 403:
-        return False
-    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else (body or "")
-    lower = text.lower()
-    return (
-        "access_terminated_error" in lower
-        or "coding agents" in lower
-        or "only available for coding" in lower
-    )
-
-
-def _kimi_code_ua_candidates(url: str) -> list[str]:
-    if not _is_kimi_code_url(url):
-        return []
-    base_key = _kimi_code_base_key(url)
-    cached = _kimi_code_ua_cache.get(base_key)
-    if cached:
-        return [cached] + [ua for ua in KIMI_CODE_USER_AGENTS if ua != cached]
-    return list(KIMI_CODE_USER_AGENTS)
-
-
-def _remember_kimi_code_user_agent(url: str, user_agent: str) -> None:
-    _kimi_code_ua_cache[_kimi_code_base_key(url)] = user_agent
-
-
-def apply_kimi_code_headers(headers: Optional[Dict], url: str) -> Dict[str, str]:
-    """Pick a Kimi Code User-Agent (cached probe when possible)."""
-    h = dict(headers or {})
-    if not _is_kimi_code_url(url):
-        return h
-    base_key = _kimi_code_base_key(url)
-    cached = _kimi_code_ua_cache.get(base_key)
-    if cached:
-        h["User-Agent"] = cached
-        return h
-    models_url = base_key.rstrip("/") + "/models"
-    from src.tls_overrides import llm_verify
-    for ua in KIMI_CODE_USER_AGENTS:
-        trial = dict(h)
-        trial["User-Agent"] = ua
-        try:
-            r = httpx.get(models_url, headers=trial, timeout=8, verify=llm_verify())
-        except Exception:
-            continue
-        if _is_kimi_code_access_denied(r.status_code, r.content):
-            logger.debug("Kimi Code rejected User-Agent %s (403), trying next", ua)
-            continue
-        if r.status_code < 400:
-            _remember_kimi_code_user_agent(url, ua)
-            h["User-Agent"] = ua
-            return h
-        break
-    h.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
-    return h
-
-
-async def apply_kimi_code_headers_async(client, headers: Optional[Dict], url: str) -> Dict[str, str]:
-    """Pick a Kimi Code User-Agent without blocking the event loop."""
-    h = dict(headers or {})
-    if not _is_kimi_code_url(url):
-        return h
-    base_key = _kimi_code_base_key(url)
-    cached = _kimi_code_ua_cache.get(base_key)
-    if cached:
-        h["User-Agent"] = cached
-        return h
-    models_url = base_key.rstrip("/") + "/models"
-    for ua in KIMI_CODE_USER_AGENTS:
-        trial = dict(h)
-        trial["User-Agent"] = ua
-        try:
-            r = await client.get(models_url, headers=trial, timeout=8)
-        except Exception:
-            continue
-        if _is_kimi_code_access_denied(r.status_code, r.content):
-            logger.debug("Kimi Code rejected User-Agent %s (403), trying next", ua)
-            continue
-        if r.status_code < 400:
-            _remember_kimi_code_user_agent(url, ua)
-            h["User-Agent"] = ua
-            return h
-        break
-    h.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
-    return h
-
-
-def httpx_get_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
-    h = apply_kimi_code_headers(headers, url)
-    if not _is_kimi_code_url(url):
-        return httpx.get(url, headers=h, **kwargs)
-    last = None
-    for ua in _kimi_code_ua_candidates(url):
-        trial = dict(h)
-        trial["User-Agent"] = ua
-        last = httpx.get(url, headers=trial, **kwargs)
-        if not _is_kimi_code_access_denied(last.status_code, last.content):
-            if last.status_code < 400:
-                _remember_kimi_code_user_agent(url, ua)
-            return last
-    return last
-
-
-def httpx_post_kimi_aware(url: str, headers: Optional[Dict], **kwargs):
-    h = apply_kimi_code_headers(headers, url)
-    if not _is_kimi_code_url(url):
-        return httpx.post(url, headers=h, **kwargs)
-    last = None
-    for ua in _kimi_code_ua_candidates(url):
-        trial = dict(h)
-        trial["User-Agent"] = ua
-        last = httpx.post(url, headers=trial, **kwargs)
-        if not _is_kimi_code_access_denied(last.status_code, last.content):
-            if last.status_code < 400:
-                _remember_kimi_code_user_agent(url, ua)
-            return last
-    return last
-
-
-async def httpx_post_kimi_aware_async(client, url: str, headers: Optional[Dict], **kwargs):
-    h = await apply_kimi_code_headers_async(client, headers, url)
-    if not _is_kimi_code_url(url):
-        return await client.post(url, headers=h, **kwargs)
-    last = None
-    for ua in _kimi_code_ua_candidates(url):
-        trial = dict(h)
-        trial["User-Agent"] = ua
-        last = await client.post(url, headers=trial, **kwargs)
-        if not _is_kimi_code_access_denied(last.status_code, last.content):
-            if last.status_code < 400:
-                _remember_kimi_code_user_agent(url, ua)
-            return last
-    return last
-
-
 def _detect_provider(url: str) -> str:
     """Detect the API provider from a configured endpoint URL.
 
@@ -980,8 +810,8 @@ def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str
     if isinstance(headers, dict):
         h.update(headers)
     if provider == "openrouter":
-        h.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
-        h.setdefault("X-OpenRouter-Title", "Odysseus")
+        h.setdefault("HTTP-Referer", "https://github.com/Plaer1/open-clank")
+        h.setdefault("X-OpenRouter-Title", "Open Clank")
     if provider == "copilot":
         # Ensure the Copilot-required headers are present even when the caller
         # didn't pass pre-built headers (e.g. model listing). build_headers()
@@ -1726,7 +1556,7 @@ def list_model_ids(
             from src.endpoint_resolver import build_models_url
 
             models_url = build_models_url(base_chat_url)
-        r = httpx_get_kimi_aware(models_url, h, timeout=timeout)
+        r = httpx.get(models_url, headers=h, timeout=timeout)
         r.raise_for_status()
         data = r.json()
         # Some OpenAI-compatible APIs (e.g. Together) return a bare list here.
@@ -1841,7 +1671,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
         note_model_activity(target_url, model)
-        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+        r = httpx.post(target_url, headers=h, json=payload, timeout=timeout)
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
     if not r.is_success:
@@ -2089,7 +1919,7 @@ async def llm_call_async(
             async with _local_model_slot(target_url, model, workload):
                 note_model_activity(target_url, model)
                 client = _get_http_client()
-                r = await httpx_post_kimi_aware_async(client, target_url, h, json=payload, timeout=call_timeout)
+                r = await client.post(target_url, headers=h, json=payload, timeout=call_timeout)
             duration = time.time() - start
             if not r.is_success:
                 friendly = _format_upstream_error(r.status_code, r.text, target_url)
@@ -2561,7 +2391,6 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
 
     try:
         client = _get_http_client()
-        h = await apply_kimi_code_headers_async(client, h, target_url)
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:

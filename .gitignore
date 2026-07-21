@@ -70,7 +70,7 @@ services/data/
 Thumbs.db
 
 # Build artifacts
-bin/mimo
+/bin/
 *.cache
 cache/
 output.txt.txt
@@ -87,6 +87,9 @@ output.txt.txt
 
 # …except shipped static assets
 !static/icons/*.png
+!static/themes/
+!static/themes/clanker/
+!static/themes/clanker/*.png
 
 # …except shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
@@ -114,6 +117,7 @@ docs/windows-port/
 
 # Local config
 compound.config.json
+/.mimocode/skills/
 *.error.log
 _scratch/
 /odysseus/

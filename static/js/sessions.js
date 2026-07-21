@@ -8,6 +8,7 @@ import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
+import { normalizeAssistantTranscript } from './chatTranscript.js';
 
 const API_BASE = window.location.origin;
 
@@ -136,6 +137,11 @@ function _renderHistoryMessage(msg, modelName) {
   const meta = msg.metadata ? { ...msg.metadata, _fromHistory: true } : null;
   let displayContent;
   if (typeof msg.content === 'string') {
+    if (msg.role === 'assistant' && meta?.tool_events?.length) {
+      const normalized = normalizeAssistantTranscript(msg.content, meta);
+      meta._history_round_texts = normalized.roundTexts.map(_displayHistoryContent);
+      meta._history_transcript_source = normalized.source;
+    }
     displayContent = _displayHistoryContent(msg.content);
   } else if (Array.isArray(msg.content)) {
     displayContent = _displayHistoryContent(msg.content.filter(p => p.type === 'text').map(p => p.text).join('\n').trim());
@@ -268,7 +274,7 @@ function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
   uiModule.el('chat-history').innerHTML = '';
-  uiModule.el('current-meta').textContent = 'Odysseus Chat';
+  uiModule.el('current-meta').textContent = 'Open Clank Chat';
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   if (window.chatModule && window.chatModule.showWelcomeScreen) {
@@ -1856,7 +1862,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
 
     const currentMetaEl = uiModule.el('current-meta');
     if (currentMetaEl) {
-      currentMetaEl.textContent = meta ? meta.name : 'Odysseus Chat';
+      currentMetaEl.textContent = meta ? meta.name : 'Open Clank Chat';
     }
     // Update model picker visibility
     updateModelPicker();

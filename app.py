@@ -78,6 +78,7 @@ import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.shutdown_lifecycle import run_shutdown_phase as _run_shutdown_phase
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -1416,15 +1417,18 @@ async def _startup_event():
     logger.info("Application startup complete")
 
 def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
-    """Best-effort SIGTERM→SIGKILL for direct children still alive at shutdown.
+    """Last-resort SIGTERM→SIGKILL containment for unregistered direct children.
 
-    The MCP stdio stack can fail to exit its cancel scopes when closed from a
-    different task than entered them ("Attempted to exit cancel scope…"),
-    which skips child termination entirely — orphaned servers then outlive
-    uvicorn and keep writing to the operator's terminal. Linux-only (/proc);
-    silently a no-op elsewhere."""
+    Normal MCP and MiMo children are closed by their registered owners before
+    this runs. Linux exposes the direct-child inventory through ``/proc``;
+    other platforms skip this defensive check explicitly.
+    """
     import signal as _signal
     import time as _time
+
+    if not sys.platform.startswith("linux"):
+        logger.info("child reaper skipped: direct-child inventory unsupported on %s", sys.platform)
+        return
 
     me = os.getpid()
 
@@ -1467,59 +1471,62 @@ def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
 
 
 async def _shutdown_event():
+    shutdown_started = time.monotonic()
     logger.info("Application shutting down...")
-    _copal_bridge = getattr(app.state, "copal_bridge", None)
-    if _copal_bridge:
+
+    async def _stop_copal():
+        bridge = getattr(app.state, "copal_bridge", None)
+        if bridge:
+            await bridge.stop()
+
+    async def _stop_mimo():
+        supervisor = getattr(app.state, "mimo_supervisor", None)
         try:
-            await _copal_bridge.stop()
-        except Exception as e:
-            logger.warning("Copal bridge shutdown error: %s", e)
-    # ── openthesius mimo supervisor shutdown ──
-    _mimo_sup = getattr(app.state, "mimo_supervisor", None)
-    if _mimo_sup:
-        try:
-            await _mimo_sup.stop()
+            if supervisor:
+                await supervisor.stop()
+        finally:
             from src.model_dispatch import set_mimo_supervisor
             set_mimo_supervisor(None)
-            logger.info("[openthesius] mimo supervisor stopped")
-        except Exception as e:
-            logger.warning("[openthesius] mimo supervisor shutdown error: %s", e)
-    startup_tasks = list(getattr(app.state, "_startup_tasks", []))
-    for task in startup_tasks:
-        if not task.done():
-            task.cancel()
-    if startup_tasks:
-        await asyncio.gather(*startup_tasks, return_exceptions=True)
-    getattr(app.state, "_startup_tasks", []).clear()
-    if upload_cleanup_task:
-        upload_cleanup_task.cancel()
-        try:
-            await upload_cleanup_task
-        except asyncio.CancelledError:
-            pass
-    # Stop task scheduler (no-op if it never started under the gate)
-    try:
-        await task_scheduler.stop()
-    except Exception:
-        pass
-    # Close webhook manager
-    try:
-        await webhook_manager.close()
-    except Exception as e:
-        logger.warning(f"Webhook manager shutdown error: {e}")
-    # Disconnect all MCP servers
-    try:
-        await mcp_manager.disconnect_all()
-    except Exception as e:
-        logger.warning(f"MCP shutdown error: {e}")
-    # Anything still alive under us at this point is a leak (typically MCP
-    # stdio children whose cancel scopes failed to close) — reap it so the
-    # operator gets their terminal back.
-    try:
-        await asyncio.to_thread(_reap_orphaned_children)
-    except Exception as e:
-        logger.warning(f"Child reaper error: {e}")
-    logger.info("Application shutdown complete")
+
+    async def _cancel_startup_tasks():
+        startup_tasks = list(getattr(app.state, "_startup_tasks", []))
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
+        if startup_tasks:
+            await asyncio.gather(*startup_tasks, return_exceptions=True)
+        getattr(app.state, "_startup_tasks", []).clear()
+
+    async def _cancel_upload_cleanup():
+        if upload_cleanup_task:
+            upload_cleanup_task.cancel()
+            try:
+                await upload_cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _stop_memory_provider():
+        shutdown = getattr(memory_provider, "shutdown", None)
+        if callable(shutdown):
+            await shutdown()
+
+    await _run_shutdown_phase("copal_bridge", _stop_copal, timeout=2.0)
+    await _run_shutdown_phase("mimo_supervisor", _stop_mimo, timeout=7.0)
+    await _run_shutdown_phase("startup_tasks", _cancel_startup_tasks, timeout=2.0)
+    await _run_shutdown_phase("upload_cleanup", _cancel_upload_cleanup, timeout=2.0)
+    await _run_shutdown_phase("task_scheduler", task_scheduler.stop, timeout=2.0)
+    await _run_shutdown_phase("webhooks", webhook_manager.close, timeout=2.0)
+    await _run_shutdown_phase("memory_provider", _stop_memory_provider, timeout=5.0)
+    await _run_shutdown_phase("mcp_servers", mcp_manager.disconnect_all, timeout=6.0)
+    await _run_shutdown_phase(
+        "defensive_child_reaper",
+        lambda: asyncio.to_thread(_reap_orphaned_children),
+        timeout=3.0,
+    )
+    logger.info(
+        "Application shutdown complete (duration_s=%.3f)",
+        time.monotonic() - shutdown_started,
+    )
 
 
 if __name__ == "__main__":

@@ -10,13 +10,13 @@ import socket
 import time as _time
 import logging
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
-from core.database import SessionLocal, ModelEndpoint, Session as DbSession
+from core.database import SessionLocal, ModelEndpoint, Session as DbSession, utcnow_naive
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
 from src.constants import COOKBOOK_STATE_FILE
@@ -28,6 +28,7 @@ from src.endpoint_resolver import (
     build_chat_url,
     build_models_url,
     build_headers,
+    _endpoint_enabled_models,
 )
 from src.model_catalog import build_model_catalog
 from src.chatgpt_subscription import is_chatgpt_subscription_base
@@ -910,7 +911,7 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
         return {"status": "ok", "latency_ms": 0, "skipped": True}
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Say OK"},
+        {"role": "user", "content": "Call the test tool with empty arguments. Do not answer in text." if with_tools else "Say OK"},
     ]
     # Simple tool definition to test tool support
     _test_tools = [{"type": "function", "function": {"name": "test", "description": "Test tool", "parameters": {"type": "object", "properties": {}}}}] if with_tools else None
@@ -923,6 +924,7 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
         payload = _build_anthropic_payload(model_id, messages, 0.0, 5)
         if _test_tools:
             payload["tools"] = [{"name": "test", "description": "Test tool", "input_schema": {"type": "object", "properties": {}}}]
+            payload["tool_choice"] = {"type": "tool", "name": "test"}
     elif provider == "ollama":
         from src.llm_core import _build_ollama_payload
         target_url = build_chat_url(base)
@@ -935,20 +937,48 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
         h["Content-Type"] = "application/json"
         from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
         _max_key = "max_completion_tokens" if _uses_max_completion_tokens(model_id) else "max_tokens"
-        payload = {"model": model_id, "messages": messages, _max_key: 5}
+        # A forced tool call still needs enough output budget for reasoning
+        # models to serialize the call. Five tokens produced a valid 200 with
+        # no call on GLM-5.2, falsely leaving a tool-capable model unknown.
+        payload = {"model": model_id, "messages": messages, _max_key: 64 if with_tools else 5}
         # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature, so a
         # probe that hardcodes one falsely reports a working endpoint as failing.
         if not _restricts_temperature(model_id):
             payload["temperature"] = 0.0
         if _test_tools:
             payload["tools"] = _test_tools
+            payload["tool_choice"] = {"type": "function", "function": {"name": "test"}}
 
     try:
         t0 = _time.time()
         r = httpx.post(target_url, headers=h, json=payload, timeout=timeout, verify=llm_verify())
         latency = round((_time.time() - t0) * 1000)
         if r.is_success:
-            return {"status": "ok", "latency_ms": latency}
+            if not with_tools:
+                return {"status": "ok", "latency_ms": latency}
+            try:
+                body = r.json()
+                calls = []
+                if provider == "anthropic":
+                    calls = [item for item in body.get("content", []) if item.get("type") == "tool_use"]
+                else:
+                    message = ((body.get("choices") or [{}])[0].get("message") or {})
+                    calls = message.get("tool_calls") or []
+                    if not calls and isinstance(body.get("message"), dict):
+                        calls = body["message"].get("tool_calls") or []
+                if any(
+                    (call.get("name") or (call.get("function") or {}).get("name")) == "test"
+                    for call in calls if isinstance(call, dict)
+                ):
+                    return {"status": "ok", "latency_ms": latency, "tool_support": True}
+            except (ValueError, TypeError, AttributeError, IndexError):
+                pass
+            return {
+                "status": "unknown",
+                "latency_ms": latency,
+                "tool_support": None,
+                "error": "Model answered without the forced test tool call",
+            }
         else:
             # Extract error detail from response body
             error_msg = f"HTTP {r.status_code}"
@@ -962,11 +992,21 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
                         error_msg = err[:120]
             except Exception:
                 pass
-            return {"status": "fail", "latency_ms": latency, "error": error_msg}
+            unsupported = bool(
+                with_tools
+                and r.status_code in {400, 404, 405, 422}
+                and re.search(r"tools?.*(?:not supported|unsupported|unknown)|tool_choice.*(?:not supported|unsupported|unknown)", error_msg, re.IGNORECASE)
+            )
+            return {
+                "status": "unsupported" if unsupported else "unknown" if with_tools else "fail",
+                "latency_ms": latency,
+                "error": error_msg,
+                **({"tool_support": False if unsupported else None} if with_tools else {}),
+            }
     except httpx.TimeoutException:
-        return {"status": "timeout", "latency_ms": timeout * 1000, "error": f"Timed out ({timeout}s)"}
+        return {"status": "timeout", "latency_ms": timeout * 1000, "error": f"Timed out ({timeout}s)", **({"tool_support": None} if with_tools else {})}
     except Exception as e:
-        return {"status": "fail", "error": str(e)[:80]}
+        return {"status": "unknown" if with_tools else "fail", "error": str(e)[:80], **({"tool_support": None} if with_tools else {})}
 
 
 # Hostnames / IP prefixes that indicate a local endpoint
@@ -1075,18 +1115,91 @@ def _ollama_model_names(data: Any) -> List[str]:
     return out
 
 
-def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+def _mark_catalog_probe(
+    diagnostics: Optional[Dict[str, Any]],
+    status: str,
+    http_status: Optional[int] = None,
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.clear()
+    diagnostics.update({
+        "status": status,
+        "http_status": http_status,
+        "probed_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+    })
+
+
+def _catalog_http_status(status: Optional[int]) -> str:
+    if status == 401:
+        return "auth_invalid"
+    if status == 403:
+        return "auth_forbidden"
+    if status in {404, 405, 501}:
+        return "unsupported"
+    return "unavailable"
+
+
+def _record_catalog_probe(endpoint: ModelEndpoint, diagnostics: Dict[str, Any]) -> None:
+    endpoint.catalog_probe_status = diagnostics.get("status")
+    endpoint.catalog_probe_http_status = diagnostics.get("http_status")
+    raw_time = diagnostics.get("probed_at")
+    try:
+        endpoint.catalog_probed_at = datetime.fromisoformat(str(raw_time).removesuffix("Z"))
+    except (TypeError, ValueError):
+        endpoint.catalog_probed_at = utcnow_naive()
+
+
+def _catalog_probe_payload(endpoint: ModelEndpoint) -> Dict[str, Any]:
+    status = getattr(endpoint, "catalog_probe_status", None)
+    actions = {
+        "auth_missing": ["repair_credentials"],
+        "auth_invalid": ["repair_credentials"],
+        "auth_forbidden": ["repair_credentials"],
+        "unavailable": ["retry_catalog_probe"],
+        "loading": ["retry_catalog_probe"],
+        "malformed": ["check_provider_compatibility", "retry_catalog_probe"],
+        "unsupported": ["pin_models", "check_provider_compatibility"],
+        "empty": ["pin_models", "retry_catalog_probe"],
+    }.get(status, [])
+    probed_at = getattr(endpoint, "catalog_probed_at", None)
+    return {
+        "status": status or "unknown",
+        "http_status": getattr(endpoint, "catalog_probe_http_status", None),
+        "probed_at": probed_at.isoformat() + "Z" if probed_at else None,
+        "actions": actions,
+    }
+
+
+def _probe_endpoint(
+    base_url: str,
+    api_key: str = None,
+    timeout: int = 5,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
+    _mark_catalog_probe(diagnostics, "unknown")
     from src.endpoint_resolver import resolve_url
-    from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
     provider = _safe_detect_provider(base)
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
-        if api_key:
-            return fetch_available_models(api_key, timeout=timeout)
-        return []
+        if not api_key:
+            _mark_catalog_probe(diagnostics, "auth_missing")
+            return []
+        try:
+            models = fetch_available_models(api_key, timeout=timeout)
+            _mark_catalog_probe(diagnostics, "ok" if models else "empty")
+            return models
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            _mark_catalog_probe(diagnostics, _catalog_http_status(status), status)
+            return []
+        except Exception:
+            _mark_catalog_probe(diagnostics, "unavailable")
+            logger.warning("ChatGPT subscription model discovery failed")
+            return []
     if provider == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = _safe_build_models_url(base)
@@ -1099,14 +1212,21 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             data = r.json()
             models = _openai_model_ids(data)
             if models:
+                _mark_catalog_probe(diagnostics, "ok", r.status_code)
                 return models
+            _mark_catalog_probe(diagnostics, "empty", r.status_code)
         except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            _mark_catalog_probe(diagnostics, _catalog_http_status(status), status)
             if api_key:
-                status = e.response.status_code if e.response is not None else "unknown"
-                logger.warning(f"Anthropic /v1/models failed with API key: HTTP {status}")
+                logger.warning(f"Anthropic /v1/models failed with API key: HTTP {status or 'unknown'}")
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         except Exception as e:
+            _mark_catalog_probe(
+                diagnostics,
+                "malformed" if isinstance(e, (ValueError, json.JSONDecodeError)) else "unavailable",
+            )
             if api_key:
                 logger.warning(f"Anthropic /v1/models failed with API key: {e}")
                 return []
@@ -1115,7 +1235,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     url = _safe_build_models_url(base)
     headers = _safe_build_headers(api_key, base)
     try:
-        r = httpx_get_kimi_aware(url, headers, timeout=timeout, verify=llm_verify())
+        r = httpx.get(url, headers=headers, timeout=timeout, verify=llm_verify())
         r.raise_for_status()
         data = r.json()
         # OpenAI format: {"data": [{"id": "model-name"}]}
@@ -1136,17 +1256,24 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
                 for _e in _PROVIDER_CURATED.get(_ck, []):
                     if _e not in set(models) and not any(m.startswith(_e) for m in models):
                         models.append(_e)
+            _mark_catalog_probe(diagnostics, "ok", r.status_code)
             return [m for m in models if _is_chat_model(m)]
+        _mark_catalog_probe(diagnostics, "empty", r.status_code)
     except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else None
+        _mark_catalog_probe(diagnostics, _catalog_http_status(status), status)
         if e.response is not None and _is_loading_model_response(e.response):
             logger.info("Endpoint still loading model at %s", _redact_url_for_log(url))
             return []
         if api_key:
-            status = e.response.status_code if e.response is not None else "unknown"
-            logger.warning("Failed to probe %s with API key: HTTP %s", _redact_url_for_log(url), status)
+            logger.warning("Failed to probe %s with API key: HTTP %s", _redact_url_for_log(url), status or "unknown")
             return []
         logger.warning("Failed to probe %s: %s", _redact_url_for_log(url), e)
     except Exception as e:
+        _mark_catalog_probe(
+            diagnostics,
+            "malformed" if isinstance(e, (ValueError, json.JSONDecodeError)) else "unavailable",
+        )
         if api_key:
             logger.warning("Failed to probe %s with API key: %s", _redact_url_for_log(url), e)
             return []
@@ -1163,6 +1290,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             data = r.json()
             models = _ollama_model_names(data)
             if models:
+                _mark_catalog_probe(diagnostics, "ok", r.status_code)
                 return [m for m in models if _is_chat_model(m)]
     except Exception as e:
         logger.debug(f"Ollama /api/tags probe failed for {base}: {e}")
@@ -1172,7 +1300,34 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     if fallback:
         logger.info(f"Using curated fallback for {curated_key}: {fallback}")
         return list(fallback)
+    if diagnostics is not None and diagnostics.get("status") == "unknown":
+        _mark_catalog_probe(diagnostics, "empty")
     return []
+
+
+def _probe_endpoint_result(
+    base_url: str,
+    api_key: str = None,
+    timeout: int = 5,
+) -> tuple[List[str], Dict[str, Any]]:
+    """Return models plus typed probe evidence without breaking legacy overrides."""
+    diagnostics: Dict[str, Any] = {}
+    try:
+        models = _probe_endpoint(
+            base_url,
+            api_key,
+            timeout=timeout,
+            diagnostics=diagnostics,
+        )
+    except TypeError as exc:
+        # Some installed integrations and test doubles override the historical
+        # three-argument helper. Preserve that contract while the canonical
+        # implementation records richer evidence.
+        if "diagnostics" not in str(exc):
+            raise
+        models = _probe_endpoint(base_url, api_key, timeout=timeout)
+        _mark_catalog_probe(diagnostics, "ok" if models else "empty")
+    return models, diagnostics
 
 
 def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> Dict[str, Any]:
@@ -1575,17 +1730,25 @@ def setup_model_routes(model_discovery):
 
                     def _probe_one(key: str, data: Dict[str, Any]):
                         try:
-                            ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
-                            return key, data["endpoint_ids"], ids, None
+                            ids, diagnostic = _probe_endpoint_result(
+                                data["base"], data.get("api_key"),
+                                timeout=data.get("timeout") or 2,
+                            )
+                            return key, data["endpoint_ids"], ids, diagnostic, None
                         except Exception as e:
-                            return key, data["endpoint_ids"], None, e
+                            return key, data["endpoint_ids"], None, {"status": "unavailable"}, e
 
                     if groups:
                         with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
                             futures = [pool.submit(_probe_one, key, data) for key, data in groups.items()]
                             for fut in as_completed(futures):
-                                key, endpoint_ids, ids, err = fut.result()
+                                key, endpoint_ids, ids, diagnostic, err = fut.result()
                                 st = _refresh_state.setdefault(key, {})
+                                st["catalog_probe"] = diagnostic
+                                for ep_id in endpoint_ids:
+                                    ep_obj = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                                    if ep_obj:
+                                        _record_catalog_probe(ep_obj, diagnostic)
                                 if ids:
                                     for ep_id in endpoint_ids:
                                         ep_obj = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
@@ -2020,7 +2183,15 @@ def setup_model_routes(model_discovery):
             ok_count = 0
             for ep in ep_data:
                 base = _normalize_base(ep["base_url"])
-                all_models = _probe_endpoint(base, ep.get("api_key"))
+                all_models, diagnostic = _probe_endpoint_result(base, ep.get("api_key"))
+                db_probe = SessionLocal()
+                try:
+                    ep_obj = db_probe.query(ModelEndpoint).filter(ModelEndpoint.id == ep["id"]).first()
+                    if ep_obj:
+                        _record_catalog_probe(ep_obj, diagnostic)
+                        db_probe.commit()
+                finally:
+                    db_probe.close()
                 # Update cached_models in DB
                 if all_models:
                     db2 = SessionLocal()
@@ -2088,11 +2259,20 @@ def setup_model_routes(model_discovery):
                 _invalidate_models_cache()
             rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
             results = []
+            from src.model_capabilities import endpoint_capability_states
             for r in rows:
                 all_models = _cached_model_ids(r)
                 hidden = _hidden_model_ids(r)
                 pinned = _normalize_model_ids(getattr(r, "pinned_models", None))
                 visible = _visible_models(all_models, r.hidden_models, pinned)
+                model_capabilities = endpoint_capability_states(db, r)
+                _cap_by_model = {item["model_id"]: item for item in model_capabilities}
+                _visible_caps = [_cap_by_model[m] for m in visible if m in _cap_by_model]
+                tools_summary = (
+                    True if _visible_caps and all(item["eligible"] for item in _visible_caps)
+                    else False if any(item["status"] == "blocked" for item in _visible_caps)
+                    else None
+                )
                 # Keep the list route cache-only. It feeds Settings →
                 # Added Models and must render immediately; explicit
                 # Refresh/Probe endpoints do the network work.
@@ -2145,11 +2325,13 @@ def setup_model_routes(model_discovery):
                                     stale=status != "online",
                                     capabilities={
                                         "chat": (getattr(r, "model_type", None) or "llm") == "llm",
-                                        "tools": getattr(r, "supports_tools", None),
+                                        "tools": tools_summary,
                                         "vision": None,
                                     },
                                 ),
-                                "supports_tools": getattr(r, "supports_tools", None),
+                                "supports_tools": tools_summary,
+                                "model_capabilities": model_capabilities,
+                                "catalog_probe": _catalog_probe_payload(r),
                                 "endpoint_kind": kind,
                                 "category": _classify_endpoint(base, kind),
                                 "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2164,7 +2346,13 @@ def setup_model_routes(model_discovery):
                         # "empty" status, and the existing background refresh
                         # path will eventually fill it in too.
                         try:
-                            probed = _probe_endpoint(r.base_url, r.api_key, timeout=max(5, int(ping_timeout)))
+                            probed, diagnostic = _probe_endpoint_result(
+                                r.base_url,
+                                r.api_key,
+                                timeout=max(5, int(ping_timeout)),
+                            )
+                            _record_catalog_probe(r, diagnostic)
+                            db.commit()
                             if probed:
                                 r.cached_models = json.dumps(probed)
                                 db.commit()
@@ -2203,11 +2391,13 @@ def setup_model_routes(model_discovery):
                         stale=status != "online",
                         capabilities={
                             "chat": (getattr(r, "model_type", None) or "llm") == "llm",
-                            "tools": getattr(r, "supports_tools", None),
+                            "tools": tools_summary,
                             "vision": None,
                         },
                     ),
-                    "supports_tools": getattr(r, "supports_tools", None),
+                    "supports_tools": tools_summary,
+                    "model_capabilities": model_capabilities,
+                    "catalog_probe": _catalog_probe_payload(r),
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2397,11 +2587,13 @@ def setup_model_routes(model_discovery):
                 # Explicit "require models" calls still probe; normal refresh
                 # belongs to /model-endpoints/{id}/models or /probe.
                 if require_model_list:
-                    probed_models = _probe_endpoint(
+                    probed_models, diagnostic = _probe_endpoint_result(
                         base_url,
                         (api_key.strip() or existing.api_key or None),
                         timeout=_explicit_model_list_timeout(base_url, existing_kind_for_probe, refresh_timeout),
                     )
+                    _record_catalog_probe(existing, diagnostic)
+                    changed = True
                     if probed_models:
                         existing.cached_models = json.dumps(probed_models)
                         changed = True
@@ -2429,11 +2621,20 @@ def setup_model_routes(model_discovery):
                     "existing": True,
                     "endpoint_kind": existing_kind,
                     "category": _classify_endpoint(existing.base_url, existing_kind),
+                    "catalog_probe": _catalog_probe_payload(existing),
                 }
         finally:
             _db_dedup.close()
 
-        model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=explicit_timeout) if should_probe else []
+        model_ids, diagnostic = (
+            _probe_endpoint_result(
+                base_url,
+                api_key.strip() or None,
+                timeout=explicit_timeout,
+            )
+            if should_probe
+            else ([], {"status": "unknown"})
+        )
         ping = {"reachable": False, "error": None}
         if (should_probe or requested_kind in ("api", "proxy")) and not model_ids:
             ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 10.0))
@@ -2443,8 +2644,6 @@ def setup_model_routes(model_discovery):
         ep_id = str(uuid.uuid4())[:8]
         db = SessionLocal()
         try:
-            _st_raw = (supports_tools or "").strip().lower()
-            _st = True if _st_raw in ("true", "1", "yes") else (False if _st_raw in ("false", "0", "no") else None)
             _pinned = _normalize_model_ids(pinned_models)
             # Stamp owner so the picker only shows this endpoint to the admin
             # who added it. Pass `shared=true` to mark it null-owner (visible
@@ -2466,9 +2665,12 @@ def setup_model_routes(model_discovery):
                 model_refresh_timeout=refresh_timeout,
                 cached_models=json.dumps(model_ids) if model_ids else None,
                 pinned_models=json.dumps(_pinned) if _pinned else None,
-                supports_tools=_st,
+                # Legacy endpoint-wide authority is intentionally dormant.
+                supports_tools=None,
                 owner=_owner_val,
             )
+            if should_probe:
+                _record_catalog_probe(ep, diagnostic)
             db.add(ep)
             db.commit()
             _schedule_mimo_reprojection(request)
@@ -2519,6 +2721,7 @@ def setup_model_routes(model_discovery):
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
+            "catalog_probe": diagnostic if should_probe else {"status": "unknown"},
         }
 
     @router.post("/model-endpoints/test")
@@ -2539,7 +2742,11 @@ def setup_model_routes(model_discovery):
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
         configured_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
-        models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
+        models, diagnostic = _probe_endpoint_result(
+            base_url,
+            api_key.strip() or None,
+            timeout=probe_timeout,
+        )
         ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
         return {
             "base_url": base_url,
@@ -2550,6 +2757,7 @@ def setup_model_routes(model_discovery):
             "count": len(models),
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
+            "catalog_probe": diagnostic,
         }
 
     @router.get("/model-endpoints/{ep_id}/probe")
@@ -2568,7 +2776,7 @@ def setup_model_routes(model_discovery):
             db.close()
 
         base = _normalize_base(ep_data["base_url"])
-        all_models = _probe_endpoint(base, ep_data["api_key"])
+        all_models, diagnostic = _probe_endpoint_result(base, ep_data["api_key"])
         chat_models = [m for m in all_models if _is_chat_model(m)]
         skipped = len(all_models) - len(chat_models)
 
@@ -2592,6 +2800,7 @@ def setup_model_routes(model_discovery):
             try:
                 ep_obj = db2.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
                 if ep_obj:
+                    _record_catalog_probe(ep_obj, diagnostic)
                     ep_obj.hidden_models = json.dumps(failed) if failed else None
                     if all_models:
                         ep_obj.cached_models = json.dumps(all_models)
@@ -2643,20 +2852,26 @@ def setup_model_routes(model_discovery):
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
-                    probed = _probe_endpoint(base, ep.api_key, timeout=timeout)
+                    probed, diagnostic = _probe_endpoint_result(
+                        base,
+                        ep.api_key,
+                        timeout=timeout,
+                    )
+                    _record_catalog_probe(ep, diagnostic)
                 except Exception as exc:
                     logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
                     probed = []
+                    _record_catalog_probe(ep, {"status": "unavailable"})
                 if probed:
                     all_models = probed
                     ep.cached_models = json.dumps(all_models)
-                    db.commit()
                     _invalidate_models_cache()
                     response.headers["X-Model-Refresh-Status"] = "refreshed"
                     response.headers["X-Model-Refresh-Count"] = str(len(probed))
                 else:
                     response.headers["X-Model-Refresh-Status"] = "failed"
                     response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
+                db.commit()
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
             pinned_set = set(pinned)
             return [
@@ -2855,6 +3070,69 @@ def setup_model_routes(model_discovery):
         finally:
             db.close()
 
+    @router.get("/model-endpoints/{ep_id}/capabilities")
+    def get_model_capabilities(ep_id: str, request: Request):
+        require_admin(request)
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+            from src.model_capabilities import endpoint_capability_states
+            return {"endpoint_id": ep_id, "models": endpoint_capability_states(db, ep)}
+        finally:
+            db.close()
+
+    @router.patch("/model-endpoints/{ep_id}/capabilities")
+    async def declare_model_capability(ep_id: str, request: Request):
+        require_admin(request)
+        body = await request.json()
+        model_id = str(body.get("model_id") or "").strip()
+        if not model_id:
+            raise HTTPException(400, "model_id is required")
+        raw = body.get("tools_declared")
+        if not isinstance(raw, bool):
+            raise HTTPException(400, "tools_declared must be boolean")
+        value = raw
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+            if model_id not in _endpoint_enabled_models(ep):
+                raise HTTPException(404, "Model is not enabled on this endpoint")
+            from src.model_capabilities import capability_state, set_declared
+            row = set_declared(db, ep, model_id, value)
+            db.commit()
+            _schedule_mimo_reprojection(request)
+            return capability_state(ep, model_id, row)
+        finally:
+            db.close()
+
+    @router.post("/model-endpoints/{ep_id}/capabilities/probe")
+    async def probe_model_capability(ep_id: str, request: Request):
+        require_admin(request)
+        body = await request.json()
+        model_id = str(body.get("model_id") or "").strip()
+        if not model_id:
+            raise HTTPException(400, "model_id is required")
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+            if model_id not in _endpoint_enabled_models(ep):
+                raise HTTPException(404, "Model is not enabled on this endpoint")
+            from src.endpoint_resolver import resolve_endpoint_runtime
+            base, api_key = resolve_endpoint_runtime(ep, owner=getattr(ep, "owner", None))
+            result = _probe_single_model(base, api_key, model_id, timeout=10, with_tools=True)
+            from src.model_capabilities import capability_state, set_verified
+            row = set_verified(db, ep, model_id, result.get("tool_support"))
+            db.commit()
+            return {**capability_state(ep, model_id, row), "probe": result}
+        finally:
+            db.close()
+
     @router.patch("/model-endpoints/{ep_id}")
     async def toggle_model_endpoint(ep_id: str, request: Request):
         require_admin(request)
@@ -2875,9 +3153,6 @@ def setup_model_routes(model_discovery):
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             if body:
-                if "supports_tools" in body:
-                    v = body["supports_tools"]
-                    ep.supports_tools = {True: True, False: False, 'true': True, 'false': False, 1: True, 0: False}.get(v)
                 if "is_enabled" in body:
                     v_ie = body['is_enabled']
                     ep.is_enabled = v_ie.lower() in ('true', '1', 'yes') if isinstance(v_ie, str) else bool(v_ie)
@@ -2920,10 +3195,13 @@ def setup_model_routes(model_discovery):
             _invalidate_models_cache()
             _schedule_mimo_reprojection(request)
             _local_probe_cache["data"] = None
+            from src.model_capabilities import endpoint_capability_states
             return {
                 "id": ep.id,
                 "is_enabled": ep.is_enabled,
                 "supports_tools": ep.supports_tools,
+                "model_capabilities": endpoint_capability_states(db, ep),
+                "catalog_probe": _catalog_probe_payload(ep),
                 "name": ep.name,
                 "model_type": ep.model_type,
                 "base_url": ep.base_url,

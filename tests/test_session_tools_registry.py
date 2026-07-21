@@ -10,6 +10,7 @@ legacy dispatch_ai_tool elif.
 """
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import src.ai_interaction as ai_interaction
 import src.database as database
@@ -62,7 +63,13 @@ def test_manage_session_list_delegates_to_list_sessions(monkeypatch):
 def test_create_session_reaches_uuid_and_creates(monkeypatch):
     # Regression for the missing `import uuid` (PR review): create_session must
     # get past _resolve_model and mint a session id without NameError.
-    monkeypatch.setattr(st, "_resolve_model", lambda spec, owner=None: ("http://x", "model-x", {}))
+    monkeypatch.setattr(
+        st,
+        "_resolve_model_target",
+        lambda spec, owner=None: SimpleNamespace(
+            endpoint_url="http://x", model_id="model-x", headers={}, endpoint_id="endpoint-x",
+        ),
+    )
     created = {}
 
     class FakeMgr:

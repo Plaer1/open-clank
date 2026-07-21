@@ -419,7 +419,7 @@ class WebhookManager:
         headers = {
             "Content-Type": "application/json",
             "X-Odysseus-Event": event,
-            "User-Agent": "Odysseus-Webhook/1.0",
+            "User-Agent": "OpenClank-Webhook/1.0",
         }
         if secret:
             sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()

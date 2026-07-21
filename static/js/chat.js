@@ -1270,32 +1270,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           if (emCtx.account) fd.append('active_email_account', String(emCtx.account));
         }
       } catch (_e) { /* best-effort */ }
-      // Web toggle: pre-search in Chat mode only. Agent mode should not
-      // opportunistically hit SearXNG just because the chat search toggle is
-      // on; explicit web/current-info requests are handled by the backend
-      // intent gate.
-      const toggleState = Storage.loadToggleState();
-      let isAgentMode = (toggleState.mode || 'chat') === 'agent';
+      const isAgentMode = true;
       const incognitoChk = el('incognito-toggle');
       const isIncognito = !!(incognitoChk && incognitoChk.checked);
-      // Auto-escalate to agent mode when a document is open — the user expects
-      // the AI to see the document and have tools to edit it
-      if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
-        isAgentMode = true;
-      }
-      fd.append('mode', isAgentMode ? 'agent' : 'chat');
-      if (el('web-toggle').checked) {
-        if (!isAgentMode) {
-          fd.append('use_web', 'true');
-        }
-      }
-      if (isAgentMode) {
-        fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
-      }
+      fd.append('mode', 'agent');
+      fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
       if (el('research-toggle').checked) {
         fd.append('use_research', 'true');
-        // Research always runs in chat mode — override agent if set
-        fd.set('mode', 'chat');
       }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
       const ragChk = el('rag-toggle');
@@ -1318,8 +1299,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       abortCtrl._reason = '';
       currentAbort = abortCtrl;
 
-      const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+      const _isAgent = true;
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -1451,23 +1431,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           if (m) errText = m[1].replace(/\\"/g, '"');
           else if (errBody.length < 200) errText = errBody;
         } catch {}
-        // Auto-switch to chat mode for tool-related errors
-        if (errText.includes('tool') || errText.includes('auto')) {
-          errText = 'This model doesn\'t support agent tools — switched to Chat mode. Try again.';
-          const _ab = document.getElementById('mode-agent-btn');
-          const _cb = document.getElementById('mode-chat-btn');
-          if (_ab && _cb) {
-            _ab.classList.remove('active');
-            _cb.classList.add('active');
-            const _toggle = _ab.closest('.mode-toggle');
-            if (_toggle) _toggle.classList.add('mode-chat');
-          }
-          if (typeof Storage !== 'undefined' && Storage.KEYS) {
-            const _st = Storage.getJSON(Storage.KEYS.TOGGLES, {});
-            _st.mode = 'chat';
-            Storage.setJSON(Storage.KEYS.TOGGLES, _st);
-          }
-        }
         typewriterInto(holder.querySelector('.body'), errText);
         enableResearchBtn();
         return;
@@ -1899,7 +1862,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               // Handle SSE error events (e.g. HTTP 404 from provider)
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
-                const errMsg = json.text || json.error?.message || `Error ${json.status || 'unknown'}`;
+                const rawError = typeof json.error === 'string' ? json.error : json.error?.message;
+                const actionText = {
+                  repair_credentials: 'Repair the endpoint credentials in Settings → Added Models.',
+                };
+                const actions = Array.isArray(json.actions)
+                  ? json.actions.map(action => actionText[action]).filter(Boolean)
+                  : [];
+                const errMsg = [json.text || rawError || `Error ${json.status || 'unknown'}`, ...actions]
+                  .join(' ');
                 console.error('Stream error:', errMsg);
                 if (spinner && spinner.element) spinner.destroy();
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
@@ -2550,6 +2521,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_isBg) continue;
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
+              } else if (json.type === 'actor_accounting' || json.type === 'actor_accounting_failure') {
+                if (_isBg) continue;
+                const actorTarget = _metricsTargetForTurn();
+                if (actorTarget) chatRenderer.renderActorAccounting(actorTarget, json.data || {});
+
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
                 _cancelThinkingTimer();
@@ -2902,6 +2878,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!_isBg) {
                   const detail = json.data || json;
                   uiModule.showError(detail.message || detail.error || 'MiMo protocol error');
+                }
+
+              } else if (json.type === 'retry_notice') {
+                // Provider hiccup — mimo is waiting out a backoff. Show it
+                // instead of a dead spinner.
+                if (!_isBg && json.data && json.data.attempt) {
+                  const d = json.data;
+                  const label = d.maxAttempts
+                    ? `Retrying (${d.attempt}/${d.maxAttempts})`
+                    : `Retrying (attempt ${d.attempt})`;
+                  _replaceThinkingSpinner(label);
                 }
 
               } else if (json.type === 'agent_step') {
@@ -3487,9 +3474,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             const errorHolder = document.querySelector('.msg-ai:last-of-type .body');
             if (errorHolder) {
               let errMsg = `Error: ${err.message}`;
-              // Add hint for tool-call errors
+              // Agent is the product lane; unsupported models must be replaced.
               if (err.message && (err.message.includes('tool') || err.message.includes('auto'))) {
-                errMsg += '\n\nThis model may not support tools — try switching to Chat mode.';
+                errMsg += '\n\nChoose an Agent-ready model in the model picker.';
               }
               typewriterInto(errorHolder, errMsg);
             }
@@ -3988,6 +3975,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (documentModule) documentModule.streamDocDelta(json.content || json.delta || '');
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
+          } else if (json.type === 'actor_accounting' || json.type === 'actor_accounting_failure') {
+            chatRenderer.renderActorAccounting(holder, json.data || {});
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
                      json.type === 'tool_progress') {
             rich = true;

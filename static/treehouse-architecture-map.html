@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClank Architecture Map</title>
+<style>
+  :root { --bg: #0f0f0f; --fg: #e0e0e0; --accent: #4ecdc4; --muted: #888; --card: #1a1a2e; --border: #2a2a3e; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem; max-width: 1000px; margin: 0 auto; }
+  h1 { color: var(--accent); font-size: 1.5rem; margin-bottom: 1rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 2rem 0 0.8rem; }
+  .layer { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .box h3 { color: var(--accent); font-size: 1rem; margin-bottom: 0.5rem; }
+  .box ul { list-style: none; padding: 0; }
+  .box li { padding: 0.2rem 0; font-size: 0.85rem; color: var(--muted); }
+  .box li::before { content: "• "; color: var(--accent); }
+  .flow { text-align: center; padding: 1rem; color: var(--muted); font-size: 0.9rem; }
+  .flow .arrow { color: var(--accent); font-size: 1.2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.5rem 0.8rem; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  th { color: var(--accent); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
+  @media print { body { background: white; color: black; } .box { border-color: #ccc; } }
+</style>
+</head>
+<body>
+
+<h1>OpenClank Architecture Map</h1>
+<p style="color: var(--muted); margin-bottom: 1.5rem;">High-level view of the system layers, data flow, and key components.</p>
+
+<h2>Request Flow</h2>
+<div class="flow">
+  Browser/UI <span class="arrow">→</span> FastAPI Routes <span class="arrow">→</span> Service Layer <span class="arrow">→</span> Agent Loop <span class="arrow">→</span> LLM Provider
+  <br>
+  <span class="arrow">↓</span> <span style="color: var(--muted)">Tools / MCP / Memory / Copal</span> <span class="arrow">↓</span>
+  <br>
+  SQLite DB <span class="arrow">←</span> Persistence <span class="arrow">←</span> Event Ledger <span class="arrow">←</span> Projections
+</div>
+
+<h2>System Layers</h2>
+<div class="layer">
+  <div class="box">
+    <h3>Frontend (static/)</h3>
+    <ul>
+      <li>HTML/CSS/JS single-page app</li>
+      <li>TreeHouse UI (treehouse.js)</li>
+      <li>Copal views, settings, diagnostics</li>
+      <li>Markdown rendering, dialogs</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>API Routes (routes/)</h3>
+    <ul>
+      <li>chat_routes — Agent conversation</li>
+      <li>copal_treehouse_routes — LMS</li>
+      <li>memory_routes, document_routes</li>
+      <li>model_routes, auth_routes</li>
+      <li>task_routes, calendar_routes</li>
+      <li>backup_routes, admin_wipe_routes</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Agent Core (src/)</h3>
+    <ul>
+      <li>agent_loop.py — Execution engine</li>
+      <li>agent_runs.py — Run management</li>
+      <li>tool_execution.py — Tool routing</li>
+      <li>tool_schemas.py — Tool definitions</li>
+      <li>context_compactor.py — Budget mgmt</li>
+      <li>model_dispatch.py — Provider routing</li>
+    </ul>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="box">
+    <h3>Memory &amp; Knowledge</h3>
+    <ul>
+      <li>memory.py, memory_provider.py</li>
+      <li>memory_trust.py — Trust scoring</li>
+      <li>memory_digest.py — Auto-summarize</li>
+      <li>copal_treehouse.py — LMS domain</li>
+      <li>copal_bridge.py — Copal API</li>
+      <li>copal_bases.py — Structured data</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Providers &amp; MCP</h3>
+    <ul>
+      <li>model_catalog.py — Model registry</li>
+      <li>model_capabilities.py — Feature matrix</li>
+      <li>api_key_manager.py — Key storage</li>
+      <li>mcp_manager.py — MCP lifecycle</li>
+      <li>builtin_mcp.py — Built-in servers</li>
+      <li>tool_index.py — Tool discovery</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Infrastructure</h3>
+    <ul>
+      <li>database.py — SQLAlchemy/SQLite</li>
+      <li>session_manager.py — Session state</li>
+      <li>event_bus.py — Internal events</li>
+      <li>shutdown_lifecycle.py — Graceful stop</li>
+      <li>service_health.py — Health checks</li>
+      <li>secret_storage.py — Credential vault</li>
+    </ul>
+  </div>
+</div>
+
+<h2>TreeHouse Data Model</h2>
+<table>
+  <tr><th>Entity</th><th>Key Fields</th><th>Lifecycle</th></tr>
+  <tr><td>Profile</td><td>id, displayName, roles[], active</td><td>create → update → (delete)</td></tr>
+  <tr><td>Course</td><td>id, title, moduleIds[], authorIds[], status</td><td>draft → published → archived/deleted</td></tr>
+  <tr><td>Module</td><td>id, courseId, activityIds[], assignmentIds[], order</td><td>create → update → reorder → deleted</td></tr>
+  <tr><td>Activity</td><td>id, moduleId, content, points, skillIds[], status</td><td>draft → published → completed/deleted</td></tr>
+  <tr><td>Assignment</td><td>id, moduleId, prompt, maxPoints, dueAt, status</td><td>draft → published → graded/deleted</td></tr>
+  <tr><td>Submission</td><td>id, assignmentId, profileId, answer, grade, status</td><td>submitted → graded</td></tr>
+  <tr><td>Enrollment</td><td>id, courseId, profileId, status</td><td>active → completed/withdrawn</td></tr>
+  <tr><td>Skill</td><td>id, title, prerequisiteIds[], masteryThreshold</td><td>create → update → deleted</td></tr>
+  <tr><td>Evidence</td><td>id, skillId, profileId, description, status</td><td>pending → approved/rejected</td></tr>
+  <tr><td>Badge</td><td>id, title, criteria{type,threshold,...}</td><td>create → update → deleted</td></tr>
+  <tr><td>Quest</td><td>id, title, activityIds[], assignmentIds[], rewardPoints</td><td>create → update → retired/deleted</td></tr>
+</table>
+
+<h2>Copal Views</h2>
+<div class="layer">
+  <div class="box">
+    <h3>Documents</h3>
+    <ul><li>Notes — Personal markdown docs</li><li>Wiki — Interlinked knowledge</li><li>Import/Export — Filesystem bridge</li></ul>
+  </div>
+  <div class="box">
+    <h3>Structured Data</h3>
+    <ul><li>Bases — Custom field containers</li><li>Tasks — Work item tracking</li><li>Calendar — CalDAV sync</li></ul>
+  </div>
+  <div class="box">
+    <h3>History</h3>
+    <ul><li>Events — Immutable audit trail</li><li>Timeline — Chronological view</li><li>Sessions — Conversation history</li></ul>
+  </div>
+</div>
+
+<footer style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; text-align: center;">
+  OpenClank Architecture Map · Generated from live source analysis
+</footer>
+
+</body>
+</html>

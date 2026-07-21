@@ -19,6 +19,7 @@ from src.model_context import estimate_tokens
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
 from src.attachment_refs import attachment_ref
+from src.transcript_layout import build_transcript_layout, normalize_tool_events
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
@@ -327,6 +328,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
 
             sess.model = new_model
             sess.endpoint_url = chat_url
+            sess.endpoint_id = ep.id
             sess.headers = new_headers
 
             # Persist
@@ -335,6 +337,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
                 _db.query(DBSession).filter(DBSession.id == session_id).update({
                     "model": new_model,
                     "endpoint_url": chat_url,
+                    "endpoint_id": ep.id,
                     "headers": persisted_headers,
                 })
                 _db.commit()
@@ -1126,8 +1129,11 @@ def save_assistant_response(
         md["memories_used"] = used_memories
     if do_research and not research_sources:
         md["research_clarification"] = True
-    if tool_events:
-        md["tool_events"] = tool_events
+    normalized_tools = normalize_tool_events(
+        tool_events if tool_events is not None else md.get("tool_events")
+    )
+    if normalized_tools:
+        md["tool_events"] = normalized_tools
 
     # Extract thinking into metadata (don't pollute message content with <think> tags)
     _think_info = _extract_thinking_meta(full_response)
@@ -1139,6 +1145,13 @@ def save_assistant_response(
         _content = _think_info["reply"]
     else:
         _content = full_response
+    md["transcript_v2"] = build_transcript_layout(
+        _content,
+        thinking=md.get("thinking") or "",
+        tool_events=normalized_tools,
+        status="interrupted" if md.get("stopped") else "complete",
+        error=md.get("error"),
+    )
     message = ChatMessage("assistant", _content, metadata=md)
     if incognito:
         sess.history.append(message)

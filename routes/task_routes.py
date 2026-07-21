@@ -25,6 +25,18 @@ from routes.prefs_routes import _load_for_user, _save_for_user
 logger = logging.getLogger(__name__)
 
 
+def _json_string_list(raw) -> list[str]:
+    if raw in (None, ""):
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return sorted({str(item).strip() for item in value if str(item).strip()})
+
+
 def _maybe_cascade_calendar_event(task) -> None:
     """Delete the linked calendar event when a cookbook_serve task is
     removed. Two lookup strategies:
@@ -154,6 +166,11 @@ class TaskCreate(BaseModel):
     output_target: str = "session"
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
+    endpoint_id: Optional[str] = None
+    workspace: Optional[str] = None
+    allowed_tools: Optional[list[str]] = None
+    interaction_policy: str = "fail_on_interaction"
+    max_tool_calls: Optional[int] = 20
     then_task_id: Optional[str] = None            # chain: run this task after success
     notifications_enabled: Optional[bool] = None  # None lets action-specific defaults apply
     character_id: Optional[str] = None             # built-in persona id (PERSONAS) — biases output voice
@@ -175,6 +192,11 @@ class TaskUpdate(BaseModel):
     output_target: Optional[str] = None
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
+    endpoint_id: Optional[str] = None
+    workspace: Optional[str] = None
+    allowed_tools: Optional[list[str]] = None
+    interaction_policy: Optional[str] = None
+    max_tool_calls: Optional[int] = None
     then_task_id: Optional[str] = None
     notifications_enabled: Optional[bool] = None
     character_id: Optional[str] = None
@@ -213,6 +235,11 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "character_id": getattr(t, "character_id", None),
         "model": t.model,
         "endpoint_url": t.endpoint_url,
+        "endpoint_id": getattr(t, "endpoint_id", None),
+        "workspace": getattr(t, "workspace", None),
+        "allowed_tools": _json_string_list(getattr(t, "allowed_tools", None)),
+        "interaction_policy": getattr(t, "interaction_policy", None) or "fail_on_interaction",
+        "max_tool_calls": getattr(t, "max_tool_calls", None),
         "run_count": t.run_count or 0,
         "then_task_id": t.then_task_id,
         "notifications_enabled": bool(getattr(t, "notifications_enabled", True)),
@@ -261,35 +288,31 @@ def _run_research_id(task: ScheduledTask) -> str:
 
 
 def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
-    """Best-effort endpoint URL for reopening a task run in chat."""
-    if getattr(task, "endpoint_url", None):
-        return task.endpoint_url or ""
-
+    """Resolve a task run through its persisted endpoint identity."""
+    endpoint_id = getattr(task, "endpoint_id", None)
     try:
-        if getattr(task, "session_id", None):
+        if not endpoint_id and getattr(task, "session_id", None):
             from core.database import Session as DbSession
             sess = db.query(DbSession).filter(DbSession.id == task.session_id).first()
-            if sess and sess.endpoint_url:
-                return sess.endpoint_url or ""
+            endpoint_id = getattr(sess, "endpoint_id", None) if sess else None
     except Exception:
         pass
 
-    model = (getattr(run, "model", None) or getattr(task, "model", None) or "").strip()
-    if not model:
-        return ""
-
+    if endpoint_id == "mimo":
+        return "mimo://acp"
     try:
         from core.database import ModelEndpoint
-        eps = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
-        for ep in eps:
-            cached = []
-            if ep.cached_models:
-                try:
-                    cached = json.loads(ep.cached_models) or []
-                except Exception:
-                    cached = []
-            if model in cached:
-                return ep.base_url or ""
+        from src.auth_helpers import owner_filter
+        from src.endpoint_resolver import build_chat_url, normalize_base
+
+        if endpoint_id:
+            query = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == endpoint_id,
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+            )
+            ep = owner_filter(query, ModelEndpoint, task.owner or "").first()
+            if ep:
+                return build_chat_url(normalize_base(ep.base_url))
     except Exception:
         pass
     return ""
@@ -300,6 +323,83 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     def _owner(request: Request):
         return get_current_user(request)
+
+    def _task_agent_contract(db, req, owner: str | None, *, current=None) -> dict:
+        """Validate the durable identity/authority used by a headless Agent run."""
+        from core.database import ModelEndpoint
+        from src.auth_helpers import owner_filter
+        from src.endpoint_resolver import build_chat_url, normalize_base
+        from src.tool_policy import known_tool_names
+
+        endpoint_id = (
+            req.endpoint_id
+            if "endpoint_id" in getattr(req, "model_fields_set", set())
+            else getattr(current, "endpoint_id", None)
+        )
+        endpoint_url = (
+            req.endpoint_url
+            if "endpoint_url" in getattr(req, "model_fields_set", set())
+            else getattr(current, "endpoint_url", None)
+        )
+        if endpoint_id:
+            query = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == endpoint_id,
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+            )
+            query = owner_filter(query, ModelEndpoint, owner or "")
+            endpoint = query.first()
+            if endpoint is None:
+                raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
+            endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
+        elif endpoint_url:
+            raise HTTPException(400, "Headless Agent tasks require endpoint_id, not a raw endpoint URL")
+
+        workspace = (
+            req.workspace
+            if "workspace" in getattr(req, "model_fields_set", set())
+            else getattr(current, "workspace", None)
+        )
+        if workspace:
+            if not owner_has_admin_task_privileges(owner):
+                raise HTTPException(403, "Only an administrator can grant a task workspace")
+            from src.tool_execution import vet_workspace
+            workspace = vet_workspace(workspace)
+            if not workspace:
+                raise HTTPException(400, "Invalid or unsafe task workspace")
+
+        raw_tools = (
+            req.allowed_tools
+            if "allowed_tools" in getattr(req, "model_fields_set", set())
+            else _json_string_list(getattr(current, "allowed_tools", None))
+        )
+        allowed_tools = sorted({str(item).strip() for item in (raw_tools or []) if str(item).strip()})
+        unknown = set(allowed_tools) - known_tool_names()
+        if unknown:
+            raise HTTPException(400, f"Unknown task tools: {', '.join(sorted(unknown))}")
+
+        interaction_policy = (
+            req.interaction_policy
+            if "interaction_policy" in getattr(req, "model_fields_set", set())
+            else getattr(current, "interaction_policy", None) or "fail_on_interaction"
+        )
+        if interaction_policy != "fail_on_interaction":
+            raise HTTPException(400, "Scheduled tasks must use fail_on_interaction")
+
+        max_tool_calls = (
+            req.max_tool_calls
+            if "max_tool_calls" in getattr(req, "model_fields_set", set())
+            else getattr(current, "max_tool_calls", None) or 20
+        )
+        if not 1 <= int(max_tool_calls) <= 1000:
+            raise HTTPException(400, "max_tool_calls must be between 1 and 1000")
+        return {
+            "endpoint_id": endpoint_id or None,
+            "endpoint_url": endpoint_url or None,
+            "workspace": workspace or None,
+            "allowed_tools": json.dumps(allowed_tools),
+            "interaction_policy": "fail_on_interaction",
+            "max_tool_calls": int(max_tool_calls),
+        }
 
     async def _generate_task_name(prompt: str, owner: Optional[str] = None) -> str:
         """Use LLM to generate a short task name from the prompt."""
@@ -514,6 +614,18 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         db = SessionLocal()
         try:
             then_task_id = _validate_then_task_id(db, req.then_task_id, user)
+            agent_contract = (
+                _task_agent_contract(db, req, user)
+                if req.task_type in ("llm", "research")
+                else {
+                    "endpoint_id": req.endpoint_id or None,
+                    "endpoint_url": req.endpoint_url or None,
+                    "workspace": None,
+                    "allowed_tools": "[]",
+                    "interaction_policy": "fail_on_interaction",
+                    "max_tool_calls": 20,
+                }
+            )
             notifications_enabled = (
                 False if req.task_type == "action" and req.notifications_enabled is None
                 else bool(req.notifications_enabled) if req.notifications_enabled is not None
@@ -548,7 +660,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 status="active" if (req.trigger_type in ("event", "webhook") or next_run) else "completed",
                 output_target=req.output_target,
                 model=req.model or None,
-                endpoint_url=req.endpoint_url or None,
+                **agent_contract,
                 then_task_id=then_task_id,
                 webhook_token=webhook_token,
                 notifications_enabled=notifications_enabled,
@@ -680,6 +792,11 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             next_task_type = req.task_type if req.task_type is not None else task.task_type
             next_action = req.action if req.action is not None else task.action
             _require_admin_for_task_action(user, next_task_type, next_action)
+            agent_contract = (
+                _task_agent_contract(db, req, user, current=task)
+                if next_task_type in ("llm", "research")
+                else None
+            )
 
             if req.name is not None:
                 task.name = req.name
@@ -693,8 +810,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 task.output_target = req.output_target
             if req.model is not None:
                 task.model = req.model or None
-            if req.endpoint_url is not None:
+            if agent_contract is not None:
+                for field, value in agent_contract.items():
+                    setattr(task, field, value)
+            elif req.endpoint_url is not None:
                 task.endpoint_url = req.endpoint_url or None
+                task.endpoint_id = req.endpoint_id or None
             if req.trigger_type is not None:
                 # Generate webhook token when switching to webhook trigger
                 if req.trigger_type == "webhook" and not task.webhook_token:

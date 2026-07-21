@@ -692,12 +692,13 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         # For panel-launched research (rp-* IDs), there is no chat session, so
         # fall back through the same chain as /api/research/start: research →
         # utility → first enabled endpoint in the DB.
-        ep_url, ep_model, ep_headers = "", "", {}
+        ep_url, ep_model, ep_headers, ep_id = "", "", {}, None
         try:
             src_sess = session_manager.get_session(session_id)
             ep_url = src_sess.endpoint_url or ""
             ep_model = src_sess.model or ""
             ep_headers = dict(src_sess.headers or {})
+            ep_id = getattr(src_sess, "endpoint_id", None)
         except KeyError:
             pass
 
@@ -724,6 +725,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             try:
                 ep = _owned_enabled_endpoint(db, user)
                 if ep:
+                    ep_id = ep.id
                     base = normalize_base(ep.base_url)
                     fallback_url = build_chat_url(base)
                     fallback_headers = build_headers(ep.api_key, base)
@@ -757,6 +759,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             model=ep_model,
             rag=False,
             owner=user,
+            endpoint_id=ep_id,
         )
         if ep_headers:
             new_sess.headers = ep_headers

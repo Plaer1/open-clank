@@ -150,7 +150,7 @@ def setup_compare_routes(session_manager: SessionManager):
                         restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
                         if (privileges or {}).get("block_all_models") or (restricted and model not in allowed):
                             raise HTTPException(403, f"Your account is not allowed to use model {model!r}")
-                        resolved.append((sid, model, "mimo://acp", None))
+                        resolved.append((sid, model, "mimo://acp", None, "mimo"))
                         continue
                     ep = _owned_endpoint_by_id(db, eid, user)
                     if ep is None:
@@ -197,13 +197,13 @@ def setup_compare_routes(session_manager: SessionManager):
                 # `ep` is None (raw admin URL or no match), so a comparison can
                 # never inherit another user's key/headers.
                 headers = build_headers(ep.api_key, ep.base_url) if (ep and ep.api_key) else None
-                resolved.append((sid, model, session_endpoint_url, headers))
+                resolved.append((sid, model, session_endpoint_url, headers, str(ep.id) if ep is not None else None))
         finally:
             db.close()
 
         # Both endpoints validated — only now create the ephemeral [CMP]
         # sessions and copy any resolved headers.
-        for sid, model, session_endpoint_url, headers in resolved:
+        for sid, model, session_endpoint_url, headers, resolved_endpoint_id in resolved:
             name = f"[CMP] {slot_name[sid]}" if blind else f"[CMP] {model.split('/')[-1]}"
             session_manager.create_session(
                 session_id=sid,
@@ -212,6 +212,7 @@ def setup_compare_routes(session_manager: SessionManager):
                 model=model,
                 rag=False,
                 owner=user,
+                endpoint_id=resolved_endpoint_id,
             )
             if headers:
                 s = session_manager.sessions.get(sid)

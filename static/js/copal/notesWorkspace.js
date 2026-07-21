@@ -2,9 +2,34 @@ export const NOTES_WORKSPACE_VERSION = 2;
 
 const MODES = new Set(['live', 'source', 'reading']);
 const PREVIEW_LAYOUTS = new Set(['inline', 'side-by-side']);
-const LEFT_TABS = new Set(['files', 'search', 'bookmarks', 'recent']);
+const LEFT_TABS = new Set(['files', 'search', 'tags', 'bookmarks', 'recent']);
 const RIGHT_TABS = new Set(['properties', 'links', 'outline']);
 const FILE_SORTS = new Set(['name', 'modified']);
+
+// Panel registry: id → { label, allowedSides, defaultSide, defaultOrder }
+// Files and Search are left-locked (drag/drop and search-focus semantics);
+// others are movable between sides.
+const PANELS = Object.freeze({
+  files:      { label:'Files',      allowedSides:['left'],             defaultSide:'left',  defaultOrder:0 },
+  search:     { label:'Search',     allowedSides:['left'],             defaultSide:'left',  defaultOrder:1 },
+  tags:       { label:'Tags',       allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:2 },
+  bookmarks:  { label:'Bookmarks',  allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:3 },
+  recent:     { label:'Recent',     allowedSides:['left','right'],     defaultSide:'left',  defaultOrder:4 },
+  properties: { label:'Properties', allowedSides:['left','right'],     defaultSide:'right', defaultOrder:0 },
+  links:      { label:'Links',      allowedSides:['left','right'],     defaultSide:'right', defaultOrder:1 },
+  outline:    { label:'Outline',    allowedSides:['left','right'],     defaultSide:'right', defaultOrder:2 },
+});
+export const NOTES_PANELS = PANELS;
+
+const PANEL_IDS = new Set(Object.keys(PANELS));
+
+function defaultPanels() {
+  const panels = {};
+  for (const [id, def] of Object.entries(PANELS)) {
+    panels[id] = { side:def.defaultSide, order:def.defaultOrder, hidden:false };
+  }
+  return panels;
+}
 let idSequence = 0;
 
 function nextId(prefix) {
@@ -21,9 +46,23 @@ function safeNumber(value, fallback, minimum, maximum) {
   return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
 }
 
+export function normalizeNotesSettings(raw = {}) {
+  const settings = raw && typeof raw === 'object' ? raw : {};
+  return {
+    previewLayout:PREVIEW_LAYOUTS.has(settings.previewLayout) ? settings.previewLayout : 'inline',
+    lineNumbers:settings.lineNumbers === true,
+    readableLineWidth:settings.readableLineWidth !== false,
+    ribbon:settings.ribbon === true,
+    completedVisibility:settings.completedVisibility === 'hide' ? 'hide' : 'show',
+  };
+}
+
 export function noteViewType(doc = {}) {
   const kind = String(doc.kind || '').toLowerCase();
   const name = String(doc.name || '').toLowerCase();
+  if (kind === 'timeline') return 'timeline';
+  if (kind === 'note') return 'note';
+  if (kind === 'copal-event') return 'event';
   if (kind === 'canvas' || name.endsWith('.canvas')) return 'canvas';
   if (kind === 'base' || name.endsWith('.base')) return 'base';
   if (kind === 'asset') {
@@ -37,12 +76,13 @@ export function noteViewType(doc = {}) {
 }
 
 function makeLeaf(doc, source = {}) {
+  const view = noteViewType(doc);
   return {
     type: 'leaf',
     id: typeof source.id === 'string' && source.id ? source.id : nextId('leaf'),
     docId: doc.id,
-    view: noteViewType(doc),
-    mode: MODES.has(source.mode) ? source.mode : 'live',
+    view,
+    mode:view === 'note' && source.mode === 'source' ? 'live' : MODES.has(source.mode) ? source.mode : 'live',
     pinned: source.pinned === true,
     rawSource: source.rawSource === true,
     selection: source.selection && typeof source.selection === 'object'
@@ -65,21 +105,6 @@ function makeGroup(leaves = [], source = {}) {
     id: typeof source.id === 'string' && source.id ? source.id : nextId('group'),
     tabs,
     activeLeafId: active,
-  };
-}
-
-function defaultWorkspace(doc = null) {
-  const leaf = doc ? makeLeaf(doc) : null;
-  const group = makeGroup(leaf ? [leaf] : []);
-  return {
-    version: NOTES_WORKSPACE_VERSION,
-    root: group,
-    activeLeafId: leaf?.id || null,
-    left: { open: true, width: 224, tab: 'files', sort: 'name', expanded: [], selected: [] },
-    right: { open: false, width: 280, tab: 'properties', pinnedDocId: null },
-    settings: { previewLayout: 'inline', lineNumbers: false, readableLineWidth: true, ribbon: false },
-    recent: doc ? [doc.id] : [],
-    closed: [],
   };
 }
 
@@ -153,14 +178,16 @@ function migrateLegacy(raw, docsById, fallbackDoc) {
     version: NOTES_WORKSPACE_VERSION,
     root,
     activeLeafId: activeLeaf?.id || null,
-    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[] },
+    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[], showDotFolders:raw?.showDotFolders === true },
     right: {
       open:raw?.sidebarOpen === true,
       width:280,
       tab:RIGHT_TABS.has(raw?.sidebar) ? raw.sidebar : 'properties',
       pinnedDocId:null,
     },
-    settings: { previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false },
+    panels:defaultPanels(),
+    settings:normalizeNotesSettings(),
+    bookmarks:uniqueStrings(raw?.bookmarks || raw?.pinned).filter((id) => docsById.has(id)),
     recent:ids.slice().reverse(),
     closed:[],
   };
@@ -172,7 +199,7 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const fallbackDoc = docsById.get(selected) || visibleDocs[0] || null;
   if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return migrateLegacy(raw || {}, docsById, fallbackDoc);
 
-  let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || defaultWorkspace(fallbackDoc).root;
+  let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || makeGroup();
   let leaves = flattenLeaves(root);
   if (selected && docsById.has(selected) && !leaves.some((leaf) => leaf.docId === selected)) {
     const leaf = makeLeaf(docsById.get(selected));
@@ -200,7 +227,8 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   }
   const left = raw.left && typeof raw.left === 'object' ? raw.left : {};
   const right = raw.right && typeof raw.right === 'object' ? raw.right : {};
-  const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
+  const settings = normalizeNotesSettings(raw.settings);
+  const panels = normalizePanels(raw.panels, left, right);
   return {
     version: NOTES_WORKSPACE_VERSION,
     root,
@@ -212,6 +240,7 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
       sort:FILE_SORTS.has(left.sort) ? left.sort : 'name',
       expanded:uniqueStrings(left.expanded),
       selected:uniqueStrings(left.selected).filter((id) => docsById.has(id)),
+      showDotFolders:left.showDotFolders === true,
     },
     right: {
       open:right.open === true,
@@ -219,12 +248,9 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
       tab:RIGHT_TABS.has(right.tab) ? right.tab : 'properties',
       pinnedDocId:typeof right.pinnedDocId === 'string' && docsById.has(right.pinnedDocId) ? right.pinnedDocId : null,
     },
-    settings: {
-      previewLayout:PREVIEW_LAYOUTS.has(settings.previewLayout) ? settings.previewLayout : 'inline',
-      lineNumbers:settings.lineNumbers === true,
-      readableLineWidth:settings.readableLineWidth !== false,
-      ribbon:settings.ribbon === true,
-    },
+    panels,
+    settings,
+    bookmarks:uniqueStrings(raw.bookmarks).filter((id) => docsById.has(id)),
     recent:uniqueStrings(raw.recent).filter((id) => docsById.has(id)).slice(0, 40),
     closed:uniqueStrings(raw.closed).filter((id) => docsById.has(id)).slice(0, 20),
   };
@@ -392,4 +418,56 @@ export function setWorkspaceLeafMode(workspace, leafId, mode) {
 
 export function serializeNotesWorkspace(workspace) {
   return JSON.stringify(workspace);
+}
+
+function normalizePanels(rawPanels, left, right) {
+  const panels = defaultPanels();
+  if (rawPanels && typeof rawPanels === 'object') {
+    for (const [id, entry] of Object.entries(rawPanels)) {
+      if (!PANEL_IDS.has(id) || !entry || typeof entry !== 'object') continue;
+      const def = PANELS[id];
+      const side = def.allowedSides.includes(entry.side) ? entry.side : def.defaultSide;
+      panels[id] = {
+        side,
+        order: safeNumber(entry.order, def.defaultOrder, 0, 99),
+        hidden: entry.hidden === true,
+      };
+    }
+  }
+  // Ensure no two panels share the same (side, order) — break ties by
+  // stable panel-id sort so the result is deterministic.
+  for (const side of ['left', 'right']) {
+    const entries = Object.entries(panels).filter(([, p]) => p.side === side).sort(([a], [b]) => a.localeCompare(b));
+    entries.sort(([, a], [, b]) => a.order - b.order);
+    entries.forEach(([, p], index) => { p.order = index; });
+  }
+  return panels;
+}
+
+// Returns the ordered, visible panel ids for a given side.
+export function workspacePanelsForSide(workspace, side) {
+  const panels = workspace.panels || defaultPanels();
+  return Object.entries(panels)
+    .filter(([, p]) => p.side === side && !p.hidden)
+    .sort(([, a], [, b]) => a.order - b.order)
+    .map(([id]) => id);
+}
+
+// Validates and applies a placement patch for a panel.
+export function setWorkspacePanelPlacement(workspace, id, patch) {
+  if (!PANEL_IDS.has(id) || !workspace.panels) return false;
+  const def = PANELS[id];
+  const current = workspace.panels[id];
+  if (patch && typeof patch === 'object') {
+    if (typeof patch.side === 'string' && def.allowedSides.includes(patch.side)) current.side = patch.side;
+    if (typeof patch.order === 'number') current.order = Math.max(0, Math.min(99, patch.order));
+    if (typeof patch.hidden === 'boolean') current.hidden = patch.hidden;
+  }
+  // Re-normalize orders for the side to prevent collisions.
+  for (const side of ['left', 'right']) {
+    const entries = Object.entries(workspace.panels).filter(([, p]) => p.side === side).sort(([a], [b]) => a.localeCompare(b));
+    entries.sort(([, a], [, b]) => a.order - b.order);
+    entries.forEach(([, p], index) => { p.order = index; });
+  }
+  return true;
 }

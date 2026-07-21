@@ -1743,10 +1743,7 @@ def setup_cookbook_routes() -> APIRouter:
             if remote_home:
                 mlx_shim_model_id = f"{remote_home}/.cache/odysseus/mlx-shims/{short_name}"
 
-        # If the serve command opts models into OpenAI tool-calling, record it so
-        # agent_loop trusts emitted tool_calls instead of the name heuristic.
         is_ollama_endpoint = "ollama" in (req.cmd or "").lower()
-        supports_tools = True if "--enable-auto-tool-choice" in req.cmd else None
         # Pin the model the user launched for every Cookbook-created LLM
         # endpoint, not just Ollama. Some OpenAI-compatible servers report a
         # deployment alias from /v1/models, and a stale server can answer on the
@@ -1778,8 +1775,6 @@ def setup_cookbook_routes() -> APIRouter:
                     existing.endpoint_kind = "ollama"
                     if pinned_models:
                         existing.cached_models = json.dumps(pinned_models)
-                if supports_tools is not None:
-                    existing.supports_tools = supports_tools
                 db.commit()
                 logger.info(f"Updated existing local model endpoint: {base_url}")
                 # Re-probe so cached_models matches what the server actually
@@ -1829,7 +1824,7 @@ def setup_cookbook_routes() -> APIRouter:
                 model_refresh_mode="auto",
                 cached_models=json.dumps(pinned_models) if pinned_models else None,
                 pinned_models=json.dumps(pinned_models) if pinned_models else None,
-                supports_tools=supports_tools,
+                supports_tools=None,
             )
             db.add(ep)
             db.commit()

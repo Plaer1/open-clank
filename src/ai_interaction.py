@@ -72,7 +72,14 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # Model resolution
 # ---------------------------------------------------------------------------
 
-from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
+from src.endpoint_resolver import (
+    ResolvedModelTarget,
+    build_chat_url,
+    build_headers,
+    build_models_url,
+    resolve_endpoint_runtime,
+    resolve_model_target,
+)
 
 
 def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
@@ -84,6 +91,12 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
 
     Raises ValueError if model not found.
     """
+    target = _resolve_model_target(spec, owner=owner)
+    return target.endpoint_url, target.model_id, dict(target.headers)
+
+
+def _resolve_model_target(spec: str, owner: Optional[str] = None) -> ResolvedModelTarget:
+    """Resolve a model specifier while retaining its registered endpoint ID."""
     import httpx
     from src.database import SessionLocal, ModelEndpoint
     from src.llm_core import _detect_provider, ANTHROPIC_MODELS
@@ -120,6 +133,15 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
             provider = _detect_provider(base)
             headers = build_headers(api_key, base)
 
+            def _target(selected_model: str) -> ResolvedModelTarget:
+                return resolve_model_target(
+                    build_chat_url(base),
+                    selected_model,
+                    headers,
+                    endpoint_id=str(ep.id),
+                    provider_id=f"ody-{ep.id}",
+                )
+
             if provider == "anthropic":
                 # Anthropic: match against hardcoded model list
                 matched = None
@@ -128,7 +150,7 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                         matched = am
                         break
                 if matched:
-                    return build_chat_url(base), matched, headers
+                    return _target(matched)
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
                 try:
@@ -153,12 +175,12 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                 # Exact match first
                 for mid in model_ids:
                     if mid.lower() == model_name.lower():
-                        return build_chat_url(base), mid, headers
+                        return _target(mid)
 
                 # Partial match
                 for mid in model_ids:
                     if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
-                        return build_chat_url(base), mid, headers
+                        return _target(mid)
 
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:
@@ -643,10 +665,9 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
     Actions:
       toggle <name> <on|off>  — Toggle a setting (web, bash, rag, research, incognito, document_editor)
-      set_mode <agent|chat>   — Switch between agent and chat mode
       switch_model <model>    — Change the model for the current session
-      set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
-      create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
+      set_theme <preset>      — Apply a built-in theme preset (clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
+      create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|clanker-sweep|clanker-blueprint|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
       open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
@@ -686,18 +707,6 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "toggle_name": toggle_name,
             "state": state,
             "results": f"Toggle '{toggle_name}' set to {'on' if state else 'off'}",
-        }
-
-    elif action == "set_mode":
-        if len(parts) < 2:
-            return {"error": "set_mode needs: set_mode <agent|chat>"}
-        mode = parts[1].lower()
-        if mode not in ("agent", "chat"):
-            return {"error": f"Invalid mode '{mode}'. Use: agent, chat"}
-        return {
-            "ui_event": "set_mode",
-            "mode": mode,
-            "results": f"Mode changed to '{mode}'",
         }
 
     elif action == "switch_model":
@@ -747,7 +756,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         # Also check user's custom themes stored in prefs.
         # Must match the THEMES keys in static/js/theme.js.
         known_presets = [
-            "dark", "light", "midnight", "paper", "cyberpunk", "retrowave",
+            "clanker-dark", "clanker-light", "dark", "light", "midnight", "paper", "cyberpunk", "retrowave",
             "forest", "ocean", "ume", "copper", "terminal", "organs",
             "lavender", "gpt", "claude", "cute",
         ]
@@ -772,7 +781,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         parts = lines[0].strip().split()
         # create_theme <name> <bg> <fg> <panel> <border> <accent> [key=value ...]
         if len(parts) < 7:
-            return {"error": "create_theme needs: create_theme <name> <bg> <fg> <panel> <border> <accent> (all hex colors). Optional advanced color key=value pairs (userBubbleBg, aiBubbleBg, bubbleBorder, sidebarBg, sectionAccent, brandColor, inputBg, inputBorder, sendBtnBg, sendBtnHover, codeBg, codeFg, toggleBg, toggleActive, accentPrimary, accentError). Optional background EFFECTS: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num e.g. 1>, bgEffectSize=<num e.g. 1>, frosted=true|false"}
+            return {"error": "create_theme needs: create_theme <name> <bg> <fg> <panel> <border> <accent> (all hex colors). Optional advanced color key=value pairs (userBubbleBg, aiBubbleBg, bubbleBorder, sidebarBg, sectionAccent, brandColor, inputBg, inputBorder, sendBtnBg, sendBtnHover, codeBg, codeFg, toggleBg, toggleActive, accentPrimary, accentError). Optional background EFFECTS: bgPattern=<none|clanker-sweep|clanker-blueprint|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num e.g. 1>, bgEffectSize=<num e.g. 1>, frosted=true|false"}
         name = parts[1].lower().replace(" ", "-")
         colors = {"bg": parts[2], "fg": parts[3], "panel": parts[4], "border": parts[5], "red": parts[6]}
         # Validate base hex colors
@@ -790,7 +799,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         advanced = {}
         # Background-effect fields (animated pattern + frosted glass). Different
         # value types than the hex-only advanced keys, so parse separately.
-        _BG_PATTERNS = {"none", "dots", "synapse", "rain", "constellations",
+        _BG_PATTERNS = {"none", "clanker-sweep", "clanker-blueprint", "dots", "synapse", "rain", "constellations",
                         "perlin-flow", "petals", "sparkles", "embers"}
         bg = {}
         for part in parts[7:]:
@@ -951,7 +960,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
 
     else:
-        return {"error": f"Unknown action '{action}'. Use: toggle, set_mode, switch_model, set_theme, highlight, clear_highlight, get_toggles"}
+        return {"error": f"Unknown action '{action}'. Use: toggle, switch_model, set_theme, highlight, clear_highlight, get_toggles"}
 
 
 # ---------------------------------------------------------------------------

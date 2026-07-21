@@ -8,7 +8,9 @@ The on-disk format is SKILL.md (frontmatter + structured body) under
 """
 
 import logging
+import json
 import re
+from pathlib import Path
 from typing import List, Optional
 
 import httpx
@@ -18,9 +20,119 @@ from pydantic import BaseModel, Field
 
 from services.memory.skills import SkillsManager
 from src.auth_helpers import get_current_user
+from src.constants import DATA_DIR
+from core.atomic_io import atomic_write_json
 from core.middleware import require_admin
 
 logger = logging.getLogger(__name__)
+_SKILL_JOB_STATE_PATH = Path(DATA_DIR) / "skill-audit-jobs.json"
+
+
+def _load_skill_job_state() -> dict:
+    try:
+        raw = json.loads(_SKILL_JOB_STATE_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+_PERSISTED_SKILL_JOB_STATE = _load_skill_job_state()
+
+
+def _restore_job_map(kind: str) -> dict:
+    restored = {}
+    for row in _PERSISTED_SKILL_JOB_STATE.get(kind, []):
+        if not isinstance(row, dict) or not isinstance(row.get("key"), list):
+            continue
+        key = tuple(str(part) for part in row["key"])
+        job = row.get("job") if isinstance(row.get("job"), dict) else {}
+        if job.get("status") == "running":
+            job["status"] = "manual_verification_required"
+            job["verdict"] = job.get("verdict") or {
+                "verdict": "manual_verification_required",
+                "confidence": 0,
+                "summary": "The server restarted before this job completed.",
+                "issues": ["Restart the audit manually."],
+            }
+        restored[key] = job
+    return restored
+
+
+def _persist_skill_job_state() -> None:
+    def _rows(store: dict) -> list[dict]:
+        rows = []
+        for key, job in store.items():
+            clean = {name: value for name, value in job.items() if name != "task"}
+            try:
+                clean = json.loads(json.dumps(clean))
+            except (TypeError, ValueError):
+                continue
+            rows.append({"key": list(key), "job": clean})
+        return rows
+
+    atomic_write_json(str(_SKILL_JOB_STATE_PATH), {
+        "test": _rows(globals().get("_skill_test_jobs", {})),
+        "audit": _rows(globals().get("_skill_audit_jobs", {})),
+    }, indent=2)
+
+
+def _configured_endpoint_id(prefix: str, owner: Optional[str]) -> Optional[str]:
+    """Return the exact registered endpoint selected by a model setting."""
+    from src.settings import get_user_setting, load_settings
+
+    settings = load_settings()
+    owner_key = owner or ""
+    endpoint_id = get_user_setting(
+        f"{prefix}_endpoint_id", owner_key, settings.get(f"{prefix}_endpoint_id", ""),
+    )
+    if not endpoint_id and prefix not in ("default", "utility"):
+        endpoint_id = get_user_setting(
+            "utility_endpoint_id", owner_key, settings.get("utility_endpoint_id", ""),
+        )
+    if not endpoint_id:
+        endpoint_id = get_user_setting(
+            "default_endpoint_id", owner_key, settings.get("default_endpoint_id", ""),
+        )
+    return str(endpoint_id or "").strip() or None
+
+
+def _skill_test_unsafe_tools(skill_md: str) -> list[str]:
+    """Tools without a hermetic read-only adapter require manual verification."""
+    from src.tool_policy import known_tool_names
+    from src.tool_security import COMPARE_READONLY_TOOLS
+
+    text = str(skill_md or "").lower()
+    referenced = {
+        name for name in known_tool_names()
+        if re.search(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])", text)
+    }
+    if "mcp__" in text:
+        referenced.add("mcp__*")
+    return sorted(referenced - set(COMPARE_READONLY_TOOLS))
+
+
+async def _skill_auxiliary_call(
+    purpose: str,
+    url: str,
+    model: str,
+    messages: list[dict],
+    *,
+    headers: Optional[dict],
+    owner: Optional[str],
+    timeout: int,
+    **options,
+) -> str:
+    from src.endpoint_resolver import resolve_model_target
+    from src.model_dispatch import AuxiliaryRequest, run_auxiliary_inference
+
+    return await run_auxiliary_inference(AuxiliaryRequest(
+        purpose=purpose,
+        target=resolve_model_target(url, model, headers, lifecycle="ephemeral"),
+        messages=messages,
+        owner=owner,
+        timeout=timeout,
+        options=options,
+    ))
 
 # Last-resort verdict extraction from a teacher/verifier model's prose (run when
 # JSON parsing fails). `["\'\s:]*` already consumes whitespace, so the original
@@ -99,10 +211,10 @@ def _skill_test_task(skill: dict) -> str:
         skill = {}
     ctx = (skill.get("when_to_use") or skill.get("description") or skill.get("name") or "").strip()
     return (
-        "Test this skill end-to-end. FIRST, set up a small realistic scenario it "
-        "applies to — create any sample input it needs (e.g. a short document, a "
-        "note, sample data). Do NOT ask the user for input; invent a plausible "
-        "example yourself. THEN apply the skill fully to that example and show the "
+        "Test this skill against the provided disposable fixture using only the "
+        "read-only tools available. Do not create, edit, send, publish, or mutate "
+        "anything. If the procedure needs a side effect, say manual verification is "
+        "required. Apply every safe step you can and show the "
         "result. Context for when this skill is used: " + (ctx or "(general)")
     )
 
@@ -117,7 +229,6 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
     """
     import json as _json
     import re as _re
-    from src.llm_core import llm_call_async
 
     sys_prompt = (
         "You are a strict QA reviewer judging whether an AI 'skill' (a reusable "
@@ -239,7 +350,8 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
                 "must START with '{' and be ONLY the JSON object, nothing else."
             )
         try:
-            raw = await llm_call_async(
+            raw = await _skill_auxiliary_call(
+                "skill_run_judge",
                 # Generous budget so a heavy reasoner can think AND still have
                 # room to emit the JSON afterwards (reasoning tokens come out of
                 # this same cap; the server clamps to its own max).
@@ -271,7 +383,6 @@ async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: st
     purely a flag the UI surfaces."""
     import json as _json
     import re as _re
-    from src.llm_core import llm_call_async
 
     catalog = "\n".join(f"- {o.get('name')}: {o.get('description', '')}" for o in others) or "(no other skills)"
     sys_prompt = (
@@ -290,8 +401,8 @@ async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: st
         f"=== OTHER SKILLS IN THE LIBRARY ===\n{catalog[:4000]}"
     )
     try:
-        raw = await llm_call_async(
-            url, model,
+        raw = await _skill_auxiliary_call(
+            "skill_necessity_judge", url, model,
             [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
             temperature=0.1, max_tokens=8192, headers=headers, timeout=120,
             owner=owner,
@@ -356,7 +467,6 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
     """
     import json as _json
     import re as _re
-    from src.llm_core import llm_call_async
 
     catalog = "\n".join(f"- {o.get('name')}: {o.get('description', '')}" for o in others[:80]) or "(no other skills)"
     sys_prompt = (
@@ -380,8 +490,8 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
         "fires for its intended scenario and not for adjacent skills above."
     )
     try:
-        raw = await llm_call_async(
-            url, model,
+        raw = await _skill_auxiliary_call(
+            "skill_retrieval_judge", url, model,
             [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
             temperature=0.1, max_tokens=4096, headers=headers, timeout=90,
             owner=owner,
@@ -410,13 +520,16 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
     }
 
 
-# In-memory skill-test jobs, keyed by (owner, skill_name). Runs server-side so
-# the test survives the modal being closed; the UI polls /test-status. (Not
-# persisted across restart — it's a "come back in a bit" convenience.)
-_skill_test_jobs: dict = {}
+# Durable skill-test checkpoints, keyed by (owner, skill_name). Live asyncio
+# handles stay process-local; restart marks unfinished work for manual rerun.
+_skill_test_jobs: dict = _restore_job_map("test")
+_skill_test_handles: dict = {}
 
 
-async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, skills_manager=None):
+async def _run_skill_test_job(
+    key, name, md, task, url, model, headers, owner,
+    skills_manager=None, endpoint_id: Optional[str] = None,
+):
     """Background coroutine: run the skill in an agent loop, capture a condensed
     log + transcript, then have the judge grade it. Writes into _skill_test_jobs."""
     import json as _json
@@ -428,6 +541,18 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
     if job is None:
         return
     log = job["log"]
+    unsafe_tools = _skill_test_unsafe_tools(md)
+    if unsafe_tools:
+        job["verdict"] = {
+            "verdict": "manual_verification_required",
+            "confidence": 0,
+            "summary": "This skill requires tools without a hermetic read-only test adapter.",
+            "issues": [f"manual verification: {', '.join(unsafe_tools)}"],
+        }
+        log.append({"type": "manual_verification_required", "tools": unsafe_tools})
+        job["status"] = "done"
+        _persist_skill_job_state()
+        return
     transcript = []
     say_buf = []
 
@@ -444,45 +569,84 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
             "do your best — the problems will be reviewed afterward.\n\n=== SKILL ===\n" + md},
         {"role": "user", "content": task},
     ]
+    infrastructure_error = None
     try:
-        target = resolve_model_target(url, model, headers, lifecycle="ephemeral")
-        async for chunk in stream_agent_target(
-            target,
-            messages,
-            session_id=f"skill-test-{_uuid.uuid4().hex}",
-            owner=owner,
-            temperature=0.3,
-            max_tokens=0,
-            max_rounds=8,
-        ):
-            if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
-                continue
-            try:
-                d = _json.loads(chunk[6:])
-            except Exception:
-                continue
-            if d.get("delta"):
-                say_buf.append(d["delta"]); transcript.append(d["delta"])
-            elif d.get("type") == "tool_start":
-                _flush_say()
-                cmd = str(d.get("command") or d.get("args") or "")[:300]
-                log.append({"type": "tool_start", "tool": d.get("tool"), "command": cmd})
-                transcript.append(f"\n[tool {d.get('tool')}] {cmd}\n")
-            elif d.get("type") == "tool_output":
-                _flush_say()
-                out = str(d.get("output") or "")[:600]
-                log.append({"type": "tool_output", "output": out})
-                transcript.append(f"[output] {out}\n")
-            elif d.get("type") == "agent_step":
-                _flush_say()
-                log.append({"type": "agent_step", "round": d.get("round")})
-                transcript.append(f"\n--- round {d.get('round')} ---\n")
-            if len(log) > 600:
-                del log[0:len(log) - 600]
+        import tempfile
+        from pathlib import Path
+        from src.tool_security import COMPARE_READONLY_TOOLS
+
+        target = resolve_model_target(
+            url, model, headers,
+            endpoint_id=endpoint_id,
+            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}" if endpoint_id else None),
+            lifecycle="ephemeral",
+        )
+        with tempfile.TemporaryDirectory(prefix="openclank-skill-test-") as workspace:
+            Path(workspace, "fixture.txt").write_text(
+                "Disposable read-only skill-test fixture.\n", encoding="utf-8",
+            )
+            async for chunk in stream_agent_target(
+                target,
+                messages,
+                session_id=f"skill-test-{_uuid.uuid4().hex}",
+                owner=owner,
+                cwd=workspace,
+                relevant_tools=COMPARE_READONLY_TOOLS,
+                max_tool_calls=12,
+                max_rounds=8,
+                workload="background",
+                turn_envelope={
+                    "allowed_tools": sorted(COMPARE_READONLY_TOOLS),
+                    "interaction_policy": "fail_on_interaction",
+                    "workspace": workspace,
+                    "durable_id": f"skill-test:{name}",
+                },
+            ):
+                if chunk.startswith("event: error"):
+                    infrastructure_error = chunk
+                    break
+                if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
+                    continue
+                try:
+                    d = _json.loads(chunk[6:])
+                except Exception:
+                    continue
+                if d.get("delta"):
+                    say_buf.append(d["delta"]); transcript.append(d["delta"])
+                elif d.get("type") == "tool_start":
+                    _flush_say()
+                    cmd = str(d.get("command") or d.get("args") or "")[:300]
+                    log.append({"type": "tool_start", "tool": d.get("tool"), "command": cmd})
+                    transcript.append(f"\n[tool {d.get('tool')}] {cmd}\n")
+                elif d.get("type") == "tool_output":
+                    _flush_say()
+                    out = str(d.get("output") or "")[:600]
+                    log.append({"type": "tool_output", "output": out})
+                    transcript.append(f"[output] {out}\n")
+                elif d.get("type") == "agent_step":
+                    _flush_say()
+                    log.append({"type": "agent_step", "round": d.get("round")})
+                    transcript.append(f"\n--- round {d.get('round')} ---\n")
+                if len(log) > 600:
+                    del log[0:len(log) - 600]
+                if len(log) % 5 == 0:
+                    _persist_skill_job_state()
         _flush_say()
     except Exception as e:
         _flush_say()
         log.append({"type": "error", "error": str(e)})
+        infrastructure_error = str(e)
+
+    if infrastructure_error:
+        job["verdict"] = {
+            "verdict": "manual_verification_required",
+            "confidence": 0,
+            "summary": "Skill test infrastructure did not complete.",
+            "issues": [str(infrastructure_error)[:500]],
+        }
+        job["status"] = "done"
+        _persist_skill_job_state()
+        return
 
     log.append({"type": "evaluating"})
     try:
@@ -508,10 +672,12 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
             except Exception:
                 pass
     job["status"] = "done"
+    _persist_skill_job_state()
 
 
 # ── Autonomous skill audit: test → judge → self-edit → retry → teacher → flag ──
-_skill_audit_jobs: dict = {}
+_skill_audit_jobs: dict = _restore_job_map("audit")
+_skill_audit_handles: dict = {}
 
 
 def _audit_auto_publish_policy(owner) -> tuple[bool, float]:
@@ -711,6 +877,15 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
     from src.endpoint_resolver import resolve_model_target
     from src.model_dispatch import stream_agent_target
 
+    unsafe_tools = _skill_test_unsafe_tools(md)
+    if unsafe_tools:
+        return "", {
+            "verdict": "manual_verification_required",
+            "confidence": 0,
+            "summary": "No hermetic read-only adapter exists for this skill's tools.",
+            "issues": [f"manual verification: {', '.join(unsafe_tools)}"],
+        }
+
     transcript = []
     messages = [
         {"role": "system", "content":
@@ -718,38 +893,72 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
             "for real, using your tools, step by step.\n\n=== SKILL ===\n" + md},
         {"role": "user", "content": task},
     ]
+    infrastructure_error = None
+    terminal = False
     try:
-        # max_tokens explicitly set: passing 0 lets some upstreams (Ollama,
-        # OpenAI-compat) generate an empty completion, which manifested as
-        # the skill test returning nothing while chat (which carries its
-        # preset's max_tokens) worked. 4096 matches the chat default.
-        target = resolve_model_target(url, model, headers, lifecycle="ephemeral")
-        async for chunk in stream_agent_target(
-            target,
-            messages,
-            session_id=f"skill-audit-{_uuid.uuid4().hex}",
-            temperature=0.3,
-            max_tokens=4096,
-            max_rounds=8,
-            owner=owner,
-        ):
-            if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
-                continue
-            try:
-                d = _json.loads(chunk[6:])
-            except Exception:
-                continue
-            if d.get("delta"):
-                transcript.append(d["delta"])
-            elif d.get("type") == "tool_start":
-                transcript.append(f"\n[tool {d.get('tool')}] {str(d.get('command') or d.get('args') or '')[:300]}\n")
-            elif d.get("type") == "tool_output":
-                transcript.append(f"[output] {str(d.get('output') or '')[:600]}\n")
-            elif d.get("type") == "agent_step":
-                transcript.append(f"\n--- round {d.get('round')} ---\n")
+        import tempfile
+        from pathlib import Path
+        from src.tool_security import COMPARE_READONLY_TOOLS
+
+        endpoint_id = _configured_endpoint_id("utility", owner)
+        if not endpoint_id:
+            raise RuntimeError("Skill audit has no registered utility endpoint_id")
+        target = resolve_model_target(
+            url, model, headers,
+            endpoint_id=endpoint_id,
+            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}"),
+            lifecycle="ephemeral",
+        )
+        with tempfile.TemporaryDirectory(prefix="openclank-skill-audit-") as workspace:
+            Path(workspace, "fixture.txt").write_text(
+                "Disposable read-only skill-audit fixture.\n", encoding="utf-8",
+            )
+            async for chunk in stream_agent_target(
+                target,
+                messages,
+                session_id=f"skill-audit-{_uuid.uuid4().hex}",
+                max_rounds=8,
+                max_tool_calls=12,
+                owner=owner,
+                cwd=workspace,
+                relevant_tools=COMPARE_READONLY_TOOLS,
+                workload="background",
+                turn_envelope={
+                    "allowed_tools": sorted(COMPARE_READONLY_TOOLS),
+                    "interaction_policy": "fail_on_interaction",
+                    "workspace": workspace,
+                },
+            ):
+                if chunk.startswith("event: error"):
+                    infrastructure_error = chunk
+                    break
+                if chunk.strip() == "data: [DONE]":
+                    terminal = True
+                    continue
+                if not chunk.startswith("data: "):
+                    continue
+                try:
+                    d = _json.loads(chunk[6:])
+                except Exception:
+                    continue
+                if d.get("delta") and not d.get("thinking"):
+                    transcript.append(d["delta"])
+                elif d.get("type") == "tool_start":
+                    transcript.append(f"\n[tool {d.get('tool')}] {str(d.get('command') or d.get('args') or '')[:300]}\n")
+                elif d.get("type") == "tool_output":
+                    transcript.append(f"[output] {str(d.get('output') or '')[:600]}\n")
+                elif d.get("type") == "agent_step":
+                    transcript.append(f"\n--- round {d.get('round')} ---\n")
     except Exception as e:
-        transcript.append(f"\n[run error] {e}\n")
+        infrastructure_error = str(e)
     text = "".join(transcript)
+    if infrastructure_error or not terminal or not text.strip():
+        return text, {
+            "verdict": "manual_verification_required",
+            "confidence": 0,
+            "summary": "Hermetic skill test infrastructure did not complete.",
+            "issues": [str(infrastructure_error or "empty or interrupted Agent result")[:500]],
+        }
     verdict = await _eval_skill_run(md, task, text, url, model, headers, owner=owner)
     return text, verdict
 
@@ -758,7 +967,6 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
     """Have a model rewrite SKILL.md to fix the reviewer's issues. Returns the
     corrected markdown, or None if it couldn't produce a usable change."""
     import re as _re
-    from src.llm_core import llm_call_async
     issues = "\n".join("- " + str(i) for i in (verdict.get("issues") or []))
     sys_prompt = (
         "You are improving a reusable AI SKILL written in Markdown (frontmatter + body). "
@@ -780,11 +988,13 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
         f"=== TEST TRANSCRIPT ===\n{(transcript or '')[:6000]}"
     )
     try:
-        raw = await llm_call_async(url, model,
-                                   [{"role": "system", "content": sys_prompt},
-                                    {"role": "user", "content": user_msg}],
-                                   temperature=0.2, max_tokens=16384, headers=headers, timeout=180,
-                                   owner=owner)
+        raw = await _skill_auxiliary_call(
+            "skill_rewrite", url, model,
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": user_msg}],
+            temperature=0.2, max_tokens=16384, headers=headers, timeout=180,
+            owner=owner,
+        )
     except Exception as e:
         logger.warning(f"Audit: improve call failed: {e}")
         return None
@@ -910,6 +1120,15 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.95, (refreshed or {}).get("necessity"), verdict)
         log(f"{name}: {status} — confidence 95%")
         return {"skill": name, "result": "pass", "verdict": verdict, "confidence": 0.95, "status": status}
+    if v == "manual_verification_required":
+        current_status = skill.get("status") or "draft"
+        log(f"{name}: manual verification required — skill left unchanged")
+        return {
+            "skill": name,
+            "result": "manual_verification_required",
+            "verdict": verdict,
+            "status": current_status,
+        }
     if v in ("unknown", "inconclusive"):
         skills_manager.set_audit(name, "inconclusive", by_teacher=False, worker_model=model, owner=owner)
         status = _audit_finalize_status(skills_manager, name, owner, "inconclusive", skill.get("confidence") or 0.0, skill.get("necessity"))
@@ -990,6 +1209,8 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
         job["log"].append(msg)
         if len(job["log"]) > 1000:
             del job["log"][0:len(job["log"]) - 1000]
+        if len(job["log"]) % 5 == 0:
+            _persist_skill_job_state()
 
     cancelled = False
     try:
@@ -1031,13 +1252,14 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 pass
             job["results"].append(res)
             job["done"] = len(job["results"])
+            _persist_skill_job_state()
     except _asyncio.CancelledError:
         cancelled = True
     finally:
         job["current"] = None
         job["status"] = "cancelled" if cancelled or job.get("cancel") else "done"
         job["finished"] = _time.time()
-        job.pop("task", None)
+        _persist_skill_job_state()
 
 
 def _resolve_audit_models(owner=None):
@@ -1114,6 +1336,7 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
                                + (f"; teacher {teacher[1]}" if teacher else "")],
         "started": _time.time(), "cancel": False,
     }
+    _persist_skill_job_state()
     logger.info(f"Scheduled skill audit starting: {len(names)} skill(s) (owner={owner or 'all'})")
     await _run_audit_all_job(key, skills_manager, names, url, model, headers, teacher, owner)
     job = _skill_audit_jobs.get(key, {})
@@ -1445,11 +1668,13 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         # Prefer the configured DEFAULT (→ Utility) model — not the current chat
         # session's model. Fall back to the caller's session model only if unset.
         url, model, headers = resolve_endpoint("default", owner=user)
+        endpoint_id = _configured_endpoint_id("default", user)
         if not url or not model:
             url = url or ((body.get("endpoint_url") or "").strip() or None)
             model = model or ((body.get("model") or "").strip() or None)
             if headers is None and isinstance(body.get("headers"), dict):
                 headers = body.get("headers")
+            endpoint_id = (body.get("endpoint_id") or "").strip() or None
         if not url or not model:
             raise HTTPException(400, "No model configured — set a Default or Utility model in Settings.")
 
@@ -1466,6 +1691,11 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             logger.warning(f"Skill-test model resolve failed: {_e}")
 
         key = (user or "", name)
+        if not endpoint_id:
+            raise HTTPException(400, "Skill tests require a registered endpoint_id")
+        existing_handle = _skill_test_handles.get(key)
+        if existing_handle and not existing_handle.done():
+            raise HTTPException(409, "A test for this skill is already running")
         _skill_test_jobs[key] = {
             "status": "running",
             "task": task,
@@ -1475,7 +1705,18 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "log": [{"type": "skill_test_start", "task": task, "skill": name, "model": model}],
             "verdict": None,
         }
-        _asyncio.create_task(_run_skill_test_job(key, name, md, task, url, model, headers, user, skills_manager))
+        _persist_skill_job_state()
+        handle = _asyncio.create_task(_run_skill_test_job(
+            key, name, md, task, url, model, headers, user,
+            skills_manager, endpoint_id=endpoint_id,
+        ))
+        _skill_test_handles[key] = handle
+
+        def _finished(_done, job_key=key):
+            _skill_test_handles.pop(job_key, None)
+            _persist_skill_job_state()
+
+        handle.add_done_callback(_finished)
         return {"ok": True, "status": "running", "skill": name, "model": model}
 
     @router.get("/{skill_id}/test-status")
@@ -1495,6 +1736,31 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "log": job.get("log", []),
             "verdict": job.get("verdict"),
         }
+
+    @router.post("/{skill_id}/test-cancel")
+    async def cancel_skill_test(request: Request, skill_id: str):
+        import asyncio as _asyncio
+
+        user = _owner(request)
+        skills = skills_manager.load(owner=user)
+        match = next((s for s in skills if s.get("name") == skill_id or s.get("id") == skill_id), None)
+        name = (match or {}).get("name", skill_id)
+        key = (user or "", name)
+        handle = _skill_test_handles.get(key)
+        if not handle or handle.done():
+            return {"ok": False, "status": (_skill_test_jobs.get(key) or {}).get("status", "none")}
+        handle.cancel()
+        await _asyncio.gather(handle, return_exceptions=True)
+        job = _skill_test_jobs.get(key) or {}
+        job["status"] = "cancelled"
+        job["verdict"] = {
+            "verdict": "manual_verification_required",
+            "confidence": 0,
+            "summary": "Skill test cancelled; skill was not changed.",
+            "issues": [],
+        }
+        _persist_skill_job_state()
+        return {"ok": True, "status": "cancelled"}
 
     @router.post("/audit-all")
     async def audit_all_skills(request: Request):
@@ -1516,7 +1782,8 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
         key = (user or "",)
         existing = _skill_audit_jobs.get(key)
-        if existing and existing.get("status") == "running":
+        existing_handle = _skill_audit_handles.get(key)
+        if existing_handle and not existing_handle.done():
             return {
                 "ok": True, "status": "running", "total": existing.get("total", 0),
                 "done": existing.get("done", 0), "model": existing.get("model"),
@@ -1567,8 +1834,17 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "results": [], "log": [f"Auditing {len(names)} skill(s) with {model}" + (f"; teacher {teacher[1]}" if teacher else "")],
             "started": _time.time(), "cancel": False,
         }
-        task = _asyncio.create_task(_run_audit_all_job(key, skills_manager, names, url, model, headers, teacher, user))
-        _skill_audit_jobs[key]["task"] = task
+        _persist_skill_job_state()
+        handle = _asyncio.create_task(
+            _run_audit_all_job(key, skills_manager, names, url, model, headers, teacher, user)
+        )
+        _skill_audit_handles[key] = handle
+
+        def _finished(_done, job_key=key):
+            _skill_audit_handles.pop(job_key, None)
+            _persist_skill_job_state()
+
+        handle.add_done_callback(_finished)
         return {"ok": True, "status": "running", "total": len(names), "model": model}
 
     @router.get("/audit-all/status")
@@ -1587,15 +1863,20 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
     @router.post("/audit-all/cancel")
     async def audit_cancel(request: Request):
+        import asyncio as _asyncio
+
         user = _owner(request)
-        job = _skill_audit_jobs.get((user or "",))
+        key = (user or "",)
+        job = _skill_audit_jobs.get(key)
         if job:
             job["cancel"] = True
+            handle = _skill_audit_handles.get(key)
+            if handle and not handle.done():
+                handle.cancel()
+                await _asyncio.gather(handle, return_exceptions=True)
             job["status"] = "cancelled"
             job["current"] = None
-            task = job.get("task")
-            if task and not task.done():
-                task.cancel()
+            _persist_skill_job_state()
         return {"ok": True, "status": "cancelled" if job else "none"}
 
     @router.post("/{skill_id}/markdown")

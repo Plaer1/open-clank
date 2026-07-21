@@ -526,6 +526,20 @@ async function loadEndpoints() {
       const keyLabel = ep.has_key
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
         : '';
+      const catalogProbe = ep.catalog_probe || {};
+      const probeLabels = {
+        auth_missing: 'catalog needs credentials',
+        auth_invalid: 'catalog authentication failed',
+        auth_forbidden: 'catalog access forbidden',
+        unavailable: 'catalog unavailable',
+        malformed: 'catalog response incompatible',
+        unsupported: 'catalog listing unsupported',
+        empty: 'catalog returned no models',
+      };
+      const probeLabel = probeLabels[catalogProbe.status] || '';
+      const probeWhen = catalogProbe.probed_at
+        ? `; checked ${new Date(catalogProbe.probed_at).toLocaleString()}`
+        : '';
       return `
         <div class="admin-user-row${ep.is_enabled ? '' : ' admin-ep-disabled'}${justAddedClass}" data-adm-ep-id="${ep.id}" data-adm-ep-readonly="${readOnly ? '1' : '0'}">
           <div style="display:flex;align-items:center;justify-content:space-between;${hasModels ? 'cursor:pointer;' : ''}padding:4px 0;" data-adm-ep-header="${ep.id}">
@@ -535,6 +549,7 @@ async function loadEndpoints() {
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
               ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
               ${statusBadge}
+              ${probeLabel ? `<span class="admin-badge admin-badge-off" title="${esc(`${probeLabel}${catalogProbe.http_status ? ` (HTTP ${catalogProbe.http_status})` : ''}${probeWhen}`)}">${esc(probeLabel)}</span>` : ''}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">${readOnly ? 'Click to view models' : 'Click to manage models'}</span>` : ''}
             </div>
@@ -672,6 +687,10 @@ async function loadEndpoints() {
         if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label')) return;
         const epId = header.dataset.admEpHeader;
         const readOnly = row.dataset.admEpReadonly === '1';
+        const endpoint = data.find(item => String(item.id) === String(epId)) || {};
+        const capabilityByModel = new Map(
+          (endpoint.model_capabilities || []).map(item => [String(item.model_id), item])
+        );
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
         if (!panel) return;
         panel.classList.toggle('hidden');
@@ -739,6 +758,18 @@ async function loadEndpoints() {
             }
             const hiddenSet = new Set(sortedModels.filter(m => m.is_hidden).map(m => m.id));
             const showSearch = sortedModels.length >= 8;
+            const capabilityControls = (model) => {
+              const cap = capabilityByModel.get(String(model.id)) || {};
+              const toolsEnabled = cap.tools_enabled ?? (cap.tools_declared !== false);
+              const disabled = model.is_hidden ? 'disabled' : '';
+              return `<span class="adm-model-capability">
+                <span style="margin-right:auto;">Tools</span>
+                <label class="admin-switch" title="Enable tools for ${esc(model.display)}">
+                  <input type="checkbox" data-ep-capability-model="${esc(model.id)}" aria-label="Tools for ${esc(model.display)}" ${toolsEnabled ? 'checked' : ''} ${disabled}>
+                  <span class="admin-slider"></span>
+                </label>
+              </span>`;
+            };
             panel.innerHTML = `<div class="mcp-tools-header">
               <span>Models</span>
               <span style="display:flex;gap:8px;align-items:center;">
@@ -748,11 +779,14 @@ async function loadEndpoints() {
                 <a href="#" data-ep-select-none="${epId}">None</a>
               </span>
             </div>${warningHtml}${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
-              `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
-                <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
-                <span class="adm-check-dot" aria-hidden="true"></span>
-                <span>${esc(m.display)}</span>
-              </label>`
+              `<div data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-cap-row">
+                <label title="${esc(m.id)}" class="adm-model-row">
+                  <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
+                  <span class="adm-check-dot" aria-hidden="true"></span>
+                  <span>${esc(m.display)}</span>
+                </label>
+                ${capabilityControls(m)}
+              </div>`
             ).join('') + '</div>';
             const filterRows = (q) => {
               const needle = q.trim().toLowerCase();
@@ -765,19 +799,38 @@ async function loadEndpoints() {
             panel.querySelector(`[data-ep-select-all="${epId}"]`)?.addEventListener('click', (e) => {
               e.preventDefault();
               panel.querySelectorAll('[data-ep-model-row]').forEach(row => {
-                if (row.style.display !== 'none') row.querySelector('input[type=checkbox]').checked = true;
+                if (row.style.display !== 'none') row.querySelector('input[data-ep-model-id]').checked = true;
               });
               _saveEpModelState(epId, panel);
             });
             panel.querySelector(`[data-ep-select-none="${epId}"]`)?.addEventListener('click', (e) => {
               e.preventDefault();
               panel.querySelectorAll('[data-ep-model-row]').forEach(row => {
-                if (row.style.display !== 'none') row.querySelector('input[type=checkbox]').checked = false;
+                if (row.style.display !== 'none') row.querySelector('input[data-ep-model-id]').checked = false;
               });
               _saveEpModelState(epId, panel);
             });
-            panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
+            panel.querySelectorAll('input[data-ep-model-id]').forEach(cb => {
               cb.addEventListener('change', () => _saveEpModelState(epId, panel));
+            });
+            panel.querySelectorAll('[data-ep-capability-model]').forEach(checkbox => {
+              checkbox.addEventListener('change', async (event) => {
+                event.stopPropagation();
+                checkbox.disabled = true;
+                try {
+                  await checkedFetch(`/api/model-endpoints/${epId}/capabilities`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ model_id: checkbox.dataset.epCapabilityModel, tools_declared: checkbox.checked }),
+                  });
+                  await loadEndpoints();
+                } catch (error) {
+                  checkbox.checked = !checkbox.checked;
+                  checkbox.disabled = false;
+                  uiModule?.showToast?.(`Tools update failed: ${error.message}`, 3500);
+                }
+              });
             });
           };
           try {
@@ -798,10 +851,10 @@ async function loadEndpoints() {
 
 async function _saveEpModelState(epId, panel) {
   const hidden = [];
-  panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
+  panel.querySelectorAll('input[data-ep-model-id]').forEach(cb => {
     if (!cb.checked) hidden.push(cb.dataset.epModelId);
   });
-  const total = panel.querySelectorAll('input[type=checkbox]').length;
+  const total = panel.querySelectorAll('input[data-ep-model-id]').length;
   try {
     await checkedFetch(`/api/model-endpoints/${epId}/models`, {
       method: 'PATCH',

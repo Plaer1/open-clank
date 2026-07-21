@@ -4,6 +4,7 @@ import {
   extractAccountIdFromClaims,
   extractAccountId,
   modelMatchesCodexEntitlement,
+  CodexAuthPlugin,
   type IdTokenClaims,
 } from "../../src/plugin/codex"
 
@@ -14,6 +15,29 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("applies Codex request shaping to an endpoint-projected provider", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    const input = {
+      sessionID: "session-test",
+      agent: "build",
+      message: {},
+      provider: { options: { baseURL: "https://chatgpt.com/backend-api/codex" } },
+      model: {
+        providerID: "ody-endpoint",
+        api: { id: "gpt-5.6-luna", npm: "@ai-sdk/openai", url: "https://chatgpt.com/backend-api/codex" },
+      },
+    } as never
+    const params = { maxOutputTokens: 32_000 } as { maxOutputTokens?: number }
+    const headers = { headers: {} as Record<string, string> }
+
+    await hooks["chat.params"]!(input, params as never)
+    await hooks["chat.headers"]!(input, headers)
+
+    expect(params.maxOutputTokens).toBeUndefined()
+    expect(headers.headers.originator).toBe("opencode")
+    expect(headers.headers.session_id).toBe("session-test")
+  })
+
   describe("parseJwtClaims", () => {
     test("parses valid JWT with claims", () => {
       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }

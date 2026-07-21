@@ -30,7 +30,7 @@ or `mimo://acp`) passes through the same post-response seam, and only that
 seam knows the full policy context (incognito, compare mode, the user's
 auto-memory preference).
 
-- After each saved turn, `run_post_response_tasks` runs
+- After each saved, non-Temporary Agent turn, `run_post_response_tasks` runs
   `capture_turn_and_enrich` (`services/memory/graph_extractor.py`):
   `FrankenmemoryProvider.capture()` → fm `capture` with
   `capture_mode="candidate"` (heuristic admission, no LLM), then — when the
@@ -48,7 +48,7 @@ auto-memory preference).
   projection. The file stays the source of truth (records are decay- and
   dedup-exempt); checkpoints, task notes, and cc-root files never ingest.
 - **Compaction summaries**: `compaction-capture.ts`, unchanged.
-- Incognito and compare-mode turns are never captured anywhere.
+- Temporary Agent and Compare turns are never captured anywhere.
 
 ## The overlay — index card + pull recall
 
@@ -98,14 +98,13 @@ classifier).
 
 ## Pull recall (T8: pitch first, pull by choice)
 
-- Direct chat mode: the HTTP leg runs the shared agent loop restricted
-  to exactly `recall_memory` (read-only search / `id:` fetch, 2 calls,
-  3 rounds). Agent mode carries `recall_memory` in ALWAYS_AVAILABLE
-  (manage_memory keeps the write actions). Pulled results inherit the
-  trust split: endorsed plain, the rest guard-wrapped.
-- Mimo: the chat agent hard-allows its native read-only `memory` tool
-  (everything else stays denied); agent lanes keep the full memory
-  manual. The digest tail names the tool per lane.
+- The conversation UX is Agent-only. `recall_memory` remains an always-available
+  read-only Agent tool while `manage_memory` owns writes. Pulled results inherit
+  the trust split: endorsed plain, the rest guard-wrapped.
+- MiMo Agent sessions use the scoped frankenmemory descriptor and native memory
+  manual. Named auxiliary inference has a wildcard tool deny and no generic
+  conversation endpoint. Temporary Agent and Compare receive no memory capture;
+  Temporary Agent also receives no digest or frankenmemory descriptor.
 
 ## Open questions (known-unknowns metaplan, 2026-07-17)
 
@@ -183,7 +182,7 @@ under `FM_SCOPE_AUTHORITY=trusted-caller`; mimo sessions get
 - `tests/test_memory_trust_injection.py` — classifier matrix, T6
   placement, injection-firewall regression, cross-host split parity.
 - `tests/test_recall_memory_pull.py` — pull tool read-only surface,
-  trust-tiered results, per-lane registration and tail wording.
+  trust-tiered results, Agent registration, and absence of generic Chat.
 - `tests/test_memory_wire_enrichment.py` — full record on the wire,
   graph + digest-preview endpoints (live fm round-trips included).
 - `tests/test_memory_brain_ui_js.py`, `tests/test_memory_graph_canvas_js.py`

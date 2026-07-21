@@ -67,6 +67,7 @@ class Session:
     name: str
     endpoint_url: str
     model: str
+    endpoint_id: Optional[str] = None
     rag: bool = False
     archived: bool = False
     headers: Optional[Dict[str, str]] = None
@@ -103,9 +104,20 @@ class Session:
         self.history.append(message)
         self.message_count = len(self.history)
 
-        # Delegate to session manager for persistence
+        # Delegate to session manager for persistence. A failed commit must not
+        # leave an in-memory message that the stream can mistake for durable.
         if _SESSION_MANAGER_INSTANCE:
-            _SESSION_MANAGER_INSTANCE._persist_message(self.id, message)
+            try:
+                persisted = _SESSION_MANAGER_INSTANCE._persist_message(self.id, message)
+                if not persisted:
+                    raise RuntimeError(f"Session {self.id} no longer exists")
+            except Exception:
+                if self.history and self.history[-1] is message:
+                    self.history.pop()
+                else:
+                    self.history = [item for item in self.history if item is not message]
+                self.message_count = len(self.history)
+                raise
 
     def get_context_messages(self) -> List[Dict[str, Any]]:
         """Get messages in format for LLM API.

@@ -14,6 +14,8 @@ from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as
 from src.auth_helpers import effective_user
 from src.topic_analyzer import analyze_topics
 from src.upload_handler import reserve_message_upload_references
+from src.transcript_layout import strip_invalid_transcript_layout
+from src.agent_actor_accounting import actor_accounting_for_assistant
 from routes.session_routes import (
     _message_role,
     _message_text,
@@ -134,6 +136,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 meta = {}
         if m.timestamp and "timestamp" not in meta:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
+        meta = strip_invalid_transcript_layout(m.content, meta)
+        accounting = actor_accounting_for_assistant(m.id)
+        if accounting is not None:
+            meta["actor_accounting"] = accounting
+        elif meta.get("tool_events"):
+            meta["actor_accounting"] = {"state": "not_recorded", "total": None, "actors": []}
         if meta:
             entry["metadata"] = meta
         return entry
@@ -200,7 +208,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     continue
                 entry = {"role": msg.role, "content": _history_display_content(msg.content)}
                 if msg.metadata:
-                    entry["metadata"] = msg.metadata
+                    meta = strip_invalid_transcript_layout(msg.content, msg.metadata)
+                    accounting = actor_accounting_for_assistant(meta.get("_db_id"))
+                    if accounting is not None:
+                        meta = {**meta, "actor_accounting": accounting}
+                    elif meta.get("tool_events"):
+                        meta = {**meta, "actor_accounting": {"state": "not_recorded", "total": None, "actors": []}}
+                    entry["metadata"] = meta
                 history_dict.append(entry)
             elif isinstance(msg, dict):
                 if msg.get("metadata", {}).get("hidden"):
@@ -210,7 +224,15 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "content": _history_display_content(msg.get("content", "")),
                 }
                 if msg.get("metadata"):
-                    entry["metadata"] = msg["metadata"]
+                    meta = strip_invalid_transcript_layout(
+                        msg.get("content", ""), msg["metadata"]
+                    )
+                    accounting = actor_accounting_for_assistant(meta.get("_db_id"))
+                    if accounting is not None:
+                        meta = {**meta, "actor_accounting": accounting}
+                    elif meta.get("tool_events"):
+                        meta = {**meta, "actor_accounting": {"state": "not_recorded", "total": None, "actors": []}}
+                    entry["metadata"] = meta
                 history_dict.append(entry)
 
         # Fallback: load from DB if in-memory is empty
@@ -621,6 +643,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 name=fork_name,
                 endpoint_url=source.endpoint_url,
                 model=source.model,
+                endpoint_id=getattr(source, "endpoint_id", None),
                 rag=False,
                 owner=getattr(source, 'owner', None),
             )

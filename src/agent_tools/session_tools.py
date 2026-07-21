@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Dict, Optional
 
-from src.ai_interaction import get_session_manager, _resolve_model, AI_CHAT_TIMEOUT
+from src.ai_interaction import get_session_manager, _resolve_model, _resolve_model_target, AI_CHAT_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
         return {"error": "Session name cannot be empty"}
 
     try:
-        url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        target = await asyncio.to_thread(_resolve_model_target, model_spec, owner=owner)
+        url, model, headers = target.endpoint_url, target.model_id, dict(target.headers)
     except ValueError as e:
         return {"error": str(e)}
 
@@ -54,6 +55,7 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
             model=model,
             rag=False,
             owner=owner,
+            endpoint_id=target.endpoint_id,
         )
         # Store headers on session for future calls
         sess = _session_manager.get_session(sid)
@@ -65,7 +67,13 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
         except Exception:
             logger.debug("session_created event dispatch failed", exc_info=True)
 
-        return {"session_id": sid, "name": name, "model": model, "endpoint_url": url}
+        return {
+            "session_id": sid,
+            "name": name,
+            "model": model,
+            "endpoint_url": url,
+            "endpoint_id": target.endpoint_id,
+        }
     except Exception as e:
         logger.error(f"create_session failed: {e}")
         return {"error": f"Failed to create session: {e}"}
@@ -440,6 +448,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                 model=source.model,
                 rag=False,
                 owner=owner,
+                endpoint_id=getattr(source, "endpoint_id", None),
             )
             # Copy messages
             history = source.get_context_messages()

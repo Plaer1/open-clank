@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +53,34 @@ _MAX_OUTPUT_CHARS = 16000
 # files) is kept before pruning, so neither the store nor data/bg_jobs/ grows
 # without bound. The agent has already consumed the result by then.
 _RETENTION_S = 3600  # 1 hour after follow-up
+_FOLLOWUP_CLAIM_LEASE_S = 20 * 60
+_FOLLOWUP_MAX_ATTEMPTS = 3
+
+
+@contextmanager
+def _store_lock():
+    """Cross-process lock for read/modify/write follow-up transitions."""
+    _STORE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _STORE.with_suffix(_STORE.suffix + ".lock")
+    with open(lock_path, "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _load() -> Dict[str, Dict[str, Any]]:
@@ -153,9 +182,10 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         "log_path": str(log_path),
         "exit_path": str(exit_path),
     }
-    jobs = _load()
-    jobs[job_id] = rec
-    _save(jobs)
+    with _store_lock():
+        jobs = _load()
+        jobs[job_id] = rec
+        _save(jobs)
     return rec
 
 
@@ -191,43 +221,41 @@ def _prune(jobs: Dict[str, Dict[str, Any]], now: float) -> bool:
 def refresh() -> Dict[str, Dict[str, Any]]:
     """Reconcile every running job against disk. Marks done/failed (incl.
     timeout). Idempotent — safe to call from a poll loop. Returns the store."""
-    jobs = _load()
-    changed = False
-    now = time.time()
-    for rec in jobs.values():
-        if rec.get("status") != "running":
-            continue
-        exit_path = Path(rec.get("exit_path", ""))
-        if exit_path.exists():
-            try:
-                code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "1")
-            except Exception:
-                code = 1
-            rec["exit_code"] = code
-            rec["status"] = "done" if code == 0 else "failed"
-            rec["ended_at"] = now
+    with _store_lock():
+        jobs = _load()
+        changed = False
+        now = time.time()
+        for rec in jobs.values():
+            if rec.get("status") != "running":
+                continue
+            exit_path = Path(rec.get("exit_path", ""))
+            if exit_path.exists():
+                try:
+                    code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "1")
+                except Exception:
+                    code = 1
+                rec["exit_code"] = code
+                rec["status"] = "done" if code == 0 else "failed"
+                rec["ended_at"] = now
+                changed = True
+            elif (now - rec.get("started_at", now)) > rec.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S):
+                _kill(rec.get("pid"))
+                rec["status"] = "failed"
+                rec["exit_code"] = -1
+                rec["ended_at"] = now
+                rec["timed_out"] = True
+                changed = True
+            elif not _pid_alive(rec.get("pid")) and not exit_path.exists():
+                rec["status"] = "failed"
+                rec["exit_code"] = -1
+                rec["ended_at"] = now
+                rec["died"] = True
+                changed = True
+        if _prune(jobs, now):
             changed = True
-        elif (now - rec.get("started_at", now)) > rec.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S):
-            # Runaway / stuck — reap it but STILL surface a follow-up.
-            _kill(rec.get("pid"))
-            rec["status"] = "failed"
-            rec["exit_code"] = -1
-            rec["ended_at"] = now
-            rec["timed_out"] = True
-            changed = True
-        elif not _pid_alive(rec.get("pid")) and not exit_path.exists():
-            # Process vanished without writing an exit code (killed, OOM,
-            # crash). Don't leave it "running" forever.
-            rec["status"] = "failed"
-            rec["exit_code"] = -1
-            rec["ended_at"] = now
-            rec["died"] = True
-            changed = True
-    if _prune(jobs, now):
-        changed = True
-    if changed:
-        _save(jobs)
-    return jobs
+        if changed:
+            _save(jobs)
+        return jobs
 
 
 def _kill(pid: Optional[int]) -> None:
@@ -243,11 +271,93 @@ def pending_followups() -> List[Dict[str, Any]]:
             if r.get("status") in ("done", "failed") and not r.get("followed_up")]
 
 
-def mark_followed_up(job_id: str) -> None:
-    jobs = _load()
-    if job_id in jobs:
-        jobs[job_id]["followed_up"] = True
+def claim_pending_followups(claimant: str) -> List[Dict[str, Any]]:
+    """Atomically lease ready follow-ups to one monitor process."""
+    refresh()
+    now = time.time()
+    claimed = []
+    with _store_lock():
+        jobs = _load()
+        for rec in jobs.values():
+            if rec.get("status") not in ("done", "failed") or rec.get("followed_up"):
+                continue
+            if rec.get("followup_state") == "failed":
+                continue
+            if float(rec.get("next_followup_at") or 0) > now:
+                continue
+            claimed_at = float(rec.get("followup_claimed_at") or 0)
+            if rec.get("followup_state") == "claimed" and now - claimed_at < _FOLLOWUP_CLAIM_LEASE_S:
+                continue
+            attempts = int(rec.get("followup_attempts") or 0)
+            if attempts >= _FOLLOWUP_MAX_ATTEMPTS:
+                rec.update({
+                    "followup_state": "failed",
+                    "followed_up": True,
+                    "followup_error": rec.get("followup_error") or "Follow-up retry budget exhausted",
+                })
+                continue
+            token = f"{claimant}:{uuid.uuid4().hex}"
+            rec.update({
+                "followup_state": "claimed",
+                "followup_claim": token,
+                "followup_claimed_at": now,
+                "followup_attempts": attempts + 1,
+            })
+            item = dict(rec)
+            item["_claim_token"] = token
+            claimed.append(item)
         _save(jobs)
+    return claimed
+
+
+def finish_followup(job_id: str, claim_token: str) -> bool:
+    with _store_lock():
+        jobs = _load()
+        rec = jobs.get(job_id)
+        if not rec or rec.get("followup_claim") != claim_token:
+            return False
+        rec.update({
+            "followed_up": True,
+            "followup_state": "completed",
+            "followup_claim": None,
+            "followup_claimed_at": None,
+            "followup_error": None,
+        })
+        _save(jobs)
+        return True
+
+
+def fail_followup(job_id: str, claim_token: str, error: str, *, count_attempt: bool = True) -> str:
+    """Release a claim with bounded durable backoff; return pending or failed."""
+    with _store_lock():
+        jobs = _load()
+        rec = jobs.get(job_id)
+        if not rec or rec.get("followup_claim") != claim_token:
+            return "stale"
+        attempts = int(rec.get("followup_attempts") or 0)
+        if not count_attempt:
+            attempts = max(0, attempts - 1)
+            rec["followup_attempts"] = attempts
+        terminal = attempts >= _FOLLOWUP_MAX_ATTEMPTS
+        rec.update({
+            "followup_state": "failed" if terminal else "pending",
+            "followup_claim": None,
+            "followup_claimed_at": None,
+            "followup_error": str(error)[:2000],
+            "next_followup_at": None if terminal else time.time() + min(300, 15 * (2 ** max(0, attempts - 1))),
+            "followed_up": terminal,
+        })
+        _save(jobs)
+        return rec["followup_state"]
+
+
+def mark_followed_up(job_id: str) -> None:
+    with _store_lock():
+        jobs = _load()
+        if job_id in jobs:
+            jobs[job_id]["followed_up"] = True
+            jobs[job_id]["followup_state"] = "completed"
+            _save(jobs)
 
 
 def get(job_id: str) -> Optional[Dict[str, Any]]:
@@ -268,19 +378,20 @@ def kill(job_id: str) -> Optional[Dict[str, Any]]:
     updated record, or None if the id is unknown. Idempotent: a job that already
     finished is returned unchanged. Sets followed_up so the monitor does not also
     fire an auto-continue for a job the agent deliberately stopped."""
-    jobs = _load()
-    rec = jobs.get(job_id)
-    if rec is None:
-        return None
-    if rec.get("status") == "running":
-        _kill(rec.get("pid"))
-        rec["status"] = "failed"
-        rec["exit_code"] = -1
-        rec["ended_at"] = time.time()
-        rec["killed"] = True
-        rec["followed_up"] = True
-        _save(jobs)
-    return rec
+    with _store_lock():
+        jobs = _load()
+        rec = jobs.get(job_id)
+        if rec is None:
+            return None
+        if rec.get("status") == "running":
+            _kill(rec.get("pid"))
+            rec["status"] = "failed"
+            rec["exit_code"] = -1
+            rec["ended_at"] = time.time()
+            rec["killed"] = True
+            rec["followed_up"] = True
+            _save(jobs)
+        return dict(rec)
 
 
 def result_text(rec: Dict[str, Any]) -> str:
