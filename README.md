@@ -11,6 +11,12 @@ It also made the Clanker theme—and, buried under that, the system that generat
 </p>
 
 <p align="center">
+    # We did it!! 
+</p>
+<p align="center">
+  <img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/2ba35e8f-fb70-4f62-87c0-e2a53154f32a" /
+</p>
+<p align="center">
   A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
 </p>
 
