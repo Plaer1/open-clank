@@ -11,10 +11,12 @@ It also made the Clanker theme—and, buried under that, the system that generat
 </p>
 
 
-# We did it!! 
+## We did it!!
+
 <p align="center">
-  <img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/2ba35e8f-fb70-4f62-87c0-e2a53154f32a" /
+  <img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/2ba35e8f-fb70-4f62-87c0-e2a53154f32a" />
 </p>
+
 <p align="center">
   A self-hosted system for turning curiosity into durable progress.
 </p>
