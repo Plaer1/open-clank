@@ -377,6 +377,34 @@ async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch
     await single_pool.stop()
 
 
+def test_owner_supervisor_pool_catalogue_never_falls_back_across_owners(tmp_path):
+    """A real pool lookup for an unmaterialized owner must be empty, not merged."""
+    import src.openclank.mimo_supervisor as module
+
+    alice = SimpleNamespace(
+        available_models=lambda: [{"modelId": "alice/private-model"}],
+        provider_apis=lambda: {"alice": "openai"},
+    )
+    bob = SimpleNamespace(
+        available_models=lambda: [{"modelId": "bob/private-model"}],
+        provider_apis=lambda: {"bob": "anthropic"},
+    )
+    pool = module.MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    pool._workers.update({"alice": alice, "bob": bob})
+
+    assert pool.available_models(owner="alice") == [{"modelId": "alice/private-model"}]
+    assert pool.provider_apis(owner="alice") == {"alice": "openai"}
+    assert pool.available_models(owner="charlie") == []
+    assert pool.provider_apis(owner="charlie") == {}
+    assert pool.available_models(owner=None) == []
+    assert pool.provider_apis(owner=None) == {}
+
+    single = module.MimoSupervisorPool(auth_enabled=False, data_dir=tmp_path)
+    single._workers[""] = alice
+    assert single.available_models() == [{"modelId": "alice/private-model"}]
+    assert single.provider_apis() == {"alice": "openai"}
+
+
 async def test_pool_starts_initial_and_explicit_host_provider_owners(monkeypatch, tmp_path):
     import src.openclank.mimo_supervisor as module
 

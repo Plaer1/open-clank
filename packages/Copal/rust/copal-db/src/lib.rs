@@ -76,14 +76,17 @@ pub struct DocRecord {
     pub corpus: String,
     pub kind: String,
     pub created_op: String,
-    #[serde(default = "shared_owner")]
+    #[serde(default = "unclaimed_owner")]
     pub owner: String,
-    #[serde(default = "global_workspace")]
+    #[serde(default = "unclaimed_workspace")]
     pub workspace_id: String,
+    /// Only bridge-recognized bundled content may cross tenant scopes.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 fn doc_record_schema_version() -> u64 {
-    1
+    2
 }
 
 fn shared_owner() -> String {
@@ -92,6 +95,14 @@ fn shared_owner() -> String {
 
 fn global_workspace() -> String {
     "global".to_string()
+}
+
+fn unclaimed_owner() -> String {
+    "__copal_unclaimed_owner__".to_string()
+}
+
+fn unclaimed_workspace() -> String {
+    "__copal_unclaimed_workspace__".to_string()
 }
 
 fn hidden_name(name: &str) -> bool {
@@ -163,6 +174,7 @@ pub struct DocView {
     pub kind: String,
     pub owner: String,
     pub workspace_id: String,
+    pub builtin: bool,
     pub name: String,
     pub head: String,
     pub ts: u64,
@@ -451,6 +463,7 @@ impl Db {
             kind: doc.kind,
             owner: doc.owner,
             workspace_id: doc.workspace_id,
+            builtin: doc.builtin,
             name: commit.name,
             head: head.to_string(),
             ts: commit.ts,
@@ -499,16 +512,20 @@ impl Db {
         let docs = self.list_docs()?;
         let exact_names = docs
             .iter()
-            .filter(|doc| doc.owner == owner && doc.workspace_id == workspace_id)
+            .filter(|doc| {
+                !unclaimed_scope(doc)
+                    && !(doc.owner == "shared" && doc.workspace_id == "global")
+                    && doc.owner == owner
+                    && doc.workspace_id == workspace_id
+            })
             .map(|doc| (doc.corpus.clone(), doc.kind.clone(), doc.name.clone()))
             .collect::<BTreeSet<_>>();
         Ok(docs
             .into_iter()
             .filter(|doc| {
-                (doc.owner == owner && doc.workspace_id == workspace_id)
-                    || (doc.owner == "shared"
-                        && doc.workspace_id == "global"
-                        && !exact_names.contains(&(
+                scope_allows(doc, owner, workspace_id)
+                    && (!(doc.builtin && doc.owner == "shared" && doc.workspace_id == "global")
+                        || !exact_names.contains(&(
                             doc.corpus.clone(),
                             doc.kind.clone(),
                             doc.name.clone(),
@@ -626,6 +643,43 @@ impl Db {
     /// we store snapshots, not deltas).
     pub fn diff(&self, from: &str, to: &str) -> Result<String> {
         let txn = self.database.begin_read()?;
+        self.diff_in_txn(&txn, from, to)
+    }
+
+    pub fn diff_scoped(
+        &self,
+        id: &str,
+        from: &str,
+        to: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<String> {
+        let txn = self.database.begin_read()?;
+        let view = self.read_view(&txn)?;
+        let head = view
+            .get(id)
+            .ok_or_else(|| err("doc not found in this scope"))?;
+        let current = self
+            .view_of(&txn, id, head)
+            .map_err(|_| err("doc not found in this scope"))?;
+        if matches!(current.content, Content::Tombstone)
+            || !scope_allows(&current, owner, workspace_id)
+        {
+            return Err(err("doc not found in this scope"));
+        }
+        let from_commit = self
+            .load_commit(&txn, from)
+            .map_err(|_| err("commit not found in this scope"))?;
+        let to_commit = self
+            .load_commit(&txn, to)
+            .map_err(|_| err("commit not found in this scope"))?;
+        if from_commit.doc != id || to_commit.doc != id {
+            return Err(err("commit not found in this scope"));
+        }
+        self.diff_in_txn(&txn, from, to)
+    }
+
+    fn diff_in_txn(&self, txn: &redb::ReadTransaction, from: &str, to: &str) -> Result<String> {
         let read_text = |commit_id: &str| -> Result<String> {
             let commit = self.load_commit(&txn, commit_id)?;
             match commit.content {
@@ -651,6 +705,29 @@ impl Db {
 
     /// Operation log page, newest first.
     pub fn ops(&self, limit: usize, before: Option<&str>) -> Result<Value> {
+        self.ops_for_scope(limit, before, None)
+    }
+
+    /// Operation log page restricted to documents visible in one tenant scope.
+    pub fn ops_scoped(
+        &self,
+        limit: usize,
+        before: Option<&str>,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Value> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Err(err("owner and workspace are required"));
+        }
+        self.ops_for_scope(limit, before, Some((owner, workspace_id)))
+    }
+
+    fn ops_for_scope(
+        &self,
+        limit: usize,
+        before: Option<&str>,
+        scope: Option<(&str, &str)>,
+    ) -> Result<Value> {
         let txn = self.database.begin_read()?;
         let ops = txn.open_table(OPS)?;
         let mut out = Vec::new();
@@ -663,13 +740,59 @@ impl Db {
                 }
             }
             let op: OpRecord = serde_json::from_str(value.value())?;
+            let parent_view = match op.parent.as_deref() {
+                Some(parent) => {
+                    let encoded = ops
+                        .get(parent)?
+                        .ok_or_else(|| err("operation parent is missing"))?;
+                    serde_json::from_str::<OpRecord>(encoded.value())?.view
+                }
+                None => BTreeMap::new(),
+            };
+            let mut changed = BTreeSet::new();
+            for (document_id, head) in &op.view {
+                if parent_view.get(document_id) != Some(head) {
+                    changed.insert(document_id);
+                }
+            }
+            for document_id in parent_view.keys() {
+                if !op.view.contains_key(document_id) {
+                    changed.insert(document_id);
+                }
+            }
+            let docs = if let Some((owner, workspace_id)) = scope {
+                let mut affects_scope = false;
+                for document_id in changed {
+                    let head = op
+                        .view
+                        .get(document_id)
+                        .or_else(|| parent_view.get(document_id))
+                        .ok_or_else(|| err("operation document head is missing"))?;
+                    if scope_allows(&self.view_of(&txn, document_id, head)?, owner, workspace_id) {
+                        affects_scope = true;
+                        break;
+                    }
+                }
+                if !affects_scope {
+                    continue;
+                }
+                let mut visible = 0;
+                for (document_id, head) in &op.view {
+                    if scope_allows(&self.view_of(&txn, document_id, head)?, owner, workspace_id) {
+                        visible += 1;
+                    }
+                }
+                visible
+            } else {
+                op.view.len()
+            };
             out.push(json!({
                 "op": id,
                 "parent": op.parent,
                 "kind": op.kind,
                 "description": op.description,
                 "ts": op.ts,
-                "docs": op.view.len(),
+                "docs": docs,
             }));
             if out.len() >= limit {
                 break;
@@ -684,6 +807,66 @@ impl Db {
     // exactly one operation, then advances the op head. redb serializes
     // writers, so this is the whole concurrency story.
 
+    pub fn preflight_rename_owner(&self, old_owner: &str, new_owner: &str) -> Result<usize> {
+        validate_owner_rename(old_owner, new_owner)?;
+        let txn = self.database.begin_read()?;
+        let docs = txn.open_table(DOCS)?;
+        let mut source_count = 0;
+        for entry in docs.iter()? {
+            let (_, encoded) = entry?;
+            let record: DocRecord = serde_json::from_str(encoded.value())?;
+            if record.owner == new_owner {
+                return Err(err("destination owner already has Copal documents"));
+            }
+            if record.owner == old_owner {
+                source_count += 1;
+            }
+        }
+        Ok(source_count)
+    }
+
+    pub fn rename_owner(&self, old_owner: &str, new_owner: &str) -> Result<usize> {
+        let source_count = self.preflight_rename_owner(old_owner, new_owner)?;
+        if source_count == 0 {
+            return Ok(0);
+        }
+
+        let txn = self.database.begin_write()?;
+        let (view, parent_op) = self.write_view(&txn)?;
+        let updates = {
+            let docs = txn.open_table(DOCS)?;
+            let mut updates = Vec::with_capacity(source_count);
+            for entry in docs.iter()? {
+                let (document_id, encoded) = entry?;
+                let mut record: DocRecord = serde_json::from_str(encoded.value())?;
+                if record.owner == new_owner {
+                    return Err(err("destination owner already has Copal documents"));
+                }
+                if record.owner == old_owner {
+                    record.owner = new_owner.to_string();
+                    updates.push((document_id.value().to_string(), record));
+                }
+            }
+            updates
+        };
+        {
+            let mut docs = txn.open_table(DOCS)?;
+            for (document_id, record) in &updates {
+                let encoded = serde_json::to_string(record)?;
+                docs.insert(document_id.as_str(), encoded.as_str())?;
+            }
+        }
+        put_op(
+            &txn,
+            parent_op,
+            "rename-owner",
+            &format!("rename owner {old_owner} to {new_owner}"),
+            &view,
+        )?;
+        txn.commit()?;
+        Ok(updates.len())
+    }
+
     pub fn create_doc(
         &self,
         kind: &str,
@@ -692,6 +875,20 @@ impl Db {
         message: Option<&str>,
     ) -> Result<DocView> {
         self.create_doc_scoped("shared", "global", kind, name, content, message)
+    }
+
+    /// Create bridge-recognized bundled content. This is intentionally not
+    /// reachable through the public bridge protocol: normal shared/global
+    /// records are tenant-invisible unless a seed routine marks them.
+    #[doc(hidden)]
+    pub fn create_builtin_seed_doc(
+        &self,
+        kind: &str,
+        name: &str,
+        content: &str,
+        message: Option<&str>,
+    ) -> Result<DocView> {
+        self.create_doc_with_marker("shared", "global", kind, name, content, message, true)
     }
 
     pub fn create_doc_scoped(
@@ -703,13 +900,35 @@ impl Db {
         content: &str,
         message: Option<&str>,
     ) -> Result<DocView> {
+        self.create_doc_with_marker(owner, workspace_id, kind, name, content, message, false)
+    }
+
+    fn create_doc_with_marker(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        kind: &str,
+        name: &str,
+        content: &str,
+        message: Option<&str>,
+        builtin: bool,
+    ) -> Result<DocView> {
         if owner.trim().is_empty() || workspace_id.trim().is_empty() {
             return Err(err("owner and workspace are required"));
         }
-        if self
-            .find_doc_by_name_kind_scoped(name, kind, owner, workspace_id)?
-            .is_some()
-        {
+        if owner == unclaimed_owner() || workspace_id == unclaimed_workspace() {
+            return Err(err("unclaimed scope is reserved"));
+        }
+        let corpus = canonical_corpus(kind);
+        let collision = self.list_docs()?.into_iter().any(|doc| {
+            doc.owner == owner
+                && doc.workspace_id == workspace_id
+                && doc.kind == kind
+                && doc.corpus == corpus
+                && doc.name == name
+                && (!builtin || doc.builtin)
+        });
+        if collision {
             return Err(err(format!("name already exists: {name}")));
         }
         let doc_id = new_ulid();
@@ -724,6 +943,7 @@ impl Db {
                 created_op: "pending".to_string(),
                 owner: owner.to_string(),
                 workspace_id: workspace_id.to_string(),
+                builtin,
             };
             docs.insert(doc_id.as_str(), serde_json::to_string(&record)?.as_str())?;
         }
@@ -742,6 +962,56 @@ impl Db {
         put_op(&txn, parent_op, "create", &format!("create {name}"), &view)?;
         txn.commit()?;
         Ok(self.get_doc(&doc_id)?.ok_or_else(|| err("create failed"))?)
+    }
+
+    /// Promote a bridge-recognized legacy shared seed without rewriting its
+    /// commit or content. Callers must first validate the exact bundled seed.
+    #[doc(hidden)]
+    pub fn claim_builtin_seed_doc(&self, id: &str) -> Result<DocView> {
+        let current = self
+            .get_doc(id)?
+            .ok_or_else(|| err("seed document not found"))?;
+        if current.owner != "shared" || current.workspace_id != "global" {
+            return Err(err(
+                "only shared/global documents can be claimed as builtin",
+            ));
+        }
+        if current.builtin && current.record_schema_version == doc_record_schema_version() {
+            return Ok(current);
+        }
+
+        let txn = self.database.begin_write()?;
+        let (view, parent_op) = self.write_view(&txn)?;
+        if view.get(id) != Some(&current.head) {
+            return Err(err("seed document changed during claim"));
+        }
+        {
+            let mut docs = txn.open_table(DOCS)?;
+            let encoded = docs
+                .get(id)?
+                .ok_or_else(|| err("seed document not found"))?;
+            let mut record: DocRecord = serde_json::from_str(encoded.value())?;
+            if record.owner != "shared" || record.workspace_id != "global" {
+                return Err(err(
+                    "only shared/global documents can be claimed as builtin",
+                ));
+            }
+            record.builtin = true;
+            record.schema_version = doc_record_schema_version();
+            let replacement = serde_json::to_string(&record)?;
+            drop(encoded);
+            docs.insert(id, replacement.as_str())?;
+        }
+        put_op(
+            &txn,
+            parent_op,
+            "seed-promote",
+            &format!("promote builtin seed {}", current.name),
+            &view,
+        )?;
+        txn.commit()?;
+        self.get_doc(id)?
+            .ok_or_else(|| err("seed document disappeared during claim"))
     }
 
     pub fn write_doc_scoped(
@@ -825,7 +1095,10 @@ impl Db {
             .get(id)
             .ok_or_else(|| err("doc not found in this scope"))?;
         let deleted = self.view_of(&txn, id, head)?;
-        if deleted.owner != owner
+        if unclaimed_scope(&deleted)
+            || owner == unclaimed_owner()
+            || workspace_id == unclaimed_workspace()
+            || deleted.owner != owner
             || deleted.workspace_id != workspace_id
             || !matches!(deleted.content, Content::Tombstone)
         {
@@ -850,8 +1123,18 @@ impl Db {
         let Some(doc) = self.get_doc(id)? else {
             return Err(err("doc not found in this scope"));
         };
+        if unclaimed_scope(&doc)
+            || owner == unclaimed_owner()
+            || workspace_id == unclaimed_workspace()
+            || (doc.owner == "shared" && doc.workspace_id == "global" && !doc.builtin)
+        {
+            return Err(err("doc not found in this scope"));
+        }
         if doc.owner != owner || doc.workspace_id != workspace_id {
-            return Err(err("document is read-only in this scope"));
+            if doc.builtin && doc.owner == "shared" && doc.workspace_id == "global" {
+                return Err(err("document is read-only in this scope"));
+            }
+            return Err(err("doc not found in this scope"));
         }
         Ok(())
     }
@@ -1191,7 +1474,15 @@ impl Db {
     pub fn put_asset(&self, name: &str, ext: &str, bytes: &[u8]) -> Result<DocView> {
         let ext = safe_asset_ext(ext.trim_start_matches('.'));
         let content = store_import_asset(&self.assets_dir, &ext, bytes)?;
-        match self.find_doc_by_name_kind_scoped(name, "asset", "shared", "global")? {
+        let existing = self.list_docs()?.into_iter().find(|doc| {
+            doc.owner == "shared"
+                && doc.workspace_id == "global"
+                && !doc.builtin
+                && doc.kind == "asset"
+                && doc.corpus == "system"
+                && doc.name == name
+        });
+        match existing {
             Some(existing) => {
                 if existing.content == content {
                     return Ok(existing);
@@ -1234,6 +1525,7 @@ impl Db {
                         created_op: "pending".to_string(),
                         owner: shared_owner(),
                         workspace_id: global_workspace(),
+                        builtin: false,
                     };
                     docs.insert(doc_id.as_str(), serde_json::to_string(&record)?.as_str())?;
                 }
@@ -1365,7 +1657,11 @@ impl Db {
         let existing: BTreeMap<(String, String, String), DocView> = self
             .list_docs()?
             .into_iter()
-            .filter(|doc| doc.owner == owner && doc.workspace_id == workspace_id)
+            .filter(|doc| {
+                doc.owner == owner
+                    && doc.workspace_id == workspace_id
+                    && !(owner == "shared" && workspace_id == "global" && doc.builtin)
+            })
             .map(|doc| {
                 (
                     (doc.corpus.clone(), doc.kind.clone(), doc.name.clone()),
@@ -1953,6 +2249,7 @@ fn import_content_in_txn(
             created_op: "pending".to_string(),
             owner: owner.to_string(),
             workspace_id: workspace_id.to_string(),
+            builtin: false,
         };
         docs.insert(
             document_id.as_str(),
@@ -2006,8 +2303,36 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn scope_allows(doc: &DocView, owner: &str, workspace_id: &str) -> bool {
-    (doc.owner == "shared" && doc.workspace_id == "global")
-        || (doc.owner == owner && doc.workspace_id == workspace_id)
+    if unclaimed_scope(doc) || owner == unclaimed_owner() || workspace_id == unclaimed_workspace() {
+        return false;
+    }
+    if doc.owner == "shared" && doc.workspace_id == "global" {
+        return doc.builtin;
+    }
+    doc.owner == owner && doc.workspace_id == workspace_id
+}
+
+fn unclaimed_scope(doc: &DocView) -> bool {
+    doc.owner == unclaimed_owner() || doc.workspace_id == unclaimed_workspace()
+}
+
+fn validate_mutable_owner(owner: &str) -> Result<()> {
+    if owner.is_empty() || owner.trim() != owner {
+        return Err(err("owner is required"));
+    }
+    if owner.eq_ignore_ascii_case("shared") {
+        return Err(err("shared owner is immutable"));
+    }
+    Ok(())
+}
+
+fn validate_owner_rename(old_owner: &str, new_owner: &str) -> Result<()> {
+    validate_mutable_owner(old_owner)?;
+    validate_mutable_owner(new_owner)?;
+    if old_owner == new_owner {
+        return Err(err("source and destination owners must differ"));
+    }
+    Ok(())
 }
 
 fn normalized_wikilink(value: &str) -> String {
@@ -2078,6 +2403,16 @@ mod tests {
     fn temp_db() -> (Db, PathBuf) {
         let dir = std::env::temp_dir().join(format!("copal-db-test-{}", new_ulid()));
         (Db::open(&dir).unwrap(), dir)
+    }
+
+    fn overwrite_doc_record(db: &Db, id: &str, record: Value) {
+        let txn = db.database.begin_write().unwrap();
+        {
+            let mut docs = txn.open_table(DOCS).unwrap();
+            let encoded = record.to_string();
+            docs.insert(id, encoded.as_str()).unwrap();
+        }
+        txn.commit().unwrap();
     }
 
     #[test]
@@ -2176,6 +2511,185 @@ mod tests {
     }
 
     #[test]
+    fn missing_scope_defaults_to_inaccessible_unclaimed_sentinels() {
+        let (db, _dir) = temp_db();
+        let legacy = db
+            .create_doc("markdown", "legacy.md", "legacy", None)
+            .unwrap();
+        overwrite_doc_record(
+            &db,
+            &legacy.id,
+            json!({
+                "schema_version": 1,
+                "corpus": "notes",
+                "kind": "markdown",
+                "created_op": "legacy"
+            }),
+        );
+
+        let raw = db.get_doc(&legacy.id).unwrap().unwrap();
+        assert_eq!(raw.owner, unclaimed_owner());
+        assert_eq!(raw.workspace_id, unclaimed_workspace());
+        assert!(!raw.builtin);
+        assert!(db.list_docs_scoped("alice", "home").unwrap().is_empty());
+        assert!(db
+            .get_doc_scoped(&legacy.id, "shared", "global")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .write_doc_scoped(
+                &legacy.id,
+                "claimed by sentinel",
+                None,
+                &unclaimed_owner(),
+                &unclaimed_workspace(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn explicit_private_v1_records_remain_readable() {
+        let (db, _dir) = temp_db();
+        let legacy = db
+            .create_doc_scoped("alice", "home", "markdown", "legacy.md", "legacy", None)
+            .unwrap();
+        overwrite_doc_record(
+            &db,
+            &legacy.id,
+            json!({
+                "schema_version": 1,
+                "corpus": "notes",
+                "kind": "markdown",
+                "created_op": "legacy",
+                "owner": "alice",
+                "workspace_id": "home"
+            }),
+        );
+
+        let visible = db
+            .get_doc_scoped(&legacy.id, "alice", "home")
+            .unwrap()
+            .unwrap();
+        assert_eq!(visible.record_schema_version, 1);
+        assert!(!visible.builtin);
+    }
+
+    #[test]
+    fn builtin_claim_promotes_legacy_record_to_v2_without_changing_content() {
+        let (db, _dir) = temp_db();
+        let legacy = db
+            .create_doc("note", "OpenClank/Legacy", "exact bundled body", None)
+            .unwrap();
+        overwrite_doc_record(
+            &db,
+            &legacy.id,
+            json!({
+                "schema_version": 1,
+                "corpus": "notes",
+                "kind": "note",
+                "created_op": "legacy",
+                "owner": "shared",
+                "workspace_id": "global"
+            }),
+        );
+
+        assert!(db.list_docs_scoped("alice", "home").unwrap().is_empty());
+        let promoted = db.claim_builtin_seed_doc(&legacy.id).unwrap();
+        assert_eq!(promoted.record_schema_version, 2);
+        assert!(promoted.builtin);
+        assert_eq!(promoted.head, legacy.head);
+        assert_eq!(promoted.text.as_deref(), Some("exact bundled body"));
+        assert_eq!(db.list_docs_scoped("alice", "home").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ordinary_shared_records_and_imports_are_invisible_to_hosted_scopes() {
+        let (db, _dir) = temp_db();
+        db.create_doc("planning", "planning.json", "{}", None)
+            .unwrap();
+        db.create_doc("treehouse-state", "treehouse.json", "{}", None)
+            .unwrap();
+
+        let vault = std::env::temp_dir().join(format!("copal-unscoped-import-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".copal")).unwrap();
+        fs::write(vault.join("Imported.md"), "ordinary import").unwrap();
+        let planning = vault.join(".copal/planning.json");
+        fs::write(&planning, r#"{"tracks":[]}"#).unwrap();
+        fs::write(
+            vault.join(".copal/treehouse-state.json"),
+            r#"{"schemaVersion":1}"#,
+        )
+        .unwrap();
+        db.import_vault(&vault, Some(&planning)).unwrap();
+
+        let raw = db.list_docs().unwrap();
+        assert!(raw.len() >= 5);
+        assert!(raw
+            .iter()
+            .all(|doc| { doc.owner == "shared" && doc.workspace_id == "global" && !doc.builtin }));
+        assert!(db.list_docs_scoped("alice", "home").unwrap().is_empty());
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn ordinary_unscoped_import_cannot_rewrite_a_builtin_seed() {
+        let (db, _dir) = temp_db();
+        let builtin = db
+            .create_builtin_seed_doc("markdown", "Welcome.md", "bundled", None)
+            .unwrap();
+        let vault = std::env::temp_dir().join(format!("copal-seed-safe-import-{}", new_ulid()));
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("Welcome.md"), "ordinary import").unwrap();
+
+        let stats = db.import_vault(&vault, None).unwrap();
+        assert_eq!(stats.notes, 1);
+        assert_eq!(
+            db.get_doc(&builtin.id).unwrap().unwrap().text.as_deref(),
+            Some("bundled")
+        );
+        let copies = db
+            .list_docs()
+            .unwrap()
+            .into_iter()
+            .filter(|doc| doc.name == "Welcome.md")
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies.iter().filter(|doc| doc.builtin).count(), 1);
+        assert_eq!(db.list_docs_scoped("alice", "home").unwrap().len(), 1);
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn builtin_seed_is_visible_and_shadowable_while_unrelated_shared_copy_is_not() {
+        let (db, _dir) = temp_db();
+        let unrelated = db
+            .create_doc("note", "OpenClank/Start Here", "user shared copy", None)
+            .unwrap();
+        let builtin = db
+            .create_builtin_seed_doc("note", "OpenClank/Start Here", "bundled copy", None)
+            .unwrap();
+
+        let alice = db.list_docs_scoped("alice", "home").unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].id, builtin.id);
+        assert_ne!(alice[0].id, unrelated.id);
+
+        let private = db
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "note",
+                "OpenClank/Start Here",
+                "private shadow",
+                None,
+            )
+            .unwrap();
+        let alice = db.list_docs_scoped("alice", "home").unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].id, private.id);
+    }
+
+    #[test]
     fn private_documents_are_owner_and_workspace_scoped() {
         let (db, _dir) = temp_db();
         let alice = db
@@ -2244,12 +2758,71 @@ mod tests {
     }
 
     #[test]
+    fn owner_rename_moves_live_and_deleted_documents_without_merging() {
+        let (db, _dir) = temp_db();
+        let visible = db
+            .create_doc_scoped("alice", "home", "markdown", "visible.md", "old", None)
+            .unwrap();
+        let deleted = db
+            .create_doc_scoped("alice", "home", "markdown", "deleted.md", "old", None)
+            .unwrap();
+        db.delete_doc_scoped(&deleted.id, "alice", "home").unwrap();
+        db.create_doc_scoped("bob", "home", "markdown", "bob.md", "bob", None)
+            .unwrap();
+
+        assert!(db.preflight_rename_owner("alice", "bob").is_err());
+        assert_eq!(db.list_docs_scoped("alice", "home").unwrap().len(), 1);
+        assert_eq!(db.rename_owner("alice", "alice2").unwrap(), 2);
+        assert!(db.list_docs_scoped("alice", "home").unwrap().is_empty());
+        assert_eq!(db.list_docs_scoped("alice2", "home").unwrap().len(), 1);
+        assert_eq!(
+            db.list_deleted_docs_scoped("alice2", "home").unwrap().len(),
+            1
+        );
+        assert_eq!(db.get_doc(&visible.id).unwrap().unwrap().owner, "alice2");
+        assert!(db.get_doc(&deleted.id).unwrap().is_none());
+
+        assert!(db.rename_owner("shared", "somebody").is_err());
+        assert!(db.rename_owner("alice2", "shared").is_err());
+    }
+
+    #[test]
+    fn scoped_diff_rejects_commit_hashes_from_another_document() {
+        let (db, _dir) = temp_db();
+        let alice = db
+            .create_doc_scoped("alice", "home", "markdown", "alice.md", "before", None)
+            .unwrap();
+        let updated = db
+            .write_doc_scoped(&alice.id, "after", Some(&alice.head), "alice", "home")
+            .unwrap();
+        let WriteOutcome::Committed { view: alice, .. } = updated else {
+            panic!()
+        };
+        let bob = db
+            .create_doc_scoped("bob", "home", "markdown", "bob.md", "secret", None)
+            .unwrap();
+
+        assert!(db
+            .diff_scoped(&alice.id, &alice.head, &alice.head, "alice", "home")
+            .is_ok());
+        let foreign = db
+            .diff_scoped(&alice.id, &alice.head, &bob.head, "alice", "home")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(foreign, "commit not found in this scope");
+        assert!(db
+            .diff_scoped(&alice.id, &alice.head, &alice.head, "bob", "home")
+            .is_err());
+    }
+
+    #[test]
     fn shared_documents_are_visible_but_read_only_to_scoped_clients() {
         let (db, _dir) = temp_db();
         let shared = db
-            .create_doc("note", "OpenClank/Start Here", "shared knowledge", None)
+            .create_builtin_seed_doc("note", "OpenClank/Start Here", "shared knowledge", None)
             .unwrap();
 
+        assert!(shared.builtin);
         assert!(db
             .get_doc_scoped(&shared.id, "alice", "home")
             .unwrap()
@@ -2381,10 +2954,10 @@ mod tests {
     fn scoped_import_shadows_but_never_rewrites_shared_seed_documents() {
         let (db, _dir) = temp_db();
         let shared_note = db
-            .create_doc("markdown", "Welcome.md", "shared", None)
+            .create_builtin_seed_doc("markdown", "Welcome.md", "shared", None)
             .unwrap();
         let shared_planning = db
-            .create_doc(
+            .create_builtin_seed_doc(
                 "planning",
                 "move-data.json",
                 "{\"tracks\":[\"shared\"]}",
@@ -2720,7 +3293,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(event.record_schema_version, 1);
+        assert_eq!(event.record_schema_version, 2);
+        assert!(!event.builtin);
         assert_eq!(event.corpus, "events");
         assert!(event.hidden);
         assert!(!event.deleted);

@@ -3,10 +3,12 @@
 TTS API routes — multi-provider (local Kokoro, API endpoint, browser).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 import logging
+
+from src.auth_helpers import effective_user
 
 logger = logging.getLogger(__name__)
 
@@ -19,26 +21,27 @@ def setup_tts_routes(tts_service):
     router = APIRouter(prefix="/api/tts", tags=["tts"])
 
     @router.get("/stats")
-    async def get_tts_stats():
+    async def get_tts_stats(request: Request):
         """Get TTS service statistics"""
         try:
-            return tts_service.get_stats()
+            return tts_service.get_stats(owner=effective_user(request))
         except Exception as e:
             logger.error(f"Failed to get TTS stats: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     @router.post("/synthesize")
-    async def synthesize_speech(request: TTSRequest):
+    async def synthesize_speech(body: TTSRequest, request: Request):
         """Synthesize speech from text"""
         try:
-            if not tts_service.available:
+            owner = effective_user(request)
+            if not tts_service.is_available(owner):
                 raise HTTPException(
                     status_code=503,
                     detail={"message": "TTS service not available"}
                 )
             
-            if request.format == "base64":
-                audio_b64 = tts_service.synthesize_to_base64(request.text)
+            if body.format == "base64":
+                audio_b64 = tts_service.synthesize_to_base64(body.text, owner=owner)
                 if not audio_b64:
                     raise HTTPException(
                         status_code=500,
@@ -47,7 +50,7 @@ def setup_tts_routes(tts_service):
                 return {"audio": audio_b64}
             
             else:  # audio format
-                audio_data = tts_service.synthesize(request.text)
+                audio_data = tts_service.synthesize(body.text, owner=owner)
                 if not audio_data:
                     raise HTTPException(
                         status_code=500,
@@ -75,7 +78,7 @@ def setup_tts_routes(tts_service):
             )
 
     @router.post("/clear-cache")
-    async def clear_tts_cache():
+    async def clear_tts_cache(request: Request):
         """Clear TTS cache"""
         try:
             tts_service.clear_cache()

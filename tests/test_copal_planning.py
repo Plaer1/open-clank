@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -351,3 +352,23 @@ def test_recurring_event_calendar_uids_are_per_occurrence(monkeypatch):
     assert len(uids) == 4  # all unique
     for e in events:
         assert "2026-07" in e.description or "2026-08" in e.description  # occurrence in desc
+
+
+def test_timeline_chrome_uses_active_theme_tokens():
+    root = Path(__file__).resolve().parents[1]
+    planning = (root / "static/js/copal/planning.js").read_text(encoding="utf-8")
+    style = (root / "static/style.css").read_text(encoding="utf-8")
+    renderer = planning.split("function renderTimeline", 1)[1].split("function renderTodo", 1)[0]
+    timeline_css = style.split(":where(.copal-timeline-toolbar", 1)[1].split("/* Rich event", 1)[0]
+
+    assert "THEME_TRACK_COLOR" in renderer
+    assert "eventTrack.color || '#14b8a6'" not in renderer
+    for token in (
+        "--copal-timeline-accent:", "--copal-timeline-canvas:",
+        "--copal-timeline-band:", "--copal-timeline-label:",
+        "--copal-timeline-grid:", "--copal-timeline-shadow:",
+    ):
+        assert token in timeline_css
+    for fixed_chrome in ("68%, white", "rgba(0, 0, 0, .45)", "var(--accent, #22d3ee)"):
+        assert fixed_chrome not in timeline_css
+    assert "var(--font-mono" in timeline_css

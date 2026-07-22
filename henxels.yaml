@@ -19,8 +19,8 @@ henxels:
   - henxel: "Reference clones stay out of git (.references/ is study material, not product)"
     run_before_commit: 'test -z "$(git ls-files .references)"'
 
-  - henxel: "Claude is never attributed in the release commit — inherited history is left intact"
-    run_before_push: '! git log -1 --format=%B | grep -qiE "co-authored-by:.*claude|generated with.*\[?claude"'
+  - henxel: "Claude is never attributed in commits — no AI co-author, generated-with, or session trailers"
+    run_before_push: '! git log --format=%B | grep -qiE "co-authored-by:.*(claude|anthropic)|generated with.*\[?(claude|anthropic)|^claude-session:"'
 
   - henxel: "No credentials in first-party code"
     in: [./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*]

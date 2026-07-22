@@ -47,7 +47,8 @@ def test_audit_teacher_resolution_scoped_to_owner(monkeypatch):
     def fake_resolve_endpoint(role, owner=None):
         return ("http://worker.local/v1", "worker-model", {})
 
-    def fake_get_setting(key, default=None):
+    def fake_get_user_setting(key, owner, default=None):
+        seen.setdefault("setting_owners", []).append(owner)
         return {"teacher_enabled": True, "teacher_model": "teacher-model"}.get(key, default)
 
     def fake_resolve_model(spec, owner=None):
@@ -56,7 +57,7 @@ def test_audit_teacher_resolution_scoped_to_owner(monkeypatch):
         return ("http://endpoint.local/v1", "teacher-model", {})
 
     monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
-    monkeypatch.setattr("src.settings.get_setting", fake_get_setting)
+    monkeypatch.setattr("src.settings.get_user_setting", fake_get_user_setting)
     monkeypatch.setattr("src.ai_interaction._resolve_model", fake_resolve_model)
     # list_model_ids is best-effort; force it to no-op so the worker model passes through.
     monkeypatch.setattr("src.llm_core.list_model_ids", lambda url, headers=None: [])
@@ -67,3 +68,4 @@ def test_audit_teacher_resolution_scoped_to_owner(monkeypatch):
     assert teacher == ("http://endpoint.local/v1", "teacher-model", {})
     assert seen["owner"] == "alice"
     assert seen["spec"] == "teacher-model"
+    assert seen["setting_owners"] == ["alice", "alice"]

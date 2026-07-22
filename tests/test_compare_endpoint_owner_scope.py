@@ -3,9 +3,9 @@
 start_comparison() takes caller-supplied endpoint URLs (endpoint_a/endpoint_b),
 matches a ModelEndpoint by base_url, and copies that row's *decrypted* api_key
 into the caller-owned [CMP] session's headers — which then drive that session's
-/api/chat_stream calls. The match must be owner-scoped (the caller's own rows +
-legacy null-owner shared rows) so a user can't mint a comparison bound to
-ANOTHER user's private endpoint and spend their api_key / reach their base_url.
+/api/chat_stream calls. The match must be exact-owner scoped so a user can't
+mint a comparison bound to ANOTHER user's private endpoint and spend their
+api_key / reach their base_url.
 Mirrors the session `_owned_endpoint` and research `_owned_enabled_endpoint`
 fixes.
 """
@@ -86,10 +86,9 @@ def test_returns_callers_own_endpoint(monkeypatch):
     assert ep is not None and ep.owner == "alice"
 
 
-def test_allows_legacy_null_owner_shared_row(monkeypatch):
+def test_rejects_legacy_null_owner_row_for_authenticated_user(monkeypatch):
     rows = [_ep(URL, None)]
-    ep = _resolve(monkeypatch, rows, URL, "alice")
-    assert ep is not None and ep.owner is None
+    assert _resolve(monkeypatch, rows, URL, "alice") is None
 
 
 def test_no_match_returns_none(monkeypatch):
@@ -97,8 +96,7 @@ def test_no_match_returns_none(monkeypatch):
     assert _resolve(monkeypatch, rows, URL, "alice") is None
 
 
-def test_null_owner_is_legacy_single_user_noop(monkeypatch):
-    # Single-user / unresolved owner: owner_filter no-op, exact URL match wins.
-    rows = [_ep(URL, "bob")]
+def test_unresolved_owner_only_sees_legacy_null_owner_row(monkeypatch):
+    rows = [_ep(URL, "bob"), _ep(URL, None)]
     ep = _resolve(monkeypatch, rows, URL, None)
-    assert ep is not None and ep.owner == "bob"
+    assert ep is not None and ep.owner is None

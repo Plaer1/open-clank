@@ -1497,9 +1497,8 @@ def _configured_cached_model_ids(
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
         if endpoint_id:
             q = q.filter(ModelEndpoint.id == endpoint_id)
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         rows = q.all()
         for ep in rows:
             if _model_list_base(getattr(ep, "base_url", "")) != target:

@@ -325,3 +325,58 @@ async def test_mcp_draft_email_document_uses_hidden_owner(monkeypatch):
     docs = [obj for obj in saved if isinstance(obj, FakeDocument)]
     assert len(docs) == 1
     assert docs[0].owner == "alice"
+
+
+@pytest.mark.asyncio
+async def test_ai_reply_resolves_every_model_candidate_for_hidden_owner(monkeypatch):
+    import routes.email_helpers as email_helpers
+    import src.endpoint_resolver as endpoint_resolver
+    import src.llm_core as llm_core
+
+    observed = []
+
+    def resolve_endpoint(kind, owner=None):
+        observed.append((kind, owner))
+        if kind == "utility":
+            return "https://alice.invalid/chat", "alice-model", {}
+        return None, None, None
+
+    def utility_fallbacks(owner=None):
+        observed.append(("utility-fallbacks", owner))
+        return []
+
+    def chat_fallbacks(owner=None):
+        observed.append(("chat-fallbacks", owner))
+        return []
+
+    async def llm_call(*_args, **_kwargs):
+        return "Owner-scoped reply"
+
+    monkeypatch.setattr(es, "_read_email", lambda **_kwargs: {
+        "from_address": "sender@example.com",
+        "subject": "Hello",
+        "body": "Original body",
+        "message_id": "message-1",
+    })
+    monkeypatch.setattr(es, "_draft_reply_to_email", lambda **kwargs: kwargs)
+    monkeypatch.setattr(email_helpers, "_load_settings", lambda: {})
+    monkeypatch.setattr(email_helpers, "_extract_reply", lambda value: value)
+    monkeypatch.setattr(email_helpers, "_apply_email_style_mechanics", lambda value: value)
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", resolve_endpoint)
+    monkeypatch.setattr(endpoint_resolver, "resolve_utility_fallback_candidates", utility_fallbacks)
+    monkeypatch.setattr(endpoint_resolver, "resolve_chat_fallback_candidates", chat_fallbacks)
+    monkeypatch.setattr(llm_core, "llm_call_async_with_fallback", llm_call)
+
+    token = es._CURRENT_OWNER.set("alice")
+    try:
+        result = await es._ai_draft_reply_to_email("1")
+    finally:
+        es._CURRENT_OWNER.reset(token)
+
+    assert result["body"] == "Owner-scoped reply"
+    assert observed == [
+        ("utility", "alice"),
+        ("default", "alice"),
+        ("utility-fallbacks", "alice"),
+        ("chat-fallbacks", "alice"),
+    ]

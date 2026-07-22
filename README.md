@@ -16,7 +16,7 @@ It also made the Clanker theme—and, buried under that, the system that generat
   <img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/2ba35e8f-fb70-4f62-87c0-e2a53154f32a" /
 </p>
 <p align="center">
-  A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
+  A self-hosted system for turning curiosity into durable progress.
 </p>
 
 <p align="center">
@@ -31,6 +31,8 @@ It also made the Clanker theme—and, buried under that, the system that generat
 </p>
 
 ---
+
+Open Clank connects cited AI research, a local-first knowledge vault, evidence-based learning, calendars, email, notes, documents, scheduled agents, and local or API models through one trust-aware memory. Instead of restarting in a chatbot or shuttling context between apps, you can research a question, turn the findings into a course or plan, schedule the work, automate the routine parts, and preserve what mattered. Built on Odysseus, MiMoCode, and excellent open-source work, its contribution is not a new primitive; it is a clever, coherent composition where context, learning, and effort compound instead of leaking between tools.
 
 ## Quick Start
 

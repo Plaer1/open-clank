@@ -16,6 +16,8 @@ bun run servo:runtime-check
 
 `servo:runtime-check` cargo-checks the first real runtime shell path. It creates a winit window, a Servo `WindowRenderingContext`, a `Servo` runtime with an event-loop waker, and a `WebView` navigated to `COPAL_URL`.
 
+The native API keeps standalone data in a `standalone/` child of Copal's normal data directory. With this repo's debug setting, that is `packages/Copal/db/standalone/`, separate from OpenClank's hosted `packages/Copal/db/` store. An explicit `COPAL_DB=/path` is honored exactly for operator-managed deployments.
+
 Next shell work:
 
 - Run the runtime shell interactively on Linux with the local Copal server.

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual">
-<meta name="theme-color" content="#101727">
+<meta name="theme-color" content="#191A1E">
 <title>Open Clank — Login</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%234A91FF'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%234A91FF' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%234A91FF' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 29 27H3Z' fill='none' stroke='%234A91FF' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='%234A91FF' fill-rule='evenodd' clip-rule='evenodd'/%3E%3Ccircle cx='16' cy='17' r='1.2' fill='%234A91FF'/%3E%3C/svg%3E">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <script nonce="{{CSP_NONCE}}">
@@ -21,10 +21,10 @@
     ume:'petals', cute:'sparkles'
   };
   var THEME_DEFAULT_EFFECT_COLOR = {
-    'clanker-dark':'#5ABCF5', 'clanker-light':'#1E67D6',
+    'clanker-dark':'#62C7E8', 'clanker-light':'#2469D8',
     midnight:'#ffffff', organs:'#451616', cute:'#ff8cb8', ume:'#f5a0c0'
   };
-  var THEME_DEFAULT_INTENSITY = { 'clanker-dark':0.8, 'clanker-light':0.55, midnight:0.5, terminal:0.8, organs:0.65 };
+  var THEME_DEFAULT_INTENSITY = { 'clanker-dark':0.64, 'clanker-light':0.55, midnight:0.5, terminal:0.8, organs:0.65 };
   try {
     // Authentication is a stable product surface, so it always uses the
     // canonical Open Clank dark preset instead of the last in-app selection.
@@ -32,8 +32,8 @@
     var s = document.documentElement.style;
     var name = 'clanker-dark';
     var c = {
-      bg:'#101727', fg:'#FFF7DD', panel:'#1A2340', border:'#405A96', red:'#4A91FF',
-      advanced:{userBubbleBg:'#293864',aiBubbleBg:'#1A2340',bubbleBorder:'#405A96',sidebarBg:'#141C31',brandColor:'#F5B72F',brandMixTo:'#F75DB6',hamburgerColor:'#FFF7DD',inputBg:'#161F38',inputBorder:'#405A96',sendBtnBg:'#4A91FF',sendBtnHover:'#1E5FDE',codeBg:'#0B1020',codeFg:'#FFF7DD',toggleActive:'#B6E950'}
+      bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5',
+      advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#5A9EF5',sendBtnHover:'#3276D4',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
     };
     if (c) {
       // Base palette
@@ -116,47 +116,42 @@
      localStorage — renders the login page in the same palette as the rest
      of the app instead of a different greys+offwhite scheme. */
   :root {
-    --bg: #101727; --fg: #FFF7DD; --panel: #1A2340; --border: #405A96;
-    --red: #4A91FF; --green: #B6E950;
-    --brand-color: #F5B72F; --brand-mix-to: #F75DB6;
+    --bg: #191A1E; --fg: #FFF4D6; --panel: #25272C; --border: #555A62;
+    --red: #5A9EF5; --green: #A8DE53;
+    --brand-color: #F6BE48; --brand-mix-to: #ED6AB0;
+    --clanker-outline: #0E0F12; --clanker-raised: #34373E;
+    --clanker-cobalt: #397FD9; --clanker-sky: #62C7E8;
+    --clanker-lime: #A8DE53; --clanker-gold: #F6BE48;
+    --clanker-coral: #FF776E; --clanker-pink: #ED6AB0; --clanker-lilac: #B7A7E8;
     --font-family: 'Liga Comic Mono', 'Fira Code', monospace;
     --bg-effect-intensity: 1;
   }
-  /* Background patterns — mirrors static/style.css "Background Patterns"
-     block so the theme's chosen bgPattern renders on login too. The
-     canvas-based effects (rain, constellations, perlin-flow, petals,
-     sparkles, embers) are spawned by the deferred theme.js import below;
-     the static gradient ones (dots, synapse) need these CSS rules. */
-  #clanker-routefield-canvas, #synapse-canvas, #rain-canvas, #constellations-canvas,
+  /* Background patterns mirror the main app. Canvas effects own their full
+     visual layer; only genuinely static effects receive a CSS background. */
+  #synapse-canvas, #rain-canvas, #constellations-canvas,
   #perlin-flow-canvas, #petals-canvas, #sparkles-canvas,
   #embers-canvas { opacity: var(--bg-effect-intensity, 1); }
   body.bg-pattern-dots {
     background-image: radial-gradient(color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px);
     background-size: 20px 20px; background-attachment: fixed;
   }
-  body.bg-pattern-synapse {
-    background-image: linear-gradient(color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(3.5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px),
-      linear-gradient(90deg, color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(3.5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px);
-    background-size: 24px 24px; background-attachment: fixed;
-  }
+  body.bg-pattern-synapse { background-image: none; }
   body.bg-pattern-clanker-routefield {
     background-color: var(--bg);
-    background-image:
-      repeating-linear-gradient(154deg, transparent 0 92px, color-mix(in srgb, #FFF7DD 1.8%, transparent) 92px 93px, transparent 93px 186px),
-      linear-gradient(180deg, color-mix(in srgb, var(--panel) 34%, var(--bg)), var(--bg) 58%);
-    background-size: 260px 190px, auto;
-    background-attachment: fixed;
+    background-image: none;
   }
   body.bg-pattern-clanker-blueprint {
     background-image:
-      radial-gradient(circle, color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(16% * var(--bg-effect-intensity, 1)), transparent) 1.5px, transparent 2px),
-      repeating-linear-gradient(90deg, transparent 0 16px, color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(8% * var(--bg-effect-intensity, 1)), transparent) 16px 20px, transparent 20px 44px, color-mix(in srgb, #F2B51D calc(10% * var(--bg-effect-intensity, 1)), transparent) 44px 48px),
-      linear-gradient(color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px),
-      linear-gradient(90deg, color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px);
-    background-size: 32px 32px, 160px 48px, 32px 32px, 32px 32px;
-    animation: clanker-login-blueprint 14s linear infinite;
+      linear-gradient(90deg, transparent 0 34%, color-mix(in srgb, var(--clanker-sky, #62C7E8) calc(28% * var(--bg-effect-intensity, 1)), transparent) 39%, color-mix(in srgb, var(--clanker-gold, #F4B827) calc(30% * var(--bg-effect-intensity, 1)), transparent) 46%, color-mix(in srgb, var(--clanker-coral, #EC635C) calc(25% * var(--bg-effect-intensity, 1)), transparent) 53%, color-mix(in srgb, var(--clanker-pink, #D94B9C) calc(22% * var(--bg-effect-intensity, 1)), transparent) 58%, transparent 64%),
+      radial-gradient(circle at 13% 24%, color-mix(in srgb, var(--clanker-coral, #EC635C) calc(48% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px),
+      radial-gradient(circle at 82% 72%, color-mix(in srgb, var(--clanker-sky, #55BDEA) calc(42% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px);
+    background-size: 240% 100%, auto, auto;
+    background-position: -135% 0, 0 0, 0 0;
+    animation: clanker-login-status-sweep 22s ease-in-out infinite alternate;
   }
-  @keyframes clanker-login-blueprint { to { background-position: 32px 32px, 160px 0, 32px 0, 0 32px; } }
+  @keyframes clanker-login-status-sweep {
+    to { background-position: 135% 0, 0 0, 0 0; }
+  }
   @media (prefers-reduced-motion: reduce) {
     body.bg-pattern-clanker-blueprint { animation: none; }
   }
@@ -177,29 +172,45 @@
        login form. */
     position: relative; z-index: 1;
   }
-  body.theme-clanker-dark .card {
-    border: 2px solid #070B15;
-    border-radius: 8px;
-    box-shadow: inset 0 1px color-mix(in srgb, #FFF7DD 24%, transparent), 0 5px 0 #070B15, 0 20px 48px color-mix(in srgb, #070B15 72%, transparent);
+  body.theme-clanker-dark .card,
+  body.theme-clanker-light .card {
+    background: var(--panel);
+    border: 2px solid var(--clanker-outline);
+    border-radius: 16px 3px 16px 3px;
+    box-shadow: inset 0 1px color-mix(in srgb, #FFF 24%, transparent), 0 5px 0 var(--clanker-outline), 0 20px 48px color-mix(in srgb, var(--clanker-outline) 72%, transparent);
+  }
+  body.theme-clanker-dark .card::before,
+  body.theme-clanker-light .card::before {
+    content: '';
+    position: absolute;
+    top: -2px;
+    left: 24px;
+    right: 24px;
+    height: 6px;
+    border-radius: 0 0 5px 5px;
+    background: linear-gradient(90deg,
+      var(--clanker-sky) 0 30%, var(--clanker-gold) 30% 52%,
+      var(--clanker-lime) 52% 69%, var(--clanker-coral) 69% 84%,
+      var(--clanker-pink) 84%);
   }
   body.theme-clanker-dark input:not(.remember-check) {
-    background: var(--input-bg, #161F38);
-    border: 2px solid #070B15;
-    box-shadow: inset 0 1px color-mix(in srgb, #FFF7DD 12%, transparent);
+    background: var(--input-bg, #2B2E34);
+    border: 2px solid var(--clanker-outline);
+    box-shadow: inset 0 1px color-mix(in srgb, #FFF 14%, transparent), 0 2px 0 var(--clanker-outline);
   }
   body.theme-clanker-dark input:not(.remember-check):focus {
     border-color: var(--red);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 28%, transparent);
   }
   body.theme-clanker-dark #submitBtn {
-    background: var(--send-btn-bg, #4A91FF);
-    color: #101216;
-    border: 2px solid #070B15;
-    box-shadow: inset 0 1px color-mix(in srgb, #FFF 40%, transparent), 0 3px 0 #070B15;
+    background: var(--send-btn-bg, #5A9EF5);
+    color: var(--clanker-outline);
+    border: 2px solid var(--clanker-outline);
+    box-shadow: inset 0 1px color-mix(in srgb, #FFF 40%, transparent), 0 3px 0 var(--clanker-outline);
   }
-  body.theme-clanker-dark #submitBtn:hover { background: var(--send-btn-hover, #1E5FDE); color: #FFF7DD; }
-  body.theme-clanker-dark #submitBtn:active { transform: translateY(2px); box-shadow: inset 0 1px color-mix(in srgb, #FFF 24%, transparent), 0 1px 0 #070B15; }
-  body.theme-clanker-dark .toggle a { color: #F5B72F; }
+  body.theme-clanker-dark #submitBtn:hover { background: var(--send-btn-hover, #3276D4); color: #FFF4D6; }
+  body.theme-clanker-dark #submitBtn:active { transform: translateY(2px); box-shadow: inset 0 1px color-mix(in srgb, #FFF 24%, transparent), 0 1px 0 var(--clanker-outline); }
+  body.theme-clanker-dark .toggle a { color: var(--clanker-gold); }
   .logo {
     text-align: center; margin-bottom: 1.5rem;
   }
@@ -209,7 +220,7 @@
   }
   body.theme-clanker-dark .logo span {
     letter-spacing: 0;
-    background: linear-gradient(90deg, var(--brand-color), var(--brand-mix-to));
+    background: linear-gradient(90deg, var(--clanker-gold) 0 45%, var(--clanker-coral) 45% 72%, var(--clanker-pink) 72% 88%, var(--clanker-lilac) 88%);
     -webkit-background-clip: text;
     background-clip: text;
   }
@@ -309,7 +320,7 @@
   .remember-toggle:hover .remember-dot {
     border-color: color-mix(in srgb, var(--fg) 40%, transparent);
   }
-  .logo-boat { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--red); }
+  .logo-mark { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--red); }
   .version-label {
     position: fixed; bottom: 12px; right: 16px;
     font-size: 0.7rem; opacity: 0.25;
@@ -334,7 +345,7 @@
 <body>
 <main class="card">
   <h1 class="logo">
-    <svg class="logo-boat" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg><span>Open Clank</span>
+    <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg><span>Open Clank</span>
   </h1>
   <p class="setup-note" id="setupNote" style="display:none"></p>
 
@@ -496,7 +507,7 @@
         if (!res.ok) throw new Error(data.detail || 'Invalid code');
         if (!data.ok) throw new Error('Login failed');
         form._totpMode = false;
-        finishLogin();
+        finishLogin(data.username);
       } catch (err) {
         errEl.textContent = err.message;
         errEl.style.display = 'block';
@@ -550,9 +561,23 @@
 
     // Login (auto-login after setup/signup too)
     const remember = document.getElementById('remember').checked;
-    function finishLogin() {
+    function finishLogin(authenticatedUsername) {
+      const liveUser = String(authenticatedUsername || username).trim().toLowerCase();
+      const cachedUser = localStorage.getItem('odysseus-auth-user');
+      if (cachedUser !== liveUser) {
+        const _keepKeys = new Set(['odysseus-last-user']);
+        const _toRemove = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          const scopedCopalState = key?.startsWith('odysseus-') && key.includes(':scope:');
+          if (key && !_keepKeys.has(key) && !scopedCopalState) _toRemove.push(key);
+        }
+        _toRemove.forEach(key => localStorage.removeItem(key));
+        sessionStorage.clear();
+      }
+      localStorage.setItem('odysseus-auth-user', liveUser);
       const _rem = document.getElementById('remember').checked;
-      if (_rem) localStorage.setItem('odysseus-last-user', username);
+      if (_rem) localStorage.setItem('odysseus-last-user', liveUser);
       else localStorage.removeItem('odysseus-last-user');
       sessionStorage.removeItem('ody-session-active');
       submitBtn.innerHTML = '<span class="login-spinner" aria-hidden="true"></span>';
@@ -598,7 +623,7 @@
         submitBtn.textContent = 'Verify';
         return;
       }
-      finishLogin();
+      finishLogin(data.username);
     } catch (err) {
       errEl.textContent = err.message;
       errEl.style.display = 'block';
@@ -655,6 +680,7 @@ if (window.visualViewport) {
   });
 }
 </script>
+<script type="module" src="/static/js/i18n.js"></script>
 <script type="module" nonce="{{CSP_NONCE}}">
 // Drive the login page's bg effect off the user's saved theme. The
 // sync bootstrap above already set the body class + effect CSS vars so

@@ -13,7 +13,8 @@ import uuid
 from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
-from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
+from core.auth import AuthManager, SetAdminResult, TOKEN_TTL, is_reserved_username
+from src.auth_helpers import _auth_disabled, copal_owner_for_user
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -23,7 +24,9 @@ from src.settings import (
     load_features as _load_features,
     save_features as _save_features,
     DEFAULT_SETTINGS,
+    PER_USER_MODEL_SETTING_KEYS,
 )
+from routes.prefs_routes import _load_for_user, _save_for_user
 from src.integrations import (
     load_integrations,
     add_integration,
@@ -77,9 +80,15 @@ def _validate_model_settings_update(body: dict, current: dict, request: Request,
             if endpoint_id and resolve_endpoint_by_id(endpoint_id, model_id, owner=owner) is None:
                 raise HTTPException(400, f"Unavailable model in {fallback_key}")
 
-    for speech_key in ("tts_provider", "stt_provider"):
-        if body.get(speech_key) == "endpoint:mimo":
+    for provider_key, model_key in (("tts_provider", "tts_model"), ("stt_provider", "stt_model")):
+        provider = str(body.get(provider_key, current.get(provider_key, "")) or "")
+        if provider == "endpoint:mimo":
             raise HTTPException(400, "MiMo ACP is not a speech endpoint")
+        if provider.startswith("endpoint:"):
+            endpoint_id = provider.split(":", 1)[1]
+            model_id = str(body.get(model_key, current.get(model_key, "")) or "")
+            if resolve_endpoint_by_id(endpoint_id, model_id, owner=owner) is None:
+                raise HTTPException(400, f"{model_key} is not available on {provider_key}")
 
     if "vision_model" in body and body.get("vision_model"):
         supervisor = getattr(getattr(request.app, "state", None), "mimo_supervisor", None)
@@ -92,6 +101,15 @@ def _validate_model_settings_update(body: dict, current: dict, request: Request,
         }
         if body["vision_model"] in mimo_models:
             raise HTTPException(400, "MiMo does not advertise vision input")
+
+
+def _settings_for_user(settings: dict, user: str) -> dict:
+    """Return global policy plus only this user's model selections."""
+    prefs = _load_for_user(user) if user else {}
+    scoped = dict(settings)
+    for key in PER_USER_MODEL_SETTING_KEYS:
+        scoped[key] = prefs[key] if key in prefs else DEFAULT_SETTINGS[key]
+    return scoped
 
 
 class LoginRequest(BaseModel):
@@ -140,8 +158,50 @@ class SetOpenRegistrationRequest(BaseModel):
 SESSION_COOKIE = "odysseus_session"
 
 
+def _copal_lifecycle_bridge(request: Request):
+    state = getattr(getattr(request, "app", None), "state", None)
+    if state is None or not hasattr(state, "copal_bridge"):
+        return None
+    bridge = state.copal_bridge
+    if bridge is None:
+        raise HTTPException(503, "Copal database bridge is unavailable")
+    return bridge
+
+
+async def _call_copal_lifecycle(bridge, operation: str, args: dict):
+    if bridge is None:
+        return None
+    try:
+        is_alive = getattr(bridge, "is_alive", None)
+        if callable(is_alive) and not is_alive():
+            await bridge.start()
+        return await bridge.call(operation, args, timeout=20)
+    except Exception as exc:
+        raise HTTPException(503, "Copal owner migration failed") from exc
+
+
+def _drop_copal_calendar_projections_for_owner(db, owner: str) -> int:
+    from core.database import CalendarCal, CalendarEvent
+
+    calendar_ids = [
+        row[0]
+        for row in db.query(CalendarCal.id).filter(CalendarCal.owner == owner).all()
+    ]
+    if not calendar_ids:
+        return 0
+    return (
+        db.query(CalendarEvent)
+        .filter(
+            CalendarEvent.calendar_id.in_(calendar_ids),
+            CalendarEvent.origin == "copal",
+        )
+        .delete(synchronize_session=False)
+    )
+
+
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
+    first_run_setup_lock = asyncio.Lock()
 
     _login_limiter = RateLimiter(max_requests=15, window_seconds=60)
     _signup_limiter = RateLimiter(max_requests=3, window_seconds=300)
@@ -162,12 +222,45 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(400, f"Password must be at least {PASSWORD_MIN_LENGTH} characters")
         if len(body.username.strip()) < 1:
             raise HTTPException(400, "Username is required")
-        if body.username.lower() in RESERVED_USERNAMES:
+        if is_reserved_username(body.username):
             raise HTTPException(403, "Username is reserved")
-        ok = await asyncio.to_thread(auth_manager.setup, body.username, body.password)
-        if not ok:
+        username = body.username.strip().lower()
+        async with first_run_setup_lock:
+            if auth_manager.is_configured:
+                raise HTTPException(400, "Already configured")
+            copal_bridge = _copal_lifecycle_bridge(request)
+            copal_owner = copal_owner_for_user(username)
+            claim = await _call_copal_lifecycle(
+                copal_bridge,
+                "rename_owner",
+                {"old_owner": "local", "new_owner": copal_owner},
+            )
+            copal_claimed = bool(claim and claim.get("documents"))
+            try:
+                ok = await asyncio.to_thread(auth_manager.setup, username, body.password)
+            except Exception:
+                if copal_claimed:
+                    try:
+                        await _call_copal_lifecycle(
+                            copal_bridge,
+                            "rename_owner",
+                            {"old_owner": copal_owner, "new_owner": "local"},
+                        )
+                    except HTTPException:
+                        logger.exception("Failed to roll back first-run Copal owner claim")
+                raise
+            if ok:
+                return {"ok": True, "message": "Admin account created"}
+            if copal_claimed:
+                try:
+                    await _call_copal_lifecycle(
+                        copal_bridge,
+                        "rename_owner",
+                        {"old_owner": copal_owner, "new_owner": "local"},
+                    )
+                except HTTPException:
+                    logger.exception("Failed to roll back rejected first-run Copal owner claim")
             raise HTTPException(500, "Setup failed")
-        return {"ok": True, "message": "Admin account created"}
 
     @router.post("/signup")
     async def signup(body: SignupRequest, request: Request):
@@ -182,7 +275,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(400, f"Password must be at least {PASSWORD_MIN_LENGTH} characters")
         if len(body.username.strip()) < 1:
             raise HTTPException(400, "Username is required")
-        if body.username.lower() in RESERVED_USERNAMES:
+        if is_reserved_username(body.username):
             raise HTTPException(403, "Username is reserved")
         ok = await asyncio.to_thread(auth_manager.create_user, body.username, body.password, is_admin=False)
         if not ok:
@@ -341,7 +434,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(400, f"Password must be at least {PASSWORD_MIN_LENGTH} characters")
         if len(body.username.strip()) < 1:
             raise HTTPException(400, "Username is required")
-        if body.username.lower() in RESERVED_USERNAMES:
+        if is_reserved_username(body.username):
             raise HTTPException(403, "Username is reserved")
         ok = auth_manager.create_user(body.username, body.password, body.is_admin)
         if not ok:
@@ -368,12 +461,17 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         new_username = (body.username or "").strip().lower()
         if not new_username:
             raise HTTPException(400, "Username required")
+        if is_reserved_username(new_username):
+            raise HTTPException(403, "Username is reserved")
         if old_username == new_username:
             return {"ok": True, "username": new_username, "renamed_self": old_username == user}
         if old_username not in auth_manager.users:
             raise HTTPException(404, "User not found")
         if new_username in auth_manager.users:
             raise HTTPException(409, "Username already taken")
+        copal_bridge = _copal_lifecycle_bridge(request)
+        old_copal_owner = copal_owner_for_user(old_username)
+        new_copal_owner = copal_owner_for_user(new_username)
 
         # Gate on auth first. Every mutation below is contingent on this
         # succeeding — doing it last meant a rejected rename (e.g. reserved
@@ -396,6 +494,35 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 )
                 return False
 
+        copal_renamed = False
+        try:
+            await _call_copal_lifecycle(
+                copal_bridge,
+                "rename_owner",
+                {"old_owner": old_copal_owner, "new_owner": new_copal_owner},
+            )
+            copal_renamed = copal_bridge is not None
+        except HTTPException:
+            _rollback_auth_rename()
+            raise
+
+        async def _rollback_copal_rename() -> None:
+            if not copal_renamed:
+                return
+            try:
+                await _call_copal_lifecycle(
+                    copal_bridge,
+                    "rename_owner",
+                    {"old_owner": new_copal_owner, "new_owner": old_copal_owner},
+                )
+            except HTTPException as rollback_error:
+                logger.error(
+                    "Failed to roll back Copal owner rename %s -> %s: %s",
+                    new_copal_owner,
+                    old_copal_owner,
+                    rollback_error,
+                )
+
         memory_provider = getattr(request.app.state, "memory_provider", None)
         provider_renamed = False
         if memory_provider:
@@ -407,6 +534,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     "Failed to rename active memory owner %s -> %s: %s",
                     old_username, new_username, e,
                 )
+                await _rollback_copal_rename()
                 _rollback_auth_rename()
                 raise HTTPException(500, "Failed to rename user memory")
 
@@ -418,6 +546,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             from core.database import Base, SessionLocal
             db = SessionLocal()
             try:
+                _drop_copal_calendar_projections_for_owner(db, old_username)
                 for mapper in Base.registry.mappers:
                     model = mapper.class_
                     if not hasattr(model, "owner"):
@@ -440,6 +569,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     await memory_provider.rename_owner(old_username, owner=new_username)
                 except Exception as rollback_error:
                     logger.error("Failed to roll back memory owner rename: %s", rollback_error)
+            await _rollback_copal_rename()
             if not _rollback_auth_rename():
                 logger.error(
                     "Auth rename %s -> %s could not be rolled back after owner migration failure",
@@ -745,34 +875,52 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.get("/settings")
     async def get_settings(request: Request):
-        """Returns app settings. Admins get the full set; non-admins get
-        a scrubbed copy with secret keys blanked. The frontend uses this
-        for keybinds + TTS prefs, so it stays callable without admin."""
+        """Return global policy with caller-owned model selections."""
         user = _get_current_user(request)
         settings = _load_settings()
+        if user:
+            settings = _settings_for_user(settings, user)
+        elif auth_manager.is_configured and not _auth_disabled():
+            # The route is intentionally readable before login for UI boot.
+            # Never expose the operator's selected endpoints/models there.
+            settings = _settings_for_user(settings, "")
         if user and auth_manager.is_admin(user):
             return settings
         return scrub_settings(settings)
 
     @router.post("/settings")
     async def set_settings(request: Request):
-        """Admin only: update app settings."""
+        """Save caller model choices; only admins may change global policy."""
         user = _get_current_user(request)
-        if not user or not auth_manager.is_admin(user):
+        single_user = not user and _auth_disabled()
+        if not user and not single_user:
             raise HTTPException(403, "Admin only")
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Settings must be an object")
         current = _load_settings()
-        _validate_model_settings_update(body, current, request, user)
+        model_update = {
+            key: body[key]
+            for key in PER_USER_MODEL_SETTING_KEYS
+            if key in body
+        }
+        global_update = {
+            key: body[key]
+            for key in DEFAULT_SETTINGS
+            if key in body and key not in PER_USER_MODEL_SETTING_KEYS
+        }
+        if user and global_update and not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+
+        scoped = _settings_for_user(current, user) if user else current
+        _validate_model_settings_update(model_update, scoped, request, user or "")
         # Per-key validation for numeric settings: coerce to int and clamp to a
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
         }
-        for key in DEFAULT_SETTINGS:
-            if key not in body:
-                continue
-            val = body[key]
+        for key, val in global_update.items():
             if key in _INT_RANGES:
                 lo, hi = _INT_RANGES[key]
                 try:
@@ -781,6 +929,20 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
             current[key] = val
+
+        if user:
+            if model_update:
+                prefs = _load_for_user(user)
+                prefs.update(model_update)
+                _save_for_user(user, prefs)
+            if global_update:
+                _save_settings(current)
+            result = _settings_for_user(current, user)
+            return result if auth_manager.is_admin(user) else scrub_settings(result)
+
+        # Explicit auth-disabled mode retains the historical single-user
+        # settings.json behavior for every setting, including model choices.
+        current.update(model_update)
         _save_settings(current)
         return current
 

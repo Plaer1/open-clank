@@ -29,16 +29,15 @@ from core.middleware import require_admin as _require_admin
 
 
 def _select_api_chat_fallback_endpoint(db, token_owner: Optional[str]):
-    """First enabled ModelEndpoint visible to token_owner — their own rows plus
-    legacy null-owner ("shared") rows. Owner-scoped: an unscoped .first() would
+    """First enabled ModelEndpoint owned exactly by token_owner. An unscoped .first() would
     let a chat-scoped token fall back onto another user's private endpoint and
-    silently spend that owner's API key/quota. Prefer owner rows before shared
-    rows. Fails closed to null-owner rows only when token_owner is absent.
+    silently spend that owner's API key/quota. Fails closed to null-owner rows
+    only when token_owner is absent.
     Does not validate base_url — admin-configured local/LAN endpoints remain allowed.
     """
     query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
     if token_owner:
-        query = owner_filter(query, ModelEndpoint, token_owner)
+        query = owner_filter(query, ModelEndpoint, token_owner, include_shared=False)
         return query.order_by(ModelEndpoint.owner.desc(), ModelEndpoint.created_at).first()
     return query.filter(ModelEndpoint.owner == None).order_by(ModelEndpoint.created_at).first()  # noqa: E711
 

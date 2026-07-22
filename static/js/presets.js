@@ -146,22 +146,13 @@ function _syncSessionPersona(sessionId) {
 }
 
 /**
- * Ruling R10: the enabled persona's name populates every UX surface that
- * used to hardcode "Odysseus" — sidebar brand, welcome screen, composer
- * placeholder, chat header, tab title, and message role labels (renderers
- * read window.__agentName at render time).
+ * The enabled persona names the conversation surfaces, while the product
+ * wordmark and welcome screen remain Open Clank.
  */
 export function applyAgentName() {
   const name = _activeAgentName();
   const previous = window.__agentName || 'Odysseus';
   window.__agentName = name;
-  const brand = document.querySelector('.sidebar-brand-title');
-  if (brand && (brand.textContent === previous || brand.textContent === 'Odysseus')) brand.textContent = name;
-  const welcome = document.querySelector('.welcome-name');
-  if (welcome) {
-    const last = welcome.lastChild;
-    if (last && last.nodeType === Node.TEXT_NODE) last.textContent = name;
-  }
   const msg = document.getElementById('message');
   if (msg && /^Message .*\.\.\.$/.test(msg.placeholder || '')) msg.placeholder = `Message ${name}...`;
   const meta = document.getElementById('current-meta');

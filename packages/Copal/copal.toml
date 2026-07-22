@@ -1,5 +1,8 @@
 # Copal repo configuration.
-# debug = true  → the app stores its database in repo-local ./db/
-# debug = false → the app stores its database in ~/.local/share/copal/
-# Env overrides: COPAL_DEBUG=0|1 beats this file; COPAL_DB=/path beats everything.
+# debug = true  → the base data directory is repo-local ./db/
+# debug = false → the base data directory is ~/.local/share/copal/
+# The standalone Servo shell uses <base>/standalone/ so its default cannot
+# collide with OpenClank's hosted store. COPAL_DB=/path is an exact operator
+# override and does not receive the standalone suffix; COPAL_DEBUG=0|1 beats
+# this file when no explicit database path is set.
 debug = true

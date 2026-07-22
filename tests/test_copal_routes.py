@@ -3,10 +3,13 @@ import json
 import stat
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+
+import routes.copal_routes as copal_routes
 
 from routes.copal_routes import (
     _encode_note,
@@ -15,6 +18,7 @@ from routes.copal_routes import (
     _note_markdown,
     _note_view,
     _require_mutable_note,
+    _stream_owner_is_current,
     setup_copal_routes,
 )
 
@@ -85,7 +89,7 @@ class FakeBridge:
 
     async def call(self, operation, args, timeout=20):
         self.calls.append((operation, args, timeout))
-        if operation == "status":
+        if operation in {"status", "scoped_status"}:
             return {"schema_version": 2, "documents": 1, "integrity_ok": True, "kinds": {"markdown": 1}}
         if operation == "list":
             return {"docs": [{"id": "DOC1"}]}
@@ -93,6 +97,8 @@ class FakeBridge:
             return {"docs": []}
         if operation == "write":
             return self.write_result
+        if operation == "ops":
+            return {"ops": []}
         if operation == "import_vault":
             root = Path(args["path"])
             self.imported_files = {
@@ -354,6 +360,47 @@ def test_scope_is_server_owned_and_workspace_validated(tmp_path, monkeypatch):
     assert http.get("/api/copal/documents?workspace=../escape").status_code == 400
 
 
+def test_status_storage_namespace_distinguishes_local_user_from_auth_disabled_local(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    local = http.get("/api/copal/status").json()
+    assert local["owner"] == "local"
+    assert local["storage_namespace"] == "local"
+
+    monkeypatch.setattr(copal_routes, "require_user", lambda _request: "local")
+    authenticated = http.get("/api/copal/status").json()
+    assert authenticated["owner"] == "user:local"
+    assert authenticated["storage_namespace"] == "user:local"
+    assert bridge.calls[-1][1]["owner"] == "user:local"
+
+
+def test_admin_operations_are_scoped_to_the_authenticated_owner(tmp_path, monkeypatch):
+    http, bridge = client(tmp_path, monkeypatch)
+    monkeypatch.setattr(copal_routes, "require_admin", lambda _request: None)
+    monkeypatch.setattr(copal_routes, "require_user", lambda _request: "alice")
+
+    response = http.get("/api/copal/operations?workspace=home&owner=bob&limit=7")
+
+    assert response.status_code == 200
+    assert bridge.calls[-1] == (
+        "ops",
+        {"owner": "alice", "workspace_id": "home", "limit": 7},
+        20,
+    )
+
+
+def test_copal_stream_session_revalidation_closes_on_rename_or_revocation():
+    sessions = {"token": "alice"}
+    manager = SimpleNamespace(get_username_for_token=lambda token: sessions.get(token))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(auth_manager=manager)))
+
+    assert _stream_owner_is_current(request, "alice", "token") is True
+    sessions["token"] = "alice2"
+    assert _stream_owner_is_current(request, "alice", "token") is False
+    sessions.clear()
+    assert _stream_owner_is_current(request, "alice", "token") is False
+    assert _stream_owner_is_current(request, "", None) is True
+
+
 def test_hidden_document_query_is_explicit_and_ui_requests_full_projection(tmp_path, monkeypatch):
     http, _ = client(tmp_path, monkeypatch)
     http.app.state.copal_bridge = VisibilityBridge(tmp_path)
@@ -378,6 +425,11 @@ def test_dead_bridge_restarts_before_copal_operation(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert bridge.start_calls == 1
     assert bridge.is_alive()
+    operation, args, _ = bridge.calls[-1]
+    assert operation == "scoped_status"
+    assert args == {"owner": "local", "workspace_id": "default"}
+    assert response.json()["visible_documents"] == 1
+    assert response.json()["owner"] == "local"
 
 
 def test_document_names_cannot_traverse(tmp_path, monkeypatch):

@@ -46,7 +46,7 @@ def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
     assert "resolve_task_candidates(" not in src
     assert "No registered model endpoint configured for research" in src
     assert "from src.auth_helpers import owner_filter" in src
-    assert 'owner_filter(query, ModelEndpoint, task.owner or "")' in src
+    assert 'owner_filter(\n                    query, ModelEndpoint, task.owner or "", include_shared=False\n                )' in src
     assert "resolve_endpoint_runtime(endpoint, owner=task.owner or None)" in src
 
 

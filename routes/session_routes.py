@@ -398,8 +398,7 @@ def setup_session_routes(
                     ModelEndpoint.id == endpoint_id.strip(),
                     ModelEndpoint.is_enabled == True,
                 )
-                if user:
-                    q = owner_filter(q, ModelEndpoint, user)
+                q = owner_filter(q, ModelEndpoint, user or "", include_shared=False)
                 endpoint_row = q.first()
                 if not endpoint_row:
                     raise HTTPException(400, "Model endpoint no longer exists")
@@ -587,8 +586,7 @@ def setup_session_routes(
                         ModelEndpoint.id == endpoint_id,
                         ModelEndpoint.is_enabled == True,
                     )
-                    if user:
-                        q = owner_filter(q, ModelEndpoint, user)
+                    q = owner_filter(q, ModelEndpoint, user or "", include_shared=False)
                     ep = q.first()
                     if not ep:
                         raise HTTPException(400, "Model endpoint no longer exists")

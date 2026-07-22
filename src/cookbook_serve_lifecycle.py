@@ -25,9 +25,12 @@ from src.constants import COOKBOOK_STATE_FILE
 logger = logging.getLogger(__name__)
 
 
-def _internal_headers() -> dict:
+def _internal_headers(owner: str | None = None) -> dict:
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
-    return {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
+    headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
+    if owner:
+        headers["X-Odysseus-Owner"] = owner
+    return headers
 
 
 async def _delete_endpoint_for_task(task: dict) -> None:
@@ -46,6 +49,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
         return
     import re as _re
     payload = task.get("payload") or {}
+    owner = str(task.get("owner") or "").strip().lower()
     cmd = str(payload.get("_cmd") or "")
     remote = task.get("remoteHost") or ""
     # Build host the same way _auto_register_llm_endpoint does so URL match wins.
@@ -68,7 +72,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(
                 f"{internal_api_base()}/api/model-endpoints",
-                headers=_internal_headers(),
+                headers=_internal_headers(owner),
             )
             if r.status_code >= 400:
                 return
@@ -80,7 +84,7 @@ async def _delete_endpoint_for_task(task: dict) -> None:
             if ep:
                 await client.delete(
                     f"{internal_api_base()}/api/model-endpoints/{ep['id']}",
-                    headers=_internal_headers(),
+                    headers=_internal_headers(owner),
                 )
                 logger.info(
                     f"cookbook_serve_lifecycle: deleted endpoint {ep.get('id')} "

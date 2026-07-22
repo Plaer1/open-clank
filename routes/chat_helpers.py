@@ -286,9 +286,8 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
         q = db.query(ModelEndpoint).filter(
             ModelEndpoint.is_enabled == True
         )
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         endpoints = q.all()
     finally:
         db.close()
@@ -559,12 +558,11 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
             if not target_url:
                 return
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner:
-                # Missing headers usually means "recover from the saved endpoint".
-                # Scope that lookup to the session owner, otherwise two users
-                # with similar endpoint URLs can borrow each other's API key.
-                from src.auth_helpers import owner_filter
-                q = owner_filter(q, ModelEndpoint, owner)
+            # Missing headers usually means "recover from the saved endpoint".
+            # Scope that lookup to the session owner, otherwise two users
+            # with similar endpoint URLs can borrow each other's API key.
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
             for ep in q.all():
                 if not _session_url_matches_endpoint(target_url, ep.base_url or ""):
                     continue
@@ -637,9 +635,8 @@ def _normalize_model_id_from_cache(sess) -> Optional[str]:
     try:
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
         owner = getattr(sess, "owner", None)
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         endpoints = q.all()
         for ep in endpoints:
             try:

@@ -5,6 +5,27 @@ from typing import Optional
 from fastapi import Request, HTTPException
 
 
+_COPAL_RESERVED_OWNERS = frozenset(
+    {
+        "shared",
+        "local",
+        "__copal_unclaimed_owner__",
+        "__copal_unclaimed_workspace__",
+    }
+)
+_COPAL_RESERVED_OWNER_PREFIXES = ("user:", "deleted:")
+
+
+def copal_owner_for_user(username: Optional[str]) -> str:
+    """Resolve a human username without colliding with Copal sentinels."""
+    owner = str(username or "").strip().lower()
+    if not owner:
+        return "local"
+    if owner in _COPAL_RESERVED_OWNERS or owner.startswith(_COPAL_RESERVED_OWNER_PREFIXES):
+        return f"user:{owner}"
+    return owner
+
+
 def get_current_user(request: Request) -> Optional[str]:
     """Get current username from request state (set by auth middleware)."""
     return getattr(getattr(request, 'state', None), 'current_user', None)
@@ -32,7 +53,17 @@ def effective_user(request: Request) -> Optional[str]:
         owner = getattr(state, "api_token_owner", None)
         if owner:
             return owner
-    return get_current_user(request)
+    user = get_current_user(request)
+    # In-process agent tools authenticate as the reserved ``internal-tool``
+    # identity and forward the human session owner separately.  Keep model and
+    # other owner-scoped lookups on that human account instead of accidentally
+    # creating globally ownerless rows or an unusable internal-tool catalogue.
+    if user == "internal-tool":
+        headers = getattr(request, "headers", None)
+        owner = (headers.get("X-Odysseus-Owner") if headers is not None else None)
+        if owner:
+            return str(owner).strip().lower()
+    return user
 
 
 def _is_api_token_request(request: Request) -> bool:
@@ -140,10 +171,14 @@ def require_privilege(request: Request, key: str) -> str:
 
 def owner_filter(query, model_cls, user: str, *, include_shared: bool = True):
     """Filter `query` so only rows owned by `user` (and optionally null-owner
-    'shared' rows) come through. No-op when `user` is empty (single-user
-    mode). Returns the modified query."""
+    legacy rows) come through. In single-user mode the historical shared
+    behaviour remains the default; callers asking for an exact catalogue
+    (``include_shared=False``) get only legacy null-owner rows instead of an
+    accidental all-users query. Returns the modified query."""
     if not user:
-        return query
+        if include_shared:
+            return query
+        return query.filter(model_cls.owner == None)  # noqa: E711
     if include_shared:
         return query.filter((model_cls.owner == user) | (model_cls.owner == None))  # noqa: E711
     return query.filter(model_cls.owner == user)

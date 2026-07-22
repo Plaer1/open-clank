@@ -7,13 +7,14 @@ import { createPlanningFeature } from './copal/planning.js';
 import { createTreeHouseFeature } from './copal/treehouse.js';
 import { createCopalWindow } from './copal/windows.js';
 import { wireDialog } from './copal/overlays.js';
+import { configureCopalStorage, copalStorageKey } from './copal/storage.js';
 
 const VIEWS = ['notes', 'wiki', 'timeline', 'galaxy', 'graph', 'mind', 'bases', 'treehouse', 'todo'];
 const LABELS = { notes: 'Notes', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Mind', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
 const HIDDEN_KINDS = new Set(['asset', 'planning', 'calendar-projection', 'treehouse-state', 'copal-tracks', 'copal-migration']);
 
 const state = {
-  api: '', workspace: 'default', view: 'notes', docs: [], planning: { tracks: [], floatingTodos: [] }, selected: null,
+  api: '', workspace: 'default', storageNamespace: null, view: 'notes', docs: [], planning: { tracks: [], floatingTodos: [] }, selected: null,
   filter: '', story: [], pinned: new Set(), reading: false, saveTimers: new Map(),
   calendarMonth: null, windows: new Map(),
   root: null, content: null, body: null,
@@ -207,7 +208,7 @@ async function open(view = 'notes', push = true) {
   view = VIEWS.includes(view) ? view : 'notes';
   const context = ensureViewWindow(view);
   activateView(view);
-  localStorage.setItem('odysseus-copal-view', view);
+  localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
   context.window.show(document.activeElement);
   markActive();
   if (push) updateRoute(view);
@@ -923,7 +924,7 @@ function renderGraph() {
   // B2: respect dot-folder toggle from workspace settings
   let docs = visibleDocs();
   try {
-    const saved = JSON.parse(localStorage.getItem(`odysseus-copal-notes-layout:${state.workspace}`) || '{}');
+    const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
     const showDot = saved?.left?.showDotFolders === true;
     if (!showDot) docs = docs.filter((doc) => !(doc.name || '').split('/').some((part) => part.startsWith('.')));
   } catch (_) {}
@@ -1751,11 +1752,11 @@ function ensureViewWindow(view) {
     subtitle:'Copal · canonical Redb',
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
-    sizeKey:`odysseus-copal-${view}-window-size`,
+    sizeKey:copalStorageKey(`odysseus-copal-${view}-window-size`),
     className:`copal-view-window copal-${view}-window`,
     onActivate:() => {
       if (!state.windows.has(view)) return;
-      activateView(view); markActive(); localStorage.setItem('odysseus-copal-view', view);
+      activateView(view); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
       if (location.pathname.startsWith('/copal/')) updateRoute(view, true);
     },
     onClosed:() => { if (view === 'notes') notesFeature?.destroy(); markActive(); },
@@ -1764,7 +1765,7 @@ function ensureViewWindow(view) {
   const context = { view, window:windowApi, search, selected:null, filter:'', story:[], pinned:new Set(), reading:false };
   if (view === 'notes') {
     try {
-      const saved = JSON.parse(localStorage.getItem(`odysseus-copal-notes-layout:${state.workspace}`) || '{}');
+      const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
       notesFeature?.loadSaved(context, saved);
       context.selected = saved.selected || null;
     } catch (_) {}
@@ -1796,7 +1797,7 @@ function buildWorkspace() {
 function bindSidebar() {
   document.querySelectorAll('[data-copal-view]').forEach((link) => link.addEventListener('click', (event) => { event.preventDefault(); open(link.dataset.copalView); }));
   document.getElementById('rail-copal')?.addEventListener('click', () => {
-    const view = localStorage.getItem('odysseus-copal-view') || 'notes'; const context = ensureViewWindow(view);
+    const view = localStorage.getItem(copalStorageKey('odysseus-copal-view')) || 'notes'; const context = ensureViewWindow(view);
     context.window.visible ? close(view) : open(view);
   });
 }
@@ -1834,10 +1835,26 @@ function connectEvents() {
   state.events.addEventListener('document', refresh); state.events.addEventListener('deleted', refresh);
 }
 
-export function init(apiBase = window.location.origin) {
+export async function init(apiBase = window.location.origin) {
   state.api = apiBase;
-  state.workspace = localStorage.getItem('odysseus-copal-workspace') || 'default';
+  let status = null;
+  for (let attempt = 0; attempt < 3 && !status; attempt += 1) {
+    try {
+      status = await api('/status');
+    } catch (error) {
+      const retryable = !error.status || error.status >= 500;
+      if (!retryable || attempt === 2) {
+        console.error('[copal] refused to initialize without an authenticated storage scope', error);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+  configureCopalStorage(status.storage_namespace);
+  state.storageNamespace = status.storage_namespace;
+  state.workspace = localStorage.getItem(copalStorageKey('odysseus-copal-workspace')) || 'default';
   planningFeature.loadState(state.workspace);
+  treeHouse.loadState();
   buildWorkspace(); bindSidebar(); connectEvents();
   window.addEventListener('popstate', () => {
     const match = location.pathname.match(/^\/copal(?:\/([^/]+))?\/?$/);
@@ -1850,11 +1867,13 @@ export function init(apiBase = window.location.origin) {
 }
 
 export function getNotesSettings() {
+  if (!state.storageNamespace) return {};
   ensureViewWindow('notes');
   return notesFeature?.getSettings() || {};
 }
 
 export function updateNotesSettings(patch = {}) {
+  if (!state.storageNamespace) return {};
   ensureViewWindow('notes');
   return notesFeature?.updateSettings(patch) || {};
 }

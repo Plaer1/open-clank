@@ -41,6 +41,7 @@ import {
   wordCount,
 } from './notesModel.js';
 import { wireDialog, wirePopover } from './overlays.js';
+import { copalStorageKey } from './storage.js';
 import { registerMenuDismiss } from '../escMenuStack.js';
 import { parseTable, createTableWidget, applyTableEdit } from './tableModel.js';
 
@@ -195,7 +196,7 @@ export function createNotesFeature({
     if (!current?.noteWorkspace) return;
     const write = () => {
       persistTimer = null;
-      localStorage.setItem(`odysseus-copal-notes-layout:${state.workspace}`, serializeNotesWorkspace(current.noteWorkspace));
+      localStorage.setItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace), serializeNotesWorkspace(current.noteWorkspace));
     };
     clearTimeout(persistTimer);
     if (immediate) write();

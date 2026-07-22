@@ -22,9 +22,10 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
 
 // SECURITY: defense-in-depth state wipe on user switch. If the authenticated
 // user is different from the one whose state is cached in this browser,
-// wipe localStorage + sessionStorage so the new account doesn't inherit
-// the previous user's last session id, last-used model, draft chat input,
-// or cached lists. The settings-tab Logout button already wipes on
+// wipe unscoped localStorage + sessionStorage so the new account doesn't
+// inherit the previous user's last session id, last-used model, draft chat
+// input, or cached lists. Already namespaced Copal preferences are retained
+// for their owning account. The settings-tab Logout button already wipes on
 // explicit logout; this catches the cases where a different user signs
 // in without the previous one logging out cleanly.
 (async () => {
@@ -41,7 +42,8 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
       const toRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        if (k && !_keepKeys.has(k)) toRemove.push(k);
+        const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
+        if (k && !_keepKeys.has(k) && !scopedCopalState) toRemove.push(k);
       }
       toRemove.forEach(k => localStorage.removeItem(k));
       sessionStorage.clear();

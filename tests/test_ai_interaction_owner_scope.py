@@ -15,7 +15,7 @@ def test_model_resolver_applies_owner_filter():
 
     assert "owner: Optional[str] = None" in body
     assert "from src.auth_helpers import owner_filter" in body
-    assert "owner_filter(query, ModelEndpoint, owner)" in body
+    assert 'owner_filter(query, ModelEndpoint, owner or "", include_shared=False)' in body
 
 
 def test_model_listing_and_image_fallback_are_owner_scoped():
@@ -24,10 +24,10 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
     image_body = _source(ai_interaction.do_generate_image)
 
     assert "owner: Optional[str] = None" in list_body
-    assert "owner_filter(query, ModelEndpoint, owner)" in list_body
+    assert 'owner_filter(query, ModelEndpoint, owner or "", include_shared=False)' in list_body
     # _resolve_model is offloaded to a worker thread (#4589) but stays owner-scoped.
     assert "asyncio.to_thread(_resolve_model, candidate, owner=owner)" in image_body
-    assert "owner_filter(_img_q, ModelEndpoint, owner)" in image_body
+    assert 'owner_filter(\n                        _img_q, ModelEndpoint, owner or "", include_shared=False\n                    )' in image_body
     assert "asyncio.to_thread(_resolve_model, model_spec, owner=owner)" in image_body
 
 

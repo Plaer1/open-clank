@@ -44,20 +44,22 @@ class TTSService:
 
     # ── Settings ──
 
-    def _load_settings(self) -> dict:
-        from src.settings import load_settings
-        saved = load_settings()
+    def _load_settings(self, owner: str | None = None) -> dict:
+        from src.settings import get_user_setting
         return {
-            "tts_enabled": saved.get("tts_enabled", True),
-            "tts_provider": saved.get("tts_provider", "disabled"),
-            "tts_model": saved.get("tts_model", "tts-1"),
-            "tts_voice": saved.get("tts_voice", "alloy"),
-            "tts_speed": saved.get("tts_speed", "1"),
+            "tts_enabled": get_user_setting("tts_enabled", owner or "", True),
+            "tts_provider": get_user_setting("tts_provider", owner or "", "disabled"),
+            "tts_model": get_user_setting("tts_model", owner or "", "tts-1"),
+            "tts_voice": get_user_setting("tts_voice", owner or "", "alloy"),
+            "tts_speed": get_user_setting("tts_speed", owner or "", "1"),
         }
 
     @property
     def available(self) -> bool:
-        settings = self._load_settings()
+        return self.is_available()
+
+    def is_available(self, owner: str | None = None) -> bool:
+        settings = self._load_settings(owner)
         if settings.get("tts_enabled") is False:
             return False
         provider = settings["tts_provider"]
@@ -69,13 +71,15 @@ class TTSService:
             kokoro = self._get_kokoro()
             return kokoro is not None and kokoro.available
         if isinstance(provider, str) and provider.startswith("endpoint:"):
-            return True  # assume reachable; errors surface at synthesis time
+            endpoint_id = provider.split(":", 1)[1]
+            return self._owned_endpoint(endpoint_id, owner) is not None
         return False
 
     # ── Cache ──
 
-    def _cache_key(self, text: str, provider: str, model: str, voice: str, speed: float = 1.0) -> str:
-        raw = f"{provider}|{model}|{voice}|{speed}|{text}"
+    def _cache_key(self, text: str, provider: str, model: str, voice: str, speed: float = 1.0,
+                   owner: str | None = None) -> str:
+        raw = f"{(owner or '').strip().lower()}|{provider}|{model}|{voice}|{speed}|{text}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def _get_cached(self, key: str) -> Optional[bytes]:
@@ -105,19 +109,33 @@ class TTSService:
 
     # ── API endpoint ──
 
-    def _synthesize_api(self, text: str, endpoint_id: str, model: str, voice: str, speed: float = 1.0) -> Optional[bytes]:
+    @staticmethod
+    def _owned_endpoint(endpoint_id: str, owner: str | None = None):
         from src.database import SessionLocal, ModelEndpoint
 
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id).first()
-            if not ep:
-                logger.error(f"TTS endpoint {endpoint_id} not found")
+            query = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
+            normalized_owner = (owner or "").strip().lower()
+            if normalized_owner:
+                query = query.filter(ModelEndpoint.owner == normalized_owner)
+            else:
+                query = query.filter(ModelEndpoint.owner.is_(None))
+            ep = query.first()
+            if ep is None:
                 return None
-            base_url = ep.base_url.rstrip("/")
-            api_key = ep.api_key
+            return {"base_url": ep.base_url.rstrip("/"), "api_key": ep.api_key}
         finally:
             db.close()
+
+    def _synthesize_api(self, text: str, endpoint_id: str, model: str, voice: str,
+                        speed: float = 1.0, owner: str | None = None) -> Optional[bytes]:
+        endpoint = self._owned_endpoint(endpoint_id, owner)
+        if endpoint is None:
+            logger.error(f"TTS endpoint {endpoint_id} not found for owner")
+            return None
+        base_url = endpoint["base_url"]
+        api_key = endpoint["api_key"]
 
         url = base_url + "/audio/speech"
         headers = {"Content-Type": "application/json"}
@@ -143,8 +161,9 @@ class TTSService:
 
     # ── Public interface ──
 
-    def synthesize(self, text: str, use_cache: bool = True) -> Optional[bytes]:
-        settings = self._load_settings()
+    def synthesize(self, text: str, use_cache: bool = True,
+                   owner: str | None = None) -> Optional[bytes]:
+        settings = self._load_settings(owner)
         if settings.get("tts_enabled") is False:
             return None
         provider = settings["tts_provider"]
@@ -159,7 +178,7 @@ class TTSService:
             text = text[:5000]
 
         if use_cache:
-            key = self._cache_key(text, provider, model, voice, speed)
+            key = self._cache_key(text, provider, model, voice, speed, owner)
             cached = self._get_cached(key)
             if cached:
                 logger.info(f"TTS cache hit ({len(text)} chars)")
@@ -176,20 +195,20 @@ class TTSService:
                 return None
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
-            audio_data = self._synthesize_api(text, endpoint_id, model, voice, speed)
+            audio_data = self._synthesize_api(text, endpoint_id, model, voice, speed, owner)
         else:
             logger.error(f"Unknown TTS provider: {provider}")
             return None
 
         if audio_data and use_cache:
-            key = self._cache_key(text, provider, model, voice, speed)
+            key = self._cache_key(text, provider, model, voice, speed, owner)
             self._put_cache(key, audio_data)
 
         return audio_data
 
-    def synthesize_to_base64(self, text: str) -> Optional[str]:
+    def synthesize_to_base64(self, text: str, owner: str | None = None) -> Optional[str]:
         import base64
-        audio = self.synthesize(text)
+        audio = self.synthesize(text, owner=owner)
         if audio:
             return base64.b64encode(audio).decode("utf-8")
         return None
@@ -197,15 +216,15 @@ class TTSService:
     def set_voice(self, voice: str):
         """Legacy no-op — voice is now managed via admin settings."""
 
-    def get_stats(self) -> Dict[str, Any]:
-        settings = self._load_settings()
+    def get_stats(self, owner: str | None = None) -> Dict[str, Any]:
+        settings = self._load_settings(owner)
         provider = settings["tts_provider"]
         tts_enabled = settings.get("tts_enabled", True)
 
         cache_files = list(self.cache_dir.glob("*.wav")) + list(self.cache_dir.glob("*.mp3"))
         cache_size = sum(f.stat().st_size for f in cache_files)
 
-        is_available = self.available and tts_enabled
+        is_available = self.is_available(owner) and tts_enabled
         stats = {
             "available": is_available,
             "ready": is_available,
@@ -222,7 +241,7 @@ class TTSService:
             stats["model"] = "Kokoro-82M (GPU)" if (kokoro and kokoro.available) else "Kokoro (not loaded)"
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
-        elif provider.startswith("endpoint:"):
+        elif provider.startswith("endpoint:") and is_available:
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
         return stats

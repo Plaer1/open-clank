@@ -28,10 +28,17 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    owner = (owner or "").strip().lower()
     db = SessionLocal()
     try:
+        def _owned_endpoints():
+            query = db.query(ModelEndpoint)
+            if owner:
+                return query.filter(ModelEndpoint.owner == owner)
+            return query.filter(ModelEndpoint.owner.is_(None))
+
         if action == "list":
-            eps = db.query(ModelEndpoint).all()
+            eps = _owned_endpoints().all()
             items = [{"id": e.id, "name": e.name, "base_url": e.base_url,
                        "is_enabled": e.is_enabled} for e in eps]
             return {"response": f"{len(items)} endpoints", "endpoints": items, "exit_code": 0}
@@ -47,6 +54,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
             from datetime import datetime
             ep = ModelEndpoint(id=eid, name=name or base_url, base_url=base_url,
                                api_key=api_key, is_enabled=True,
+                               owner=owner or None,
                                created_at=datetime.utcnow(), updated_at=datetime.utcnow())
             db.add(ep)
             db.commit()
@@ -54,7 +62,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 
         elif action == "delete":
             eid = args.get("endpoint_id", "")
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == eid).first()
+            ep = _owned_endpoints().filter(ModelEndpoint.id == eid).first()
             if not ep:
                 return {"error": f"Endpoint {eid} not found", "exit_code": 1}
             name = ep.name
@@ -64,7 +72,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 
         elif action in ("enable", "disable"):
             eid = args.get("endpoint_id", "")
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == eid).first()
+            ep = _owned_endpoints().filter(ModelEndpoint.id == eid).first()
             if not ep:
                 return {"error": f"Endpoint {eid} not found", "exit_code": 1}
             ep.is_enabled = (action == "enable")
@@ -503,6 +511,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    owner = (owner or "").strip().lower()
 
     from core.database import SessionLocal
     db = SessionLocal()
@@ -510,7 +519,36 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         # set/get/list/delete operate on the REAL app settings (the same store
         # the Settings panel writes), so changing a model / voice / search
         # engine / reminder channel from chat actually takes effect.
-        from src.settings import load_settings, save_settings, DEFAULT_SETTINGS
+        from src.settings import (
+            DEFAULT_SETTINGS,
+            PER_USER_MODEL_SETTING_KEYS,
+            get_user_setting,
+            load_settings,
+            save_settings,
+        )
+
+        def _load_scoped_settings():
+            settings = load_settings()
+            if owner:
+                for setting_key in PER_USER_MODEL_SETTING_KEYS:
+                    settings[setting_key] = get_user_setting(
+                        setting_key, owner, DEFAULT_SETTINGS[setting_key]
+                    )
+            return settings
+
+        def _save_scoped_settings(settings, changed_keys):
+            changed_keys = set(changed_keys)
+            personal_keys = changed_keys & PER_USER_MODEL_SETTING_KEYS
+            if owner and personal_keys:
+                from routes.prefs_routes import _load_for_user, _save_for_user
+                prefs = _load_for_user(owner)
+                prefs.update({key: settings[key] for key in personal_keys})
+                _save_for_user(owner, prefs)
+            global_keys = changed_keys - personal_keys if owner else changed_keys
+            if global_keys:
+                global_settings = load_settings()
+                global_settings.update({key: settings[key] for key in global_keys})
+                save_settings(global_settings)
 
         # Secrets/credentials the agent must NOT write: kept read-only (masked)
         # so API keys never flow through chat. User sets these in the panel.
@@ -595,7 +633,12 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             if not wanted_slug:
                 return None
             best = None
-            for ep in db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all():
+            endpoint_query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner:
+                endpoint_query = endpoint_query.filter(ModelEndpoint.owner == owner)
+            else:
+                endpoint_query = endpoint_query.filter(ModelEndpoint.owner.is_(None))
+            for ep in endpoint_query.all():
                 raw_models = []
                 try:
                     raw_models = _json.loads(ep.cached_models or "[]") or []
@@ -623,7 +666,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             return "••••• (set in panel)" if _is_secret(k) and v else v
 
         if action == "list":
-            s = load_settings()
+            s = _load_scoped_settings()
             shown = {k: _mask(k, v) for k, v in s.items() if k in DEFAULT_SETTINGS and not isinstance(v, dict)}
             return {"response": f"{len(shown)} settings (use get/set with a key)", "settings": shown, "exit_code": 0}
 
@@ -633,7 +676,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return {"error": "key is required", "exit_code": 1}
             if key not in DEFAULT_SETTINGS:
                 return {"error": f"Unknown setting '{args.get('key')}'. Use action='list' to see them.", "exit_code": 1}
-            val = load_settings().get(key, DEFAULT_SETTINGS.get(key))
+            val = _load_scoped_settings().get(key, DEFAULT_SETTINGS.get(key))
             return {"response": f"{key} = {_mask(key, val)}", "value": _mask(key, val), "exit_code": 0}
 
         elif action == "set":
@@ -659,8 +702,9 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return {"error": f"'{value}' isn't a valid value for {key} (expected {type(DEFAULT_SETTINGS[key]).__name__}).", "exit_code": 1}
             if key in _ENUMS and str(value).lower() not in _ENUMS[key]:
                 return {"error": f"{key} must be one of: {', '.join(_ENUMS[key])}.", "exit_code": 1}
-            s = load_settings()
+            s = _load_scoped_settings()
             s[key] = value
+            changed_keys = {key}
             if key in {"default_model", "research_model", "utility_model", "task_model", "vision_model", "image_model"}:
                 resolved = _endpoint_model_from_cache(str(value))
                 if resolved:
@@ -668,7 +712,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                     s[f"{prefix}_endpoint_id"] = resolved["endpoint_id"]
                     s[key] = resolved["model"]
                     value = resolved["model"]
-            save_settings(s)
+                    changed_keys.add(f"{prefix}_endpoint_id")
+            _save_scoped_settings(s, changed_keys)
             if key.endswith("_model") and s.get(f"{key[:-6]}_endpoint_id"):
                 return {"response": f"Set {key} = {value} (endpoint {s.get(f'{key[:-6]}_endpoint_id')}).", "exit_code": 0}
             return {"response": f"Set {key} = {value}.", "exit_code": 0}
@@ -679,9 +724,9 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return {"error": f"Unknown setting '{args.get('key')}'.", "exit_code": 1}
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential. Reset it in the panel.", "exit_code": 0}
-            s = load_settings()
+            s = _load_scoped_settings()
             s[key] = DEFAULT_SETTINGS[key]
-            save_settings(s)
+            _save_scoped_settings(s, {key})
             return {"response": f"Reset {key} to default ({DEFAULT_SETTINGS[key]}).", "exit_code": 0}
 
         elif action in ("disable_tool", "enable_tool", "list_tools"):

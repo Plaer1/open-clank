@@ -1985,7 +1985,9 @@ class TaskScheduler:
                     ModelEndpoint.id == endpoint_id,
                     ModelEndpoint.is_enabled == True,  # noqa: E712
                 )
-                endpoint = owner_filter(query, ModelEndpoint, task.owner or "").first()
+                endpoint = owner_filter(
+                    query, ModelEndpoint, task.owner or "", include_shared=False
+                ).first()
                 if endpoint is None:
                     raise RuntimeError("ENDPOINT_NOT_PROJECTABLE: task endpoint is unavailable")
                 runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)
@@ -2142,7 +2144,9 @@ class TaskScheduler:
                 ModelEndpoint.id == endpoint_id,
                 ModelEndpoint.is_enabled == True,  # noqa: E712
             )
-            endpoint = owner_filter(query, ModelEndpoint, task.owner or "").first()
+            endpoint = owner_filter(
+                query, ModelEndpoint, task.owner or "", include_shared=False
+            ).first()
             if endpoint is None:
                 raise RuntimeError("Scheduled research endpoint is unavailable")
             runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)

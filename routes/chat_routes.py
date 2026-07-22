@@ -278,10 +278,8 @@ def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
             ModelEndpoint.id == endpoint_id,
             ModelEndpoint.is_enabled == True,
         )
-        if owner:
-            from src.auth_helpers import owner_filter
-
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         if q.first() is not None:
             return False
         db_session = db.query(DBSession).filter(DBSession.id == sess.id).first()
@@ -350,9 +348,8 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
             ModelEndpoint.id == endpoint_id,
             ModelEndpoint.is_enabled == True,
         )
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         endpoint = q.first()
         if (
             endpoint is not None
@@ -399,9 +396,8 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
                 ModelEndpoint.id == endpoint_id,
                 ModelEndpoint.is_enabled == True,
             )
-            if owner:
-                from src.auth_helpers import owner_filter
-                q = owner_filter(q, ModelEndpoint, owner)
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
             ep = q.first()
         if not ep:
             return False
@@ -1172,14 +1168,14 @@ def setup_chat_routes(
             yield f'data: {json.dumps(_model_info)}\n\n'
 
             if _is_image_generation_session(sess, owner=_user):
-                from src.settings import get_setting
+                from src.settings import get_user_setting
                 if tool_policy.blocks("generate_image"):
                     _blocked_msg = tool_policy.reason_for("generate_image")
                     yield f'data: {json.dumps({"delta": _blocked_msg})}\n\n'
                     yield "data: [DONE]\n\n"
                     _active_streams.pop(session, None)
                     return
-                if not get_setting("image_gen_enabled", True):
+                if not get_user_setting("image_gen_enabled", _user, True):
                     yield f'data: {json.dumps({"delta": "Image generation is disabled by the administrator."})}\n\n'
                     yield "data: [DONE]\n\n"
                     _active_streams.pop(session, None)

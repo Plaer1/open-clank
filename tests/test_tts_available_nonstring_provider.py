@@ -7,7 +7,7 @@ def test_available_tolerates_non_string_provider(tmp_path):
     provider.startswith("endpoint:"), which raised AttributeError on a
     non-str. It must instead fall through and report unavailable."""
     service = TTSService(cache_dir=str(tmp_path))
-    service._load_settings = lambda: {
+    service._load_settings = lambda owner=None: {
         "tts_enabled": True,
         "tts_provider": 123,
         "tts_model": "tts-1",

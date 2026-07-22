@@ -852,7 +852,7 @@ body::after {{
 
 <div class="hero">
   <div class="hero-label">Odysseus &mdash; Deep Research Report</div>
-  <h1>{question_html}</h1>
+  <h1 data-user-content>{question_html}</h1>
 </div>
 
 {hero_image_html}
@@ -868,9 +868,9 @@ body::after {{
     </nav>
   </aside>
   <main class="content">
-    {report_html}
+    <div data-user-content>{report_html}</div>
 
-    {sources_html}
+    <div data-user-content>{sources_html}</div>
 
     {chat_cta_html}
   </main>
@@ -1145,6 +1145,7 @@ if (document.body.classList.contains('category-comparison')) {{
   }});
 }}
 </script>
+<script type="module" src="/static/js/i18n.js"></script>
 </body>
 </html>
 """

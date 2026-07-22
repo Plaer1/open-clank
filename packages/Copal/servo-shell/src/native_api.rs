@@ -115,15 +115,44 @@ pub(crate) struct ApiState {
     pub(crate) events: db_api::Broadcaster,
 }
 
-/// Open the versioned store per the metaplan: data dir resolved via the
-/// repo debug bit (`copal.toml`), auto-import of the vault + planning file
-/// when the view is empty (one undoable operation).
+/// Resolve the standalone shell's physical store. An explicit operator
+/// override is exact; defaults live below the normal Copal data root so the
+/// shell cannot share OpenClank's hosted store.
+fn resolve_standalone_data_dir(root: &Path) -> Result<PathBuf, String> {
+    if let Some(explicit) = std::env::var_os("COPAL_DB") {
+        return Ok(PathBuf::from(explicit));
+    }
+
+    let legacy_data_dir = copal_db::resolve_data_dir(root);
+    let standalone_data_dir = legacy_data_dir.join("standalone");
+    let legacy_database = legacy_data_dir.join("copal.redb");
+    let standalone_database = standalone_data_dir.join("copal.redb");
+    if legacy_database.is_file() && !standalone_database.is_file() {
+        return Err(format!(
+            "legacy Copal database found at {}; refusing to initialize an empty standalone store at {}; copy copal.redb and assets/ into the standalone directory after stopping Copal, or set COPAL_DB={} to select the legacy store explicitly",
+            legacy_database.display(),
+            standalone_data_dir.display(),
+            legacy_data_dir.display()
+        ));
+    }
+
+    Ok(standalone_data_dir)
+}
+
+/// Open the standalone versioned store, auto-importing the vault + planning
+/// file when the view is empty (one undoable operation).
 fn open_db(config: &NativeApiConfig) -> Option<copal_db::Db> {
     if std::env::var("COPAL_SOURCE").ok().as_deref() == Some("files") {
         println!("copal_db=disabled (COPAL_SOURCE=files)");
         return None;
     }
-    let data_dir = copal_db::resolve_data_dir(&config.root_dir);
+    let data_dir = match resolve_standalone_data_dir(&config.root_dir) {
+        Ok(data_dir) => data_dir,
+        Err(error) => {
+            eprintln!("copal_db_error={error} (falling back to files)");
+            return None;
+        },
+    };
     match copal_db::Db::open(&data_dir) {
         Ok(db) => {
             println!("copal_db={}", data_dir.display());
@@ -1162,6 +1191,8 @@ fn mime_for(path: &Path) -> &'static str {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn temp_config() -> NativeApiConfig {
         let root = std::env::temp_dir().join(format!("copal-native-api-test-{}", now_stamp()));
         let site = root.join("out");
@@ -1187,6 +1218,65 @@ mod tests {
         assert!(vault_path(&config, "../x.md").is_none());
         assert!(vault_path(&config, "safe/../../x.md").is_none());
         assert!(safe_static_path(&config, "/../Cargo.toml").is_none());
+    }
+
+    #[test]
+    fn standalone_data_dir_is_partitioned_unless_explicitly_overridden() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_config();
+        fs::write(config.root_dir.join("copal.toml"), "debug = true\n").unwrap();
+        let previous = std::env::var_os("COPAL_DB");
+
+        std::env::remove_var("COPAL_DB");
+        assert_eq!(
+            resolve_standalone_data_dir(&config.root_dir).unwrap(),
+            config.root_dir.join("db").join("standalone")
+        );
+
+        let explicit = config.root_dir.join("operator-selected");
+        std::env::set_var("COPAL_DB", &explicit);
+        assert_eq!(
+            resolve_standalone_data_dir(&config.root_dir).unwrap(),
+            explicit
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("COPAL_DB", value),
+            None => std::env::remove_var("COPAL_DB"),
+        }
+    }
+
+    #[test]
+    fn standalone_data_dir_refuses_to_hide_legacy_store() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_config();
+        fs::write(config.root_dir.join("copal.toml"), "debug = true\n").unwrap();
+        let legacy_data_dir = config.root_dir.join("db");
+        let legacy_database = legacy_data_dir.join("copal.redb");
+        fs::create_dir_all(&legacy_data_dir).unwrap();
+        fs::write(&legacy_database, b"legacy-data-must-survive").unwrap();
+        let previous = std::env::var_os("COPAL_DB");
+
+        std::env::remove_var("COPAL_DB");
+        let error = resolve_standalone_data_dir(&config.root_dir).unwrap_err();
+        assert!(error.contains(&legacy_database.display().to_string()));
+        assert!(error.contains("COPAL_DB="));
+        assert_eq!(
+            fs::read(&legacy_database).unwrap(),
+            b"legacy-data-must-survive"
+        );
+        assert!(!legacy_data_dir.join("standalone").exists());
+
+        std::env::set_var("COPAL_DB", &legacy_data_dir);
+        assert_eq!(
+            resolve_standalone_data_dir(&config.root_dir).unwrap(),
+            legacy_data_dir
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("COPAL_DB", value),
+            None => std::env::remove_var("COPAL_DB"),
+        }
     }
 
     #[test]

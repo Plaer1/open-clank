@@ -152,9 +152,8 @@ def _resolve_research_endpoint(sess, owner: Optional[str] = None) -> tuple:
 
 
 def _owned_enabled_endpoint(db, owner, endpoint_id=None):
-    """An enabled ModelEndpoint VISIBLE to `owner` (their own rows + legacy
-    null-owner "shared" rows), optionally narrowed to a specific endpoint_id;
-    None if nothing visible matches.
+    """An enabled ModelEndpoint owned exactly by `owner`, optionally narrowed
+    to a specific endpoint_id; None if nothing visible matches.
 
     Owner-scoped on purpose. ModelEndpoint is per-user (core/database.py: non-null
     owner = private, "the model picker only shows the endpoint to that user") and
@@ -164,15 +163,15 @@ def _owned_enabled_endpoint(db, owner, endpoint_id=None):
     via the bare first-enabled fallback — would let a research-privileged user
     spend ANOTHER user's API key/quota and reach whatever internal base_url they
     configured. Mirrors webhook_routes._first_enabled_endpoint and
-    session_routes._owned_endpoint. A null/empty owner is a no-op (single-user /
-    legacy mode).
+    session_routes._owned_endpoint. A null/empty owner sees only legacy
+    ownerless rows in single-user mode.
     """
     from src.database import ModelEndpoint
     from src.auth_helpers import owner_filter
     q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
     if endpoint_id:
         q = q.filter(ModelEndpoint.id == endpoint_id)
-    return owner_filter(q, ModelEndpoint, owner).first()
+    return owner_filter(q, ModelEndpoint, owner, include_shared=False).first()
 
 
 def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):

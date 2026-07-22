@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v345';
+const CACHE_NAME = 'odysseus-v346-i18n';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -16,6 +16,38 @@ const PRECACHE = [
   '/',
   '/static/style.css',
   '/static/app.js',
+  '/static/js/i18n.js',
+  '/static/i18n/registry.json',
+  '/static/i18n/en.json',
+  '/static/i18n/zh-Hans.json',
+  '/static/i18n/ja.json',
+  '/static/i18n/ko.json',
+  '/static/i18n/es.json',
+  '/static/i18n/hi.json',
+  '/static/i18n/ar.json',
+  '/static/i18n/ru.json',
+  '/static/i18n/pt.json',
+  '/static/i18n/id.json',
+  '/static/i18n/pa-Guru.json',
+  '/static/i18n/bn.json',
+  '/static/i18n/sw.json',
+  '/static/i18n/ur.json',
+  '/static/i18n/fa.json',
+  '/static/manifest.en.json',
+  '/static/manifest.zh-Hans.json',
+  '/static/manifest.ja.json',
+  '/static/manifest.ko.json',
+  '/static/manifest.es.json',
+  '/static/manifest.hi.json',
+  '/static/manifest.ar.json',
+  '/static/manifest.ru.json',
+  '/static/manifest.pt.json',
+  '/static/manifest.id.json',
+  '/static/manifest.pa-Guru.json',
+  '/static/manifest.bn.json',
+  '/static/manifest.sw.json',
+  '/static/manifest.ur.json',
+  '/static/manifest.fa.json',
   '/static/js/storage.js',
   '/static/js/ui.js',
   '/static/js/markdown.js',

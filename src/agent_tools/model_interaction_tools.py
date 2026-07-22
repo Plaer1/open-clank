@@ -78,7 +78,7 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     """
     from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
     from src.llm_core import llm_call_async
-    from src.settings import get_setting
+    from src.settings import get_user_setting
 
     lines = content.strip().split("\n", 1)
     model_spec = lines[0].strip() if lines else "auto"
@@ -88,7 +88,7 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
         return {"error": "No problem description provided"}
 
     if model_spec.lower() in ("auto", ""):
-        model_spec = get_setting("teacher_model", "")
+        model_spec = get_user_setting("teacher_model", owner or "", "")
         if not model_spec:
             return {"error": "No teacher model configured. Specify a model name or set teacher_model in settings."}
 
@@ -134,8 +134,7 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
     db = SessionLocal()
     try:
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        if owner:
-            query = owner_filter(query, ModelEndpoint, owner)
+        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
         endpoints = query.all()
         if not endpoints:
             return {"results": "No enabled model endpoints configured."}

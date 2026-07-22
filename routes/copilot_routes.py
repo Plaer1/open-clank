@@ -55,8 +55,7 @@ def _provision_endpoint(token: str, base: str, owner: Optional[str]) -> Dict:
         ep = (
             db.query(ModelEndpoint)
             .filter(ModelEndpoint.base_url == base)
-            .filter((ModelEndpoint.owner.is_(None)) | (ModelEndpoint.owner == owner))
-            .order_by(ModelEndpoint.owner.desc())
+            .filter(ModelEndpoint.owner == owner)
             .first()
         )
         if ep is None:

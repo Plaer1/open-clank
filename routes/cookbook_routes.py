@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 
-from src.auth_helpers import require_user
+from src.auth_helpers import effective_user, require_user
 from src.constants import COOKBOOK_STATE_FILE
 from pydantic import BaseModel
 
@@ -1456,7 +1456,9 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"models": models, "host": host or "local"}
 
-    def _auto_register_image_endpoint(req: ServeRequest, remote: str | None) -> str | None:
+    def _auto_register_image_endpoint(
+        req: ServeRequest, remote: str | None, owner: str | None
+    ) -> str | None:
         """Register a diffusion model as an image endpoint so it appears in the model selector."""
         import re
         from core.database import SessionLocal, ModelEndpoint
@@ -1481,7 +1483,10 @@ def setup_cookbook_routes() -> APIRouter:
         db = SessionLocal()
         try:
             # Check for existing endpoint with same base_url — update it
-            existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base_url).first()
+            existing = db.query(ModelEndpoint).filter(
+                ModelEndpoint.base_url == base_url,
+                ModelEndpoint.owner == owner,
+            ).first()
             if existing:
                 existing.is_enabled = True
                 existing.model_type = "image"
@@ -1498,6 +1503,7 @@ def setup_cookbook_routes() -> APIRouter:
                 api_key=None,
                 is_enabled=True,
                 model_type="image",
+                owner=owner,
             )
             db.add(ep)
             db.commit()
@@ -1570,6 +1576,7 @@ def setup_cookbook_routes() -> APIRouter:
         remote: str | None,
         ssh_port: str | None,
         is_windows: bool,
+        owner: str | None,
     ) -> None:
         """Drop a freshly-registered endpoint when the cookbook serve dies early.
 
@@ -1643,7 +1650,10 @@ def setup_cookbook_routes() -> APIRouter:
                 from core.database import SessionLocal as _SL, ModelEndpoint as _ME
                 db = _SL()
                 try:
-                    ep = db.query(_ME).filter(_ME.id == endpoint_id).first()
+                    ep = db.query(_ME).filter(
+                        _ME.id == endpoint_id,
+                        _ME.owner == owner,
+                    ).first()
                     if ep:
                         # A scheduled serve can leave old non-zero exit markers
                         # in tmux scrollback while the current OpenAI endpoint is
@@ -1674,7 +1684,9 @@ def setup_cookbook_routes() -> APIRouter:
             return
         logger.debug(f"crash-watchdog: no exit marker for {session_id} within window; leaving endpoint {endpoint_id}")
 
-    def _auto_register_llm_endpoint(req: ServeRequest, remote: str | None) -> str | None:
+    def _auto_register_llm_endpoint(
+        req: ServeRequest, remote: str | None, owner: str | None
+    ) -> str | None:
         """Register a freshly-served LLM as a model endpoint so it appears in the
         model picker without a manual /setup step — the text-model sibling of
         _auto_register_image_endpoint.
@@ -1754,7 +1766,10 @@ def setup_cookbook_routes() -> APIRouter:
         db = SessionLocal()
         try:
             # Reuse an endpoint already pointed at this URL instead of duplicating.
-            existing = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base_url).first()
+            existing = db.query(ModelEndpoint).filter(
+                ModelEndpoint.base_url == base_url,
+                ModelEndpoint.owner == owner,
+            ).first()
             if existing:
                 existing.is_enabled = True
                 existing.model_type = "llm"
@@ -1804,6 +1819,7 @@ def setup_cookbook_routes() -> APIRouter:
                          .filter(ModelEndpoint.name == display_name)
                          .filter(ModelEndpoint.base_url != base_url)
                          .filter(ModelEndpoint.id.like("local-%"))
+                         .filter(ModelEndpoint.owner == owner)
                          .all())
                 for s in stale:
                     logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
@@ -1825,6 +1841,7 @@ def setup_cookbook_routes() -> APIRouter:
                 cached_models=json.dumps(pinned_models) if pinned_models else None,
                 pinned_models=json.dumps(pinned_models) if pinned_models else None,
                 supports_tools=None,
+                owner=owner,
             )
             db.add(ep)
             db.commit()
@@ -1835,6 +1852,7 @@ def setup_cookbook_routes() -> APIRouter:
                      .filter(ModelEndpoint.name == display_name)
                      .filter(ModelEndpoint.id != ep_id)
                      .filter(ModelEndpoint.id.like("local-%"))
+                     .filter(ModelEndpoint.owner == owner)
                      .all())
             for s in stale:
                 logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
@@ -1883,6 +1901,7 @@ def setup_cookbook_routes() -> APIRouter:
         a fake org/name wrapper.
         """
         require_admin(request)
+        endpoint_owner = effective_user(request) or None
         # Defence-in-depth: reject values that could break out of shell contexts.
         validate_remote_host(req.remote_host)
         req.ssh_port = validate_ssh_port(req.ssh_port)
@@ -2585,9 +2604,9 @@ def setup_cookbook_routes() -> APIRouter:
         endpoint_id = None
         is_diffusion = "diffusion_server.py" in req.cmd
         if is_diffusion:
-            endpoint_id = _auto_register_image_endpoint(req, remote)
+            endpoint_id = _auto_register_image_endpoint(req, remote, endpoint_owner)
         elif not is_pip_install:
-            endpoint_id = _auto_register_llm_endpoint(req, remote)
+            endpoint_id = _auto_register_llm_endpoint(req, remote, endpoint_owner)
 
         # Crash watchdog: the auto-register above writes the endpoint row
         # IMMEDIATELY (before the server has even bound its port) so the
@@ -2607,6 +2626,7 @@ def setup_cookbook_routes() -> APIRouter:
                 remote=remote,
                 ssh_port=req.ssh_port,
                 is_windows=is_windows,
+                owner=endpoint_owner,
             ))
 
         # Log to assistant

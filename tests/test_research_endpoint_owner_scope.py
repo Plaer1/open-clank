@@ -4,8 +4,8 @@
 configured, a bare first-enabled fallback) to a `ModelEndpoint` whose *decrypted*
 api_key + base_url then drive the research LLM calls
 (`start_research(llm_endpoint=, llm_headers=)`). Both lookups must be
-owner-scoped — the caller's own rows plus legacy null-owner ("shared") rows —
-so a research-privileged user (or a chat-scoped token) can't bind a research run
+exact-owner scoped, with legacy null-owner rows reserved for unauthenticated
+single-user mode, so a research-privileged user can't bind a research run
 to ANOTHER user's PRIVATE endpoint and silently spend that owner's API key /
 reach whatever internal base_url they configured. Mirrors the
 webhook `_first_enabled_endpoint` (#1045) and session `_owned_endpoint` fixes.
@@ -98,10 +98,9 @@ def test_endpoint_id_returns_callers_own_endpoint():
     assert ep is not None and ep.id == "ep-alice"
 
 
-def test_endpoint_id_allows_legacy_null_owner_shared_row():
+def test_endpoint_id_rejects_legacy_null_owner_row_for_authenticated_user():
     rows = [_ep("ep-shared", None)]
-    ep = _resolve(rows, "alice", "ep-shared")
-    assert ep is not None and ep.id == "ep-shared"
+    assert _resolve(rows, "alice", "ep-shared") is None
 
 
 def test_endpoint_id_skips_disabled_even_when_owned():
@@ -112,10 +111,9 @@ def test_endpoint_id_skips_disabled_even_when_owned():
 # --- bare first-enabled fallback (no endpoint_id, nothing configured) ---------
 
 def test_fallback_never_picks_another_owners_endpoint():
-    # bob's private endpoint is first in the table, alice must never borrow it.
+    # Alice must borrow neither Bob's endpoint nor the legacy ownerless row.
     rows = [_ep("ep-bob", "bob"), _ep("ep-shared", None)]
-    ep = _resolve(rows, "alice")
-    assert ep is not None and ep.id == "ep-shared"
+    assert _resolve(rows, "alice") is None
 
 
 def test_fallback_returns_none_when_only_others_endpoints():
@@ -123,12 +121,13 @@ def test_fallback_returns_none_when_only_others_endpoints():
     assert _resolve(rows, "alice") is None
 
 
-# --- legacy single-user / unresolved owner: owner_filter no-op ---------------
+# --- legacy single-user / unresolved owner: null-owner rows only -------------
 
-def test_null_owner_is_legacy_single_user_noop():
-    rows = [_ep("ep-x", "bob"), _ep("ep-y", "alice")]
-    ep = _resolve(rows, None, "ep-x")
-    assert ep is not None and ep.id == "ep-x"
+def test_null_owner_only_resolves_legacy_null_owner_row():
+    rows = [_ep("ep-x", "bob"), _ep("ep-y", None)]
+    assert _resolve(rows, None, "ep-x") is None
+    ep = _resolve(rows, None, "ep-y")
+    assert ep is not None and ep.id == "ep-y"
 
 
 def test_runtime_resolution_uses_provider_auth_for_chatgpt_subscription(monkeypatch):

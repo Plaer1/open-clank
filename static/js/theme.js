@@ -10,19 +10,19 @@ import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
   'clanker-dark': {
-    bg:'#101727', fg:'#FFF7DD', panel:'#1A2340', border:'#405A96', red:'#4A91FF',
-    advanced: { userBubbleBg:'#293864', aiBubbleBg:'#1A2340', bubbleBorder:'#405A96',
-                sidebarBg:'#141C31', brandColor:'#F5B72F', brandMixTo:'#F75DB6',
-                hamburgerColor:'#FFF7DD', inputBg:'#161F38', inputBorder:'#405A96',
-                sendBtnBg:'#4A91FF', sendBtnHover:'#1E5FDE', codeBg:'#0B1020',
-                codeFg:'#FFF7DD', toggleActive:'#B6E950' },
+    bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5',
+    advanced: { userBubbleBg:'#30333A', aiBubbleBg:'#25272C', bubbleBorder:'#555A62',
+                sidebarBg:'#202227', brandColor:'#F6BE48', brandMixTo:'#ED6AB0',
+                hamburgerColor:'#FFF4D6', inputBg:'#2B2E34', inputBorder:'#555A62',
+                sendBtnBg:'#5A9EF5', sendBtnHover:'#3276D4', codeBg:'#101114',
+                codeFg:'#FFF4D6', toggleActive:'#A8DE53' },
   },
   'clanker-light': {
-    bg:'#F1ECD7', fg:'#17202A', panel:'#FFF9E7', border:'#1E67D6', red:'#1E67D6',
-    advanced: { userBubbleBg:'#DCEAF0', aiBubbleBg:'#FFF9E7', bubbleBorder:'#1E67D6',
-                sidebarBg:'#FFF9E7', brandColor:'#EC635C', brandMixTo:'#D94B9C',
-                hamburgerColor:'#17202A', inputBg:'#FFF9E7', inputBorder:'#1E67D6',
-                sendBtnBg:'#1E67D6', sendBtnHover:'#0E3B7A', codeBg:'#111A27',
+    bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#2469D8',
+    advanced: { userBubbleBg:'#DCEAF0', aiBubbleBg:'#FFF9E7', bubbleBorder:'#26323D',
+                sidebarBg:'#F4B827', brandColor:'#EC635C', brandMixTo:'#D94B9C',
+                hamburgerColor:'#17202A', inputBg:'#FFF9E7', inputBorder:'#26323D',
+                sendBtnBg:'#2469D8', sendBtnHover:'#10489D', codeBg:'#111A27',
                 codeFg:'#FFF9E7', toggleActive:'#4F9F38' },
   },
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
@@ -89,8 +89,8 @@ const THEME_DEFAULT_PATTERN = {
 
 // Default effect colors for specific themes (overrides --fg)
 const THEME_DEFAULT_EFFECT_COLOR = {
-  'clanker-dark':  '#5ABCF5',
-  'clanker-light': '#1E67D6',
+  'clanker-dark':  '#62C7E8',
+  'clanker-light': '#2469D8',
   midnight:   '#ffffff',
   organs:     '#451616',
   cute:       '#ff8cb8',
@@ -99,7 +99,7 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
 const THEME_DEFAULT_INTENSITY = {
-  'clanker-dark':  0.8,
+  'clanker-dark':  0.64,
   'clanker-light': 0.55,
   midnight:   0.5,
   terminal:   0.8,
@@ -224,7 +224,7 @@ const ADV_KEYS = [
   { key: 'aiBubbleBg',         css: '--ai-bubble-bg',      label: 'AI Chat Bubble',   group: 'Chat Bubbles' },
   { key: 'bubbleBorder',       css: '--bubble-border',     label: 'Border Chat Bubble', group: 'Chat Bubbles' },
   { key: 'sidebarBg',          css: '--sidebar-bg',        label: 'Sidebar Bg',       group: 'Sidebar' },
-  { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',    group: 'Sidebar' },
+  { key: 'brandColor',         css: '--brand-color',       label: 'Open Clank Logo',  group: 'Sidebar' },
   { key: 'brandMixTo',         css: '--brand-mix-to',      label: 'Logo Gradient End', group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
@@ -333,7 +333,7 @@ export function applyColors(colors) {
 
 // Per-route SVG shape registry — kept in sync with the inline favicon
 // script in index.html so a theme change keeps the route icon, not the
-// default boat. Returns the inner SVG markup colored with `fg`.
+// default project mark. Returns the inner SVG markup colored with `fg`.
 const _ROUTE_FAVICON_SHAPES = {
   '/calendar':
     "<rect x='4' y='6' width='24' height='22' rx='2' fill='none' stroke='__C__' stroke-width='2.5'/>" +
@@ -376,7 +376,7 @@ function _updateFavicon(fg) {
   if (routeShape) {
     svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
   } else {
-    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 4L16 22L6 22Z' fill='${fg}'/><path d='M16 8L16 22L24 22Z' fill='${fg}' opacity='0.6'/><path d='M4 24Q10 20 16 24Q22 28 28 24' stroke='${fg}' stroke-width='2.5' fill='none' stroke-linecap='round'/></svg>`;
+    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 3 29 27H3Z' fill='none' stroke='${fg}' stroke-width='2' stroke-linejoin='round'/><path d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='${fg}' fill-rule='evenodd' clip-rule='evenodd'/><circle cx='16' cy='17' r='1.2' fill='${fg}'/></svg>`;
   }
   const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
   let link = document.querySelector("link[rel='icon']");
@@ -442,14 +442,30 @@ export function applyUiScale(scale) {
   if (s === '125') document.documentElement.classList.add('ui-scale-125');
 }
 
-const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
+const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-kene-weave',
+  'bg-pattern-clanker-radar', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
 const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
+  'clanker-kene-weave': _initClankerKeneWeave,
+  'clanker-radar': _initClankerRadar,
+  'clanker-gem-drift': _initClankerGemDrift,
   synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
+const _BACKGROUND_CANVAS_SELECTOR = '[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas';
+let _activeBackgroundEffectDispose = null;
+
+function _disposeBackgroundEffect() {
+  const dispose = _activeBackgroundEffectDispose;
+  _activeBackgroundEffectDispose = null;
+  if (dispose) dispose();
+  document.querySelectorAll(_BACKGROUND_CANVAS_SELECTOR).forEach(canvas => {
+    if (typeof canvas.__disposeEffect === 'function') canvas.__disposeEffect();
+    else canvas.remove();
+  });
+}
 
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
@@ -488,8 +504,7 @@ const _STATIC_PATTERNS = new Set(['none', 'dots']);
 export function applyBgPattern(pattern) {
   const p = pattern || 'none';
   document.body.classList.remove(..._BG_CLASSES);
-  // Clean up any canvas backgrounds
-  document.querySelectorAll('#clanker-routefield-canvas, #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
+  _disposeBackgroundEffect();
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
   if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
@@ -512,8 +527,8 @@ export function getSaved() {
   if (obj && obj.name === 'clanker-dark') {
     obj.colors = { ...THEMES['clanker-dark'], advanced: { ...THEMES['clanker-dark'].advanced } };
     if (!obj.bgPattern || obj.bgPattern === 'clanker-sweep') obj.bgPattern = THEME_DEFAULT_PATTERN['clanker-dark'];
-    if (!obj.bgEffectColor || (typeof obj.bgEffectColor === 'string' && obj.bgEffectColor.toUpperCase() === '#78D4F3')) obj.bgEffectColor = THEME_DEFAULT_EFFECT_COLOR['clanker-dark'];
-    if (obj.bgEffectIntensity === undefined || obj.bgEffectIntensity === 0.7) obj.bgEffectIntensity = THEME_DEFAULT_INTENSITY['clanker-dark'];
+    if (!obj.bgEffectColor || (typeof obj.bgEffectColor === 'string' && ['#78D4F3', '#5ABCF5'].includes(obj.bgEffectColor.toUpperCase()))) obj.bgEffectColor = THEME_DEFAULT_EFFECT_COLOR['clanker-dark'];
+    if (obj.bgEffectIntensity === undefined || obj.bgEffectIntensity === 0.7 || obj.bgEffectIntensity === 0.8) obj.bgEffectIntensity = THEME_DEFAULT_INTENSITY['clanker-dark'];
     Storage.setJSON(LS_KEY, obj);
   }
   return obj;
@@ -1603,177 +1618,638 @@ export function closePopup() {
 // Expose for app.js wiring + AI ui_control
 export function getCustomThemes() { return _loadCustomThemes(); }
 
-// Asset-free night operations map: curved routes, instrument nodes, and
-// packets moving between them. The layout is deterministic so it never
-// flickers or jumps when the theme is reapplied.
-function _initClankerRoutefield() {
-  if (document.getElementById('clanker-routefield-canvas')) return;
+function _readClankerEffectConfig() {
+  const styles = getComputedStyle(document.body);
+  const color = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+  const rawIntensity = parseFloat(styles.getPropertyValue('--bg-effect-intensity'));
+  const effectColor = color('--bg-effect-color', color('--fg', '#62C7E8'));
+  const isClanker = document.body.classList.contains('theme-clanker-dark')
+    || document.body.classList.contains('theme-clanker-light');
+  const clankerColors = [
+    effectColor,
+    color('--clanker-gold', '#F6BE48'),
+    color('--clanker-lime', '#A8DE53'),
+    color('--clanker-pink', '#ED6AB0'),
+    color('--clanker-coral', '#FF776E'),
+    color('--clanker-lilac', '#B7A7E8'),
+  ];
+  return {
+    intensity: Number.isFinite(rawIntensity) ? Math.max(0, Math.min(1, rawIntensity)) : 0.64,
+    size: _getEffectSize(),
+    outline: color('--clanker-outline', '#0E0F12'),
+    colors: isClanker ? clankerColors : clankerColors.map(() => effectColor),
+  };
+}
+
+function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
+  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let animationFrame = 0;
+  let animationTime = 0;
+  let previousFrame = 0;
+  let disposed = false;
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    window.cancelAnimationFrame(animationFrame);
+    window.removeEventListener('resize', handleResize);
+    if (motion.removeEventListener) motion.removeEventListener('change', handleMotionChange);
+    else if (motion.removeListener) motion.removeListener(handleMotionChange);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
+    canvas.remove();
+  }
+
+  function frame(time = 0) {
+    if (disposed) return;
+    if (!canvas.isConnected || !document.body.classList.contains(bodyClass)) {
+      dispose();
+      return;
+    }
+    if (document.hidden) {
+      canvas.dataset.motion = 'paused';
+      animationFrame = 0;
+      return;
+    }
+    canvas.dataset.motion = motion.matches ? 'reduced' : 'active';
+    if (!motion.matches && previousFrame) animationTime += Math.min(time - previousFrame, 50);
+    previousFrame = time;
+    paint(motion.matches ? 0 : animationTime, motion.matches);
+    if (!motion.matches) animationFrame = window.requestAnimationFrame(frame);
+  }
+
+  function handleResize() {
+    resize();
+    if (motion.matches) frame(0);
+  }
+
+  function handleMotionChange() {
+    window.cancelAnimationFrame(animationFrame);
+    previousFrame = 0;
+    frame(performance.now());
+  }
+
+  function handleVisibilityChange() {
+    window.cancelAnimationFrame(animationFrame);
+    previousFrame = 0;
+    if (document.hidden) {
+      canvas.dataset.motion = 'paused';
+      animationFrame = 0;
+      return;
+    }
+    frame(performance.now());
+  }
+
+  if (_activeBackgroundEffectDispose) _activeBackgroundEffectDispose();
+  _activeBackgroundEffectDispose = dispose;
+  canvas.dataset.backgroundEffectCanvas = 'true';
+  canvas.__disposeEffect = dispose;
+  window.addEventListener('resize', handleResize);
+  if (motion.addEventListener) motion.addEventListener('change', handleMotionChange);
+  else if (motion.addListener) motion.addListener(handleMotionChange);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  resize();
+  frame(performance.now());
+}
+
+function _mountClankerEffect({ id, bodyClass, build, draw }) {
+  if (document.getElementById(id)) return;
   const canvas = document.createElement('canvas');
-  canvas.id = 'clanker-routefield-canvas';
+  canvas.id = id;
   canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;';
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
 
   const ctx = canvas.getContext('2d');
   if (!ctx) { canvas.remove(); return; }
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  canvas.dataset.motion = motion.matches ? 'reduced' : 'active';
-
-  const anchors = [
-    [0.04, 0.18, 0, 0], [0.16, 0.11, 1, 0], [0.29, 0.23, 0, 1],
-    [0.43, 0.13, 2, 0], [0.58, 0.22, 0, 0], [0.77, 0.12, 3, 1],
-    [0.93, 0.24, 0, 0], [0.08, 0.59, 1, 0], [0.24, 0.46, 0, 1],
-    [0.39, 0.64, 2, 0], [0.54, 0.45, 0, 1], [0.69, 0.62, 3, 0],
-    [0.86, 0.48, 0, 1], [0.96, 0.73, 1, 0], [0.18, 0.86, 3, 1],
-    [0.47, 0.83, 0, 0], [0.73, 0.87, 2, 1],
-  ];
-  const links = [
-    [0, 1, -0.03, 0.02], [1, 2, 0.05, 0.19], [2, 3, -0.08, 0.31],
-    [3, 4, 0.06, 0.43], [4, 5, -0.05, 0.57], [5, 6, 0.04, 0.68],
-    [0, 7, 0.05, 0.81], [2, 8, -0.04, 0.11], [7, 8, 0.06, 0.26],
-    [8, 9, -0.08, 0.39], [3, 10, 0.08, 0.52], [9, 10, 0.05, 0.64],
-    [10, 11, -0.07, 0.76], [5, 12, 0.08, 0.88], [11, 12, 0.04, 0.07],
-    [12, 13, -0.05, 0.22], [7, 14, -0.07, 0.35], [14, 15, 0.08, 0.48],
-    [9, 15, -0.05, 0.61], [15, 16, 0.06, 0.74], [11, 16, -0.08, 0.91],
-  ];
-  const palette = ['#5ABCF5', '#F5B72F', '#B6E950', '#F75DB6'];
   let width = 0;
   let height = 0;
-  let nodes = [];
-  let routes = [];
-  let animationFrame = 0;
-  let previousFrame = 0;
+  let dpr = 1;
+  let scene = null;
+  let sceneKey = '';
 
   function resize() {
     width = window.innerWidth;
     height = window.innerHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.max(1, Math.floor(width * dpr));
     canvas.height = Math.max(1, Math.floor(height * dpr));
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    nodes = anchors.map(([x, y, color, hub]) => ({ x: x * width, y: y * height, color, hub }));
-    const bendScale = Math.min(width, height);
-    routes = links.map(([from, to, bend, phase]) => {
-      const a = nodes[from];
-      const b = nodes[to];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const length = Math.hypot(dx, dy) || 1;
-      return {
-        a, b, phase,
-        color: (from + to) % palette.length,
-        cx: (a.x + b.x) / 2 - (dy / length) * bend * bendScale,
-        cy: (a.y + b.y) / 2 + (dx / length) * bend * bendScale,
-      };
-    });
+    sceneKey = '';
   }
 
-  function pointOnRoute(route, t) {
-    const inv = 1 - t;
-    return {
-      x: inv * inv * route.a.x + 2 * inv * t * route.cx + t * t * route.b.x,
-      y: inv * inv * route.a.y + 2 * inv * t * route.cy + t * t * route.b.y,
-    };
-  }
-
-  function effectIntensity() {
-    const raw = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
-    return Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.8;
-  }
-
-  function draw(time = 0) {
-    if (!canvas.isConnected || document.getElementById('clanker-routefield-canvas') !== canvas
-        || !document.body.classList.contains('bg-pattern-clanker-routefield')) {
-      window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener('resize', resize);
-      canvas.remove();
-      return;
+  function paint(time, reduced) {
+    const config = _readClankerEffectConfig();
+    const nextSceneKey = `${width}:${height}:${config.size}:${config.colors.join(':')}`;
+    if (sceneKey !== nextSceneKey) {
+      scene = build({ width, height, ...config });
+      canvas.__backgroundScene = scene;
+      sceneKey = nextSceneKey;
     }
-    if (!motion.matches && previousFrame && time - previousFrame < 32) {
-      animationFrame = window.requestAnimationFrame(draw);
-      return;
-    }
-    previousFrame = time;
     ctx.clearRect(0, 0, width, height);
+    draw(ctx, { width, height, time, reduced, scene, ...config });
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+  }
 
-    const intensity = effectIntensity();
-    const size = _getEffectSize();
-    const primary = getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim() || palette[0];
-    const colors = [primary, palette[1], palette[2], palette[3]];
+  _runBackgroundCanvas({ canvas, bodyClass, resize, paint });
+}
 
-    // Topographic instrument rings sit around a few routing hubs.
-    for (const node of nodes.filter(item => item.hub)) {
-      const drift = motion.matches ? 0 : Math.sin(time / 1700 + node.x / 240) * 3;
-      for (let ring = 0; ring < 3; ring += 1) {
+function _pointOnQuadratic(route, t) {
+  const inv = 1 - t;
+  return {
+    x: inv * inv * route.a.x + 2 * inv * t * route.cx + t * t * route.b.x,
+    y: inv * inv * route.a.y + 2 * inv * t * route.cy + t * t * route.b.y,
+  };
+}
+
+function _pointOnPolyline(points, progress) {
+  if (!points.length) return { x: 0, y: 0 };
+  const lengths = [];
+  let total = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const length = Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+    lengths.push(length);
+    total += length;
+  }
+  let target = ((progress % 1) + 1) % 1 * total;
+  for (let index = 0; index < lengths.length; index += 1) {
+    if (target <= lengths[index]) {
+      const amount = lengths[index] ? target / lengths[index] : 0;
+      return {
+        x: points[index].x + (points[index + 1].x - points[index].x) * amount,
+        y: points[index].y + (points[index + 1].y - points[index].y) * amount,
+      };
+    }
+    target -= lengths[index];
+  }
+  return points[points.length - 1];
+}
+
+// Stable connected route map. Tracks and nodes stay fixed while packets move.
+function _initClankerRoutefield() {
+  _mountClankerEffect({
+    id: 'clanker-routefield-canvas',
+    bodyClass: 'bg-pattern-clanker-routefield',
+    build: ({ width, height, size }) => {
+      const columns = Math.max(6, Math.ceil(width / (210 * size)) + 1);
+      const rows = Math.max(5, Math.ceil(height / (165 * size)) + 1);
+      const gapX = width / (columns - 1);
+      const gapY = height / (rows - 1);
+      const nodes = [];
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const seed = row * 97 + column * 29;
+          const baseX = column * gapX;
+          const baseY = row * gapY;
+          nodes.push({
+            x: column === 0 ? 12 : column === columns - 1 ? width - 12 : baseX + (_clankerNoise(seed) - .5) * gapX * .38,
+            y: row === 0 ? 12 : row === rows - 1 ? height - 12 : baseY + (_clankerNoise(seed + 13) - .5) * gapY * .34,
+            color: (row * 2 + column) % 6,
+            hub: (row + column * 2) % 6 === 0,
+          });
+        }
+      }
+      const routes = [];
+      const nodeAt = (row, column) => nodes[row * columns + column];
+      const connect = (a, b, seed) => {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const length = Math.hypot(dx, dy) || 1;
+        const bend = (_clankerNoise(seed) - .5) * Math.min(gapX, gapY) * .7;
+        routes.push({
+          a, b,
+          phase: _clankerNoise(seed + 41),
+          color: (a.color + b.color + seed) % 6,
+          cx: (a.x + b.x) / 2 - (dy / length) * bend,
+          cy: (a.y + b.y) / 2 + (dx / length) * bend,
+        });
+      };
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const seed = row * 101 + column * 17;
+          if (column < columns - 1) connect(nodeAt(row, column), nodeAt(row, column + 1), seed);
+          if (row < rows - 1 && (row + column) % 2 === 0) connect(nodeAt(row, column), nodeAt(row + 1, column), seed + 7);
+          if (row < rows - 1 && column < columns - 1 && (row * 3 + column) % 5 === 0) {
+            connect(nodeAt(row, column), nodeAt(row + 1, column + 1), seed + 19);
+          }
+        }
+      }
+      return { nodes, hubs: nodes.filter(node => node.hub), routes };
+    },
+    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+      for (const node of scene.hubs) {
+        ctx.save();
+        ctx.translate(node.x, node.y);
+        ctx.rotate(-.28);
+        ctx.fillStyle = outline;
+        ctx.globalAlpha = intensity * .72;
+        ctx.fillRect(-18 * size, -6 * size, 36 * size, 12 * size);
+        for (let segment = 0; segment < 3; segment += 1) {
+          ctx.fillStyle = colors[(node.color + segment) % colors.length];
+          ctx.globalAlpha = intensity * (.5 + segment * .1);
+          ctx.fillRect((-15 + segment * 11) * size, -3 * size, 8 * size, 6 * size);
+        }
+        ctx.restore();
+      }
+      for (const route of scene.routes) {
         ctx.beginPath();
-        ctx.ellipse(node.x, node.y, (28 + ring * 17 + drift) * size, (18 + ring * 11 + drift * 0.5) * size, -0.28, 0, Math.PI * 2);
-        ctx.strokeStyle = colors[node.color];
-        ctx.lineWidth = 1;
-        ctx.globalAlpha = intensity * (0.1 - ring * 0.018);
+        ctx.moveTo(route.a.x, route.a.y);
+        ctx.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
+        ctx.setLineDash([]);
+        ctx.strokeStyle = outline;
+        ctx.lineWidth = 4 * size;
+        ctx.globalAlpha = intensity * .62;
+        ctx.stroke();
+        ctx.strokeStyle = colors[route.color];
+        ctx.lineWidth = 1.1 * size;
+        ctx.globalAlpha = intensity * .22;
+        ctx.stroke();
+        ctx.setLineDash([3 * size, 12 * size]);
+        ctx.lineDashOffset = 0;
+        ctx.strokeStyle = colors[route.color];
+        ctx.lineWidth = 1.55 * size;
+        ctx.globalAlpha = intensity * .64;
         ctx.stroke();
       }
-    }
-
-    // Give each route a dark keyline, then a colored broken instrument line.
-    for (const route of routes) {
-      ctx.beginPath();
-      ctx.moveTo(route.a.x, route.a.y);
-      ctx.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
       ctx.setLineDash([]);
-      ctx.strokeStyle = '#070B15';
-      ctx.lineWidth = 3 * size;
-      ctx.globalAlpha = intensity * 0.38;
-      ctx.stroke();
+      for (const node of scene.nodes) {
+        const radius = (node.hub ? 5 : 3.5) * size;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius + 2 * size, 0, Math.PI * 2);
+        ctx.fillStyle = outline;
+        ctx.globalAlpha = intensity * 0.82;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = colors[node.color];
+        ctx.globalAlpha = intensity * (node.hub ? 0.88 : 0.62);
+        ctx.fill();
+      }
+      scene.routes.forEach((route, index) => {
+        if (index % 4) return;
+        const progress = (time / (11200 + (index % 5) * 760) + route.phase) % 1;
+        const point = _pointOnQuadratic(route, progress);
+        const radius = (index % 4 === 0 ? 3.4 : 2.6) * size;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius + 1.5 * size, 0, Math.PI * 2);
+        ctx.fillStyle = outline;
+        ctx.globalAlpha = intensity * 0.88;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = colors[route.color];
+        ctx.globalAlpha = intensity;
+        ctx.fill();
+      });
+    },
+  });
+}
 
-      ctx.setLineDash([5 * size, 10 * size]);
-      ctx.lineDashOffset = motion.matches ? 0 : -time / 90;
-      ctx.strokeStyle = colors[route.color];
-      ctx.lineWidth = 1.2 * size;
-      ctx.globalAlpha = intensity * 0.32;
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
+// Original signal weave informed by the interconnected symmetry and pathway
+// quality of Shipibo-Konibo kene. It deliberately avoids reproducing a
+// traditional motif or claiming cultural meaning.
+function _initClankerKeneWeave() {
+  const snakeSeed = Math.random() * 10000;
+  const upper = [
+    [0, .5], [.09, .5], [.09, .28], [.22, .28], [.22, .1], [.4, .1], [.4, .36], [.5, .36],
+    [.5, .5], [.5, .64], [.6, .64], [.6, .9], [.78, .9], [.78, .72], [.91, .72], [.91, .5], [1, .5],
+  ];
+  const lower = upper.map(([x, y]) => [x, 1 - y]);
+  const outer = [...upper, ...lower.slice(0, -1).reverse()];
+  _mountClankerEffect({
+    id: 'clanker-kene-weave-canvas',
+    bodyClass: 'bg-pattern-clanker-kene-weave',
+    build: ({ width, height, size }) => {
+      const columns = Math.max(4, Math.ceil(width / (220 * size)));
+      const rows = Math.max(4, Math.ceil(height / (220 * size)));
+      const tileWidth = width / columns;
+      const tileHeight = height / rows;
+      const paths = [];
+      const junctions = [];
+      const place = (points, column, row) => points.map(([x, y]) => ({
+        x: (column + x) * tileWidth,
+        y: (row + y) * tileHeight,
+      }));
+      const placeRotated = (points, centerX, centerY) => points.map(([x, y]) => ({
+        x: centerX - (y - .5) * tileWidth,
+        y: centerY + (x - .5) * tileHeight,
+      }));
+      const addMotif = (transform, color, layer, pair) => {
+        paths.push({ points: transform(upper), color, layer, pair, mirror: 0 });
+        paths.push({ points: transform(lower), color: (color + 2) % 6, layer, pair, mirror: 1 });
+      };
 
-    // Flat, toy-like routing nodes with a near-black outer keyline.
-    for (const node of nodes) {
-      const radius = (node.hub ? 5 : 3.5) * size;
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, radius + 2 * size, 0, Math.PI * 2);
-      ctx.fillStyle = '#070B15';
-      ctx.globalAlpha = intensity * 0.72;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = colors[node.color];
-      ctx.globalAlpha = intensity * (node.hub ? 0.8 : 0.55);
-      ctx.fill();
-    }
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const color = (row * 2 + column) % 6;
+          addMotif(points => place(points, column, row), color, 0, `h:${row}:${column}`);
+        }
+      }
 
-    // Small diamond packets travel along the routes at staggered speeds.
-    routes.forEach((route, index) => {
-      const progress = motion.matches ? route.phase : (time / (6200 + (index % 4) * 650) + route.phase) % 1;
-      const point = pointOnRoute(route, progress);
-      const packet = (index % 3 === 0 ? 4.5 : 3.2) * size;
-      ctx.save();
-      ctx.translate(point.x, point.y);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = colors[route.color];
-      ctx.globalAlpha = intensity * 0.92;
-      ctx.fillRect(-packet / 2, -packet / 2, packet, packet);
-      ctx.restore();
-    });
-    ctx.globalAlpha = 1;
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column <= columns; column += 1) {
+          const junction = {
+            x: column * tileWidth,
+            y: (row + .5) * tileHeight,
+            color: (row * 2 + column) % 6,
+          };
+          junctions.push(junction);
+          addMotif(
+            points => placeRotated(points, junction.x, junction.y),
+            (junction.color + 3) % 6,
+            1,
+            `v:${row}:${column}`,
+          );
+        }
+      }
 
-    if (!motion.matches) animationFrame = window.requestAnimationFrame(draw);
-  }
+      const graph = new Map();
+      const pointKey = point => `${point.x.toFixed(3)}:${point.y.toFixed(3)}`;
+      const graphPoint = point => {
+        const key = pointKey(point);
+        if (!graph.has(key)) graph.set(key, { x: point.x, y: point.y, key, neighbors: new Map() });
+        return graph.get(key);
+      };
+      for (const path of paths) {
+        for (let index = 1; index < path.points.length; index += 1) {
+          const a = graphPoint(path.points[index - 1]);
+          const b = graphPoint(path.points[index]);
+          a.neighbors.set(b.key, b);
+          b.neighbors.set(a.key, a);
+        }
+      }
 
-  resize();
-  if (!motion.matches) window.addEventListener('resize', resize);
-  draw();
+      const junctionNodes = junctions.map(junction => graph.get(pointKey(junction))).filter(Boolean);
+      const randomWalk = seed => {
+        let current = junctionNodes[Math.floor(_clankerNoise(seed) * junctionNodes.length)];
+        let previous = null;
+        const points = [{ x: current.x, y: current.y }];
+        for (let step = 0; step < 120; step += 1) {
+          let candidates = [...current.neighbors.values()].filter(node => node !== previous);
+          if (!candidates.length) candidates = [...current.neighbors.values()];
+          const choice = Math.floor(_clankerNoise(seed + step * 37 + current.x * .013 + current.y * .017) * candidates.length);
+          const next = candidates[Math.min(choice, candidates.length - 1)];
+          if (!next) break;
+          points.push({ x: next.x, y: next.y });
+          previous = current;
+          current = next;
+        }
+        return points;
+      };
+      const snakePoints = Array.from({ length: 36 }, (_, index) => randomWalk(snakeSeed + index * 113));
+      const maxSnakeStep = snakePoints.reduce((maximum, route) => Math.max(maximum,
+        ...route.slice(1).map((point, index) => Math.hypot(point.x - route[index].x, point.y - route[index].y))), 0);
+      return { paths, junctions, snakePoints, maxSnakeStep: maxSnakeStep, snakeSeed,
+        layerVectors: [{ x: 1, y: 0 }, { x: 0, y: 1 }], mirroredPairs: paths.length / 2,
+        junctionOffsetError: junctionNodes.length === junctions.length ? 0 : Infinity };
+    },
+    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      scene.paths.forEach(path => {
+        ctx.beginPath();
+        path.points.forEach((point, pointIndex) => pointIndex ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
+        ctx.strokeStyle = outline;
+        ctx.lineWidth = 3.4 * size;
+        ctx.globalAlpha = intensity * (path.layer ? .2 : .24);
+        ctx.stroke();
+        ctx.strokeStyle = colors[path.color];
+        ctx.lineWidth = 7 * size;
+        ctx.globalAlpha = intensity * .025;
+        ctx.stroke();
+        ctx.strokeStyle = colors[path.color];
+        ctx.lineWidth = 1.2 * size;
+        ctx.globalAlpha = intensity * (path.layer ? .3 : .36);
+        ctx.stroke();
+      });
+      scene.junctions.forEach(junction => {
+        ctx.fillStyle = colors[junction.color];
+        ctx.globalAlpha = intensity * .06;
+        ctx.beginPath();
+        ctx.arc(junction.x, junction.y, 7 * size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = intensity * .7;
+        ctx.beginPath();
+        ctx.arc(junction.x, junction.y, 1.8 * size, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      for (let signalIndex = 0; signalIndex < 7; signalIndex += 1) {
+        const duration = 16000 + signalIndex * 2300;
+        const phase = time / duration + signalIndex * .31;
+        const cycle = Math.floor(phase);
+        const progress = phase - cycle;
+        const random = scene.snakeSeed + signalIndex * 131 + cycle * 47;
+        const route = scene.snakePoints[Math.floor(_clankerNoise(random) * scene.snakePoints.length)];
+        const reverse = _clankerNoise(random + 17) > .5;
+        const headProgress = reverse ? 1 - progress : progress;
+        const fade = Math.min(1, progress * 7, (1 - progress) * 7);
+        const tail = [];
+        for (let step = 64; step >= 0; step -= 1) {
+          const pointProgress = headProgress + (reverse ? step : -step) * .0024;
+          if (pointProgress >= 0 && pointProgress <= 1) tail.push(_pointOnPolyline(route, pointProgress));
+        }
+        if (tail.length < 2) continue;
+        const signalColor = colors[Math.floor(_clankerNoise(random + 31) * colors.length)];
+        for (const [strokeStyle, lineWidth, alpha] of [
+          [outline, 7.5 * size, .72],
+          [signalColor, 3 * size, 1],
+        ]) {
+          ctx.strokeStyle = strokeStyle;
+          ctx.lineWidth = lineWidth;
+          ctx.shadowColor = signalColor;
+          ctx.shadowBlur = strokeStyle === outline ? 0 : 18 * size;
+          for (let index = 1; index < tail.length; index += 1) {
+            const tailFade = Math.pow(index / (tail.length - 1), 2.25);
+            ctx.beginPath();
+            ctx.moveTo(tail[index - 1].x, tail[index - 1].y);
+            ctx.lineTo(tail[index].x, tail[index].y);
+            ctx.globalAlpha = intensity * alpha * fade * tailFade;
+            ctx.stroke();
+          }
+        }
+        ctx.shadowBlur = 0;
+        const head = tail[tail.length - 1];
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 3.8 * size, 0, Math.PI * 2);
+        ctx.fillStyle = signalColor;
+        ctx.globalAlpha = intensity * fade;
+        ctx.shadowColor = signalColor;
+        ctx.shadowBlur = 18 * size;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    },
+  });
+}
+
+function _initClankerRadar() {
+  _mountClankerEffect({
+    id: 'clanker-radar-canvas',
+    bodyClass: 'bg-pattern-clanker-radar',
+    build: ({ width, height }) => {
+      const base = Math.min(width, height);
+      return { centers: [
+        { x: width * -.01, y: height * .2, radius: base * .18, color: 4, phase: .08 },
+        { x: width * .25, y: height * .3, radius: base * .17, color: 2, phase: .31 },
+        { x: width * .55, y: height * .18, radius: base * .15, color: 0, phase: .52 },
+        { x: width * .84, y: height * .34, radius: base * .21, color: 3, phase: .74 },
+        { x: width * .16, y: height * .73, radius: base * .19, color: 1, phase: .93 },
+        { x: width * .52, y: height * .72, radius: base * .18, color: 5, phase: .43 },
+        { x: width * .88, y: height * .83, radius: base * .17, color: 4, phase: .19 },
+      ] };
+    },
+    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+      scene.centers.forEach((center, centerIndex) => {
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, center.radius, 0, Math.PI * 2);
+        ctx.fillStyle = colors[center.color];
+        ctx.globalAlpha = intensity * .025;
+        ctx.fill();
+
+        for (let ring = 1; ring <= 5; ring += 1) {
+          const radius = center.radius * ring / 5;
+          ctx.beginPath();
+          ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+          ctx.strokeStyle = ring === 5 ? outline : colors[(center.color + ring) % colors.length];
+          ctx.lineWidth = (ring === 5 ? 2.8 : 1.1) * size;
+          ctx.globalAlpha = intensity * (ring === 5 ? .5 : .22);
+          ctx.stroke();
+
+          const direction = ring % 2 ? 1 : -.55;
+          const arcStart = center.phase * Math.PI * 2 + ring * 1.37 + time / (11500 + centerIndex * 740) * direction;
+          ctx.beginPath();
+          ctx.arc(center.x, center.y, radius, arcStart, arcStart + .34 + ring * .12);
+          ctx.strokeStyle = colors[(center.color + ring + 1) % colors.length];
+          ctx.lineWidth = (ring % 3 === 0 ? 4 : 2.2) * size;
+          ctx.globalAlpha = intensity * .7;
+          ctx.stroke();
+        }
+
+        for (let tick = 0; tick < 12; tick += 1) {
+          const angle = tick / 12 * Math.PI * 2 + center.phase;
+          const inner = center.radius * (tick % 3 === 0 ? .89 : .94);
+          ctx.beginPath();
+          ctx.moveTo(center.x + Math.cos(angle) * inner, center.y + Math.sin(angle) * inner);
+          ctx.lineTo(center.x + Math.cos(angle) * center.radius, center.y + Math.sin(angle) * center.radius);
+          ctx.strokeStyle = colors[(center.color + tick) % colors.length];
+          ctx.lineWidth = (tick % 3 === 0 ? 2 : 1) * size;
+          ctx.globalAlpha = intensity * .55;
+          ctx.stroke();
+        }
+
+        const angle = center.phase * Math.PI * 2 + time / (13800 + centerIndex * 920);
+        ctx.beginPath();
+        ctx.moveTo(center.x, center.y);
+        ctx.arc(center.x, center.y, center.radius * .96, angle - .28, angle);
+        ctx.closePath();
+        ctx.fillStyle = colors[center.color];
+        ctx.globalAlpha = intensity * .055;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(center.x, center.y);
+        ctx.lineTo(center.x + Math.cos(angle) * center.radius * .96, center.y + Math.sin(angle) * center.radius * .96);
+        ctx.strokeStyle = colors[center.color];
+        ctx.lineWidth = 2.4 * size;
+        ctx.globalAlpha = intensity * .58;
+        ctx.stroke();
+
+        for (let blip = 0; blip < 3; blip += 1) {
+          const blipAngle = center.phase * 9 + blip * 2.31;
+          const blipRadius = center.radius * (.28 + blip * .24);
+          const pulse = 1 + Math.sin(time / 1250 + blipAngle) * .24;
+          const x = center.x + Math.cos(blipAngle) * blipRadius;
+          const y = center.y + Math.sin(blipAngle) * blipRadius;
+          ctx.beginPath();
+          ctx.arc(x, y, (2.4 + blip) * pulse * size, 0, Math.PI * 2);
+          ctx.fillStyle = colors[(center.color + blip + 2) % colors.length];
+          ctx.globalAlpha = intensity * .82;
+          ctx.fill();
+        }
+
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, 4.4 * size, 0, Math.PI * 2);
+        ctx.fillStyle = colors[center.color];
+        ctx.globalAlpha = intensity;
+        ctx.fill();
+      });
+    },
+  });
+}
+
+function _clankerNoise(seed) {
+  const value = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function _initClankerGemDrift() {
+  _mountClankerEffect({
+    id: 'clanker-gem-drift-canvas',
+    bodyClass: 'bg-pattern-clanker-gem-drift',
+    build: ({ width, height, size }) => {
+      const count = Math.max(140, Math.ceil(width * height / 5600));
+      return { shards: Array.from({ length: count }, (_, index) => {
+        const seed = index * 47 + 11;
+        return {
+          x: _clankerNoise(seed) * width,
+          y: _clankerNoise(seed + 5) * height,
+          radius: (4 + _clankerNoise(seed + 9) * 10) * size,
+          stretch: .7 + _clankerNoise(seed + 13) * .55,
+          rotation: _clankerNoise(seed + 17) * Math.PI * 2,
+          color: index % 6,
+          shape: index % 4,
+          phase: _clankerNoise(seed + 23) * Math.PI * 2,
+          drift: (3 + _clankerNoise(seed + 29) * 9) * size,
+          bright: index % 9 === 0,
+        };
+      }) };
+    },
+    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      scene.shards.forEach((shard, index) => {
+        const driftX = Math.sin(time / (5900 + index % 7 * 340) + shard.phase) * shard.drift;
+        const driftY = Math.cos(time / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72;
+        const radius = shard.radius;
+        ctx.save();
+        ctx.translate(shard.x + driftX, shard.y + driftY);
+        ctx.rotate(shard.rotation + Math.sin(time / 8400 + shard.phase) * .12);
+        ctx.scale(shard.stretch, 1);
+        ctx.beginPath();
+        if (shard.shape === 0) {
+          ctx.moveTo(0, -radius); ctx.lineTo(radius * .8, 0); ctx.lineTo(0, radius); ctx.lineTo(-radius * .8, 0);
+        } else if (shard.shape === 1) {
+          ctx.moveTo(-radius * .78, -radius * .35); ctx.lineTo(-radius * .18, -radius); ctx.lineTo(radius * .82, -radius * .42); ctx.lineTo(radius * .58, radius * .72); ctx.lineTo(-radius * .55, radius * .9);
+        } else if (shard.shape === 2) {
+          ctx.moveTo(0, -radius); ctx.lineTo(radius * .9, radius * .7); ctx.lineTo(-radius * .9, radius * .7);
+        } else {
+          ctx.moveTo(-radius * .72, -radius * .58); ctx.lineTo(radius * .42, -radius * .88); ctx.lineTo(radius, 0); ctx.lineTo(radius * .35, radius * .86); ctx.lineTo(-radius * .82, radius * .52);
+        }
+        ctx.closePath();
+        ctx.fillStyle = colors[shard.color];
+        ctx.strokeStyle = outline;
+        ctx.lineWidth = (shard.bright ? 2 : 1.4) * size;
+        ctx.globalAlpha = intensity * (shard.bright ? .62 : .22);
+        if (shard.bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 9 * size; }
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = intensity * (shard.bright ? .8 : .34);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, -radius * .7); ctx.lineTo(0, 0); ctx.lineTo(radius * .5, radius * .34);
+        ctx.strokeStyle = colors[(shard.color + 2) % colors.length];
+        ctx.lineWidth = .9 * size;
+        ctx.globalAlpha = intensity * (shard.bright ? .58 : .26);
+        ctx.stroke();
+        ctx.restore();
+      });
+    },
+  });
 }
 
 // ── Synapse background effect ──
-// Uses the CSS grid pattern as base, overlays fast-moving small light pulses on grid lines
+// Stable organic signal mesh with a few bounded pulses.
 function _initSynapse() {
   if (document.getElementById('synapse-canvas')) return;
   const canvas = document.createElement('canvas');
@@ -1785,88 +2261,85 @@ function _initSynapse() {
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const GRID = 24; // matches CSS grid size
-  const MAX_PULSES = 20;
-  const SPEED_MIN = 2;
-  const SPEED_MAX = 22;
-  const TRAIL_LEN = 12; // pixels of trailing glow
+  const GRID = 92;
+  const MAX_PULSES = 18;
+  const TRAIL_LEN = 42;
 
-  let W, H, cols, rows, pulses = [];
+  let W, H, cols, rows, pulses = [], neurons = [], edges = [];
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     cols = Math.ceil(W / GRID); rows = Math.ceil(H / GRID);
+    neurons = Array.from({ length: Math.max(48, Math.ceil(W * H / 18000)) }, (_, index) => {
+      const seed = index * 31 + 7;
+      return { x:_clankerNoise(seed) * W, y:_clankerNoise(seed + 5) * H, color:index % 6,
+        radius:1.2 + _clankerNoise(seed + 11) * 2.2, phase:_clankerNoise(seed + 17) * Math.PI * 2 };
+    });
+    edges = [];
+    neurons.forEach((node, index) => {
+      const nearby = neurons.slice(index + 1).map(other => ({ other, distance:Math.hypot(node.x - other.x, node.y - other.y) }))
+        .filter(item => item.distance < GRID * 1.7).sort((a, b) => a.distance - b.distance).slice(0, 2);
+      nearby.forEach(item => edges.push({ a:node, b:item.other, color:(index + edges.length) % 6 }));
+    });
+    pulses = [];
+    for (let index = 0; index < MAX_PULSES; index += 1) {
+      spawnPulse(index);
+    }
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
 
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
-  }
-
-  function spawnPulse() {
-    const speed = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN);
-    if (Math.random() > 0.5) {
-      // Horizontal — pick a grid row
-      const row = Math.floor(Math.random() * (rows + 1));
-      pulses.push({ x: -TRAIL_LEN, y: row * GRID, dx: speed, dy: 0 });
+  function spawnPulse(index) {
+    const seed = index * 43 + 19;
+    const speed = .025 + _clankerNoise(seed + 3) * .035;
+    if (_clankerNoise(seed + 7) > .5) {
+      const row = Math.floor(_clankerNoise(seed + 11) * (rows + 1));
+      pulses.push({ horizontal:true, anchor:row * GRID, speed, phase:_clankerNoise(seed + 13), color:index % 6 });
     } else {
-      // Vertical — pick a grid column
-      const col = Math.floor(Math.random() * (cols + 1));
-      pulses.push({ x: col * GRID, y: -TRAIL_LEN, dx: 0, dy: speed });
+      const col = Math.floor(_clankerNoise(seed + 11) * (cols + 1));
+      pulses.push({ horizontal:false, anchor:col * GRID, speed, phase:_clankerNoise(seed + 13), color:index % 6 });
     }
   }
 
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-synapse')) {
-      window.removeEventListener('resize', _onResize);
-      canvas.remove();
-      return;
-    }
-    requestAnimationFrame(draw);
+  function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const c = getColor();
-
-    // Spawn
-    if (pulses.length < MAX_PULSES && Math.random() < 0.12) spawnPulse();
-
-    // Draw pulses as small bright dots with a short trail
-    for (let i = pulses.length - 1; i >= 0; i--) {
-      const p = pulses[i];
-      p.x += p.dx; p.y += p.dy;
-
-      // Off screen — remove
-      if (p.x > W + TRAIL_LEN || p.y > H + TRAIL_LEN) { pulses.splice(i, 1); continue; }
-
-      // Trail (line gradient fading behind the dot)
-      const tx = p.x - (p.dx > 0 ? TRAIL_LEN : 0);
-      const ty = p.y - (p.dy > 0 ? TRAIL_LEN : 0);
-      const grad = ctx.createLinearGradient(tx, ty, p.x, p.y);
+    const { colors, intensity, size } = _readClankerEffectConfig();
+    edges.forEach(edge => {
+      ctx.beginPath(); ctx.moveTo(edge.a.x, edge.a.y); ctx.lineTo(edge.b.x, edge.b.y);
+      ctx.strokeStyle = colors[edge.color]; ctx.lineWidth = .7 * size; ctx.globalAlpha = intensity * .12; ctx.stroke();
+    });
+    neurons.forEach(node => {
+      const pulse = .72 + Math.sin(time / 2600 + node.phase) * .18;
+      ctx.beginPath(); ctx.arc(node.x, node.y, node.radius * size * pulse, 0, Math.PI * 2);
+      ctx.fillStyle = colors[node.color]; ctx.globalAlpha = intensity * .34; ctx.fill();
+    });
+    pulses.forEach(p => {
+      const span = (p.horizontal ? W : H) + TRAIL_LEN * 2;
+      const head = (time * p.speed + p.phase * span) % span - TRAIL_LEN;
+      const x = p.horizontal ? head : p.anchor;
+      const y = p.horizontal ? p.anchor : head;
+      const tx = x - (p.horizontal ? TRAIL_LEN : 0);
+      const ty = y - (p.horizontal ? 0 : TRAIL_LEN);
+      const grad = ctx.createLinearGradient(tx, ty, x, y);
       grad.addColorStop(0, 'transparent');
-      grad.addColorStop(1, c);
+      grad.addColorStop(1, colors[p.color]);
       ctx.strokeStyle = grad;
-      ctx.globalAlpha = 0.35;
-      ctx.lineWidth = 1;
+      ctx.globalAlpha = intensity * .56;
+      ctx.lineWidth = 1.4 * size;
       ctx.beginPath();
       ctx.moveTo(tx, ty);
-      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(x, y);
       ctx.stroke();
-
-      // Bright dot at head
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = c;
+      ctx.globalAlpha = intensity * .9;
+      ctx.fillStyle = colors[p.color];
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 1.2, 0, Math.PI * 2);
+      ctx.arc(x, y, 2 * size, 0, Math.PI * 2);
       ctx.fill();
-    }
+    });
 
     ctx.globalAlpha = 1;
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-synapse', resize, paint: draw });
 }
 
 // ── Rain — thin vertical streaks falling ──
@@ -1882,66 +2355,42 @@ function _initRain() {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
-  const drops = [];
+  let drops = [];
   const MAX_DROPS = 130;
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
+    drops = Array.from({ length: MAX_DROPS }, (_, index) => {
+      const seed = index * 37 + 5;
+      return { x:_clankerNoise(seed) * W, len:20 + _clankerNoise(seed + 3) * 52,
+        speed:.035 + _clankerNoise(seed + 7) * .07, phase:_clankerNoise(seed + 11),
+        alpha:.15 + _clankerNoise(seed + 17) * .24, color:index % 6 };
+    });
   }
 
-  function spawn() {
-    const len = 20 + Math.random() * 40;
-    const speed = 4 + Math.random() * 8;
-    drops.push({ x: Math.random() * W, y: -len, len, speed, alpha: 0.32 + Math.random() * 0.28 });
-  }
-
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-rain')) {
-      window.removeEventListener('resize', _onResize);
-      canvas.remove();
-      return;
-    }
-    requestAnimationFrame(draw);
+  function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const c = getColor();
-    // Intensity also controls rain speed + spawn rate (feels slower/lighter when dim)
-    const intenCss = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
-    const inten = isNaN(intenCss) ? 1 : intenCss;
-    const speedMult = 0.35 + inten * 0.65;
-    const sizeMult = _getEffectSize();
-
-    if (drops.length < MAX_DROPS * inten && Math.random() < 0.6 * inten) spawn();
-
-    for (let i = drops.length - 1; i >= 0; i--) {
-      const d = drops[i];
-      d.y += d.speed * speedMult;
-      if (d.y > H + d.len * sizeMult) { drops.splice(i, 1); continue; }
-
-      const effLen = d.len * sizeMult;
-      const grad = ctx.createLinearGradient(d.x, d.y - effLen, d.x, d.y);
+    const { colors, intensity, size } = _readClankerEffectConfig();
+    drops.forEach(d => {
+      const effLen = d.len * size;
+      const span = H + effLen * 2;
+      const y = ((d.phase + time / 1000 * d.speed) % 1) * span - effLen;
+      const grad = ctx.createLinearGradient(d.x, y - effLen, d.x, y);
       grad.addColorStop(0, 'transparent');
-      grad.addColorStop(1, c);
+      grad.addColorStop(1, colors[d.color]);
       ctx.strokeStyle = grad;
-      ctx.globalAlpha = d.alpha;
-      ctx.lineWidth = 1.3 * Math.min(2, Math.max(0.6, sizeMult));
+      ctx.globalAlpha = intensity * d.alpha;
+      ctx.lineWidth = 1.2 * Math.min(2, Math.max(.6, size));
       ctx.beginPath();
-      ctx.moveTo(d.x, d.y - effLen);
-      ctx.lineTo(d.x, d.y);
+      ctx.moveTo(d.x, y - effLen);
+      ctx.lineTo(d.x, y);
       ctx.stroke();
-    }
+    });
     ctx.globalAlpha = 1;
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-rain', resize, paint: draw });
 }
 
 // ── Constellations — static dots that slowly form/dissolve connecting lines ──
@@ -1957,8 +2406,8 @@ function _initConstellations() {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
-  const STAR_COUNT = 50;
-  const CONNECT_DIST = 120;
+  const STAR_COUNT = 88;
+  const CONNECT_DIST = 148;
   let stars = [];
 
   function resize() {
@@ -1971,74 +2420,58 @@ function _initConstellations() {
   function initStars() {
     stars = [];
     for (let i = 0; i < STAR_COUNT; i++) {
+      const seed = i * 41 + 3;
       stars.push({
-        x: Math.random() * W, y: Math.random() * H,
-        vx: (Math.random() - 0.5) * 0.15,
-        vy: (Math.random() - 0.5) * 0.15,
-        r: 0.8 + Math.random() * 0.8,
-        phase: Math.random() * Math.PI * 2,
+        x: _clankerNoise(seed) * W, y: _clankerNoise(seed + 5) * H,
+        driftX: 2 + _clankerNoise(seed + 7) * 8,
+        driftY: 2 + _clankerNoise(seed + 11) * 8,
+        r: .8 + _clankerNoise(seed + 13) * 1.8,
+        phase: _clankerNoise(seed + 17) * Math.PI * 2,
+        color: i % 6,
       });
     }
   }
 
-  resize();
-  const _onResize = () => { resize(); initStars(); };
-  window.addEventListener('resize', _onResize);
-
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2';
-  }
-
-  let t = 0;
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-constellations')) {
-      window.removeEventListener('resize', _onResize);
-      canvas.remove();
-      return;
-    }
-    requestAnimationFrame(draw);
-    t += 0.01;
+  function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const c = getColor();
+    const { colors, intensity, size } = _readClankerEffectConfig();
+    const points = stars.map(star => ({ ...star,
+      drawX: star.x + Math.sin(time / 8500 + star.phase) * star.driftX,
+      drawY: star.y + Math.cos(time / 9800 + star.phase) * star.driftY }));
 
-    // Move stars gently
-    for (const s of stars) {
-      s.x += s.vx; s.y += s.vy;
-      if (s.x < 0) s.x = W; if (s.x > W) s.x = 0;
-      if (s.y < 0) s.y = H; if (s.y > H) s.y = 0;
-    }
-
-    // Draw connections
-    ctx.strokeStyle = c;
-    ctx.lineWidth = 0.5;
-    for (let i = 0; i < stars.length; i++) {
-      for (let j = i + 1; j < stars.length; j++) {
-        const dx = stars[i].x - stars[j].x;
-        const dy = stars[i].y - stars[j].y;
+    ctx.lineWidth = .6 * size;
+    for (let i = 0; i < points.length; i++) {
+      for (let j = i + 1; j < points.length; j++) {
+        const dx = points[i].drawX - points[j].drawX;
+        const dy = points[i].drawY - points[j].drawY;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < CONNECT_DIST) {
-          ctx.globalAlpha = (1 - dist / CONNECT_DIST) * 0.15;
+          ctx.strokeStyle = colors[(points[i].color + points[j].color) % colors.length];
+          ctx.globalAlpha = intensity * (1 - dist / CONNECT_DIST) * .16;
           ctx.beginPath();
-          ctx.moveTo(stars[i].x, stars[i].y);
-          ctx.lineTo(stars[j].x, stars[j].y);
+          ctx.moveTo(points[i].drawX, points[i].drawY);
+          ctx.lineTo(points[j].drawX, points[j].drawY);
           ctx.stroke();
         }
       }
     }
 
-    // Draw stars with subtle twinkle
-    ctx.fillStyle = c;
-    for (const s of stars) {
-      const twinkle = 0.5 + 0.5 * Math.sin(t * 2 + s.phase);
-      ctx.globalAlpha = 0.15 + twinkle * 0.25;
+    for (const s of points) {
+      const twinkle = .5 + .5 * Math.sin(time / 1700 + s.phase);
+      ctx.fillStyle = colors[s.color];
+      ctx.globalAlpha = intensity * (.18 + twinkle * .34);
       ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.arc(s.drawX, s.drawY, s.r * size, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
   }
-  draw();
+  _runBackgroundCanvas({
+    canvas,
+    bodyClass: 'bg-pattern-constellations',
+    resize: () => { resize(); initStars(); },
+    paint: draw,
+  });
 }
 
 // ── Noise helper for Perlin effects ──
@@ -2062,49 +2495,46 @@ function _initPerlinFlow() {
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  let W, H, t = 0;
-  const particles = [];
+  let W, H, streams = [];
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (particles.length === 0) for (let i = 0; i < 200; i++) particles.push({ x: Math.random() * W, y: Math.random() * H, life: Math.random() });
+    streams = Array.from({ length: Math.max(54, Math.ceil(W * H / 24000)) }, (_, index) => {
+      const seed = index * 53 + 7;
+      let x = _clankerNoise(seed) * W;
+      let y = _clankerNoise(seed + 5) * H;
+      const points = [{ x, y }];
+      for (let step = 0; step < 42; step += 1) {
+        const noise = _bgSmoothNoise(x * .0038 + index * .17, y * .0038 + 80);
+        const angle = noise * Math.PI * 4 + index * .07;
+        x += Math.cos(angle) * 11;
+        y += Math.sin(angle) * 11;
+        if (x < -12 || x > W + 12 || y < -12 || y > H + 12) break;
+        points.push({ x, y });
+      }
+      return { points, color:index % 6, phase:_clankerNoise(seed + 11) };
+    }).filter(stream => stream.points.length > 4);
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
-  function getBg() { return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#282c34'; }
-  let _cachedBg = '', _fadeStyle = '';
-  function getFade() {
-    const bg = getBg();
-    if (bg !== _cachedBg) {
-      _cachedBg = bg;
-      // Parse hex to rgb for rgba fade
-      const { r, g, b } = hexToRgb(bg) || { r: 0, g: 0, b: 0 };
-      _fadeStyle = `rgba(${r},${g},${b},0.02)`;
-    }
-    return _fadeStyle;
-  }
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-perlin-flow')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
-    ctx.fillStyle = getFade();
-    ctx.fillRect(0, 0, W, H);
-    const c = getColor();
-    particles.forEach(p => {
-      const n = _bgSmoothNoise(p.x * 0.004 + t * 0.0008, p.y * 0.004 + 100);
-      const angle = n * Math.PI * 6;
-      const speed = 1 + _bgSmoothNoise(p.x * 0.003, p.y * 0.003 + 50) * 1.5;
-      p.x += Math.cos(angle) * speed; p.y += Math.sin(angle) * speed; p.life -= 0.001;
-      if (p.life <= 0 || p.x < 0 || p.x > W || p.y < 0 || p.y > H) { p.x = Math.random() * W; p.y = Math.random() * H; p.life = 1; }
-      ctx.beginPath(); ctx.arc(p.x, p.y, 1, 0, Math.PI * 2);
-      ctx.fillStyle = c; ctx.globalAlpha = p.life * 0.15; ctx.fill();
+  function draw(time) {
+    ctx.clearRect(0, 0, W, H);
+    const { colors, intensity, size } = _readClankerEffectConfig();
+    streams.forEach((stream, index) => {
+      ctx.beginPath();
+      stream.points.forEach((point, pointIndex) => pointIndex ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
+      ctx.strokeStyle = colors[stream.color];
+      ctx.lineWidth = Math.max(.65, size * .85);
+      ctx.globalAlpha = intensity * .16;
+      ctx.stroke();
+      if (index % 6 !== 0) return;
+      const head = _pointOnPolyline(stream.points, time / (10500 + index * 37) + stream.phase);
+      ctx.beginPath(); ctx.arc(head.x, head.y, 2.1 * size, 0, Math.PI * 2);
+      ctx.fillStyle = colors[(stream.color + 2) % colors.length];
+      ctx.globalAlpha = intensity * .8; ctx.fill();
     });
     ctx.globalAlpha = 1;
-    t++;
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-perlin-flow', resize, paint: draw });
 }
 
 // ── Petals — gentle falling flower petals ──
@@ -2120,51 +2550,48 @@ function _initPetals() {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
-  const petals = [];
-  function makePetal() {
+  let petals = [];
+  function makePetal(index) {
+    const seed = index * 47 + 3;
     return {
-      x: Math.random() * W, y: -10 - Math.random() * 40,
-      size: 3 + Math.random() * 5, rot: Math.random() * Math.PI * 2,
-      vr: (Math.random() - 0.5) * 0.03, vy: 0.3 + Math.random() * 0.6,
-      drift: Math.random() * Math.PI * 2, driftSpeed: 0.008 + Math.random() * 0.012,
-      wobble: 0.3 + Math.random() * 0.8
+      x:_clankerNoise(seed) * W,
+      size:3 + _clankerNoise(seed + 5) * 5,
+      rot:_clankerNoise(seed + 7) * Math.PI * 2,
+      vr:(-_clankerNoise(seed + 11) + .5) * .0012,
+      speed:.018 + _clankerNoise(seed + 13) * .028,
+      phase:_clankerNoise(seed + 17),
+      drift:_clankerNoise(seed + 19) * Math.PI * 2,
+      wobble:8 + _clankerNoise(seed + 23) * 22,
+      color:index % 6,
     };
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (petals.length === 0) for (let i = 0; i < 30; i++) { const p = makePetal(); p.y = Math.random() * H; petals.push(p); }
+    petals = Array.from({ length:64 }, (_, index) => makePetal(index));
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+  function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const c = getColor();
-    const sz = _getEffectSize();
+    const { colors, intensity, size:sz } = _readClankerEffectConfig();
     petals.forEach(p => {
-      p.y += p.vy; p.rot += p.vr; p.drift += p.driftSpeed;
-      p.x += Math.sin(p.drift) * p.wobble;
-      if (p.y > H + 15) Object.assign(p, makePetal());
-      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-      ctx.globalAlpha = 0.2;
-      // petal shape — two overlapping ellipses
-      ctx.fillStyle = c;
+      const progress = (p.phase + time / 1000 * p.speed) % 1;
+      const y = progress * (H + 40) - 20;
+      const x = p.x + Math.sin(time / 2600 + p.drift) * p.wobble;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(p.rot + time * p.vr);
+      ctx.globalAlpha = intensity * .24;
+      ctx.fillStyle = colors[p.color];
       ctx.beginPath(); ctx.ellipse(-p.size * 0.2 * sz, 0, p.size * 0.6 * sz, p.size * 0.3 * sz, 0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 0.15;
+      ctx.globalAlpha = intensity * .16;
       ctx.beginPath(); ctx.ellipse(p.size * 0.2 * sz, 0, p.size * 0.6 * sz, p.size * 0.3 * sz, -0.3, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     });
     ctx.globalAlpha = 1;
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-petals', resize, paint: draw });
 }
 
-// ── Sparkles — twinkling star-shaped sparkles ──
+// ── Sparkles — slow-glow star shapes ──
 function _initSparkles() {
   if (document.getElementById('sparkles-canvas')) return;
   const canvas = document.createElement('canvas');
@@ -2177,20 +2604,20 @@ function _initSparkles() {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
-  const sparkles = [];
-  function makeSpark() {
-    return { x: Math.random() * W, y: Math.random() * H, size: 2 + Math.random() * 5, phase: Math.random() * Math.PI * 2, speed: 0.015 + Math.random() * 0.03, life: 0.5 + Math.random() * 0.5 };
+  let sparkles = [];
+  function makeSpark(index) {
+    const seed = index * 43 + 13;
+    return { x:_clankerNoise(seed) * W, y:_clankerNoise(seed + 5) * H,
+      size:2 + _clankerNoise(seed + 7) * 5, phase:_clankerNoise(seed + 11) * Math.PI * 2,
+      speed:.00045 + _clankerNoise(seed + 17) * .00085, life:.45 + _clankerNoise(seed + 19) * .55,
+      color:index % 6, bright:index % 13 === 0 };
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (sparkles.length === 0) for (let i = 0; i < 35; i++) sparkles.push(makeSpark());
+    sparkles = Array.from({ length:96 }, (_, index) => makeSpark(index));
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-  function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
   function drawStar(x, y, r, c, alpha) {
     ctx.save(); ctx.translate(x, y); ctx.fillStyle = c; ctx.globalAlpha = alpha;
     // 4-point star
@@ -2202,27 +2629,21 @@ function _initSparkles() {
     ctx.fill();
     ctx.restore();
   }
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-sparkles')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
-    requestAnimationFrame(draw);
+  function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const c = getColor();
-    const sizeMult = _getEffectSize();
+    const { colors, intensity, size:sizeMult } = _readClankerEffectConfig();
     sparkles.forEach(s => {
-      s.phase += s.speed;
-      const twinkle = Math.sin(s.phase);
-      const alpha = Math.max(0, twinkle) * 0.25 * s.life;
-      const scale = 0.5 + Math.max(0, twinkle) * 0.5;
-      if (alpha > 0.01) drawStar(s.x, s.y, s.size * scale * sizeMult, c, alpha);
-      // respawn when cycle completes
-      if (s.phase > Math.PI * 6) Object.assign(s, makeSpark());
+      const glow = .5 + .5 * Math.sin(time * s.speed + s.phase);
+      const alpha = intensity * (.06 + glow * (s.bright ? .42 : .2)) * s.life;
+      const scale = 0.72 + glow * 0.28;
+      drawStar(s.x, s.y, s.size * scale * sizeMult, colors[s.color], alpha);
     });
     ctx.globalAlpha = 1;
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-sparkles', resize, paint: draw });
 }
 
-// ── Embers — warm particles rising with glow and occasional spark bursts ──
+// ── Embers — warm particles rising with a persistent glow ──
 function _initEmbers() {
   if (document.getElementById('embers-canvas')) return;
   const canvas = document.createElement('canvas');
@@ -2235,94 +2656,49 @@ function _initEmbers() {
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
-  const embers = [];
-  function makeEmber() {
+  let embers = [];
+  function makeEmber(index) {
+    const seed = index * 59 + 7;
     return {
-      x: Math.random() * W,
-      y: H + Math.random() * 40,
-      vx: (Math.random() - 0.5) * 0.3,
-      vy: -0.3 - Math.random() * 0.8,
-      r: 0.3 + Math.random() * 0.6,
-      life: 0,
-      maxLife: 220 + Math.random() * 220,
-      wobble: Math.random() * Math.PI * 2,
-      spark: false,
+      x:_clankerNoise(seed) * W,
+      phase:_clankerNoise(seed + 5),
+      speed:.012 + _clankerNoise(seed + 11) * .03,
+      r:.7 + _clankerNoise(seed + 13) * 1.8,
+      wobble:_clankerNoise(seed + 17) * Math.PI * 2,
+      drift:5 + _clankerNoise(seed + 19) * 20,
+      color:[1, 4, 3][index % 3],
+      bright:index % 11 === 0,
     };
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (embers.length === 0) {
-      for (let i = 0; i < 60; i++) { const e = makeEmber(); e.y = Math.random() * H; e.life = Math.random() * e.maxLife; embers.push(e); }
-    }
+    embers = Array.from({ length:96 }, (_, index) => makeEmber(index));
   }
-  resize();
-  const _onResize = () => resize();
-  window.addEventListener('resize', _onResize);
-  function getColor() {
-    const s = getComputedStyle(document.documentElement);
-    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#c9a95a';
-  }
-  function rgba(hex, a) {
-    const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
-    return `rgba(${r},${g},${b},${a})`;
-  }
-  function draw() {
-    if (!document.body.classList.contains('bg-pattern-embers')) {
-      window.removeEventListener('resize', _onResize);
-      canvas.remove();
-      return;
-    }
-    requestAnimationFrame(draw);
-    // Fade previous frame (destination-out keeps canvas transparent where no embers)
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    ctx.fillRect(0, 0, W, H);
+  function draw(time) {
+    ctx.clearRect(0, 0, W, H);
+    const { colors, intensity, size:sz } = _readClankerEffectConfig();
     ctx.globalCompositeOperation = 'lighter';
-    const color = getColor();
-    for (let i = embers.length - 1; i >= 0; i--) {
-      const e = embers[i];
-      e.wobble += 0.03;
-      e.x += e.vx + Math.sin(e.wobble) * 0.5;
-      e.y += e.vy;
-      e.life++;
-      if (e.life > e.maxLife || e.y < -20) {
-        embers.splice(i, 1);
-        if (embers.length < 70) embers.push(makeEmber());
-        continue;
-      }
-      if (!e.spark && Math.random() < 0.003) e.spark = true;
-      const lifeRatio = e.life / e.maxLife;
-      const fade = Math.min(1, Math.min(lifeRatio * 4, (1 - lifeRatio) * 3));
-      const sz = _getEffectSize();
-      const r = e.r * (e.spark ? 2.4 : 1) * sz;
-      const a = (e.spark ? 0.9 : 0.55) * fade;
-      const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r * 4);
-      g.addColorStop(0, rgba(color, a));
-      g.addColorStop(0.4, rgba(color, a * 0.3));
-      g.addColorStop(1, rgba(color, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(e.x - r * 4, e.y - r * 4, r * 8, r * 8);
-      ctx.fillStyle = rgba('#ffffff', a * 0.6);
+    embers.forEach(e => {
+      const lifeRatio = (e.phase + time / 1000 * e.speed) % 1;
+      const fade = Math.min(1, lifeRatio * 7, (1 - lifeRatio) * 7);
+      const x = e.x + Math.sin(time / 1800 + e.wobble) * e.drift;
+      const y = H + 18 - lifeRatio * (H + 36);
+      const r = e.r * sz;
+      ctx.fillStyle = colors[e.color];
+      ctx.globalAlpha = intensity * fade * (e.bright ? .82 : .38);
+      ctx.shadowColor = colors[e.color];
+      ctx.shadowBlur = (e.bright ? 10 : 4) * sz;
       ctx.beginPath();
-      ctx.arc(e.x, e.y, r * 0.5, 0, Math.PI * 2);
+      ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fill();
-      e.spark = false;
-    }
-    if (Math.random() < 0.015) {
-      const bx = Math.random() * W;
-      for (let i = 0; i < 5; i++) {
-        const e = makeEmber();
-        e.x = bx + (Math.random() - 0.5) * 40;
-        e.y = H - 10;
-        e.vy *= 1.5;
-        embers.push(e);
-      }
-    }
+    });
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
-  draw();
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-embers', resize, paint: draw });
 }
 
 const themeModule = { initThemeUI, togglePopup, closePopup, makeDraggable,

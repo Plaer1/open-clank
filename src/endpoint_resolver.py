@@ -195,6 +195,51 @@ def _endpoint_enabled_models(ep) -> list:
     return [m for m in merged if m not in hidden]
 
 
+def _resolve_mimo_model(
+    endpoint_id: str,
+    model: Optional[str],
+    owner: Optional[str],
+) -> Optional[str]:
+    """Return an owner-advertised MiMo model, or fail closed.
+
+    MiMo is virtual and therefore has no ``ModelEndpoint`` row to enforce the
+    owner boundary.  Its live, owner-keyed supervisor catalogue is the
+    authority instead.  Legacy single-worker supervisors are usable only in
+    ownerless/auth-disabled mode; they cannot prove an authenticated owner's
+    eligibility.
+    """
+    try:
+        from src.model_dispatch import get_mimo_supervisor
+
+        supervisor = get_mimo_supervisor()
+        if supervisor is None:
+            return None
+        try:
+            catalog = supervisor.available_models(owner=owner)
+        except TypeError:
+            if owner:
+                return None
+            catalog = supervisor.available_models()
+    except Exception:
+        return None
+
+    available = [
+        str(item.get("modelId"))
+        for item in (catalog or [])
+        if isinstance(item, dict) and item.get("modelId")
+    ]
+    provider_prefix = endpoint_id.split(":", 1)[1] if ":" in endpoint_id else ""
+    if provider_prefix:
+        available = [
+            model_id for model_id in available
+            if model_id.split("/", 1)[0] == provider_prefix
+        ]
+    selected = (model or "").strip()
+    if selected:
+        return selected if selected in available else None
+    return _first_chat_model(available)
+
+
 def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """Resolve a ModelEndpoint row to its runtime base URL and bearer/API key.
 
@@ -446,7 +491,10 @@ def resolve_endpoint(
         return fallback_url, fallback_model, fallback_headers
 
     if ep_id == "mimo" or ep_id.startswith("mimo:"):
-        return "mimo://acp", model or fallback_model, fallback_headers or {}
+        selected = _resolve_mimo_model(ep_id, model or fallback_model, owner)
+        if not selected:
+            return fallback_url, fallback_model, fallback_headers
+        return "mimo://acp", selected, fallback_headers or {}
 
     db = SessionLocal()
     try:
@@ -454,11 +502,8 @@ def resolve_endpoint(
             ModelEndpoint.id == ep_id,
             ModelEndpoint.is_enabled == True,
         )
-        if owner:
-            from src.auth_helpers import owner_filter
-            ep = owner_filter(ep, ModelEndpoint, owner).first()
-        else:
-            ep = ep.first()
+        from src.auth_helpers import owner_filter
+        ep = owner_filter(ep, ModelEndpoint, owner or "", include_shared=False).first()
         if not ep:
             return fallback_url, fallback_model, fallback_headers
 
@@ -504,9 +549,8 @@ def endpoint_id_for_chat_url(chat_url: str, owner: Optional[str] = None) -> Opti
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         for ep in q.all():
             base = normalize_base(getattr(ep, "base_url", "") or "")
             if not base:
@@ -532,32 +576,7 @@ def resolve_endpoint_by_id(
     if not ep_id:
         return None
     if ep_id == "mimo" or ep_id.startswith("mimo:"):
-        provider_prefix = ep_id.split(":", 1)[1] if ":" in ep_id else ""
-        selected = (model or "").strip()
-        try:
-            from src.model_dispatch import get_mimo_supervisor
-
-            supervisor = get_mimo_supervisor()
-            try:
-                catalog = supervisor.available_models(owner=owner) if supervisor else []
-            except TypeError:
-                catalog = supervisor.available_models() if supervisor else []
-            available = [
-                item.get("modelId")
-                for item in catalog
-                if item.get("modelId")
-            ]
-            if provider_prefix:
-                available = [
-                    mid for mid in available
-                    if mid.split("/", 1)[0] == provider_prefix
-                ]
-            if available:
-                if selected and selected not in available:
-                    return None
-                selected = selected or available[0]
-        except Exception:
-            pass
+        selected = _resolve_mimo_model(ep_id, model, owner)
         if not selected:
             return None
         return "mimo://acp", selected, {}
@@ -567,9 +586,8 @@ def resolve_endpoint_by_id(
             ModelEndpoint.id == ep_id,
             ModelEndpoint.is_enabled == True,
         )
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
         ep = q.first()
         if not ep:
             return None

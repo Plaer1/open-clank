@@ -116,11 +116,11 @@ def test_visible_image_endpoint_for_base_allows_shared_or_own(monkeypatch):
     assert ep.base_url == URL
 
 
-def test_image_endpoint_owner_filter_is_noop_in_single_user_mode(monkeypatch):
+def test_image_endpoint_unresolved_owner_only_sees_legacy_null_owner(monkeypatch):
     _patch_model(monkeypatch)
-    rows = [_ep(URL, "bob")]
+    rows = [_ep(URL, "bob"), _ep(URL, None)]
 
     ep = gallery_routes._visible_image_endpoint_for_base(_DB(rows), URL, None)
 
     assert ep is not None
-    assert ep.owner == "bob"
+    assert ep.owner is None
