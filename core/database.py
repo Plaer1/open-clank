@@ -576,9 +576,8 @@ class ModelEndpoint(TimestampMixin, Base):
     # Dormant compatibility column. Startup migrates any old true/false value
     # into ModelCapability rows and clears it; new authority is per model.
     supports_tools = Column(Boolean, nullable=True, default=None)
-    # Per-user ownership. NULL = legacy/shared (visible to every user) — this
-    # is the historical default. When non-null, the model picker only shows
-    # the endpoint to that user (admins always see everything).
+    # Per-user ownership. NULL is legacy/unclaimed state and is never visible
+    # in authenticated catalogues; startup claims such rows to the first admin.
     owner = Column(String, nullable=True, index=True)
     # Optional OAuth/session-backed credential row. Used by subscription-backed
     # providers that need refresh tokens instead of a static API key.
@@ -1490,6 +1489,13 @@ def _migrate_add_session_endpoint_id_column():
         endpoints = conn.execute(
             "SELECT id, base_url, owner FROM model_endpoints WHERE is_enabled = 1"
         ).fetchall()
+        conn.execute(
+            "UPDATE sessions SET endpoint_id = NULL "
+            "WHERE endpoint_id IS NOT NULL AND endpoint_id != 'mimo' "
+            "AND NOT EXISTS (SELECT 1 FROM model_endpoints ep "
+            "WHERE ep.id = sessions.endpoint_id AND ep.is_enabled = 1 "
+            "AND ep.owner = sessions.owner)"
+        )
         sessions = conn.execute(
             "SELECT id, endpoint_url, owner FROM sessions WHERE endpoint_id IS NULL"
         ).fetchall()
@@ -1502,7 +1508,7 @@ def _migrate_add_session_endpoint_id_column():
             matches = [
                 endpoint["id"]
                 for endpoint in endpoints
-                if (endpoint["owner"] is None or endpoint["owner"] == session["owner"])
+                if endpoint["owner"] == session["owner"]
                 and _base(endpoint["base_url"]) == normalized
             ]
             if len(matches) == 1:
@@ -1568,6 +1574,13 @@ def _migrate_add_background_agent_contract_columns():
             "SELECT id, base_url, owner FROM model_endpoints WHERE is_enabled = 1"
         ).fetchall()
         for table in ("scheduled_tasks", "crew_members"):
+            conn.execute(
+                f"UPDATE {table} SET endpoint_id = NULL "
+                "WHERE endpoint_id IS NOT NULL AND endpoint_id != 'mimo' "
+                "AND NOT EXISTS (SELECT 1 FROM model_endpoints ep "
+                f"WHERE ep.id = {table}.endpoint_id AND ep.is_enabled = 1 "
+                f"AND ep.owner = {table}.owner)"
+            )
             rows = conn.execute(
                 f"SELECT id, endpoint_url, owner FROM {table} "
                 "WHERE endpoint_id IS NULL AND endpoint_url IS NOT NULL"
@@ -1577,7 +1590,7 @@ def _migrate_add_background_agent_contract_columns():
                 matches = [
                     endpoint["id"]
                     for endpoint in endpoints
-                    if (endpoint["owner"] is None or endpoint["owner"] == row["owner"])
+                    if endpoint["owner"] == row["owner"]
                     and _base(endpoint["base_url"]) == normalized
                 ]
                 if len(matches) == 1:
@@ -1758,6 +1771,13 @@ def _migrate_assign_legacy_owner():
     import sqlite3
     import json as _json
 
+    # Explicit auth-disabled mode is the legacy single-user partition.  Keep
+    # its rows ownerless: exact catalogue queries deliberately use ``owner IS
+    # NULL`` there, and claiming them to a dormant auth.json account would make
+    # every endpoint disappear immediately after boot/the hourly sweep.
+    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+        return
+
     # Find admin user from auth.json. The auth schema uses `is_admin: True`,
     # not `role: "admin"` — old code looked for the wrong field and silently
     # fell through to "first user" every time.
@@ -1799,7 +1819,8 @@ def _migrate_assign_legacy_owner():
             "calendars", "calendar_events", "integrations",
             "scheduled_tasks", "task_runs", "crew_members",
             "gallery_albums", "gallery_people", "user_tool_data",
-            "api_tokens", "webhooks",
+            "api_tokens", "webhooks", "model_endpoints",
+            "provider_auth_sessions",
         ]
         for table in tables:
             try:
@@ -2388,8 +2409,6 @@ def init_db():
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
-    _migrate_add_session_endpoint_id_column()
-    _migrate_add_background_agent_contract_columns()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
@@ -2403,6 +2422,11 @@ def init_db():
     _migrate_add_api_token_scopes_column()
     _migrate_backfill_document_owner_from_session()
     _migrate_assign_legacy_owner()
+    # Endpoint identity backfills run only after every legacy endpoint and
+    # session/task owner has been claimed.  Otherwise a NULL endpoint was
+    # treated as shared and could be linked into another user's row.
+    _migrate_add_session_endpoint_id_column()
+    _migrate_add_background_agent_contract_columns()
     _migrate_add_tidy_verdict()
     _migrate_add_doc_source_email_cols()
     _migrate_add_oauth_config()

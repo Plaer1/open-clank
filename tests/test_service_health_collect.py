@@ -33,7 +33,7 @@ def test_collect_service_health_shape(monkeypatch):
     import asyncio
 
     # Avoid touching real data sources / network.
-    monkeypatch.setattr(sh, "_gather_inputs", lambda: {
+    monkeypatch.setattr(sh, "_gather_inputs", lambda _owner=None: {
         "settings": {"search_provider": "disabled"},
         "integrations": [],
         "accounts": [],
@@ -85,7 +85,7 @@ def test_collect_runs_subsystems_concurrently(monkeypatch):
     # the four network subsystems here sleeps ~0.6s; sequential would be ~2.4s.
     import asyncio
     import time
-    monkeypatch.setattr(sh, "_gather_inputs", lambda: {
+    monkeypatch.setattr(sh, "_gather_inputs", lambda _owner=None: {
         "settings": {}, "integrations": [], "accounts": [], "endpoints": [],
     })
 
@@ -116,7 +116,7 @@ def test_collect_aggregate_deadline_yields_controlled_result(monkeypatch):
     import time
     monkeypatch.setattr(sh, "_AGGREGATE_DEADLINE", 0.5)
     monkeypatch.setattr(sh, "_SUBSYSTEM_DEADLINE", 0.4)
-    monkeypatch.setattr(sh, "_gather_inputs", lambda: {
+    monkeypatch.setattr(sh, "_gather_inputs", lambda _owner=None: {
         "settings": {}, "integrations": [], "accounts": [], "endpoints": [],
     })
 

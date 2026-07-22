@@ -379,9 +379,9 @@ def test_compare_endpoint_key_lookup_is_owner_scoped():
     # The session binds to the resolved endpoint's stored base URL, not the raw
     # caller-supplied string (the reviewer's remaining compare blocker).
     assert "build_chat_url(normalize_base(ep.base_url))" in start_body
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
+    assert "owner_filter(q, ModelEndpoint, owner, include_shared=False)" in helper_body
     # The id lookup is owner-scoped the same way the URL lookup is.
-    assert "owner_filter(q, ModelEndpoint, owner)" in id_helper_body
+    assert "owner_filter(q, ModelEndpoint, owner, include_shared=False)" in id_helper_body
 
 
 def test_gallery_image_endpoint_lookups_are_owner_scoped():
@@ -390,7 +390,7 @@ def test_gallery_image_endpoint_lookups_are_owner_scoped():
         "def _first_visible_image_endpoint", 1
     )[0]
 
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
+    assert "owner_filter(q, ModelEndpoint, owner, include_shared=False)" in helper_body
     assert body.count("_first_visible_image_endpoint(db, user)") >= 4
     assert body.count("_visible_image_endpoint_for_base(db,") >= 2
     assert "def _current_user_is_admin" in body
@@ -418,5 +418,5 @@ def test_research_endpoint_resolution_passes_owner():
     assert 'resolve_endpoint("default", owner=user)' in body
     assert 'resolve_endpoint("chat", owner=user)' in body
     helper_body = body.split("def _owned_enabled_endpoint", 1)[1].split("def setup_research_routes", 1)[0]
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
+    assert "owner_filter(q, ModelEndpoint, owner, include_shared=False)" in helper_body
     assert body.count("_owned_enabled_endpoint(db, user") >= 2

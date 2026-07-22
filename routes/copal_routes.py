@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.middleware import require_admin
-from src.auth_helpers import require_user
+from src.auth_helpers import copal_owner_for_user, require_user
 from src.openclank.copal_bridge import CopalBridgeError
 from src.openclank.copal_calendar_projection import reconcile_projection
 from src.openclank.copal_planning import (
@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _WORKSPACE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_SESSION_COOKIE = "odysseus_session"
 _KIND = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _NOTE_PROPERTY = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _NOTE_LINK = re.compile(r"(!?)\[\[([^\]\n]+)\]\]")
@@ -171,9 +172,25 @@ def _workspace(request: Request, value: str | None = None) -> str:
 
 def _scope(request: Request, workspace: str | None = None) -> dict[str, str]:
     return {
-        "owner": require_user(request) or "local",
+        "owner": copal_owner_for_user(require_user(request)),
         "workspace_id": _workspace(request, workspace),
     }
+
+
+def _stream_owner_is_current(
+    request: Request,
+    authenticated_owner: str,
+    session_token: str | None,
+) -> bool:
+    if not authenticated_owner:
+        return True
+    auth_manager = getattr(request.app.state, "auth_manager", None)
+    if auth_manager is None or not session_token:
+        return False
+    try:
+        return auth_manager.get_username_for_token(session_token) == authenticated_owner
+    except Exception:
+        return False
 
 
 def _doc_id(value: str) -> str:
@@ -1122,11 +1139,20 @@ def setup_copal_routes() -> APIRouter:
             queue.put_nowait({"event": event, "data": data})
 
     @router.get("/status")
-    async def status(request: Request):
-        scope = _scope(request)
-        result = await _call(request, "status", {})
-        visible = await _call(request, "list", scope)
-        return {**result, "visible_documents": len(visible.get("docs", [])), "workspace": scope["workspace_id"]}
+    async def status(request: Request, workspace: str | None = None):
+        authenticated_owner = require_user(request)
+        scope = {
+            "owner": copal_owner_for_user(authenticated_owner),
+            "workspace_id": _workspace(request, workspace),
+        }
+        result = await _call(request, "scoped_status", scope)
+        return {
+            **result,
+            "visible_documents": result.get("documents", 0),
+            "owner": scope["owner"],
+            "workspace": scope["workspace_id"],
+            "storage_namespace": "local" if not authenticated_owner else f"user:{authenticated_owner}",
+        }
 
     @router.get("/documents")
     async def list_documents(
@@ -1779,26 +1805,41 @@ def setup_copal_routes() -> APIRouter:
         return result
 
     @router.get("/operations")
-    async def operations(request: Request, limit: int = Query(50, ge=1, le=500)):
+    async def operations(
+        request: Request,
+        workspace: str | None = None,
+        limit: int = Query(50, ge=1, le=500),
+    ):
         require_admin(request)
-        return await _call(request, "ops", {"limit": limit})
+        return await _call(request, "ops", {**_scope(request, workspace), "limit": limit})
 
     @router.get("/events")
     async def events(request: Request, workspace: str | None = None):
-        scope = _scope(request, workspace)
+        authenticated_owner = require_user(request)
+        scope = {
+            "owner": copal_owner_for_user(authenticated_owner),
+            "workspace_id": _workspace(request, workspace),
+        }
+        session_token = request.cookies.get(_SESSION_COOKIE) if authenticated_owner else None
         key = (scope["owner"], scope["workspace_id"])
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         subscribers[key].add(queue)
 
         async def stream() -> AsyncIterator[bytes]:
             try:
+                if not _stream_owner_is_current(request, authenticated_owner, session_token):
+                    return
                 yield b"event: ready\ndata: {}\n\n"
                 while True:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=15)
+                        if not _stream_owner_is_current(request, authenticated_owner, session_token):
+                            return
                         data = json.dumps(item["data"], separators=(",", ":"))
                         yield f"event: {item['event']}\ndata: {data}\n\n".encode()
                     except asyncio.TimeoutError:
+                        if not _stream_owner_is_current(request, authenticated_owner, session_token):
+                            return
                         yield b": keepalive\n\n"
             finally:
                 subscribers[key].discard(queue)

@@ -1286,9 +1286,9 @@ def _resolve_audit_models(owner=None):
 
     teacher = None
     try:
-        from src.settings import get_setting
-        if get_setting("teacher_enabled", False):
-            spec = (get_setting("teacher_model", "") or "").strip()
+        from src.settings import get_user_setting
+        if get_user_setting("teacher_enabled", owner or "", False):
+            spec = (get_user_setting("teacher_model", owner or "", "") or "").strip()
             if spec:
                 from src.ai_interaction import _resolve_model
                 t_url, t_model, t_headers = _resolve_model(spec, owner=owner)

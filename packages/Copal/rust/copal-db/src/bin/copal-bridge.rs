@@ -32,50 +32,25 @@ struct KnowledgeSeed {
     links: &'static [&'static str],
 }
 
-const OPENCLANK_KNOWLEDGE_VERSION: u64 = 2;
+const OPENCLANK_KNOWLEDGE_VERSION: u64 = 3;
 const OPENCLANK_KNOWLEDGE: &[KnowledgeSeed] = &[
     KnowledgeSeed {
         slug: "start",
         name: "OpenClank/Start Here",
         source_path: "README.md",
-        body: r##"# OpenClank
+        body: r##"# Open Clank
 
-OpenClank is a self-hosted AI workspace combining chat, agents, research, documents, email, notes, calendar, and local model workflows into one integrated environment.
+Open Clank is a self-hosted place to talk with models, let agents use tools, and keep the work beside the conversation.
 
-## Explore the built-in knowledge
-- [[OpenClank/Chat, Agent, and Identity]] — how conversations and agents work
-- [[OpenClank/Memory and Knowledge]] — memory capture, trust, and recall
-- [[OpenClank/Copal Notes and Timeline]] — the database-backed knowledge workspace
-- [[OpenClank/Architecture and Data]] — filesystem, database, build, and contributor info
+## Start here
+- [[OpenClank/Chat, Agent, and Identity]] — chats, agents, and model choice
+- [[OpenClank/Copal Notes and Timeline]] — notes, history, planning, and imports
+- [[OpenClank/Memory and Knowledge]] — what lasts and who can see it
+- [[OpenClank/Architecture and Data]] — where the app and its data live
 
-## Core surfaces
+Your account owns its model catalogue, settings, and private Copal workspace. The notes in this folder ship with the app, are shared read-only, and update without replacing your own notes.
 
-### Planning and project views
-- **Galaxy** — task hub with node visualization for project overviews
-- **Timeline** — horizontal chip-based timeline with tracks, tasks, and date ranges
-- **Calendar** — monthly grid showing scheduled tasks and events
-- **Tasks** — flat task list with source filtering (vault vs timeline)
-
-### Knowledge and documentation views
-- **Notes** — Obsidian-style note browser with live Markdown editor, backlinks, properties, outline, and task extraction. Database-native notes with versioned structured records, stable block IDs, typed properties, explicit relations, history, trash, and recovery.
-- **Graph** — wikilink graph visualization showing note connections and backlinks
-- **Mind** — outline/mind-map view of note structure
-- **Wiki** — meme-style knowledge store in a separate database, with story navigation, cross-corpus links, and footer properties
-
-### Learning and data views
-- **TreeHouse** — skill-tree/LMS view for structured learning paths
-- **Bases** — database-style views for querying and editing structured data
-
-## Architecture at a glance
-- **Frontend**: Next.js 16, React 19, Tailwind CSS 4, served from `out/`
-- **Server**: Python stdlib HTTP (`app.py`) for vault/notes API; Rust bridge for database operations
-- **Database**: Redb (pure Rust, ACID) with content-addressed commits, operation log, and built-in versioning
-- **Desktop**: Servo-based native shell (`servo-shell/`) with embedded Next.js build
-
-## Safety baseline
-Keep authentication enabled, keep private data out of Git, and expose only the authenticated application entrypoint through a trusted private network or proxy.
-
-#openclank #knowledge #builtin"##,
+#openclank #builtin"##,
         links: &[
             "OpenClank/Chat, Agent, and Identity",
             "OpenClank/Memory and Knowledge",
@@ -89,28 +64,11 @@ Keep authentication enabled, keep private data out of Git, and expose only the a
         source_path: "docs/identity-architecture.md",
         body: r##"# Chat, Agent, and Identity
 
-OpenClank has distinct interaction modes that control what the assistant can do and how it reasons.
+**Chat** is the plain conversation lane. **Agent** is the working lane: it can use the tools offered by the selected model and endpoint. Compare is for looking at more than one model answer side by side.
 
-## Chat
-The neutral conversation lane. Chat handles questions, discussion, brainstorming, and tasks that don't require tool execution. It's conversational — no file editing, no shell access, no multi-step workflows.
+The model picker changes the engine, not the person you are talking to. Models and endpoints belong to the signed-in account, so a new account starts with its own empty catalogue instead of broken copies of somebody else's connections.
 
-## Agent
-Owns the Build, Plan, and Compose workflows and the tools needed to carry them out. Agent-mode turns use the negotiated workflow while ordinary Chat stays conversational. Agent can escalate from Chat when a request clearly needs tools.
-
-## Plan
-Read-only design mode. Plan agents have a hard permission rule that blocks every write tool except plan files. Used for structured planning before implementation — multi-file work, multiple valid approaches, or anything where wrong design costs more than planning.
-
-## Compare
-Runs parallel reasoning candidates and returns the best result. Useful for evaluating multiple approaches simultaneously.
-
-## Temporary Agent
-Ephemeral agent sessions spawned for specific tasks. They inherit context from the parent session but operate independently, returning results when complete.
-
-## Model selection
-The selected model is a transport and capability choice, not the assistant's identity. Identity is composed by Odysseus where the conversation context lives, then rendered downstream. A model change affects capability (which tools are available) but not the assistant's personality or knowledge.
-
-## Capability certification
-Before using tools, the system certifies that the selected model supports explicit tool calling. Models that lack tool capability receive a typed, actionable failure rather than silently falling back to no-tools mode.
+If a model cannot do the tool work a turn needs, Open Clank should say so plainly. It must not quietly borrow another user's endpoint or pretend a text-only model used tools.
 
 Return to [[OpenClank/Start Here]].
 
@@ -123,23 +81,11 @@ Return to [[OpenClank/Start Here]].
         source_path: "docs/memory-architecture.md",
         body: r##"# Memory and Knowledge
 
-OpenClank distinguishes between conversational memory (ephemeral, per-session) and durable knowledge (persistent, user-authored).
+Conversation history keeps a chat understandable. Copal keeps durable notes you can inspect, edit, export, restore, or trash. They are related, but one does not silently become the other.
 
-## Conversational memory
-- **Turn capture** is owned by Odysseus so changing model transports does not create a second source of truth
-- **Session transcripts** persist on disk as JSONL files, surviving restarts and compaction
-- **Memory bank** is owner-scoped — one bank across conversation and agent surfaces
-- **Trusted guidance** and **untrusted recalled material** stay visibly separate
-- **Search and graph recall** pull deeper context when a task needs it, while bounded summaries keep ordinary turns small
+Private notes are keyed to both account and workspace. Knowing another document ID is not enough to read or change it. Built-in Open Clank notes are the exception: everyone can read them, nobody edits them in place, and a same-named personal note stays yours.
 
-## Copal Notes (durable knowledge)
-- Database-native structured records with versioned blocks, typed properties, and explicit relations
-- History, diff, restore, and trash are built-in — every mutation is a content-addressed commit
-- Notes complement conversational memory; neither silently replaces the other
-- Wiki is a separate knowledge store for meme-style pages (see [[OpenClank/Copal Notes and Timeline]])
-
-## Knowledge seeds
-OpenClank ships built-in knowledge documents (like this one) as read-only database notes. They upgrade automatically when the app updates and never overwrite user-edited content.
+Imported vaults follow the same owner boundary. The Brain Vault corpus in this installation is private runtime data: it is visible only to its owner, not built into Open Clank, and not checked into Git.
 
 Return to [[OpenClank/Start Here]].
 
@@ -152,46 +98,11 @@ Return to [[OpenClank/Start Here]].
         source_path: "routes/copal_routes.py",
         body: r##"# Copal Notes and Timeline
 
-Copal is the database-backed knowledge workspace inside OpenClank.
+Copal is Open Clank's notes workspace. A note keeps the same ID and remembers its edits, links, properties, trash, and recovery. If an old browser tab tries to overwrite newer work, Copal refuses the stale save.
 
-## Notes
-Notes are stored as versioned structured records (`copal-note-v1` schema) with:
-- **Stable block IDs** — each paragraph, heading, and list item has a persistent identifier
-- **Typed properties** — key-value metadata (tags, dates, custom fields) stored alongside content
-- **Explicit relations** — wikilinks, embeds, and cross-references tracked as first-class links
-- **History** — every write is a content-addressed commit; diff, log, and restore are queries
-- **Trash and recovery** — deleted notes are tombstoned, not erased; restore is one operation
-- **Owner scope** — notes are scoped to owner/workspace; shared notes are read-only to others
+Timeline uses the same owner-scoped Copal records as Notes. Canonical event files live under `.events/`; that folder is hidden in the normal file view unless you ask to show dot-folders. Wiki records use `.wik/` and follow the same default.
 
-The editor is a projection of the database record, not a file editor. Changes go through the write pipeline: amend commit, stale detection, checkpoint boundaries.
-
-## Timeline
-The Timeline is a typed Notes view over Copal's canonical planning records. Opening it inside Notes or through the Timeline tab reads and edits the same events and tracks — there is no copied timeline database.
-
-Planning data supports:
-- Tracks with start/end dates, tasks, and visual styles
-- Tasks with due dates, scheduled dates, completion dates, recurrence, and priority
-- Fuzzy date ranges for uncertain timelines
-- JSON export for AI calendar tools
-
-## Wiki
-Wiki is a separate knowledge store for meme-style pages, stored in its own database file (`copal-wiki.redb`). It supports:
-- Small, focused pages (memes) with story-based navigation
-- Cross-corpus links between Wiki and Notes
-- Footer properties on each meme
-- Create, edit, search, and trash flows independent from Notes
-
-## Graph
-Wikilink graph visualization showing note connections, backlinks, and document relationships. Nodes represent notes; edges represent wikilinks and other relations.
-
-## Mind
-Outline/mind-map view showing the heading hierarchy of notes. Useful for navigating document structure at a glance.
-
-## Bases
-Database-style views for querying and editing structured data extracted from notes. Supports table views, filters, and inline editing.
-
-## Core workspace features (no plugins required)
-Search, links, backlinks, properties, daily notes, templates, Canvas, and recovery all work out of the box.
+Obsidian-style ZIP import and export are account-scoped. Compatibility files and attachments are kept as data; importing them does not run scripts or install plugins.
 
 Return to [[OpenClank/Start Here]].
 
@@ -201,83 +112,14 @@ Return to [[OpenClank/Start Here]].
     KnowledgeSeed {
         slug: "architecture",
         name: "OpenClank/Architecture and Data",
-        source_path: "docs/architecture.md",
+        source_path: "src/openclank/copal_bridge.py",
         body: r##"# Architecture and Data
 
-OpenClank is a local-first application with a clear separation between frontend, server, database, and desktop shell.
+The browser talks to the Python application. Copal note work goes through a small Rust helper into Redb. The main app database keeps accounts, sessions, model endpoints, and settings; Copal keeps notes, their edit history, and attachments.
 
-## Filesystem layout
-- **`packages/Copal/`** — the Copal knowledge workspace (this app)
-  - `out/` — built static site (Next.js build output)
-  - `db/copal.redb` — main Redb database (Notes, knowledge seeds, assets index)
-  - `db/assets/` — content-addressed binary files (`<blake3>.<ext>`)
-  - `sample-vault/` — development vault with example notes
-  - `rust/` — Rust crates: `copal-core` (parser), `copal-db` (database), `servo-shell` (desktop)
-  - `src/` — Next.js frontend (React components, views, store, hooks)
-  - `app.py` — Python stdlib HTTP server for vault/notes API
-  - `scripts/` — shell scripts for smoke tests and parity checks
-  - `copal.toml` — configuration (`debug = true` uses repo-local `db/`)
+In this checkout, Copal's debug data lives under `packages/Copal/db/`. That directory is runtime state, not source material. Back it up before migrations and never publish a personal vault, endpoint secret, or session token.
 
-## Data directories
-Resolution order for the database path:
-1. `COPAL_DB=/path` environment variable (highest priority)
-2. `COPAL_DEBUG=0|1` environment variable
-3. `copal.toml` `debug = true/false`
-4. Default: `$XDG_DATA_HOME/copal` or `~/.local/share/copal`
-
-With `debug = true` (current default), data lives in `packages/Copal/db/`.
-
-## Database (Redb)
-- **Engine**: Redb — pure Rust, ACID, single-file embedded database
-- **Tables**: `DOCS` (documents), `COMMITS` (content-addressed commits), `BLOBS` (raw bytes), `OPS` (operation log), `META` (metadata)
-- **Schema version**: 3 (auto-migrates on open)
-- **Versioning model**: Every accepted write is an amend commit. No staging area — the doc's live state is exactly its head commit. Change identity (`doc_id`, ULID) is stable; commits are content-addressed (blake3) and never rewritten.
-- **Checkpoint boundary**: A new change identity opens when the head commit is older than 30 minutes at write time.
-- **Undo/restore**: New operation with an older view. Tombstones for deletion.
-
-## Wiki database
-Separate Redb file opened via `COPAL_WIKI_DATA_DIR` env var. Uses the same `Store` implementation with `copal-wiki` as the database name. Same code, different file, zero forked behavior.
-
-## Build system
-- **Package manager**: bun
-- **Frontend**: `bun run dev` (Next.js dev on port 3000), `bun run build` (static export to `out/`)
-- **Server**: `bun run start` (launches `app.py` on port 8765)
-- **Rust**: `bun run servo:*` commands for Cargo builds; `servo:native-release` for full desktop build
-- **Desktop**: Servo shell embeds the Next.js build via `include_dir!` and serves it from a local HTTP server
-
-## API routes
-
-### Python server (`app.py`, port 8765)
-- `GET /api/data` — read planning data (move-data.json)
-- `POST /api/data` — write planning data
-- `GET /api/vault` — vault path info
-- `GET /api/ui-state` — read UI state (pinned items, wiki block order)
-- `POST /api/ui-state` — write UI state
-- `GET /api/notes` — list vault notes
-- `GET /api/note?path=` — read a note
-- `POST /api/note` — create/update a note
-- `POST /api/note/rename` — rename a note
-- `POST /api/note/delete` — delete a note
-- `POST /api/mkdir` — create directory
-- `GET /api/search?q=` — search notes
-- `GET /api/backlinks?path=` — get backlinks for a note
-- `GET /api/graph` — graph data (nodes + edges)
-- `GET /api/tasks` — derived tasks from notes
-- `GET /api/index` — build vault index
-- `GET /api/vault-asset?path=` — serve binary asset
-- `GET /api/export/ai` — AI export format (`copal.ai-export.v0`)
-- `GET /api/export/okf` — OKF export format (`copal.okf-inspired.v0`)
-- `GET /api/export/doclang` — DocLang XML export
-- `GET /api/export/markdown-bundle` — ZIP of markdown files
-
-### Rust bridge (stdin/stdout JSON-RPC)
-Operations: `status`, `import_vault`, `list`, `index`, `search`, `export_snapshot`, `get`, `trash`, `create`, `write`, `history`, `checkpoint`, `rename`, `delete`, `restore`, `restore_deleted`, `diff`, `ops`, `asset_path`
-
-## Contributor architecture
-- **Tests**: Rust unit tests in `copal-core`, `copal-db`, and `copal-bridge`; shell smoke tests in `scripts/`
-- **Clean-room rules**: Proprietary Obsidian code/assets/strings are behavioral evidence only; Copal must not become a hidden fork
-- **Reference imports**: External projects are references only; code must not drift into runtime source
-- **Packaging**: `servo-shell/Cargo.toml` builds the desktop binary with embedded assets
+If you are looking through the source: `routes/copal_routes.py` checks the signed-in user, `src/openclank/copal_bridge.py` runs the helper, `packages/Copal/rust/copal-db/` stores notes, and `static/` holds the browser code.
 
 Return to [[OpenClank/Start Here]].
 
@@ -295,7 +137,7 @@ struct WikiSeed {
 
 const WIKI_SEEDS: &[WikiSeed] = &[
     WikiSeed {
-        name: "Wiki/What Is Wiki",
+        name: ".wik/What Is Wiki",
         body: r##"# What Is Wiki
 Wiki is a separate knowledge store inside Copal, dedicated to meme-style pages. It lives in its own database file (`copal-wiki.redb`) and is fully isolated from Notes.
 
@@ -311,7 +153,7 @@ Create a new meme with the "+ Meme" button in the Wiki sidebar. Give it a name a
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: "Wiki/Creating and Linking Memes",
+        name: ".wik/Creating and Linking Memes",
         body: r##"# Creating and Linking Memes
 ## Creating a meme
 Click "+ Meme" in the Wiki sidebar. Enter a name. The new meme opens in edit mode — start writing.
@@ -329,7 +171,7 @@ You can link from a Wiki meme to a Notes document and vice versa. The link shows
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: "Wiki/Story Navigation",
+        name: ".wik/Story Navigation",
         body: r##"# Story Navigation
 Wiki uses a "story" model — multiple memes can be open side by side.
 
@@ -348,7 +190,7 @@ Click × to remove a meme from the story (unless it's pinned).
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: "Wiki/Fields and Properties",
+        name: ".wik/Fields and Properties",
         body: r##"# Fields and Properties
 Every Wiki meme can have properties (also called fields). These appear as a compact footer strip below the meme content.
 
@@ -366,7 +208,7 @@ When editing a meme, you can add or modify properties. Properties are stored as 
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: "Wiki/Wiki vs Notes",
+        name: ".wik/Wiki vs Notes",
         body: r##"# Wiki vs Notes
 Copal has two knowledge stores: **Notes** and **Wiki**. Here's when to use each.
 
@@ -390,23 +232,130 @@ Notes and Wiki are separate stores but you can link between them. A Wiki meme ca
     },
 ];
 
+struct LegacyWikiSeed {
+    name: &'static str,
+    target: &'static str,
+    blob: &'static str,
+}
+
+// Exact fingerprints from the bundled pre-v2 Wiki seeds. Name alone is not
+// enough to claim a shared document: an unrelated same-name page stays data.
+const LEGACY_WIKI_SEEDS: &[LegacyWikiSeed] = &[
+    LegacyWikiSeed {
+        name: "Wiki/Creating and Linking Tiddlers",
+        target: ".wik/Creating and Linking Memes",
+        blob: "032b23b359978236a0f75228a9e3c30df6fce1f5012f3b7f9f685bb81841bc6a",
+    },
+    LegacyWikiSeed {
+        name: "Wiki/Fields and Properties",
+        target: ".wik/Fields and Properties",
+        blob: "79a26b736bbc6fc613e9e350202c123baed1c028206451a14ed20d1fbdfd1bc0",
+    },
+    LegacyWikiSeed {
+        name: "Wiki/Story Navigation",
+        target: ".wik/Story Navigation",
+        blob: "eb4d7413bd0afd5e4f7f6b9f1414400eec909134f4565157ede23e685adda6a8",
+    },
+    LegacyWikiSeed {
+        name: "Wiki/What Is Wiki",
+        target: ".wik/What Is Wiki",
+        blob: "93d36071f83856a09881a35d18b3bfb0031075a3ee2263ba2c9fb91ab7164481",
+    },
+    LegacyWikiSeed {
+        name: "Wiki/Wiki vs Notes",
+        target: ".wik/Wiki vs Notes",
+        blob: "b3ada6681af29a23d943f63421da091157ccae20d6dadea3e677cf631813b91d",
+    },
+];
+
+fn legacy_wiki_seed(doc: &DocView) -> Option<&'static LegacyWikiSeed> {
+    if doc.kind != "wiki" || doc.owner != "shared" || doc.workspace_id != "global" {
+        return None;
+    }
+    let Content::Blob { hash } = &doc.content else {
+        return None;
+    };
+    LEGACY_WIKI_SEEDS
+        .iter()
+        .find(|seed| doc.name == seed.name && hash == seed.blob)
+}
+
+fn hidden_namespace_target(doc: &DocView) -> Option<String> {
+    if let Some(seed) = legacy_wiki_seed(doc) {
+        return Some(seed.target.to_string());
+    }
+    let (legacy, hidden) = match doc.kind.as_str() {
+        "copal-event" => ("events/", ".events/"),
+        "wiki" => ("Wiki/", ".wik/"),
+        _ => return None,
+    };
+    doc.name
+        .strip_prefix(legacy)
+        .filter(|tail| !tail.is_empty())
+        .map(|tail| format!("{hidden}{tail}"))
+}
+
+/// Move only Copal's known internal namespaces. Preflight all names first;
+/// interrupted runs are safe because each rename is versioned and idempotent.
+fn migrate_hidden_namespaces(db: &Db) -> Result<usize, String> {
+    let docs = db.list_docs().map_err(|error| error.to_string())?;
+    let legacy_ids = docs
+        .iter()
+        .filter(|doc| !doc.builtin && legacy_wiki_seed(doc).is_some())
+        .map(|doc| doc.id.clone())
+        .collect::<Vec<_>>();
+    let moves = docs
+        .iter()
+        .filter_map(|doc| hidden_namespace_target(doc).map(|name| (doc, name)))
+        .collect::<Vec<_>>();
+
+    for (doc, target) in &moves {
+        if docs.iter().any(|other| {
+            other.id != doc.id
+                && other.owner == doc.owner
+                && other.workspace_id == doc.workspace_id
+                && other.kind == doc.kind
+                && other.corpus == doc.corpus
+                && other.name == *target
+        }) {
+            return Err(format!(
+                "cannot migrate {} to {target}: target already exists in this scope",
+                doc.name
+            ));
+        }
+    }
+
+    for id in legacy_ids {
+        db.claim_builtin_seed_doc(&id)
+            .map_err(|error| error.to_string())?;
+    }
+    for (doc, target) in &moves {
+        db.rename_doc(&doc.id, target)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(moves.len())
+}
+
 fn seed_wiki_pages(db: &Db) -> Result<usize, String> {
     let mut existing = db
         .list_docs()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter(|doc| doc.owner == "shared" && doc.workspace_id == "global")
-        .map(|doc| (doc.name.clone(), doc))
-        .collect::<BTreeMap<_, _>>();
+        .filter(|doc| doc.owner == "shared" && doc.workspace_id == "global" && doc.kind == "wiki")
+        .collect::<Vec<_>>();
     let mut changed = 0;
     for seed in WIKI_SEEDS {
-        if let Some(doc) = existing.get(seed.name) {
+        if let Some(doc) = existing
+            .iter()
+            .find(|doc| doc.builtin && doc.name == seed.name)
+            .cloned()
+        {
             if doc.text.as_deref() == Some(seed.body) {
                 continue;
             }
-            // Update if content changed (idempotent upgrade).
+            // Explicitly marked seed: update it in place (idempotent upgrade).
             match db
-                .write_doc_scoped(&doc.id, seed.body, Some(&doc.head), "shared", "global")
+                .write_doc(&doc.id, seed.body, Some(&doc.head))
                 .map_err(|error| error.to_string())?
             {
                 WriteOutcome::Committed { .. } => changed += 1,
@@ -414,10 +363,35 @@ fn seed_wiki_pages(db: &Db) -> Result<usize, String> {
             }
             continue;
         }
+
+        if let Some(doc) = existing
+            .iter()
+            .find(|doc| doc.name == seed.name && doc.text.as_deref() == Some(seed.body))
+            .cloned()
+        {
+            // Exact legacy bundle content is the only safe unmarked record to claim.
+            let promoted = db
+                .claim_builtin_seed_doc(&doc.id)
+                .map_err(|error| error.to_string())?;
+            if let Some(current) = existing.iter_mut().find(|item| item.id == doc.id) {
+                *current = promoted;
+            }
+            changed += 1;
+            continue;
+        }
+
+        // An unrelated shared same-name record is not a seed. Preserve it and
+        // create a separately marked bundled copy; scoped listing will expose
+        // the builtin deterministically.
         let doc = db
-            .create_doc("wiki", seed.name, seed.body, Some("built-in Wiki how-to seed"))
+            .create_builtin_seed_doc(
+                "wiki",
+                seed.name,
+                seed.body,
+                Some("built-in Wiki how-to seed"),
+            )
             .map_err(|error| error.to_string())?;
-        existing.insert(seed.name.to_string(), doc);
+        existing.push(doc);
         changed += 1;
     }
     Ok(changed)
@@ -511,24 +485,29 @@ fn seed_openclank_knowledge(db: &Db) -> Result<usize, String> {
         .list_docs()
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter(|doc| doc.owner == "shared" && doc.workspace_id == "global")
-        .map(|doc| (doc.name.clone(), doc))
-        .collect::<BTreeMap<_, _>>();
+        .filter(|doc| doc.owner == "shared" && doc.workspace_id == "global" && doc.kind == "note")
+        .collect::<Vec<_>>();
     let mut changed = 0;
     for seed in OPENCLANK_KNOWLEDGE {
         let expected = knowledge_note(seed);
-        if let Some(doc) = existing.get(seed.name) {
+        if let Some(doc) = existing
+            .iter()
+            .find(|doc| doc.builtin && doc.name == seed.name)
+            .cloned()
+        {
             if doc.text.as_deref() == Some(expected.as_str()) {
                 continue;
             }
-            let Some(version) = doc.text.as_deref().and_then(knowledge_seed_version) else {
-                continue; // Preserve unrelated shared content with the same name.
-            };
-            if version > OPENCLANK_KNOWLEDGE_VERSION {
+            if doc
+                .text
+                .as_deref()
+                .and_then(knowledge_seed_version)
+                .is_some_and(|version| version > OPENCLANK_KNOWLEDGE_VERSION)
+            {
                 continue;
             }
             match db
-                .write_doc_scoped(&doc.id, &expected, Some(&doc.head), "shared", "global")
+                .write_doc(&doc.id, &expected, Some(&doc.head))
                 .map_err(|error| error.to_string())?
             {
                 WriteOutcome::Committed { .. } => changed += 1,
@@ -536,15 +515,55 @@ fn seed_openclank_knowledge(db: &Db) -> Result<usize, String> {
             }
             continue;
         }
+
+        if let Some(doc) = existing
+            .iter()
+            .find(|doc| {
+                doc.name == seed.name
+                    && (doc.text.as_deref() == Some(expected.as_str())
+                        || doc
+                            .text
+                            .as_deref()
+                            .and_then(knowledge_seed_version)
+                            .is_some())
+            })
+            .cloned()
+        {
+            // Exact generated content or the embedded OpenClank seed metadata
+            // identifies a legacy bundled record. Claim before any update.
+            let promoted = db
+                .claim_builtin_seed_doc(&doc.id)
+                .map_err(|error| error.to_string())?;
+            let future = promoted
+                .text
+                .as_deref()
+                .and_then(knowledge_seed_version)
+                .is_some_and(|version| version > OPENCLANK_KNOWLEDGE_VERSION);
+            let mut final_doc = promoted.clone();
+            if promoted.text.as_deref() != Some(expected.as_str()) && !future {
+                if let WriteOutcome::Committed { view, .. } = db
+                    .write_doc(&promoted.id, &expected, Some(&promoted.head))
+                    .map_err(|error| error.to_string())?
+                {
+                    final_doc = view;
+                }
+            }
+            if let Some(current) = existing.iter_mut().find(|item| item.id == doc.id) {
+                *current = final_doc;
+            }
+            changed += 1;
+            continue;
+        }
+
         let doc = db
-            .create_doc(
+            .create_builtin_seed_doc(
                 "note",
                 seed.name,
                 &expected,
                 Some("built-in OpenClank knowledge v1"),
             )
             .map_err(|error| error.to_string())?;
-        existing.insert(seed.name.to_string(), doc);
+        existing.push(doc);
         changed += 1;
     }
     Ok(changed)
@@ -649,7 +668,8 @@ fn indexed_legacy_markdown(doc: &DocView) -> Value {
         "kind": doc.kind,
         "owner": doc.owner,
         "workspace_id": doc.workspace_id,
-        "readOnly": doc.owner == "shared" && doc.workspace_id == "global",
+        "builtin": doc.builtin,
+        "readOnly": doc.builtin,
         "name": doc.name,
         "head": doc.head,
         "ts": doc.ts,
@@ -720,7 +740,7 @@ fn indexed_note(doc: &DocView) -> Value {
             "id": doc.id, "recordSchemaVersion": doc.record_schema_version,
             "corpus": doc.corpus, "kind": doc.kind,
             "owner": doc.owner, "workspace_id": doc.workspace_id,
-            "readOnly": doc.owner == "shared" && doc.workspace_id == "global",
+            "builtin": doc.builtin, "readOnly": doc.builtin,
             "name": doc.name, "head": doc.head, "ts": doc.ts,
             "hidden": doc.hidden, "deleted": doc.deleted, "content": doc.content,
             "text": "", "properties": {}, "propertyDefinitions": [], "frontmatter": {},
@@ -824,7 +844,7 @@ fn indexed_note(doc: &DocView) -> Value {
         "id": doc.id, "recordSchemaVersion": doc.record_schema_version,
         "corpus": doc.corpus, "kind": doc.kind,
         "owner": doc.owner, "workspace_id": doc.workspace_id,
-        "readOnly": doc.owner == "shared" && doc.workspace_id == "global",
+        "builtin": doc.builtin, "readOnly": doc.builtin,
         "name": doc.name, "head": doc.head, "ts": doc.ts,
         "hidden": doc.hidden, "deleted": doc.deleted, "content": doc.content,
         "text": text, "properties": properties, "propertyDefinitions": definitions, "frontmatter": properties,
@@ -866,10 +886,25 @@ fn pick_db<'a>(notes: &'a Db, wiki: Option<&'a Db>, args: &Value) -> Result<&'a 
 
 fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Value, String> {
     match op {
-        "status" => {
-            let docs = db.list_docs().map_err(|error| error.to_string())?;
+        "status" | "scoped_status" => {
+            let requested_scope = if op == "scoped_status" {
+                Some(scope(args)?)
+            } else {
+                None
+            };
+            let docs = match requested_scope {
+                Some((owner, workspace_id)) => db.list_docs_scoped(owner, workspace_id),
+                None => db.list_docs(),
+            }
+            .map_err(|error| error.to_string())?;
             let wiki_docs = wiki_db
-                .map(|w| w.list_docs().map_err(|e| e.to_string()))
+                .map(|wiki| {
+                    match requested_scope {
+                        Some((owner, workspace_id)) => wiki.list_docs_scoped(owner, workspace_id),
+                        None => wiki.list_docs(),
+                    }
+                    .map_err(|error| error.to_string())
+                })
                 .transpose()?
                 .unwrap_or_default();
             let mut kinds = BTreeMap::<String, usize>::new();
@@ -883,6 +918,35 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
                 "kinds": kinds,
                 "integrity_ok": true,
             }))
+        }
+        "rename_owner" => {
+            let old_owner = required(args, "old_owner")?;
+            let new_owner = required(args, "new_owner")?;
+            db.preflight_rename_owner(old_owner, new_owner)
+                .map_err(|error| error.to_string())?;
+            if let Some(wiki) = wiki_db {
+                wiki.preflight_rename_owner(old_owner, new_owner)
+                    .map_err(|error| error.to_string())?;
+            }
+            let notes = db
+                .rename_owner(old_owner, new_owner)
+                .map_err(|error| error.to_string())?;
+            let wiki = if let Some(wiki) = wiki_db {
+                match wiki.rename_owner(old_owner, new_owner) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        if let Err(rollback) = db.rename_owner(new_owner, old_owner) {
+                            return Err(format!(
+                                "wiki owner rename failed: {error}; notes rollback failed: {rollback}"
+                            ));
+                        }
+                        return Err(error.to_string());
+                    }
+                }
+            } else {
+                0
+            };
+            Ok(json!({"notes": notes, "wiki": wiki, "documents": notes + wiki}))
         }
         "import_vault" => {
             let (owner, workspace_id) = scope(args)?;
@@ -939,6 +1003,10 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
 
             docs.retain(|doc| kind.is_none_or(|value| doc.kind == value));
 
+            if op == "export_snapshot" {
+                docs.retain(|doc| !doc.builtin);
+            }
+
             if op == "list" {
                 return Ok(json!({ "docs": docs }));
             }
@@ -987,7 +1055,10 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
             // Try the requested store first; if corpus is unspecified, fall
             // through to the other store so cross-store lookups work.
             let target = pick_db(db, wiki_db, args)?;
-            match target.get_doc_scoped(id, owner, workspace_id).map_err(|error| error.to_string())? {
+            match target
+                .get_doc_scoped(id, owner, workspace_id)
+                .map_err(|error| error.to_string())?
+            {
                 Some(doc) => Ok(indexed(&doc)),
                 None => {
                     // Fallback: try the other store when corpus was explicit.
@@ -1108,22 +1179,29 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
             let (owner, workspace_id) = scope(args)?;
             let target = pick_db(db, wiki_db, args)?;
             target
-                .history_scoped(required(args, "id")?, owner, workspace_id)
-                .map_err(|error| error.to_string())?;
-            target
-                .diff(required(args, "from")?, required(args, "to")?)
+                .diff_scoped(
+                    required(args, "id")?,
+                    required(args, "from")?,
+                    required(args, "to")?,
+                    owner,
+                    workspace_id,
+                )
                 .map(|diff| json!({ "diff": diff }))
                 .map_err(|error| error.to_string())
         }
-        "ops" => db
-            .ops(
+        "ops" => {
+            let (owner, workspace_id) = scope(args)?;
+            db.ops_scoped(
                 args.get("limit")
                     .and_then(Value::as_u64)
                     .unwrap_or(50)
                     .min(500) as usize,
                 optional(args, "before"),
+                owner,
+                workspace_id,
             )
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())
+        }
         "asset_path" => {
             let (owner, workspace_id) = scope(args)?;
             let target = pick_db(db, wiki_db, args)?;
@@ -1152,6 +1230,7 @@ mod tests {
             kind: "note".to_string(),
             owner: "local".to_string(),
             workspace_id: "default".to_string(),
+            builtin: false,
             name: "Native".to_string(),
             head: "head1".to_string(),
             ts: 1,
@@ -1223,13 +1302,15 @@ mod tests {
         assert_eq!(seeded.len(), OPENCLANK_KNOWLEDGE.len());
         assert!(seeded
             .iter()
-            .all(|doc| doc.kind == "note" && doc.owner == "shared"));
+            .all(|doc| doc.kind == "note" && doc.owner == "shared" && doc.builtin));
         let start = seeded
             .iter()
             .find(|doc| doc.name.ends_with("Start Here"))
             .unwrap();
         let indexed_view = indexed(start);
         assert_eq!(indexed_view["storage"], "database");
+        assert_eq!(indexed_view["builtin"], true);
+        assert_eq!(indexed_view["readOnly"], true);
         assert_eq!(indexed_view["properties"]["builtin"], true);
         assert!(indexed_view["links"]
             .as_array()
@@ -1255,8 +1336,371 @@ mod tests {
         assert!(matches!(outcome, WriteOutcome::Committed { .. }));
         assert_eq!(seed_openclank_knowledge(&db).unwrap(), 1);
         let upgraded = db.get_doc(&start.id).unwrap().unwrap();
-        assert_eq!(indexed(&upgraded)["properties"]["seedVersion"], 2);
+        assert_eq!(
+            indexed(&upgraded)["properties"]["seedVersion"],
+            OPENCLANK_KNOWLEDGE_VERSION
+        );
         assert_eq!(seed_openclank_knowledge(&db).unwrap(), 0);
+    }
+
+    #[test]
+    fn hidden_namespace_migration_is_scoped_versioned_and_idempotent() {
+        let root = std::env::temp_dir().join(format!("copal-hidden-names-{}", ulid::Ulid::new()));
+        let db = Db::open(&root).unwrap();
+        let event = db
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "copal-event",
+                "events/Launch.md",
+                "{}",
+                None,
+            )
+            .unwrap();
+        let wiki = db
+            .create_doc_scoped("alice", "home", "wiki", "Wiki/Launch", "# Launch", None)
+            .unwrap();
+        db.create_doc_scoped(
+            "bob",
+            "home",
+            "markdown",
+            "events/Personal.md",
+            "leave this alone",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 2);
+        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 0);
+
+        let migrated_event = db.get_doc(&event.id).unwrap().unwrap();
+        let migrated_wiki = db.get_doc(&wiki.id).unwrap().unwrap();
+        assert_eq!(migrated_event.name, ".events/Launch.md");
+        assert_eq!(migrated_wiki.name, ".wik/Launch");
+        assert_ne!(migrated_event.head, event.head);
+        assert_ne!(migrated_wiki.head, wiki.head);
+        assert_eq!(
+            db.list_docs_scoped("bob", "home")
+                .unwrap()
+                .into_iter()
+                .find(|doc| doc.kind == "markdown")
+                .unwrap()
+                .name,
+            "events/Personal.md"
+        );
+    }
+
+    #[test]
+    fn legacy_wiki_seed_alias_requires_the_exact_bundled_blob() {
+        let mut wiki = note_view("");
+        wiki.kind = "wiki".to_string();
+        wiki.corpus = "wiki".to_string();
+        wiki.owner = "shared".to_string();
+        wiki.workspace_id = "global".to_string();
+        wiki.name = "Wiki/Creating and Linking Tiddlers".to_string();
+        wiki.content = Content::Blob {
+            hash: LEGACY_WIKI_SEEDS[0].blob.to_string(),
+        };
+        assert_eq!(
+            hidden_namespace_target(&wiki).as_deref(),
+            Some(".wik/Creating and Linking Memes")
+        );
+
+        wiki.content = Content::Blob {
+            hash: "unrelated".to_string(),
+        };
+        assert_eq!(
+            hidden_namespace_target(&wiki).as_deref(),
+            Some(".wik/Creating and Linking Tiddlers")
+        );
+    }
+
+    #[test]
+    fn hidden_namespace_migration_refuses_collisions_before_writing() {
+        let root =
+            std::env::temp_dir().join(format!("copal-hidden-collision-{}", ulid::Ulid::new()));
+        let db = Db::open(&root).unwrap();
+        let legacy = db
+            .create_doc_scoped("alice", "home", "wiki", "Wiki/Same", "old", None)
+            .unwrap();
+        db.create_doc_scoped("alice", "home", "wiki", ".wik/Same", "new", None)
+            .unwrap();
+
+        assert!(migrate_hidden_namespaces(&db)
+            .unwrap_err()
+            .contains("target already exists"));
+        assert_eq!(db.get_doc(&legacy.id).unwrap().unwrap().name, "Wiki/Same");
+    }
+
+    #[test]
+    fn seeders_claim_exact_legacy_content_and_preserve_unrelated_same_names() {
+        let root = std::env::temp_dir().join(format!("copal-seed-claim-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root.join("notes")).unwrap();
+        let wiki = Db::open(&root.join("wiki")).unwrap();
+
+        let exact_note = knowledge_note(&OPENCLANK_KNOWLEDGE[0]);
+        let legacy_note = notes
+            .create_doc("note", OPENCLANK_KNOWLEDGE[0].name, &exact_note, None)
+            .unwrap();
+        let unrelated_note = notes
+            .create_doc(
+                "note",
+                OPENCLANK_KNOWLEDGE[1].name,
+                "unrelated shared note",
+                None,
+            )
+            .unwrap();
+        let legacy_wiki = wiki
+            .create_doc("wiki", WIKI_SEEDS[0].name, WIKI_SEEDS[0].body, None)
+            .unwrap();
+        let unrelated_wiki = wiki
+            .create_doc("wiki", WIKI_SEEDS[1].name, "unrelated shared wiki", None)
+            .unwrap();
+
+        assert_eq!(
+            seed_openclank_knowledge(&notes).unwrap(),
+            OPENCLANK_KNOWLEDGE.len()
+        );
+        assert_eq!(seed_wiki_pages(&wiki).unwrap(), WIKI_SEEDS.len());
+
+        let claimed_note = notes.get_doc(&legacy_note.id).unwrap().unwrap();
+        assert!(claimed_note.builtin);
+        assert_eq!(claimed_note.record_schema_version, 2);
+        assert_eq!(claimed_note.head, legacy_note.head);
+        let claimed_wiki = wiki.get_doc(&legacy_wiki.id).unwrap().unwrap();
+        assert!(claimed_wiki.builtin);
+        assert_eq!(claimed_wiki.head, legacy_wiki.head);
+
+        assert_eq!(
+            notes
+                .list_docs()
+                .unwrap()
+                .into_iter()
+                .filter(|doc| doc.name == OPENCLANK_KNOWLEDGE[1].name)
+                .count(),
+            2
+        );
+        assert_eq!(
+            notes
+                .get_doc(&unrelated_note.id)
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("unrelated shared note")
+        );
+        assert_eq!(
+            wiki.list_docs()
+                .unwrap()
+                .into_iter()
+                .filter(|doc| doc.name == WIKI_SEEDS[1].name)
+                .count(),
+            2
+        );
+        assert_eq!(
+            wiki.get_doc(&unrelated_wiki.id)
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("unrelated shared wiki")
+        );
+
+        assert_eq!(seed_openclank_knowledge(&notes).unwrap(), 0);
+        assert_eq!(seed_wiki_pages(&wiki).unwrap(), 0);
+    }
+
+    #[test]
+    fn builtin_seeds_are_read_only_shadowable_and_excluded_from_export() {
+        let root = std::env::temp_dir().join(format!("copal-seed-export-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root.join("notes")).unwrap();
+        let wiki = Db::open(&root.join("wiki")).unwrap();
+        seed_openclank_knowledge(&notes).unwrap();
+        seed_wiki_pages(&wiki).unwrap();
+        notes
+            .create_doc_scoped("alice", "home", "markdown", "Alice.md", "private", None)
+            .unwrap();
+        let shadow = notes
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "note",
+                OPENCLANK_KNOWLEDGE[0].name,
+                r#"{"schemaVersion":1,"body":{"type":"doc","blocks":[]},"properties":[],"relations":[]}"#,
+                None,
+            )
+            .unwrap();
+
+        let index = execute(
+            &notes,
+            Some(&wiki),
+            "index",
+            &json!({"owner": "alice", "workspace_id": "home", "corpus": "all"}),
+        )
+        .unwrap();
+        let indexed_docs = index["docs"].as_array().unwrap();
+        assert!(indexed_docs.iter().any(|doc| {
+            doc["id"] == shadow.id && doc["builtin"] == false && doc["readOnly"] == false
+        }));
+        assert!(!indexed_docs
+            .iter()
+            .any(|doc| doc["builtin"] == true && doc["name"] == OPENCLANK_KNOWLEDGE[0].name));
+        assert!(indexed_docs
+            .iter()
+            .any(|doc| doc["builtin"] == true && doc["readOnly"] == true));
+
+        let export = execute(
+            &notes,
+            Some(&wiki),
+            "export_snapshot",
+            &json!({"owner": "alice", "workspace_id": "home", "corpus": "all"}),
+        )
+        .unwrap();
+        let exported_docs = export["docs"].as_array().unwrap();
+        assert_eq!(exported_docs.len(), 2);
+        assert!(exported_docs
+            .iter()
+            .all(|doc| doc["builtin"] == false && doc["readOnly"] == false));
+    }
+
+    #[test]
+    fn scoped_status_does_not_count_another_owners_documents() {
+        let root = std::env::temp_dir().join(format!("copal-scoped-status-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root.join("notes")).unwrap();
+        let wiki = Db::open(&root.join("wiki")).unwrap();
+        notes
+            .create_doc_scoped("alice", "home", "markdown", "Alice.md", "Alice", None)
+            .unwrap();
+        notes
+            .create_doc_scoped("bob", "home", "planning", "Bob.json", "{}", None)
+            .unwrap();
+        wiki.create_doc_scoped("alice", "home", "wiki", "Alice Wiki.md", "Wiki", None)
+            .unwrap();
+
+        let alice = execute(
+            &notes,
+            Some(&wiki),
+            "scoped_status",
+            &json!({"owner": "alice", "workspace_id": "home"}),
+        )
+        .unwrap();
+        let bob = execute(
+            &notes,
+            Some(&wiki),
+            "scoped_status",
+            &json!({"owner": "bob", "workspace_id": "home"}),
+        )
+        .unwrap();
+
+        assert_eq!(alice["documents"], 2);
+        assert_eq!(alice["kinds"], json!({"markdown": 1, "wiki": 1}));
+        assert_eq!(bob["documents"], 1);
+        assert_eq!(bob["kinds"], json!({"planning": 1}));
+    }
+
+    #[test]
+    fn operation_log_hides_other_owner_document_names() {
+        let root = std::env::temp_dir().join(format!("copal-scoped-ops-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root.join("notes")).unwrap();
+        let alice = notes
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "markdown",
+                "Alice Private Plan.md",
+                "first",
+                None,
+            )
+            .unwrap();
+        notes
+            .create_doc_scoped(
+                "bob",
+                "home",
+                "markdown",
+                "Bob Secret Acquisition.md",
+                "secret",
+                None,
+            )
+            .unwrap();
+        notes
+            .write_doc_scoped(&alice.id, "second", Some(&alice.head), "alice", "home")
+            .unwrap();
+
+        let operations = execute(
+            &notes,
+            None,
+            "ops",
+            &json!({"owner": "alice", "workspace_id": "home", "limit": 50}),
+        )
+        .unwrap();
+        let descriptions = operations["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|operation| operation["description"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(descriptions.contains("Alice Private Plan.md"));
+        assert!(!descriptions.contains("Bob Secret Acquisition.md"));
+        assert!(operations["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["docs"] == 1));
+        assert!(execute(&notes, None, "ops", &json!({"limit": 50})).is_err());
+    }
+
+    #[test]
+    fn owner_rename_preflights_both_stores() {
+        let root =
+            std::env::temp_dir().join(format!("copal-owner-lifecycle-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root.join("notes")).unwrap();
+        let wiki = Db::open(&root.join("wiki")).unwrap();
+        let note = notes
+            .create_doc_scoped("alice", "home", "markdown", "Alice.md", "old", None)
+            .unwrap();
+        let wiki_page = wiki
+            .create_doc_scoped("alice", "home", "wiki", "Alice Wiki.md", "old", None)
+            .unwrap();
+        wiki.create_doc_scoped("taken", "home", "wiki", "Taken.md", "taken", None)
+            .unwrap();
+
+        assert!(execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({"old_owner": "alice", "new_owner": "taken"}),
+        )
+        .is_err());
+        assert!(notes
+            .get_doc_scoped(&note.id, "alice", "home")
+            .unwrap()
+            .is_some());
+
+        let renamed = execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({"old_owner": "alice", "new_owner": "alice2"}),
+        )
+        .unwrap();
+        assert_eq!(renamed["documents"], 2);
+        assert!(notes
+            .get_doc_scoped(&note.id, "alice2", "home")
+            .unwrap()
+            .is_some());
+        assert!(wiki
+            .get_doc_scoped(&wiki_page.id, "alice2", "home")
+            .unwrap()
+            .is_some());
+        assert!(execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({"old_owner": "shared", "new_owner": "somebody"}),
+        )
+        .is_err());
     }
 }
 
@@ -1266,6 +1710,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::args_os().nth(1).map(PathBuf::from))
         .ok_or("COPAL_DATA_DIR is required")?;
     let db = Db::open(&data_dir).map_err(|error| io::Error::other(error.to_string()))?;
+    migrate_hidden_namespaces(&db).map_err(io::Error::other)?;
     // Optional second store for wiki corpus (separate Redb file).
     let wiki_db = std::env::var_os("COPAL_WIKI_DATA_DIR")
         .map(PathBuf::from)
@@ -1275,6 +1720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
         });
     if let Some(ref wiki) = wiki_db {
+        migrate_hidden_namespaces(wiki).map_err(io::Error::other)?;
         seed_wiki_pages(wiki).map_err(io::Error::other)?;
         eprintln!("[copal-bridge] wiki store opened alongside notes store");
     }

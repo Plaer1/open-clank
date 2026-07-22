@@ -21,8 +21,7 @@ router = APIRouter(prefix="/api/compare", tags=["compare"])
 
 
 def _owned_endpoint_by_url(db, base_url, owner):
-    """ModelEndpoint whose base_url == `base_url` and is VISIBLE to `owner`
-    (their own rows + legacy null-owner "shared" rows); None otherwise.
+    """ModelEndpoint whose base_url == `base_url` belongs exactly to `owner`.
 
     Owner-scoped on purpose. ModelEndpoint is per-user (core/database.py: non-null
     owner = private, "the model picker only shows the endpoint to that user") and
@@ -31,18 +30,17 @@ def _owned_endpoint_by_url(db, base_url, owner):
     /api/chat_stream calls — so an UNSCOPED base_url match would let a user mint a
     comparison bound to ANOTHER user's private endpoint and spend that owner's
     api_key / reach whatever base_url they configured. Mirrors
-    session_routes._owned_endpoint. A null/empty owner is a no-op (single-user /
-    legacy mode).
+    session_routes._owned_endpoint. A null/empty owner sees only legacy
+    ownerless rows in single-user mode.
     """
     from core.database import ModelEndpoint
     from src.auth_helpers import owner_filter
     q = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base_url)
-    return owner_filter(q, ModelEndpoint, owner).first()
+    return owner_filter(q, ModelEndpoint, owner, include_shared=False).first()
 
 
 def _owned_endpoint_by_id(db, endpoint_id, owner):
-    """ModelEndpoint whose id == `endpoint_id` and is VISIBLE to `owner` (their
-    own rows + legacy null-owner "shared" rows); None otherwise.
+    """ModelEndpoint whose id == `endpoint_id` belongs exactly to `owner`.
 
     Preferred over _owned_endpoint_by_url for credential resolution: two visible
     endpoints can share the same base_url but hold DIFFERENT api_keys (e.g. two
@@ -50,12 +48,12 @@ def _owned_endpoint_by_id(db, endpoint_id, owner):
     sorts first, so it can copy the WRONG owner-scoped key into the [CMP] session.
     An id pins the exact registered endpoint, so /api/compare/start prefers it and
     only falls back to URL matching for legacy / admin raw-URL callers. Owner
-    scoping is identical to _owned_endpoint_by_url (a null/empty owner is a no-op).
+    Scoping is identical to _owned_endpoint_by_url.
     """
     from core.database import ModelEndpoint
     from src.auth_helpers import owner_filter
     q = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
-    return owner_filter(q, ModelEndpoint, owner).first()
+    return owner_filter(q, ModelEndpoint, owner, include_shared=False).first()
 
 
 class RecordVoteRequest(BaseModel):

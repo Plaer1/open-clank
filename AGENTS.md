@@ -14,7 +14,7 @@ Only use `git commit --no-verify` in a genuine emergency: it bypasses the hooks 
 - Plans live in .futures/ and are markdown (in ./.futures/*)
 - Clanker sidecar notes (test instructions, run records, audits) live in robonotes/ and are markdown — never in .claude/ (in ./.robonotes/*)
 - Reference clones stay out of git (.references/ is study material, not product)
-- Claude is never attributed in the release commit — inherited history is left intact
+- Claude is never attributed in commits — no AI co-author, generated-with, or session trailers
 - No credentials in first-party code (in ./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*) _(warn)_
 - Glue/memory code changes update plans or robonotes (write it down as you go) _(warn)_
 

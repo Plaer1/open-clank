@@ -738,3 +738,115 @@ def test_rejected_rename_does_not_mutate_files(monkeypatch, tmp_path):
     assert json.loads(rp.read_text())["owner"] == "alice", "research owner mutated after rejected rename"
     assert json.loads(mem.read_text())[0]["owner"] == "alice", "memory owner mutated after rejected rename"
     assert "owner: alice" in (skill_dir / "SKILL.md").read_text(), "skill owner mutated after rejected rename"
+
+
+class _CopalOwnerBridge:
+    def __init__(self):
+        self.calls = []
+
+    def is_alive(self):
+        return True
+
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, dict(args), timeout))
+        return {"documents": 1}
+
+
+def test_rename_migrates_copal_owner(rename_endpoint):
+    endpoint, _am, tmp_path = rename_endpoint
+    bridge = _CopalOwnerBridge()
+    request = _request(tmp_path)
+    request.app.state.copal_bridge = bridge
+
+    result = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), request))
+
+    assert result["username"] == "alice2"
+    assert bridge.calls == [
+        ("rename_owner", {"old_owner": "alice", "new_owner": "alice2"}, 20)
+    ]
+
+
+def test_rename_uses_resolved_owner_for_grandfathered_local_account(rename_endpoint):
+    endpoint, am, tmp_path = rename_endpoint
+    am.users = {"local": {}}
+    bridge = _CopalOwnerBridge()
+    request = _request(tmp_path)
+    request.app.state.copal_bridge = bridge
+
+    asyncio.run(endpoint("local", SimpleNamespace(username="alice2"), request))
+
+    assert bridge.calls[0][1] == {"old_owner": "user:local", "new_owner": "alice2"}
+
+
+def test_explicitly_unavailable_copal_bridge_blocks_rename_before_auth(rename_endpoint):
+    endpoint, am, tmp_path = rename_endpoint
+    request = _request(tmp_path)
+    request.app.state.copal_bridge = None
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), request))
+
+    assert exc.value.status_code == 503
+    am.rename_user.assert_not_called()
+
+
+def test_sql_failure_rolls_back_copal_owner_rename(monkeypatch, tmp_path):
+    import routes.auth_routes as ar
+
+    _force_sql_owner_migration_failure(monkeypatch)
+    am = _auth_manager_for_rollback_test(monkeypatch, tmp_path)
+    admin_token = am.create_session_trusted("admin")
+    endpoint = _route(ar.setup_auth_routes(am), "rename_user")
+    bridge = _CopalOwnerBridge()
+    request = _request(tmp_path, token=admin_token)
+    request.app.state.copal_bridge = bridge
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), request))
+
+    assert exc.value.status_code == 500
+    assert [call[:2] for call in bridge.calls] == [
+        ("rename_owner", {"old_owner": "alice", "new_owner": "alice2"}),
+        ("rename_owner", {"old_owner": "alice2", "new_owner": "alice"}),
+    ]
+
+
+def test_calendar_projection_cleanup_keeps_native_rows_and_calendars():
+    from datetime import datetime
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import routes.auth_routes as ar
+    from core.database import Base, CalendarCal, CalendarEvent
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine, tables=[CalendarCal.__table__, CalendarEvent.__table__])
+    sessions = sessionmaker(bind=engine)
+    db = sessions()
+    db.add_all([
+        CalendarCal(id="alice-cal", owner="alice", name="Alice"),
+        CalendarCal(id="bob-cal", owner="bob", name="Bob"),
+        CalendarEvent(
+            uid="alice-copal", calendar_id="alice-cal", summary="Projected",
+            dtstart=datetime(2026, 7, 21), dtend=datetime(2026, 7, 22), origin="copal",
+        ),
+        CalendarEvent(
+            uid="alice-native", calendar_id="alice-cal", summary="Native",
+            dtstart=datetime(2026, 7, 23), dtend=datetime(2026, 7, 24), origin="local",
+        ),
+        CalendarEvent(
+            uid="bob-copal", calendar_id="bob-cal", summary="Other",
+            dtstart=datetime(2026, 7, 25), dtend=datetime(2026, 7, 26), origin="copal",
+        ),
+    ])
+    db.commit()
+
+    assert ar._drop_copal_calendar_projections_for_owner(db, "alice") == 1
+    db.commit()
+
+    assert db.query(CalendarCal).count() == 2
+    assert db.query(CalendarEvent).filter_by(uid="alice-copal").first() is None
+    assert db.query(CalendarEvent).filter_by(uid="alice-native").first() is not None
+    assert db.query(CalendarEvent).filter_by(uid="bob-copal").first() is not None
+    db.close()

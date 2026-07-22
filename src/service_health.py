@@ -407,7 +407,7 @@ def _rollup(services: List[Dict[str, Any]]) -> str:
     return worst
 
 
-def _gather_inputs() -> Dict[str, Any]:
+def _gather_inputs(owner: str | None = None) -> Dict[str, Any]:
     """Pull live config/account/endpoint lists from the app's data sources.
 
     Each lookup fails soft: a broken source yields an empty/neutral value so a
@@ -434,10 +434,14 @@ def _gather_inputs() -> Dict[str, Any]:
         logger.debug(f"service_health: email accounts load failed: {e}")
     try:
         from core.database import SessionLocal, ModelEndpoint
+        from src.auth_helpers import owner_filter
         db = SessionLocal()
         try:
-            rows = db.query(ModelEndpoint).filter(
-                ModelEndpoint.is_enabled == True).all()  # noqa: E712
+            query = db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True)  # noqa: E712
+            rows = owner_filter(
+                query, ModelEndpoint, owner or "", include_shared=False
+            ).all()
             endpoints = [{"name": r.name, "base_url": r.base_url,
                           "api_key": r.api_key} for r in rows]
         finally:
@@ -465,7 +469,8 @@ async def _run_subsystem(name: str, fn: Callable, *args: Any) -> Dict[str, Any]:
 
 
 async def collect_service_health(rag_manager: Any = None,
-                                 memory_vector: Any = None) -> Dict[str, Any]:
+                                 memory_vector: Any = None,
+                                 owner: str | None = None) -> Dict[str, Any]:
     """Run every probe and return {overall, services, timestamp}.
 
     Bounded end-to-end: in-process ChromaDB flags are read synchronously; the
@@ -475,7 +480,7 @@ async def collect_service_health(rag_manager: Any = None,
     """
     from datetime import datetime, timezone
 
-    inputs = _gather_inputs()
+    inputs = _gather_inputs(owner)
     settings = inputs["settings"]
 
     # ChromaDB is in-process and synchronous (just reads flags).

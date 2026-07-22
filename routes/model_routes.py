@@ -160,21 +160,31 @@ def _active_cookbook_endpoint_ids() -> set[str]:
     return out
 
 
-def _disable_stale_cookbook_local_endpoints(db) -> int:
-    """Disable enabled cookbook endpoints whose serve task is no longer active."""
+def _disable_stale_cookbook_local_endpoints(db, owner: str = "") -> int:
+    """Disable this owner's cookbook endpoints whose serve task ended."""
     active_ids = _active_cookbook_endpoint_ids()
     if not active_ids:
         return 0
-    stale = (
+    stale_query = (
         db.query(ModelEndpoint)
         .filter(ModelEndpoint.is_enabled == True)  # noqa: E712
         .filter(ModelEndpoint.id.like("local-%"))
         .filter(~ModelEndpoint.id.in_(active_ids))
-        .all()
     )
+    stale = owner_filter(
+        stale_query, ModelEndpoint, owner, include_shared=False
+    ).all()
     if not stale:
         return 0
-    settings = _load_settings()
+    if owner:
+        from routes.prefs_routes import _load_for_user, _save_for_user
+
+        settings = _load_for_user(owner)
+        def save_settings(value):
+            _save_for_user(owner, value)
+    else:
+        settings = _load_settings()
+        save_settings = _save_settings
     touched_settings = False
     for ep in stale:
         ep.is_enabled = False
@@ -183,7 +193,7 @@ def _disable_stale_cookbook_local_endpoints(db) -> int:
             touched_settings = True
         logger.info("Disabled stale Cookbook endpoint %s (%s @ %s)", ep.id, ep.name, ep.base_url)
     if touched_settings:
-        _save_settings(settings)
+        save_settings(settings)
     db.commit()
     return len(stale)
 
@@ -703,8 +713,7 @@ def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None)
         db = SessionLocal()
         try:
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner:
-                q = owner_filter(q, ModelEndpoint, owner)
+            q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
             for ep in q.all():
                 if (getattr(ep, "model_type", None) or "llm") != "llm":
                     continue
@@ -1592,6 +1601,17 @@ def _api_key_fingerprint(api_key: Optional[str]) -> str:
 def setup_model_routes(model_discovery):
     router = APIRouter(prefix="/api")
 
+    def _model_owner(request: Request) -> str:
+        return effective_user(request) or ""
+
+    def _owned_endpoint_query(db, request: Request):
+        return owner_filter(
+            db.query(ModelEndpoint),
+            ModelEndpoint,
+            _model_owner(request),
+            include_shared=False,
+        )
+
     # ---- Model list cache ----
     import time as _time
     # Per-user cache: { owner_key: {"data": ..., "time": ...} }. owner_key is
@@ -1632,8 +1652,8 @@ def setup_model_routes(model_discovery):
     _REFRESH_FAILURE_BASE = 300.0
     _REFRESH_FAILURE_MAX = 3600.0
 
-    def _refresh_key(base: str, api_key: Optional[str]) -> str:
-        return f"{base.rstrip('/')}\x00{api_key or ''}"
+    def _refresh_key(base: str, api_key: Optional[str], owner: str = "") -> str:
+        return f"{owner}\x00{base.rstrip('/')}\x00{api_key or ''}"
 
     def _ts(value: Any) -> float:
         try:
@@ -1654,7 +1674,11 @@ def setup_model_routes(model_discovery):
         category = _classify_endpoint(base, kind)
         mode = _endpoint_refresh_mode(ep, kind)
         cached = _cached_model_ids(ep)
-        key = _refresh_key(base, getattr(ep, "api_key", None))
+        key = _refresh_key(
+            base,
+            getattr(ep, "api_key", None),
+            str(getattr(ep, "owner", None) or ""),
+        )
         state = _refresh_state.get(key, {})
 
         info = {
@@ -1690,7 +1714,7 @@ def setup_model_routes(model_discovery):
                 return False, info
         return True, info
 
-    def _refresh_caches_bg(force: bool = False):
+    def _refresh_caches_bg(owner: str = "", force: bool = False):
         """Background thread: safely refresh model caches with per-base single-flight.
 
         The public /api/models path stays cached-first. This refresh never clears
@@ -1707,9 +1731,15 @@ def setup_model_routes(model_discovery):
                 db = SessionLocal()
                 changed = False
                 try:
-                    if _disable_stale_cookbook_local_endpoints(db):
+                    if _disable_stale_cookbook_local_endpoints(db, owner):
                         changed = True
-                    endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+                    endpoint_query = db.query(ModelEndpoint).filter(
+                        ModelEndpoint.is_enabled == True
+                    )
+                    endpoint_query = owner_filter(
+                        endpoint_query, ModelEndpoint, owner, include_shared=False
+                    )
+                    endpoints = endpoint_query.all()
                     now = _time.time()
                     groups: Dict[str, Dict[str, Any]] = {}
                     for ep in endpoints:
@@ -1775,28 +1805,20 @@ def setup_model_routes(model_discovery):
                 _refresh_inflight["v"] = False
         threading.Thread(target=_do, daemon=True).start()
 
-    def _fetch_models(owner: str = "", is_admin: bool = False):
+    def _fetch_models(owner: str = ""):
         """Return model list from cached data (instant). Background refresh keeps caches fresh.
 
-        SECURITY: filters endpoints by `owner` — without this the picker
-        leaked every admin-added endpoint (and the model list behind each
-        one) to every authenticated user. NULL-owner rows are treated as
-        legacy/shared so existing configs still appear after migration.
-
-        Admins see EVERY endpoint (they manage the global pool, and the
-        scoped filter was making the picker disappear for them).
+        Authenticated callers see exact-owner rows only. NULL-owner records
+        are legacy/unclaimed and startup assigns them to the first admin.
         """
         items = []
 
         db = SessionLocal()
         try:
-            if _disable_stale_cookbook_local_endpoints(db):
+            if _disable_stale_cookbook_local_endpoints(db, owner):
                 _invalidate_models_cache()
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner and not is_admin:
-                # Regular users see: their own endpoints + null-owner
-                # (legacy / shared). Admins see everything.
-                q = owner_filter(q, ModelEndpoint, owner)
+            q = owner_filter(q, ModelEndpoint, owner, include_shared=False)
             endpoints = q.all()
         finally:
             db.close()
@@ -1878,10 +1900,9 @@ def setup_model_routes(model_discovery):
 
     @router.get("/models")
     def api_models(request: Request, refresh: bool = False, background: bool = False):
-        """Get available models — per-user (caller sees only their endpoints +
-        legacy/shared null-owner rows). Cached per-user for 30s."""
-        # Require auth; "" is the unconfigured single-user mode, treated as
-        # "see everything" by _fetch_models.
+        """Get the caller's model catalogue, cached per owner for 30 seconds."""
+        # Require auth; "" is unconfigured single-user mode and only sees
+        # legacy ownerless endpoints.
         try:
             if getattr(request.state, "api_token", False):
                 scopes = set(getattr(request.state, "api_token_scopes", []) or [])
@@ -1901,28 +1922,16 @@ def setup_model_routes(model_discovery):
         except Exception as e:
             logger.error("Auth gate error in GET /api/models, failing closed: %s", e)
             raise HTTPException(status_code=500, detail="Internal error")
-        # Admins see every endpoint (they manage the global pool); regular
-        # users get the owner-scoped view.
-        _is_admin = False
-        try:
-            auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if owner and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
-                _is_admin = bool(auth_mgr.is_admin(owner))
-        except Exception:
-            _is_admin = False
         _allowed_models = _allowed_model_ids(request, owner)
         now = _time.time()
-        # Cache key includes the admin flag so a demotion / promotion doesn't
-        # serve the wrong scoped view from cache.
         _cache_key = (
             owner,
-            _is_admin,
             None if _allowed_models is None else tuple(sorted(_allowed_models)),
         )
         cache_entry = _models_cache.get(_cache_key)
         if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
             return cache_entry["data"]
-        result = _fetch_models(owner=owner, is_admin=_is_admin)
+        result = _fetch_models(owner=owner)
         # mimo reports up its own provider catalog (model authority lives in
         # mimo's config, not the endpoint DB) — surface it as its own group.
         _sup = getattr(request.app.state, "mimo_supervisor", None)
@@ -1975,7 +1984,7 @@ def setup_model_routes(model_discovery):
         # Page boot can opt out with background=false so opening Odysseus does
         # not start endpoint probes against slow/offline model servers.
         if background or refresh:
-            _refresh_caches_bg(force=refresh)
+            _refresh_caches_bg(owner=owner, force=refresh)
         return result
 
     # Brief cache for local-probe results so picker-open doesn't hammer
@@ -1983,8 +1992,8 @@ def setup_model_routes(model_discovery):
     # short enough that a freshly-killed local server shows as offline
     # within ~8s of the user noticing.
     _LOCAL_PROBE_TTL = 8.0
-    _local_probe_cache: Dict[str, Any] = {"data": None, "time": 0.0}
-    _local_probe_inflight: Dict[str, Any] = {"task": None}
+    _local_probe_cache: Dict[str, Dict[str, Any]] = {}
+    _local_probe_inflight: Dict[str, Any] = {}
 
     @router.get("/model-endpoints/probe-local")
     async def probe_local_endpoints(request: Request):
@@ -1994,22 +2003,25 @@ def setup_model_routes(model_discovery):
         can dim stale entries pointing at dead vLLM servers. Returns
         {ep_id: {alive, latency_ms, error}}."""
         require_admin(request)
+        owner = effective_user(request) or ""
         now = _time.time()
-        if (_local_probe_cache["data"] is not None and
-                (now - _local_probe_cache["time"]) < _LOCAL_PROBE_TTL):
-            return _local_probe_cache["data"]
+        cache_entry = _local_probe_cache.get(owner)
+        if cache_entry is not None and (now - cache_entry["time"]) < _LOCAL_PROBE_TTL:
+            return cache_entry["data"]
 
         import asyncio as _asyncio
-        task = _local_probe_inflight.get("task")
+        task = _local_probe_inflight.get(owner)
         if task is not None and not task.done():
             return await task
 
         async def _compute_local_probe() -> Dict[str, Any]:
             db = SessionLocal()
             try:
-                if _disable_stale_cookbook_local_endpoints(db):
+                if _disable_stale_cookbook_local_endpoints(db, owner):
                     _invalidate_models_cache()
-                endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+                query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+                query = owner_filter(query, ModelEndpoint, owner, include_shared=False)
+                endpoints = query.all()
                 local_eps = []
                 for ep in endpoints:
                     base = _normalize_base(ep.base_url)
@@ -2021,7 +2033,7 @@ def setup_model_routes(model_discovery):
 
             grouped: Dict[str, Dict[str, Any]] = {}
             for ep_id, base, api_key in local_eps:
-                key = _refresh_key(base, api_key)
+                key = _refresh_key(base, api_key, owner)
                 grouped.setdefault(key, {"base": base, "api_key": api_key, "endpoint_ids": []})["endpoint_ids"].append(ep_id)
 
             async def _probe_one(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2054,17 +2066,16 @@ def setup_model_routes(model_discovery):
                 for eid in data["endpoint_ids"]:
                     results[eid] = r
 
-            _local_probe_cache["data"] = results
-            _local_probe_cache["time"] = _time.time()
+            _local_probe_cache[owner] = {"data": results, "time": _time.time()}
             return results
 
         task = _asyncio.create_task(_compute_local_probe())
-        _local_probe_inflight["task"] = task
+        _local_probe_inflight[owner] = task
         try:
             return await task
         finally:
-            if _local_probe_inflight.get("task") is task:
-                _local_probe_inflight["task"] = None
+            if _local_probe_inflight.get(owner) is task:
+                _local_probe_inflight.pop(owner, None)
 
     @router.get("/ping")
     def ping_endpoints(request: Request):
@@ -2072,7 +2083,9 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         db = SessionLocal()
         try:
-            endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+            endpoints = _owned_endpoint_query(db, request).filter(
+                ModelEndpoint.is_enabled == True
+            ).all()
         finally:
             db.close()
 
@@ -2127,7 +2140,9 @@ def setup_model_routes(model_discovery):
 
                 # Cache endpoint lookups
                 if ep_id and ep_id not in endpoints_cache:
-                    ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                    ep = _owned_endpoint_query(db, request).filter(
+                        ModelEndpoint.id == ep_id
+                    ).first()
                     if ep:
                         endpoints_cache[ep_id] = {"base_url": ep.base_url, "api_key": ep.api_key}
                 ep_data = endpoints_cache.get(ep_id)
@@ -2157,7 +2172,7 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         db = SessionLocal()
         try:
-            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            q = _owned_endpoint_query(db, request).filter(ModelEndpoint.is_enabled == True)
             if endpoint_id:
                 q = q.filter(ModelEndpoint.id == endpoint_id)
             endpoints = q.all()
@@ -2186,7 +2201,9 @@ def setup_model_routes(model_discovery):
                 all_models, diagnostic = _probe_endpoint_result(base, ep.get("api_key"))
                 db_probe = SessionLocal()
                 try:
-                    ep_obj = db_probe.query(ModelEndpoint).filter(ModelEndpoint.id == ep["id"]).first()
+                    ep_obj = _owned_endpoint_query(db_probe, request).filter(
+                        ModelEndpoint.id == ep["id"]
+                    ).first()
                     if ep_obj:
                         _record_catalog_probe(ep_obj, diagnostic)
                         db_probe.commit()
@@ -2196,7 +2213,9 @@ def setup_model_routes(model_discovery):
                 if all_models:
                     db2 = SessionLocal()
                     try:
-                        ep_obj = db2.query(ModelEndpoint).filter(ModelEndpoint.id == ep["id"]).first()
+                        ep_obj = _owned_endpoint_query(db2, request).filter(
+                            ModelEndpoint.id == ep["id"]
+                        ).first()
                         if ep_obj:
                             ep_obj.cached_models = json.dumps(all_models)
                             db2.commit()
@@ -2255,9 +2274,9 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         db = SessionLocal()
         try:
-            if _disable_stale_cookbook_local_endpoints(db):
+            if _disable_stale_cookbook_local_endpoints(db, _model_owner(request)):
                 _invalidate_models_cache()
-            rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
+            rows = _owned_endpoint_query(db, request).order_by(ModelEndpoint.created_at).all()
             results = []
             from src.model_capabilities import endpoint_capability_states
             for r in rows:
@@ -2493,12 +2512,9 @@ def setup_model_routes(model_discovery):
         supports_tools: str = Form(""),  # "true"/"false"/"" (unknown)
         pinned_models: str = Form(""),  # admin-pinned IDs: list/JSON/comma/newline
         container_local: str = Form("false"),
-        # Default `shared=true` → endpoints are visible to all users (the
-        # app's historical behaviour). Admins can pass `shared=false` to
-        # scope a new endpoint to their own account only.
-        shared: str = Form("true"),
     ):
         require_admin(request)
+        _caller = _model_owner(request) or None
         base_url = _normalize_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
@@ -2524,22 +2540,19 @@ def setup_model_routes(model_discovery):
         )
         explicit_timeout = _explicit_model_list_timeout(base_url, requested_kind, refresh_timeout)
 
-        # Dedupe: if an endpoint with the same base_url already exists and
-        # is reachable by the caller (shared or owned by them), return it
-        # instead of creating a duplicate row. Fixes "Scan for Servers"
-        # re-adding manually-added endpoints under their host:port name.
-        from src.auth_helpers import get_current_user as _gcu_dedup
-        _caller = _gcu_dedup(request) or None
+        # Dedupe only inside this owner's catalogue. Two users may connect the
+        # same provider URL with different credentials without sharing a row.
         _incoming_api_key = api_key.strip()
         _db_dedup = SessionLocal()
         try:
-            _same_url_rows = (
-                _db_dedup.query(ModelEndpoint)
-                .filter(ModelEndpoint.base_url == base_url)
-                .filter((ModelEndpoint.owner.is_(None)) | (ModelEndpoint.owner == _caller))
-                .order_by(ModelEndpoint.owner.desc())  # prefer owned over shared
-                .all()
+            _same_url_query = _db_dedup.query(ModelEndpoint).filter(
+                ModelEndpoint.base_url == base_url
             )
+            if _caller:
+                _same_url_query = _same_url_query.filter(ModelEndpoint.owner == _caller)
+            else:
+                _same_url_query = _same_url_query.filter(ModelEndpoint.owner.is_(None))
+            _same_url_rows = _same_url_query.all()
             existing = None
             _empty_key_existing = None
             for _candidate in _same_url_rows:
@@ -2600,7 +2613,7 @@ def setup_model_routes(model_discovery):
                 if changed:
                     _db_dedup.commit()
                     _invalidate_models_cache()
-                    _local_probe_cache["data"] = None
+                    _local_probe_cache.clear()
                 existing_models = _cached_model_ids(existing)
                 _existing_pinned = _normalize_model_ids(getattr(existing, "pinned_models", None))
                 existing_kind = _effective_endpoint_kind(existing, existing.base_url)
@@ -2645,13 +2658,6 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             _pinned = _normalize_model_ids(pinned_models)
-            # Stamp owner so the picker only shows this endpoint to the admin
-            # who added it. Pass `shared=true` to mark it null-owner (visible
-            # to all users), preserving the pre-fix "everyone sees everything"
-            # behaviour for endpoints the admin explicitly intends to share.
-            from src.auth_helpers import get_current_user as _gcu
-            _shared_flag = (shared or "").strip().lower() in ("true", "1", "yes")
-            _owner_val = None if _shared_flag else (_gcu(request) or None)
             ep = ModelEndpoint(
                 id=ep_id,
                 name=name.strip(),
@@ -2667,7 +2673,7 @@ def setup_model_routes(model_discovery):
                 pinned_models=json.dumps(_pinned) if _pinned else None,
                 # Legacy endpoint-wide authority is intentionally dormant.
                 supports_tools=None,
-                owner=_owner_val,
+                owner=_caller,
             )
             if should_probe:
                 _record_catalog_probe(ep, diagnostic)
@@ -2679,17 +2685,21 @@ def setup_model_routes(model_discovery):
             # endpoint that is now missing/disabled (#3586). Seed the first CHAT
             # model (not raw model_ids[0]) so we don't pin the global default to
             # an embedding/tts/etc. entry a provider happens to list first.
-            settings = _load_settings()
+            if _caller:
+                from routes.prefs_routes import _load_for_user, _save_for_user
+                settings = _load_for_user(_caller)
+            else:
+                settings = _load_settings()
             enabled_ids = {
                 e.id
-                for e in db.query(ModelEndpoint).filter(
+                for e in _owned_endpoint_query(db, request).filter(
                     ModelEndpoint.is_enabled == True  # noqa: E712
                 ).all()
             }
             current_default_id = settings.get("default_endpoint_id") or ""
             current_default_ep = None
             if current_default_id:
-                current_default_ep = db.query(ModelEndpoint).filter(
+                current_default_ep = _owned_endpoint_query(db, request).filter(
                     ModelEndpoint.id == current_default_id
                 ).first()
             if _default_endpoint_needs_assignment(
@@ -2701,9 +2711,12 @@ def setup_model_routes(model_discovery):
                 from src.endpoint_resolver import _first_chat_model
                 settings["default_endpoint_id"] = ep.id
                 settings["default_model"] = _first_chat_model(model_ids) or ""
-                _save_settings(settings)
+                if _caller:
+                    _save_for_user(_caller, settings)
+                else:
+                    _save_settings(settings)
             _invalidate_models_cache()
-            _local_probe_cache["data"] = None
+            _local_probe_cache.clear()
         finally:
             db.close()
 
@@ -2768,7 +2781,7 @@ def setup_model_routes(model_discovery):
             raise HTTPException(409, "These models refresh automatically with the provider connection")
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key}
@@ -2798,7 +2811,9 @@ def setup_model_routes(model_discovery):
             # Update hidden_models and cached_models in DB
             db2 = SessionLocal()
             try:
-                ep_obj = db2.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                ep_obj = _owned_endpoint_query(db2, request).filter(
+                    ModelEndpoint.id == ep_id
+                ).first()
                 if ep_obj:
                     _record_catalog_probe(ep_obj, diagnostic)
                     ep_obj.hidden_models = json.dumps(failed) if failed else None
@@ -2841,7 +2856,7 @@ def setup_model_routes(model_discovery):
             ]
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             hidden = _hidden_model_ids(ep)
@@ -2900,7 +2915,7 @@ def setup_model_routes(model_discovery):
             raise HTTPException(409, "Model visibility for this provider is managed by its connection")
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             body = await request.json()
@@ -2934,30 +2949,27 @@ def setup_model_routes(model_discovery):
         # no per-user default yet, we resolve via the owner-scoped endpoint
         # lookup below (last-resort: first enabled endpoint THIS user owns).
         # Unauthenticated single-user mode keeps the old behavior.
-        from src.auth_helpers import get_current_user as _gcu
         try:
-            _user = _gcu(request) or ""
+            _user = _model_owner(request)
         except Exception:
             _user = ""
-        # Admins resolve via the global defaults (they own them, and the
-        # scoped resolution was making the picker disappear for them).
-        # Regular users get per-user prefs with NO global fallback for the
-        # model/endpoint values — that's what was leaking the previous
-        # admin's pick into every new account's composer.
         settings = _load_settings()
-        _is_admin = False
-        try:
-            auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if _user and auth_mgr is not None and getattr(auth_mgr, "is_admin", None):
-                _is_admin = bool(auth_mgr.is_admin(_user))
-        except Exception:
-            _is_admin = False
-        if _user and not _is_admin:
+        if _user:
             from routes.prefs_routes import _load_for_user
             _user_prefs = _load_for_user(_user) or {}
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
             _fallbacks = _user_prefs.get("default_model_fallbacks") or []
+            # MiMo is a virtual per-owner runtime, not a shared database
+            # endpoint. Reusing the operator's virtual default is safe because
+            # the catalogue below is still fetched for this caller and an
+            # unconnected account resolves to nothing. This also preserves the
+            # pre-isolation default for the existing admin without exposing any
+            # other user's credentials or models.
+            _global_ep = str(settings.get("default_endpoint_id") or "").strip()
+            if not ep_id and _mimo_endpoint_provider(_global_ep)[0]:
+                ep_id = _global_ep
+                model = str(settings.get("default_model") or "").strip()
             # If user has no personal default, fall back to global default
             # But only based on the "share_defaults_with_users" flag
             # (only if share_defaults_with_users is enabled)
@@ -2988,12 +3000,7 @@ def setup_model_routes(model_discovery):
                 _catalog = [item for item in _catalog if item in _allowed]
                 _catalog_base = [item for item in _catalog_base if item in _allowed]
             if not _catalog:
-                eligible_configured = model if _allowed is None or model in _allowed else ""
-                return {
-                    "endpoint_id": ep_id,
-                    "endpoint_url": "mimo://acp",
-                    "model": eligible_configured,
-                }
+                return {"endpoint_id": "", "endpoint_url": "", "model": ""}
             if not model or model not in _catalog:
                 # Nothing (valid) configured: prefer the router's auto mode —
                 # it picks a model per request — before any specific model.
@@ -3008,16 +3015,12 @@ def setup_model_routes(model_discovery):
         try:
             ep = None
             if ep_id:
-                ep_q = db.query(ModelEndpoint).filter(
+                ep_q = _owned_endpoint_query(db, request).filter(
                     ModelEndpoint.id == ep_id, ModelEndpoint.is_enabled == True
                 )
-                # Honor the same owner-scope rule as /api/models — a per-user
-                # default that points at an endpoint owned by a different user
-                # mustn't silently resolve. Admins are exempt (they manage the
-                # global pool).
-                if _user and not _is_admin:
-                    ep_q = owner_filter(ep_q, ModelEndpoint, _user)
                 ep = ep_q.first()
+                if ep is None:
+                    model = ""
             # Configured fallback chain — when the chosen default endpoint is
             # gone/disabled, honor the user's configured `default_model_fallbacks`
             # in order BEFORE arbitrarily grabbing the first enabled endpoint.
@@ -3031,11 +3034,9 @@ def setup_model_routes(model_discovery):
                     fid = (entry.get("endpoint_id") or "").strip()
                     if not fid:
                         continue
-                    cand_q = db.query(ModelEndpoint).filter(
+                    cand_q = _owned_endpoint_query(db, request).filter(
                         ModelEndpoint.id == fid, ModelEndpoint.is_enabled == True
                     )
-                    if _user and not _is_admin:
-                        cand_q = owner_filter(cand_q, ModelEndpoint, _user)
                     cand = cand_q.first()
                     if cand:
                         ep = cand
@@ -3045,15 +3046,12 @@ def setup_model_routes(model_discovery):
                         # fills it from the fallback endpoint.
                         model = (entry.get("model") or "").strip()
                         break
-            # Last resort: first enabled endpoint owned by THIS user. Do not
-            # include null-owner/shared endpoints here: a brand-new user with
-            # no explicit default should not auto-open a pending chat using an
-            # existing shared/admin endpoint. Shared endpoints remain visible
-            # in the picker and still work when explicitly selected/saved.
+            # Last resort: first enabled endpoint owned by this user.
             if not ep:
-                _last_q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                if _user and not _is_admin:
-                    _last_q = owner_filter(_last_q, ModelEndpoint, _user, include_shared=False)
+                model = ""
+                _last_q = _owned_endpoint_query(db, request).filter(
+                    ModelEndpoint.is_enabled == True
+                )
                 ep = _last_q.first()
             if not ep:
                 return {"endpoint_id": "", "endpoint_url": "", "model": ""}
@@ -3075,7 +3073,7 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             from src.model_capabilities import endpoint_capability_states
@@ -3096,7 +3094,7 @@ def setup_model_routes(model_discovery):
         value = raw
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             if model_id not in _endpoint_enabled_models(ep):
@@ -3118,7 +3116,7 @@ def setup_model_routes(model_discovery):
             raise HTTPException(400, "model_id is required")
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             if model_id not in _endpoint_enabled_models(ep):
@@ -3149,7 +3147,7 @@ def setup_model_routes(model_discovery):
             body = {}
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             if body:
@@ -3194,7 +3192,7 @@ def setup_model_routes(model_discovery):
             db.commit()
             _invalidate_models_cache()
             _schedule_mimo_reprojection(request)
-            _local_probe_cache["data"] = None
+            _local_probe_cache.clear()
             from src.model_capabilities import endpoint_capability_states
             return {
                 "id": ep.id,
@@ -3251,7 +3249,7 @@ def setup_model_routes(model_discovery):
         }
         return sess in variants or sess.startswith(base + "/")
 
-    def _clear_sessions_for_endpoint(db, base_url: str) -> int:
+    def _clear_sessions_for_endpoint(db, base_url: str, owner: str | None) -> int:
         """Drop stored auth for sessions using an endpoint being deleted.
 
         Keep the session's endpoint URL and model intact. If the admin is
@@ -3261,7 +3259,10 @@ def setup_model_routes(model_discovery):
         matching enabled endpoint exists.
         """
         cleared = 0
-        rows = db.query(DbSession).filter(DbSession.endpoint_url.isnot(None)).all()
+        rows = db.query(DbSession).filter(DbSession.endpoint_url.isnot(None))
+        if owner:
+            rows = rows.filter(DbSession.owner == owner)
+        rows = rows.all()
         for row in rows:
             if _session_uses_endpoint_url(row.endpoint_url or "", base_url):
                 row.headers = {}
@@ -3269,7 +3270,7 @@ def setup_model_routes(model_discovery):
                 cleared += 1
         return cleared
 
-    def _clear_loaded_sessions_for_endpoint(base_url: str) -> int:
+    def _clear_loaded_sessions_for_endpoint(base_url: str, owner: str | None) -> int:
         try:
             from src.ai_interaction import get_session_manager
             manager = get_session_manager()
@@ -3280,6 +3281,8 @@ def setup_model_routes(model_discovery):
         cleared = 0
         try:
             for sess in list(getattr(manager, "sessions", {}).values()):
+                if owner and getattr(sess, "owner", None) != owner:
+                    continue
                 if _session_uses_endpoint_url(getattr(sess, "endpoint_url", "") or "", base_url):
                     sess.headers = {}
                     cleared += 1
@@ -3300,21 +3303,21 @@ def setup_model_routes(model_discovery):
             raise HTTPException(409, "Disconnect this provider instead of deleting it")
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             # Clean up any settings that reference this endpoint
             cleared = _clear_settings_for_endpoint(ep_id)
             cleared_user_preferences = _clear_user_prefs_for_endpoint(ep_id)
-            cleared_sessions = _clear_sessions_for_endpoint(db, ep.base_url)
-            cleared_loaded_sessions = _clear_loaded_sessions_for_endpoint(ep.base_url)
+            cleared_sessions = _clear_sessions_for_endpoint(db, ep.base_url, ep.owner)
+            cleared_loaded_sessions = _clear_loaded_sessions_for_endpoint(ep.base_url, ep.owner)
             auth_id = getattr(ep, "provider_auth_id", None)
             db.delete(ep)
             cleared_provider_auth = _delete_orphaned_provider_auth(db, auth_id, exclude_ep_id=ep_id)
             db.commit()
             _invalidate_models_cache()
             _schedule_mimo_reprojection(request)
-            _local_probe_cache["data"] = None
+            _local_probe_cache.clear()
             return {
                 "deleted": True,
                 "cleared_settings": cleared,

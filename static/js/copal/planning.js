@@ -18,6 +18,7 @@ import {
   parseLocalDate,
 } from './planningModel.js';
 import { createCopalWindow } from './windows.js';
+import { copalStorageKey } from './storage.js';
 
 export { MIN_DAY_WIDTH, DEFAULT_DAY_WIDTH, MAX_DAY_WIDTH, MIN_LANE_HEIGHT, MAX_LANE_HEIGHT, RANGE_CHUNK_DAYS, WARM_HISTORY_DAYS, addDays, daysBetween, dragPatch, eventLayout, formatLocalDate, glyphFor, manipulationGate, parseLocalDate } from './planningModel.js';
 const MAX_WINDOW_DAYS = 1460;
@@ -25,6 +26,7 @@ const LABEL_WIDTH = 190;
 const INITIAL_HISTORY_DAYS = 3;
 const RANGE_STATE_VERSION = 2;
 const COLORS = ['#f97316','#84cc16','#ec4899','#a855f7','#14b8a6','#eab308','#0ea5e9','#b45309','#f59e0b','#6b7280','#dc2626','#22c55e','#10b981','#0891b2','#06b6d4','#f43f5e','#8b5cf6','#facc15'];
+const THEME_TRACK_COLOR = 'var(--accent-primary, var(--accent, var(--red)))';
 
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function uniqueEvents(data) {
@@ -70,7 +72,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
   let timelineTodayKey = '';
   let timelineRefreshTimer = null;
 
-  function storageKey() { return `odysseus-copal-timeline-v2:${workspace}`; }
+  function storageKey() { return copalStorageKey('odysseus-copal-timeline-v2', workspace); }
   function loadState(nextWorkspace) {
     workspace = nextWorkspace || 'default';
     try {
@@ -119,7 +121,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     { id:'tags', label:'Tags', visible:false, order:6 },
     { id:'stages', label:'Stages', visible:false, order:7 },
   ];
-  function taskStorageKey() { return `odysseus-copal-taskview-v1:${workspace}`; }
+  function taskStorageKey() { return copalStorageKey('odysseus-copal-taskview-v1', workspace); }
   function loadTaskSettings() {
     try {
       const saved = JSON.parse(localStorage.getItem(taskStorageKey()) || '{}');
@@ -170,7 +172,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     if (eventEditor) return eventEditor;
     eventEditor = createCopalWindow({
       id: 'copal-event-editor-modal', label: 'Edit event', subtitle: 'Canonical Redb note', minWidth: 430, minHeight: 520,
-      sizeKey: 'odysseus-copal-event-editor-size', className: 'copal-event-editor-window',
+      sizeKey: copalStorageKey('odysseus-copal-event-editor-size'), className: 'copal-event-editor-window',
       onBeforeClose: () => !editorState.dirty || window.confirm('Discard unsaved event changes?'),
       onClosed: () => { editorState = { eventId:null, draft:null, dirty:false, trigger:null }; },
     });
@@ -249,7 +251,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     const shared = h('div', { class:'copal-track-chip-list', role:'group', 'aria-label':'Additional shared tracks' });
     for (const track of tracks.filter((item) => item.id !== draft.trackId)) {
       const active = (draft.sharedTrackIds || []).includes(track.id);
-      shared.append(h('button', { type:'button', class:`copal-track-chip${active ? ' active' : ''}`, style:`--track-color:${track.color}`, text:`${glyphFor(track.icon)} ${track.name}`, onclick:() => {
+      shared.append(h('button', { type:'button', class:`copal-track-chip${active ? ' active' : ''}`, style:`--track-color:${track.color || THEME_TRACK_COLOR}`, text:`${glyphFor(track.icon)} ${track.name}`, onclick:() => {
         const ids = new Set(draft.sharedTrackIds || []); active ? ids.delete(track.id) : ids.add(track.id); draft.sharedTrackIds = [...ids]; markEditorDirty(); renderEventEditor();
       } }));
     }
@@ -367,7 +369,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     if (trackEditor) return trackEditor;
     trackEditor = createCopalWindow({
       id:'copal-track-editor-modal', label:'Edit track', subtitle:'Canonical track registry', minWidth:390, minHeight:430,
-      sizeKey:'odysseus-copal-track-editor-size', className:'copal-track-editor-window',
+      sizeKey:copalStorageKey('odysseus-copal-track-editor-size'), className:'copal-track-editor-window',
       onBeforeClose:() => !trackState.dirty || window.confirm('Discard unsaved track changes?'),
       onClosed:() => { trackState = { trackId:null, draft:null, dirty:false, trigger:null }; },
     });
@@ -591,7 +593,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     canvas.append(guide);
 
     const visibleTracks = (data.tracks || []).filter((track) => track.enabled !== false && !timeline.hiddenTracks.has(track.id));
-    const rows = timeline.mode === 'regular' ? visibleTracks : [{ id:'__condensed__', name:data.title || 'All events', color:'#14b8a6', icon:'timeline', enabled:true, condensed:true }];
+    const rows = timeline.mode === 'regular' ? visibleTracks : [{ id:'__condensed__', name:data.title || 'All events', color:THEME_TRACK_COLOR, icon:'timeline', enabled:true, condensed:true }];
     for (const track of rows) {
       const candidates = (track.condensed ? allEvents : allEvents.filter((event) => event.trackId === track.id || (event.sharedTrackIds || []).includes(track.id))).map((event) => {
         const layout = eventLayout(event, start, autoStart); const startDay = daysBetween(start, layout.start); const endDay = Math.max(startDay, daysBetween(start, layout.end));
@@ -599,7 +601,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
       }).filter((item) => item.endDay >= 0 && item.startDay < totalDays);
       const lanes = assignEventLanes(candidates); const expanded = !track.condensed && lanes.laneCount > 1 && timeline.expandedTracks.has(track.id);
       const rowHeight = track.condensed ? Math.max(72, timeline.laneHeight) : expanded ? Math.max(timeline.laneHeight, 12 + lanes.laneCount * (timeline.laneHeight - 12)) : timeline.laneHeight;
-      const label = h('div', { class:'copal-track-label' }, h('span', { class:'copal-track-dot', style:`--track-color:${track.color}` }), h('span', { class:'copal-track-glyph', text:glyphFor(track.icon) }), h('span', { class:'copal-track-name', text:track.name }));
+      const label = h('div', { class:'copal-track-label' }, h('span', { class:'copal-track-dot', style:`--track-color:${track.color || THEME_TRACK_COLOR}` }), h('span', { class:'copal-track-glyph', text:glyphFor(track.icon) }), h('span', { class:'copal-track-name', text:track.name }));
       if (!track.condensed) label.append(h('button', { class:'copal-track-edit', type:'button', text:'✎', title:`Edit ${track.name}`, 'aria-label':`Edit ${track.name}`, onclick:(event) => openTrackEditor(track.id, event.currentTarget) }));
       if (lanes.laneCount > 1 && !track.condensed) label.append(h('button', { class:'copal-track-overlap', type:'button', text:`${expanded ? '▾' : '▸'} ${lanes.laneCount}`, 'aria-expanded':String(expanded), 'aria-label':`${expanded ? 'Collapse' : 'Expand'} ${track.name}: ${lanes.laneCount} overlapping lanes`, onclick:() => { expanded ? timeline.expandedTracks.delete(track.id) : timeline.expandedTracks.add(track.id); persist(); rerender({ left:scroll.scrollLeft }); } }));
       const row = h('section', { class:`copal-track${expanded ? ' expanded' : ''}${track.condensed ? ` condensed ${timeline.condensedStyle}` : ''}`, style:`height:${rowHeight}px`, 'data-track-id':track.id, 'data-lanes':String(lanes.laneCount), 'aria-label':`${track.name}, ${candidates.length} events, ${lanes.laneCount} lanes` }, label);
@@ -612,7 +614,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
         if (gate.resizeRight) eventChildren.push(h('span', { class:'copal-resize-handle copal-resize-right', 'aria-hidden':'true' }));
         const node = h('div', {
           class:`copal-event${event.startDate === 'FUZZY' || event.fuzzy ? ' fuzzy' : ''}${event.status === 'done' ? ' done' : ''}`,
-          role:'button', tabindex:'0', 'data-task-id':event.id, 'data-lane':String(item.lane), style:`left:${left + 1}px;top:${top}px;width:${width - 2}px;--event-color:${eventTrack.color || '#14b8a6'};--stack-index:${item.lane}`,
+          role:'button', tabindex:'0', 'data-task-id':event.id, 'data-lane':String(item.lane), style:`left:${left + 1}px;top:${top}px;width:${width - 2}px;--event-color:${eventTrack.color || THEME_TRACK_COLOR};--stack-index:${item.lane}`,
           'aria-label':`${event.title}, ${event.startDate || 'unscheduled'} to ${event.dueDate || 'open end'}`,
         }, ...eventChildren);
         if ((event.stages || []).length) node.append(h('span', { class:'copal-event-progress', style:`--progress:${Math.round((event.stages.filter((stage) => stage.done).length / event.stages.length) * 100)}%` }));

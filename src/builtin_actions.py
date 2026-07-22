@@ -2488,6 +2488,25 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
+def _save_cookbook_model_defaults(owner: str, endpoint_id: str, model: str) -> None:
+    if owner:
+        from routes.prefs_routes import _load_for_user, _save_for_user
+        settings = _load_for_user(owner)
+        save = lambda value: _save_for_user(owner, value)
+    else:
+        from src.settings import load_settings, save_settings
+        settings = load_settings()
+        save = save_settings
+
+    settings["default_endpoint_id"] = endpoint_id
+    settings["default_model"] = model
+    for prefix in ("task", "utility"):
+        if not (settings.get(f"{prefix}_endpoint_id") or "").strip():
+            settings[f"{prefix}_endpoint_id"] = endpoint_id
+            settings[f"{prefix}_model"] = model
+    save(settings)
+
+
 async def action_cookbook_serve(
     owner: str,
     task_name: str = "",
@@ -2510,6 +2529,8 @@ async def action_cookbook_serve(
     from core.atomic_io import atomic_write_json
 
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
+    if owner:
+        headers["X-Odysseus-Owner"] = owner
     try:
         cfg = json.loads(command or "{}")
     except Exception:
@@ -2625,7 +2646,12 @@ async def action_cookbook_serve(
                 from core.database import SessionLocal as _SL, ModelEndpoint as _ME
                 _db = _SL()
                 try:
-                    _ep = _db.query(_ME).filter(_ME.id == endpoint_id).first()
+                    _query = _db.query(_ME).filter(_ME.id == endpoint_id)
+                    if owner:
+                        _query = _query.filter(_ME.owner == owner)
+                    else:
+                        _query = _query.filter(_ME.owner.is_(None))
+                    _ep = _query.first()
                     if _ep and _ep.cached_models:
                         _models = json.loads(_ep.cached_models or "[]")
                         if isinstance(_models, list) and _models:
@@ -2634,28 +2660,7 @@ async def action_cookbook_serve(
                     _db.close()
             except Exception:
                 pass
-            from src.settings import load_settings as _load_settings, save_settings as _save_settings
-            _settings = _load_settings()
-            _settings["default_endpoint_id"] = endpoint_id
-            _settings["default_model"] = selected_model
-            # Keep background tasks aligned unless the user explicitly chose a
-            # separate task model.
-            if not (_settings.get("task_endpoint_id") or "").strip():
-                _settings["task_endpoint_id"] = endpoint_id
-                _settings["task_model"] = selected_model
-            if not (_settings.get("utility_endpoint_id") or "").strip():
-                _settings["utility_endpoint_id"] = endpoint_id
-                _settings["utility_model"] = selected_model
-            _save_settings(_settings)
-            if owner:
-                from routes.prefs_routes import _load_for_user, _save_for_user
-                _prefs = _load_for_user(owner)
-                _prefs["default_endpoint_id"] = endpoint_id
-                _prefs["default_model"] = selected_model
-                if not (_prefs.get("utility_endpoint_id") or "").strip():
-                    _prefs["utility_endpoint_id"] = endpoint_id
-                    _prefs["utility_model"] = selected_model
-                _save_for_user(owner, _prefs)
+            _save_cookbook_model_defaults(owner, endpoint_id, selected_model)
         except Exception as e:
             logger.warning(f"cookbook_serve: default endpoint update failed: {e}")
     # Register the new task in cookbook_state.json + stamp it with our
@@ -2707,6 +2712,7 @@ async def action_cookbook_serve(
             # Stamp ownership + end-at on the task entry.
             existing["_scheduledByTask"] = task_name or ""
             existing["_scheduledByOwner"] = owner or ""
+            existing["owner"] = owner or ""
             if endpoint_id:
                 existing["_endpointId"] = endpoint_id
                 existing["endpointId"] = endpoint_id

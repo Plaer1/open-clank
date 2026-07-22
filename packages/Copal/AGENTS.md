@@ -26,7 +26,7 @@ Only use `git commit --no-verify` in a genuine emergency: it bypasses the hooks 
 - Plans live in .futures/ and are markdown (in ./.futures/*)
 - Clanker sidecar notes (test instructions, run records, audits) live in robonotes/ and are markdown — never in .claude/ (in ./robonotes/*)
 - Reference clones stay out of git (references/ is study material, not product)
-- Claude is never attributed in commits — no Co-Authored-By, no 'Generated with' (project attribution happens later in one human pass)
+- Claude is never attributed in commits — no AI co-author, generated-with, or session trailers
 - Reference imports remain isolated from Copal source
   ↳ External projects and audits are references only; Copal code must not become a hidden fork of them.
 

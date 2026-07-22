@@ -21,7 +21,7 @@ from src.llm_core import (
     _is_ollama_native_url,
 )
 from src.model_context import estimate_tokens
-from src.settings import get_setting
+from src.settings import get_setting, get_user_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
@@ -2098,7 +2098,7 @@ def _build_base_prompt(
     from src.tool_index import ALWAYS_AVAILABLE
 
     disabled = set(disabled_tools or [])
-    if not get_setting("image_gen_enabled", False):
+    if not get_user_setting("image_gen_enabled", owner or "", False):
         disabled.add("generate_image")
 
     if relevant_tools is not None:
@@ -3024,7 +3024,12 @@ async def stream_agent_loop(
         try:
             _ep = None
             for _key in _endpoint_lookup_keys(endpoint_url):
-                _ep = _db.query(_ME).filter(_ME.base_url == _key).first()
+                _query = _db.query(_ME).filter(_ME.base_url == _key)
+                if owner:
+                    _query = _query.filter(_ME.owner == owner)
+                else:
+                    _query = _query.filter(_ME.owner.is_(None))
+                _ep = _query.first()
                 if _ep is not None:
                     break
             if _ep is not None:

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Form, Request
 from services.youtube.youtube_handler import extract_youtube_id, extract_transcript_async
 from core.constants import DEFAULT_HOST, DATA_DIR
 from core.middleware import require_admin
+from src.auth_helpers import effective_user
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,9 @@ def setup_diagnostics_routes(
         ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
         require_admin(request)
         from src.service_health import collect_service_health
-        report = await collect_service_health(rag_manager, memory_vector)
+        report = await collect_service_health(
+            rag_manager, memory_vector, owner=effective_user(request)
+        )
         app_state = request.app.state
         memory_declared = hasattr(app_state, "memory_provider")
         mimo_declared = hasattr(app_state, "mimo_supervisor")

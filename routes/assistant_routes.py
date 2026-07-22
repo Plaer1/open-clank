@@ -197,7 +197,9 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                         ModelEndpoint.id == payload.endpoint_id,
                         ModelEndpoint.is_enabled == True,  # noqa: E712
                     )
-                    endpoint = owner_filter(query, ModelEndpoint, owner).first()
+                    endpoint = owner_filter(
+                        query, ModelEndpoint, owner, include_shared=False
+                    ).first()
                     if endpoint is None:
                         raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
                     crew_db.endpoint_id = endpoint.id

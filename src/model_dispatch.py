@@ -167,7 +167,7 @@ async def mimo_agent_target(
             ModelEndpoint.id == endpoint_id,
             ModelEndpoint.is_enabled == True,  # noqa: E712
         )
-        query = owner_filter(query, ModelEndpoint, owner or "")
+        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
         endpoint = query.first()
         if endpoint is None:
             raise SupervisorAdmissionError(

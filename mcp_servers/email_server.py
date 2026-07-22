@@ -1560,6 +1560,7 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
 
     candidates = []
     seen = set()
+    owner = _current_owner() or None
 
     def _add(url, model, headers):
         key = (url or "", model or "")
@@ -1569,21 +1570,21 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
         candidates.append((url, model, headers))
 
     try:
-        _add(*resolve_endpoint("utility", owner=None))
+        _add(*resolve_endpoint("utility", owner=owner))
     except Exception:
         pass
     try:
-        _add(*resolve_endpoint("default", owner=None))
+        _add(*resolve_endpoint("default", owner=owner))
     except Exception:
         pass
     try:
-        utility_fallbacks = resolve_utility_fallback_candidates(owner=None) or []
+        utility_fallbacks = resolve_utility_fallback_candidates(owner=owner) or []
     except TypeError:
         utility_fallbacks = resolve_utility_fallback_candidates() or []
     for cand in utility_fallbacks:
         _add(*cand)
     try:
-        chat_fallbacks = resolve_chat_fallback_candidates(owner=None) or []
+        chat_fallbacks = resolve_chat_fallback_candidates(owner=owner) or []
     except TypeError:
         chat_fallbacks = resolve_chat_fallback_candidates() or []
     for cand in chat_fallbacks:

@@ -1,0 +1,13 @@
+{
+  "exact": [],
+  "patterns": [
+    {
+      "pattern": "^(?:INFO|WARNING|ERROR|DEBUG|GET|POST|PUT|PATCH|DELETE)$",
+      "reason": "protocol or diagnostic token"
+    },
+    {
+      "pattern": "^(?:https?://|/api/|/static/)",
+      "reason": "URL or stable route"
+    }
+  ]
+}

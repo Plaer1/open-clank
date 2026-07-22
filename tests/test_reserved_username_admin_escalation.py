@@ -30,7 +30,11 @@ def _fresh_auth_manager(tmp_path):
 
 @pytest.mark.parametrize(
     "name",
-    ["internal-tool", "api", "demo", "system", "INTERNAL-TOOL", " Internal-Tool ", "Api", "SYSTEM"],
+    [
+        "internal-tool", "api", "demo", "system", "shared", "local",
+        "__copal_unclaimed_owner__", "__copal_unclaimed_workspace__",
+        "user:alice", "deleted:alice", "INTERNAL-TOOL", " Local ", "Api", "SYSTEM",
+    ],
 )
 def test_create_user_rejects_reserved_usernames(tmp_path, name):
     mgr = _fresh_auth_manager(tmp_path)
@@ -59,6 +63,29 @@ def test_rename_into_reserved_username_is_blocked(tmp_path):
     assert mgr.rename_user("bob", "internal-tool", "admin") is False
     assert "internal-tool" not in mgr.users
     assert "bob" in mgr.users
+
+
+def test_legacy_copal_sentinel_accounts_are_kept_but_resolve_to_safe_owners(tmp_path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        '{"users": {"local": {"password_hash": "unused", "is_admin": true}, '
+        '"shared": {"password_hash": "unused", "is_admin": false}, '
+        '"user:legacy": {"password_hash": "unused", "is_admin": false}}}',
+        encoding="utf-8",
+    )
+    mgr = _fresh_auth_manager(tmp_path)
+    from src.auth_helpers import copal_owner_for_user
+
+    assert set(mgr.users) == {"local", "shared", "user:legacy"}
+    assert copal_owner_for_user("local") == "user:local"
+    assert copal_owner_for_user("shared") == "user:shared"
+    assert copal_owner_for_user("user:legacy") == "user:user:legacy"
+    assert copal_owner_for_user("__copal_unclaimed_owner__") == (
+        "user:__copal_unclaimed_owner__"
+    )
+    assert copal_owner_for_user("__copal_unclaimed_workspace__") == (
+        "user:__copal_unclaimed_workspace__"
+    )
 
 
 def test_legacy_reserved_username_is_removed_on_load(tmp_path):

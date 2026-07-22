@@ -128,8 +128,8 @@ def test_owner_scoping_hides_foreign_private_endpoints(endpoint_factory):
     private = endpoint_factory(owner="mallory")
     shared = endpoint_factory(owner=None)
     config, _ = _endpoint_registry_providers("alice")
-    providers = config["provider"]
-    assert f"{ENDPOINT_PROVIDER_PREFIX}{shared}" in providers
+    providers = config.get("provider") or {}
+    assert f"{ENDPOINT_PROVIDER_PREFIX}{shared}" not in providers
     assert f"{ENDPOINT_PROVIDER_PREFIX}{private}" not in providers
 
 

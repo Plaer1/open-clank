@@ -262,38 +262,37 @@ def is_setting_overridden(key: str) -> bool:
         return False
 
 
-# Per-user settings (user prefs override the global admin default). Used for
-# keys that a user is allowed to choose individually — currently the vision
-# model + image-generation model. The owner argument is the authed username
-# resolved by FastAPI deps; an empty/None owner falls through to the global.
-_PER_USER_KEYS = {
-    "vision_model", "vision_enabled", "vision_model_fallbacks",
-    "image_model", "image_gen_enabled", "image_quality",
-    # Default chat endpoint / model — without per-user resolution every new
-    # account inherited whatever the most-recent admin picked, which then
-    # got injected into the chat composer on first open.
+# Model choices belong to the authenticated user, not the process-wide app
+# settings file. An empty owner is the explicit single-user/auth-disabled mode.
+PER_USER_MODEL_SETTING_KEYS = frozenset({
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
     "research_endpoint_id", "research_model",
-}
+    "task_endpoint_id", "task_model",
+    "vision_model", "vision_enabled", "vision_model_fallbacks",
+    "image_model", "image_gen_enabled", "image_quality",
+    "teacher_model", "teacher_enabled", "teacher_tier2_enabled",
+    "tts_enabled", "tts_provider", "tts_model", "tts_voice", "tts_speed",
+    "stt_enabled", "stt_provider", "stt_model", "stt_language",
+})
 
 
 def get_user_setting(key: str, owner: str = "", default: Any = None) -> Any:
-    """Resolve `key` from the caller's per-user prefs first, falling back to
-    the global setting. Only the small whitelist in `_PER_USER_KEYS` is
-    eligible — for any other key this is equivalent to `get_setting(key)`.
+    """Resolve a model setting from the caller's preferences.
 
-    Falls back gracefully if the prefs module can't be imported (cycle/early
-    boot) — admin-global settings keep working.
+    Authenticated users never inherit another user's process-wide model
+    selection. Missing personal values use the application default; explicit
+    empty values remain empty. Auth-disabled single-user mode stays global.
     """
-    if owner and key in _PER_USER_KEYS:
+    if owner and key in PER_USER_MODEL_SETTING_KEYS:
         try:
             from routes.prefs_routes import _load_for_user
             prefs = _load_for_user(owner) or {}
-            if key in prefs and prefs[key] not in (None, ""):
+            if key in prefs:
                 return prefs[key]
         except Exception:
             pass
+        return DEFAULT_SETTINGS.get(key, default)
     return get_setting(key, default)
 
 

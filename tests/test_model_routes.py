@@ -1063,7 +1063,6 @@ def _create_form_kwargs(**overrides):
         supports_tools="",
         pinned_models="",
         container_local="false",
-        shared="true",
     )
     kwargs.update(overrides)
     return kwargs
@@ -1590,8 +1589,8 @@ def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
 
     result = _route_endpoint(router, "/api/models")(request)
 
-    assert [item["endpoint_name"] for item in result["items"]] == ["alice", "shared"]
-    assert admin_checks == ["alice"]
+    assert [item["endpoint_name"] for item in result["items"]] == ["alice"]
+    assert admin_checks == []
 
 
 def test_api_models_filters_http_and_mimo_catalog_by_user_allowlist(monkeypatch):
@@ -1899,7 +1898,6 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
         model_refresh_timeout="",
         supports_tools="",
         container_local="false",
-        shared="true",
     )
 
     assert result["online"] is True

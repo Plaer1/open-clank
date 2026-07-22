@@ -242,7 +242,9 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
     db = SessionLocal()
     try:
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
-        query = owner_filter(query, ModelEndpoint, owner or "")
+        query = owner_filter(
+            query, ModelEndpoint, owner or "", include_shared=False
+        )
         rows = query.all()
         for ep in rows:
             if (getattr(ep, "model_type", None) or "llm") != "llm":
@@ -1378,25 +1380,27 @@ class MimoSupervisorPool:
         return next(iter(self._workers.values()), None)
 
     def available_models(self, owner: str | None = None) -> list:
-        worker = self.worker_for_owner(owner) if owner else self._default_worker()
-        if worker:
-            return worker.available_models()
-        merged: dict[str, dict] = {}
-        for item in self._workers.values():
-            for model in item.available_models():
-                model_id = str(model.get("modelId") or "")
-                if model_id:
-                    merged[model_id] = model
-        return list(merged.values())
+        # A catalogue is an owner capability boundary, not a process-wide
+        # inventory.  In authenticated mode an absent/unknown owner must not
+        # fall back to the initial worker or merge models from other owners.
+        if self._auth_enabled:
+            key = self._key(owner)
+            if not key:
+                return []
+            worker = self._workers.get(key)
+        else:
+            worker = self._workers.get("")
+        return worker.available_models() if worker else []
 
     def provider_apis(self, owner: str | None = None) -> dict[str, str]:
-        worker = self.worker_for_owner(owner) if owner else self._default_worker()
-        if worker:
-            return worker.provider_apis()
-        merged: dict[str, str] = {}
-        for item in self._workers.values():
-            merged.update(item.provider_apis())
-        return merged
+        if self._auth_enabled:
+            key = self._key(owner)
+            if not key:
+                return {}
+            worker = self._workers.get(key)
+        else:
+            worker = self._workers.get("")
+        return worker.provider_apis() if worker else {}
 
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         return await (await self.for_owner(owner)).refresh_model_catalog()

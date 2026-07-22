@@ -44,13 +44,10 @@ def token_owner(request: Request) -> str | None:
 def owner_can_see(row_owner, owner) -> bool:
     """Owner-scope rule for read endpoints.
 
-    A caller sees a row when it is their own, or when it is a legacy null-owner
-    ("shared") row. A caller must NEVER see another owner's row. Mirrors the
-    `owner_filter` rule used elsewhere, expressed as a pure predicate so it can
-    be tested directly and used as a defensive in-Python check alongside the
-    SQL filter.
+    Authenticated callers see only their own rows.  A null owner is legacy
+    single-user state, not a shared multi-user catalogue entry.
     """
-    return row_owner is None or row_owner == owner
+    return row_owner == owner if owner else row_owner is None
 
 
 def require_models_scope(request: Request) -> None:
@@ -112,9 +109,9 @@ def setup_companion_routes() -> APIRouter:
 
         The stock /api/models route scopes to get_current_user, which for a
         bearer token is the sandboxed pseudo-user "api" (owns nothing). Here we
-        scope to the token's real owner instead, plus legacy null-owner shared
-        rows -- the same rule as owner_filter. Read-only; never returns api_key
-        material.
+        scope to the token's real owner instead. Legacy null-owner rows remain
+        available only in unauthenticated single-user mode. Read-only; never
+        returns api_key material.
         """
         require_models_scope(request)
         import json as _json
@@ -123,6 +120,8 @@ def setup_companion_routes() -> APIRouter:
         from src.endpoint_resolver import build_chat_url
 
         owner = token_owner(request)
+        if getattr(request.state, "api_token", False) and not owner:
+            raise HTTPException(403, "API token has no owner")
         out = []
         db = SessionLocal()
         try:
@@ -131,7 +130,9 @@ def setup_companion_routes() -> APIRouter:
                 (ModelEndpoint.model_type == "llm") | (ModelEndpoint.model_type == None),  # noqa: E711
             )
             if owner:
-                q = q.filter((ModelEndpoint.owner == owner) | (ModelEndpoint.owner == None))  # noqa: E711
+                q = q.filter(ModelEndpoint.owner == owner)
+            else:
+                q = q.filter(ModelEndpoint.owner == None)  # noqa: E711
             for ep in q.all():
                 if not owner_can_see(ep.owner, owner):
                     continue
@@ -183,7 +184,7 @@ def setup_companion_routes() -> APIRouter:
     <button type="submit">Generate pairing code</button>
   </form>
   <p style="color:#8a8a96;font-size:12px;margin-top:18px">Admin only. Each code mints a new token, shown once. Manage or revoke under Settings &rarr; API tokens.</p>
-</div></body></html>"""
+</div><script type="module" src="/static/js/i18n.js"></script></body></html>"""
         return HTMLResponse(page)
 
     @router.post("/pair")
@@ -244,7 +245,7 @@ def setup_companion_routes() -> APIRouter:
   <p class="warn">Shown once. This grants chat access to your Odysseus; revoke it
   in Settings &rarr; API tokens (id <code>{html.escape(token_id)}</code>). The
   device must be on the same network, and the server must bind to your LAN.</p>
-</div></body></html>"""
+</div><script type="module" src="/static/js/i18n.js"></script></body></html>"""
         return HTMLResponse(page)
 
     return router

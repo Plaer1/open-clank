@@ -1,3 +1,5 @@
+import { copalStorageKey } from './storage.js';
+
 const SECTIONS = [['courses', 'Courses'], ['skills', 'Skills'], ['assignments', 'Assignments'], ['analytics', 'Analytics']];
 
 export function treeHouseCommandId(prefix = 'command') {
@@ -23,8 +25,8 @@ export function moveTreeHouseItem(items, itemId, delta) {
 
 export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, openDocument }) {
   const ui = {
-    actorId: localStorage.getItem('odysseus-treehouse-actor') || 'owner',
-    section: localStorage.getItem('odysseus-treehouse-section') || 'courses',
+    actorId: 'owner',
+    section: 'courses',
     selectedCourse: null,
     snapshot: null,
     token: 0,
@@ -35,6 +37,11 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
   const csv = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
   const learnerProjection = () => ui.snapshot?.projection?.learners?.[ui.actorId] || { points: 0, badges: [], quests: [], streak: 0, courses: {}, skills: {}, pointEvidence: [] };
   const currentEnrollment = (courseId) => values(ui.snapshot?.state?.enrollments).find((item) => item.courseId === courseId && item.profileId === ui.actorId);
+
+  function loadState() {
+    ui.actorId = localStorage.getItem(copalStorageKey('odysseus-treehouse-actor')) || 'owner';
+    ui.section = localStorage.getItem(copalStorageKey('odysseus-treehouse-section')) || 'courses';
+  }
 
   function field(label, control) {
     return h('label', { class: 'copal-treehouse-field' }, h('span', { text: label }), control);
@@ -87,7 +94,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       snapshot = await api(`/treehouse?actor=${encodeURIComponent(ui.actorId)}`);
     } catch (error) {
       if (ui.actorId !== 'owner' && (error.status === 404 || /profile not found|inactive/i.test(error.message))) {
-        ui.actorId = 'owner'; localStorage.setItem('odysseus-treehouse-actor', ui.actorId);
+        ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId);
         return load();
       }
       throw error;
@@ -95,7 +102,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     if (token !== ui.token) return false;
     ui.snapshot = snapshot;
     if (!snapshot.state.profiles[ui.actorId]) {
-      ui.actorId = 'owner'; localStorage.setItem('odysseus-treehouse-actor', ui.actorId); return load();
+      ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId); return load();
     }
     return true;
   }
@@ -126,7 +133,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     }
     select.value = ui.actorId;
     select.addEventListener('change', async () => {
-      ui.actorId = select.value; localStorage.setItem('odysseus-treehouse-actor', ui.actorId);
+      ui.actorId = select.value; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId);
       ui.body.replaceChildren(h('div', { class: 'copal-empty', text: 'Switching TreeHouse profile…' }));
       try { await load(); renderLoaded(); } catch (error) { renderFailure(error); }
     });
@@ -150,7 +157,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
 
   function navigation(root) {
     const nav = h('nav', { class: 'copal-treehouse-nav', 'aria-label': 'TreeHouse sections' });
-    for (const [id, label] of SECTIONS) nav.append(h('button', { class: `copal-btn${ui.section === id ? ' primary' : ''}`, text: label, onclick: () => { ui.section = id; localStorage.setItem('odysseus-treehouse-section', id); renderLoaded(); } }));
+    for (const [id, label] of SECTIONS) nav.append(h('button', { class: `copal-btn${ui.section === id ? ' primary' : ''}`, text: label, onclick: () => { ui.section = id; localStorage.setItem(copalStorageKey('odysseus-treehouse-section'), id); renderLoaded(); } }));
     root.append(nav);
   }
 
@@ -565,5 +572,5 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     try { if (await load()) renderLoaded(); } catch (error) { renderFailure(error); }
   }
 
-  return { render, command, get snapshot() { return ui.snapshot; } };
+  return { render, command, loadState, get snapshot() { return ui.snapshot; } };
 }

@@ -117,8 +117,7 @@ def _resolve_model_target(spec: str, owner: Optional[str] = None) -> ResolvedMod
         query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
         if target_endpoint_name:
             query = query.filter(ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"))
-        if owner:
-            query = owner_filter(query, ModelEndpoint, owner)
+        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
         endpoints = query.all()
 
         if not endpoints:
@@ -991,10 +990,13 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
 
-    # Load admin settings for defaults
+    # Load this user's image defaults.
     try:
-        from src.settings import load_settings
-        _settings = load_settings()
+        from src.settings import get_user_setting
+        _settings = {
+            "image_model": get_user_setting("image_model", owner or "", ""),
+            "image_quality": get_user_setting("image_quality", owner or "", "medium"),
+        }
     except Exception:
         _settings = {}
 
@@ -1025,8 +1027,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         ModelEndpoint.is_enabled == True,
                         ModelEndpoint.model_type == "image",
                     )
-                    if owner:
-                        _img_q = owner_filter(_img_q, ModelEndpoint, owner)
+                    _img_q = owner_filter(
+                        _img_q, ModelEndpoint, owner or "", include_shared=False
+                    )
                     _img_eps = _img_q.all()
                     for _iep in _img_eps:
                         _ibase = _iep.base_url.rstrip("/")

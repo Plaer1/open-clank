@@ -192,6 +192,7 @@ async def _ensure_served_endpoint(
     model: str,
     cmd: str,
     host: str | None,
+    owner: str | None,
 ) -> Dict[str, Any]:
     """Register/fetch a model endpoint for a running serve session."""
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
@@ -213,7 +214,7 @@ async def _ensure_served_endpoint(
             resp = await client.post(
                 f"{_INTERNAL_BASE}/api/model-endpoints",
                 data=payload,
-                headers=_internal_headers(),
+                headers=_internal_headers(owner),
             )
             data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code >= 400:
@@ -242,6 +243,7 @@ async def _cookbook_register_task(
     *,
     endpoint_added: bool = False,
     endpoint_id: str = "",
+    owner: str | None = None,
 ) -> bool:
     """Append a task entry to cookbook_state.json after the agent
     launches via /api/model/serve or /api/model/download. The route
@@ -251,7 +253,7 @@ async def _cookbook_register_task(
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
     import time as _time
-    headers = _internal_headers()
+    headers = _internal_headers(owner)
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(f"{_INTERNAL_BASE}/api/cookbook/state", headers=headers)
@@ -295,6 +297,7 @@ async def _cookbook_register_task(
         "_serveReady": False,
         "_endpointAdded": bool(endpoint_added),
         "_endpointId": endpoint_id or "",
+        "owner": owner or "",
     })
     state["tasks"] = tasks
     try:
@@ -460,7 +463,7 @@ async def do_download_model(content: str, owner: Optional[str] = None) -> Dict:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{_INTERNAL_BASE}/api/model/download",
-                                     json=payload, headers=_internal_headers())
+                                     json=payload, headers=_internal_headers(owner))
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
@@ -468,6 +471,7 @@ async def do_download_model(content: str, owner: Optional[str] = None) -> Dict:
                 session_id=sid, model=repo_id, host=host,
                 cmd=(f"ollama pull {repo_id}" if backend == "ollama" else f"hf download {repo_id}"),
                 task_type="download",
+                owner=owner,
             )
             note = "" if registered else " (state-write failed — download may not show in UI)"
             where = host or "local"
@@ -545,7 +549,7 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{_INTERNAL_BASE}/api/model/serve",
-                                     json=payload, headers=_internal_headers())
+                                     json=payload, headers=_internal_headers(owner))
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
@@ -553,13 +557,16 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
             if endpoint_id:
                 endpoint_added = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(model=repo_id, cmd=cmd, host=host)
+                endpoint_meta = await _ensure_served_endpoint(
+                    model=repo_id, cmd=cmd, host=host, owner=owner
+                )
                 endpoint_added = bool(endpoint_meta.get("added"))
                 endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id,
                 host=host, cmd=cmd, task_type="serve",
                 endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
             where = host or "local"
@@ -1318,7 +1325,7 @@ async def do_serve_preset(content: str, owner: Optional[str] = None) -> Dict:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{_INTERNAL_BASE}/api/model/serve",
-                                     json=payload, headers=_internal_headers())
+                                     json=payload, headers=_internal_headers(owner))
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
@@ -1326,13 +1333,16 @@ async def do_serve_preset(content: str, owner: Optional[str] = None) -> Dict:
             if endpoint_id:
                 endpoint_added = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(model=repo_id, cmd=cmd, host=host)
+                endpoint_meta = await _ensure_served_endpoint(
+                    model=repo_id, cmd=cmd, host=host, owner=owner
+                )
                 endpoint_added = bool(endpoint_meta.get("added"))
                 endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id, host=host,
                 cmd=cmd, task_type="serve",
                 endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
             return {"output": f"Launched preset {chosen.get('name')!r}: {repo_id} on {host or 'local'} (session: {sid}){note}", "session_id": sid, "host": host, "endpoint_id": endpoint_id, "exit_code": 0}

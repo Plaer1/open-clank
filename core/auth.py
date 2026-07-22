@@ -67,6 +67,24 @@ TOKEN_TTL = 60 * 60 * 24 * 7  # 7 days
 # Refuse to create or rename into any of them so the sentinels can't be
 # impersonated. (Keep this in sync with that synthetic-owner set.)
 RESERVED_USERNAMES = frozenset({INTERNAL_TOOL_USER, "api", "demo", "system"})
+COPAL_RESERVED_USERNAMES = frozenset(
+    {
+        "shared",
+        "local",
+        "__copal_unclaimed_owner__",
+        "__copal_unclaimed_workspace__",
+    }
+)
+RESERVED_USERNAME_PREFIXES = ("user:", "deleted:")
+
+
+def is_reserved_username(username: str | None) -> bool:
+    key = str(username or "").strip().lower()
+    return (
+        key in RESERVED_USERNAMES
+        or key in COPAL_RESERVED_USERNAMES
+        or key.startswith(RESERVED_USERNAME_PREFIXES)
+    )
 
 
 def normalize_known_username(users: Dict[str, Any], username: str | None) -> Optional[str]:
@@ -250,7 +268,8 @@ class AuthManager:
         """Return public auth policy constants for the frontend."""
         return {
             "password_min_length": PASSWORD_MIN_LENGTH,
-            "reserved_usernames": sorted(RESERVED_USERNAMES),
+            "reserved_usernames": sorted(RESERVED_USERNAMES | COPAL_RESERVED_USERNAMES),
+            "reserved_username_prefixes": list(RESERVED_USERNAME_PREFIXES),
             "signup_enabled": self.signup_enabled,
             "session_days": TOKEN_TTL // 86400,
         }
@@ -271,7 +290,7 @@ class AuthManager:
         username = username.strip().lower()
         if not username:
             return False
-        if username in RESERVED_USERNAMES:
+        if is_reserved_username(username):
             logger.warning("Refused to create reserved username '%s'", username)
             return False
         with self._config_lock:
@@ -345,7 +364,7 @@ class AuthManager:
         requesting_user = (requesting_user or "").strip().lower()
         if not old_username or not new_username:
             return False
-        if new_username in RESERVED_USERNAMES:
+        if is_reserved_username(new_username):
             logger.warning("Refused to rename '%s' into reserved username '%s'", old_username, new_username)
             return False
         with self._config_lock:

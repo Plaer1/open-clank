@@ -104,12 +104,14 @@ def _run_get_default_chat_test(monkeypatch, share_defaults_enabled, second_endpo
         _FakeEndpoint(
             id="global-ep-123",
             base_url="http://global-endpoint:8000/v1",
-            is_enabled=True
+            is_enabled=True,
+            owner="regular_user",
         ),
         _FakeEndpoint(
             id="fallback-ep",
             base_url="http://fallback-endpoint:8000/v1",
-            is_enabled=True
+            is_enabled=True,
+            owner="regular_user",
         )
     ]
 
@@ -132,16 +134,16 @@ def _run_get_default_chat_test(monkeypatch, share_defaults_enabled, second_endpo
 
 ### Test Functions
 
-def test_get_default_chat_user_no_prefs_share_disabled_resolves_nothing(monkeypatch):
+def test_get_default_chat_user_no_prefs_share_disabled_uses_first_owned_endpoint(monkeypatch):
     """
-    Non-admin user without personal preferences should resolve to empty
-    ep_id, model, and fallbacks when share_defaults_with_users is disabled.
+    Without shared defaults, a user may still fall back to the first endpoint
+    in their own catalogue. The global model string is not inherited.
     """
 
     test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=False)
 
-    assert test_data["endpoint_id"] == "", "Should get empty endpoint_id"
-    assert test_data["model"] == "", "Should get empty model"
+    assert test_data["endpoint_id"] == "global-ep-123"
+    assert test_data["model"] == "", "Should not inherit the global model"
 
 
 def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults_fallbacks(monkeypatch):

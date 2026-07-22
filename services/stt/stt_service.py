@@ -27,19 +27,21 @@ class STTService:
 
     # ── Settings ──
 
-    def _load_settings(self) -> dict:
-        from src.settings import load_settings
-        saved = load_settings()
+    def _load_settings(self, owner: str | None = None) -> dict:
+        from src.settings import get_user_setting
         return {
-            "stt_enabled": saved.get("stt_enabled", False),
-            "stt_provider": saved.get("stt_provider", "disabled"),
-            "stt_model": saved.get("stt_model", "base"),
-            "stt_language": saved.get("stt_language", ""),
+            "stt_enabled": get_user_setting("stt_enabled", owner or "", False),
+            "stt_provider": get_user_setting("stt_provider", owner or "", "disabled"),
+            "stt_model": get_user_setting("stt_model", owner or "", "base"),
+            "stt_language": get_user_setting("stt_language", owner or "", ""),
         }
 
     @property
     def available(self) -> bool:
-        settings = self._load_settings()
+        return self.is_available()
+
+    def is_available(self, owner: str | None = None) -> bool:
+        settings = self._load_settings(owner)
         if settings.get("stt_enabled") is False:
             return False
         provider = settings["stt_provider"]
@@ -48,14 +50,15 @@ class STTService:
         if provider == "browser":
             return True  # handled client-side
         if provider == "local":
-            return self._get_whisper() is not None
+            return self._get_whisper(owner) is not None
         if provider.startswith("endpoint:"):
-            return True  # assume reachable
+            endpoint_id = provider.split(":", 1)[1]
+            return self._owned_endpoint(endpoint_id, owner) is not None
         return False
 
     # ── Local Whisper ──
 
-    def _get_whisper(self):
+    def _get_whisper(self, owner: str | None = None):
         if self._whisper_model is None:
             try:
                 from faster_whisper import WhisperModel
@@ -63,7 +66,7 @@ class STTService:
                 logger.warning("faster-whisper not installed. Install with: pip install faster-whisper")
                 return None
             try:
-                settings = self._load_settings()
+                settings = self._load_settings(owner)
                 model_size = settings.get("stt_model", "base")
                 # faster-whisper runs on CTranslate2, not torch. torch is only
                 # used (optionally) to detect a CUDA device for acceleration —
@@ -87,8 +90,9 @@ class STTService:
                 return None
         return self._whisper_model
 
-    def _transcribe_local(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
-        model = self._get_whisper()
+    def _transcribe_local(self, audio_bytes: bytes, language: str = "",
+                          owner: str | None = None) -> Optional[str]:
+        model = self._get_whisper(owner)
         if not model:
             return None
         tmp_path = None
@@ -116,19 +120,33 @@ class STTService:
 
     # ── API endpoint ──
 
-    def _transcribe_api(self, audio_bytes: bytes, endpoint_id: str, model: str, language: str = "") -> Optional[str]:
+    @staticmethod
+    def _owned_endpoint(endpoint_id: str, owner: str | None = None):
         from src.database import SessionLocal, ModelEndpoint
 
         db = SessionLocal()
         try:
-            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id).first()
-            if not ep:
-                logger.error(f"STT endpoint {endpoint_id} not found")
+            query = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
+            normalized_owner = (owner or "").strip().lower()
+            if normalized_owner:
+                query = query.filter(ModelEndpoint.owner == normalized_owner)
+            else:
+                query = query.filter(ModelEndpoint.owner.is_(None))
+            ep = query.first()
+            if ep is None:
                 return None
-            base_url = ep.base_url.rstrip("/")
-            api_key = ep.api_key
+            return {"base_url": ep.base_url.rstrip("/"), "api_key": ep.api_key}
         finally:
             db.close()
+
+    def _transcribe_api(self, audio_bytes: bytes, endpoint_id: str, model: str,
+                        language: str = "", owner: str | None = None) -> Optional[str]:
+        endpoint = self._owned_endpoint(endpoint_id, owner)
+        if endpoint is None:
+            logger.error(f"STT endpoint {endpoint_id} not found for owner")
+            return None
+        base_url = endpoint["base_url"]
+        api_key = endpoint["api_key"]
 
         url = base_url + "/audio/transcriptions"
         headers = {}
@@ -153,8 +171,8 @@ class STTService:
 
     # ── Public interface ──
 
-    def transcribe(self, audio_bytes: bytes) -> Optional[str]:
-        settings = self._load_settings()
+    def transcribe(self, audio_bytes: bytes, owner: str | None = None) -> Optional[str]:
+        settings = self._load_settings(owner)
         if settings.get("stt_enabled") is False:
             return None
         provider = settings["stt_provider"]
@@ -165,34 +183,34 @@ class STTService:
             return None
 
         if provider == "local":
-            return self._transcribe_local(audio_bytes, language)
+            return self._transcribe_local(audio_bytes, language, owner)
         elif provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
-            return self._transcribe_api(audio_bytes, endpoint_id, model, language)
+            return self._transcribe_api(audio_bytes, endpoint_id, model, language, owner)
         else:
             logger.error(f"Unknown STT provider: {provider}")
             return None
 
-    def get_stats(self) -> Dict[str, Any]:
-        settings = self._load_settings()
+    def get_stats(self, owner: str | None = None) -> Dict[str, Any]:
+        settings = self._load_settings(owner)
         provider = settings["stt_provider"]
         stt_enabled = settings.get("stt_enabled", False)
         # If toggle is off, report as disabled
         effective_provider = provider if stt_enabled else "disabled"
 
         stats = {
-            "available": self.available and stt_enabled,
+            "available": self.is_available(owner) and stt_enabled,
             "provider": effective_provider,
             "model": settings["stt_model"],
             "language": settings.get("stt_language", ""),
         }
 
         if provider == "local":
-            whisper = self._get_whisper()
+            whisper = self._get_whisper(owner)
             stats["model_loaded"] = whisper is not None
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
-        elif provider.startswith("endpoint:"):
+        elif provider.startswith("endpoint:") and stats["available"]:
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
         return stats

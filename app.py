@@ -1375,7 +1375,13 @@ async def _startup_event():
 
                 _safe_dirs = _safe_dirs or None
 
-                _auth_enabled = bool(getattr(auth_manager, "is_configured", False))
+                # An existing auth.json does not make this a multi-user runtime
+                # when the operator explicitly launched with AUTH_ENABLED=false.
+                # Keep MiMo's single ownerless worker aligned with middleware and
+                # exact ownerless endpoint queries in that mode.
+                _auth_enabled = AUTH_ENABLED and bool(
+                    getattr(auth_manager, "is_configured", False)
+                )
                 _initial_owner = ""
                 _host_provider_owner = ""
                 if _auth_enabled:

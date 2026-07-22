@@ -299,11 +299,9 @@ def test_sync_chat_fallback_never_picks_another_owners_endpoint():
     assert ep is not None and ep.name == "alice-private"
 
 
-def test_sync_chat_fallback_prefers_owned_or_shared_only():
+def test_sync_chat_fallback_rejects_ownerless_row_for_authenticated_user():
     rows = [_ep("bob-private", "bob"), _ep("shared", None)]
-    ep = _select(rows, "alice")
-    # Only the legacy null-owner shared row is visible to alice.
-    assert ep is not None and ep.name == "shared"
+    assert _select(rows, "alice") is None
 
 
 def test_sync_chat_fallback_returns_none_when_only_others_endpoints():
@@ -314,8 +312,7 @@ def test_sync_chat_fallback_returns_none_when_only_others_endpoints():
 
 def test_sync_chat_fallback_skips_disabled_owned_endpoint():
     rows = [_ep("alice-disabled", "alice", is_enabled=False), _ep("shared", None)]
-    ep = _select(rows, "alice")
-    assert ep is not None and ep.name == "shared"
+    assert _select(rows, "alice") is None
 
 
 def test_sync_chat_fallback_null_owner_uses_shared_rows_only():

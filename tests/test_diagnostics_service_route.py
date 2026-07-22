@@ -26,7 +26,7 @@ def _client_with_admin_gate(monkeypatch, gate):
     and return a TestClient. `gate` plays the role of require_admin."""
     import src.service_health as sh
 
-    async def _fake_collect(_rag, _mem):
+    async def _fake_collect(_rag, _mem, owner=None):
         return {"overall": "ok", "services": [], "timestamp": "t"}
 
     # monkeypatch.setattr restores these after the test — a plain assignment

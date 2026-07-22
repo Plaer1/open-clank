@@ -669,7 +669,7 @@ def _oauth_authorize_page(
     <input type="text" name="callback_url" placeholder="{redirect_uri}?code=..." required>
     <br><button type="submit">Connect</button>
   </form>
-</div></body></html>"""
+</div><script type="module" src="/static/js/i18n.js"></script></body></html>"""
 
 
 def _oauth_result_page(title: str, message: str, success: bool = False) -> str:
@@ -694,4 +694,4 @@ def _oauth_result_page(title: str, message: str, success: bool = False) -> str:
   <div class="icon">{icon}</div>
   <h2>{safe_title}</h2>
   <p>{safe_message}</p>
-</div></body></html>"""
+</div><script type="module" src="/static/js/i18n.js"></script></body></html>"""

@@ -116,7 +116,7 @@ def _visible_image_endpoint_query(db, owner: str | None):
         ModelEndpoint.model_type == "image",
         ModelEndpoint.is_enabled == True,  # noqa: E712
     )
-    return owner_filter(q, ModelEndpoint, owner)
+    return owner_filter(q, ModelEndpoint, owner, include_shared=False)
 
 
 def _first_visible_image_endpoint(db, owner: str | None):

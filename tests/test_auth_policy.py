@@ -60,6 +60,9 @@ def test_policy_returns_reserved_usernames(tmp_path):
     assert "api" in policy["reserved_usernames"]
     assert "demo" in policy["reserved_usernames"]
     assert "system" in policy["reserved_usernames"]
+    assert "shared" in policy["reserved_usernames"]
+    assert "local" in policy["reserved_usernames"]
+    assert policy["reserved_username_prefixes"] == ["user:", "deleted:"]
     assert isinstance(policy["reserved_usernames"], list)
 
 
@@ -203,6 +206,108 @@ def test_setup_accepts_exactly_min_length_password(tmp_path):
     result = asyncio.run(endpoint(body=body, request=request))
 
     assert result == {"ok": True, "message": "Admin account created"}
+
+
+def test_setup_claims_pre_auth_local_copal_owner(tmp_path):
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+
+    class Bridge:
+        def __init__(self):
+            self.calls = []
+
+        def is_alive(self):
+            return True
+
+        async def call(self, operation, args, timeout=20):
+            self.calls.append((operation, dict(args), timeout))
+            return {"documents": 1}
+
+    bridge = Bridge()
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        app=SimpleNamespace(state=SimpleNamespace(copal_bridge=bridge)),
+    )
+    body = SetupRequest(username="admin", password="12345678")
+
+    result = asyncio.run(endpoint(body=body, request=request))
+
+    assert result["ok"] is True
+    assert bridge.calls == [
+        ("rename_owner", {"old_owner": "local", "new_owner": "admin"}, 20)
+    ]
+
+
+def test_setup_fails_closed_when_copal_bridge_is_explicitly_unavailable(tmp_path):
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        app=SimpleNamespace(state=SimpleNamespace(copal_bridge=None)),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint(SetupRequest(username="admin", password="12345678"), request))
+
+    assert exc.value.status_code == 503
+    assert mgr.is_configured is False
+
+
+def test_concurrent_setup_serializes_copal_claim_with_auth_winner(tmp_path):
+    mgr = _make_manager(tmp_path)
+    endpoint, SetupRequest = _setup_endpoint(mgr)
+
+    class Bridge:
+        def __init__(self):
+            self.owner = "local"
+            self.calls = []
+            self.first_claim_started = asyncio.Event()
+            self.release_first_claim = asyncio.Event()
+
+        def is_alive(self):
+            return True
+
+        async def call(self, operation, args, timeout=20):
+            self.calls.append((operation, dict(args), timeout))
+            if operation != "rename_owner" or self.owner != args["old_owner"]:
+                return {"documents": 0}
+            self.owner = args["new_owner"]
+            if len(self.calls) == 1:
+                self.first_claim_started.set()
+                await self.release_first_claim.wait()
+            return {"documents": 1}
+
+    async def run_candidates():
+        bridge = Bridge()
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="127.0.0.1"),
+            app=SimpleNamespace(state=SimpleNamespace(copal_bridge=bridge)),
+        )
+        first = asyncio.create_task(
+            endpoint(SetupRequest(username="alice", password="12345678"), request)
+        )
+        await bridge.first_claim_started.wait()
+        second = asyncio.create_task(
+            endpoint(SetupRequest(username="bob", password="12345678"), request)
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert [call[1]["new_owner"] for call in bridge.calls] == ["alice"]
+        bridge.release_first_claim.set()
+        assert (await first)["ok"] is True
+        with pytest.raises(HTTPException) as error:
+            await second
+        return bridge, error.value
+
+    bridge, error = asyncio.run(run_candidates())
+
+    assert error.status_code == 400
+    assert error.detail == "Already configured"
+    assert set(mgr.users) == {"alice"}
+    assert bridge.owner == "alice"
+    assert [call[1] for call in bridge.calls] == [
+        {"old_owner": "local", "new_owner": "alice"}
+    ]
 
 
 def test_setup_rejects_seven_char_password(tmp_path):

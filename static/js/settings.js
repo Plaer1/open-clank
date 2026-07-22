@@ -2612,9 +2612,10 @@ function initAccount() {
     logoutBtn.addEventListener('mouseleave', () => { logoutBtn.style.opacity = ''; logoutBtn.style.borderColor = ''; logoutBtn.style.color = ''; });
     logoutBtn.addEventListener('click', async () => {
       try { await checkedFetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
-      // SECURITY: wipe all client-side state on logout so the next user that
-      // signs in on this browser doesn't inherit the previous account's
-      // session id, last-used model, draft chat input, or any cached lists.
+      // SECURITY: wipe unscoped client-side state on logout so the next user
+      // doesn't inherit the previous account's session id, last-used model,
+      // draft chat input, or cached lists. Owner-namespaced Copal preferences
+      // remain available when their account signs in again.
       // Keep "odysseus-last-user" so the login form remembers the username
       // (if "Remember me" was on). Without this the chat composer pre-loaded
       // the previous user's last model into a fresh session, which read as
@@ -2624,7 +2625,8 @@ function initAccount() {
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (k && !_keepKeys.has(k)) _toRemove.push(k);
+          const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
+          if (k && !_keepKeys.has(k) && !scopedCopalState) _toRemove.push(k);
         }
         _toRemove.forEach(k => localStorage.removeItem(k));
         sessionStorage.clear();

@@ -67,11 +67,11 @@ Good pull requests usually include:
 
 Please keep PRs small. Large PRs that mix unrelated cleanup, formatting, refactors, and behavior changes are much harder to review.
 
-> **Auto-generated PRs.** If you are running an LLM agent (Devin, Cursor, OpenHands, Claude Code, etc.) against this repo: please open an issue describing the problem first instead of opening a PR directly. Bulk agent-generated PRs that don't match the project's visual style or contribution format will be closed without review, even when the underlying fix is correct.
+> **Auto-generated PRs.** If you are running an LLM agent (Devin, Cursor, OpenHands, etc.) against this repo: please open an issue describing the problem first instead of opening a PR directly. Bulk agent-generated PRs that don't match the project's visual style or contribution format will be closed without review, even when the underlying fix is correct.
 
 ## Style and visual changes
 
-Odysseus has an intentional visual style. PRs that ignore it will be closed without merge, no matter how correct the underlying code is.
+Open Clank has an intentional visual style. PRs that ignore it will be closed without merge, no matter how correct the underlying code is.
 
 Before submitting any change that affects what the app looks like — buttons, icons, fonts, colors, spacing, layout, CSS, HTML, SVG, or any `static/js/` module that draws to the DOM — please:
 
@@ -81,7 +81,7 @@ Before submitting any change that affects what the app looks like — buttons, i
    - Reuse existing CSS variables (`--red`, `--fg`, `--bg`, `--card`, `--border`, …). Do not introduce new color values, font sizes, or spacing units.
    - Reuse existing button, input, card, and border classes. Don't invent parallel styling for similar widgets.
    - **No Unicode emoji in UI or code.** Use inline SVG (matching the monochrome icon style already in `static/index.html`) or plain text.
-   - Monospaced font (`Fira Code`) for primary UI text. Don't override.
+   - Use the active theme's font tokens. Clanker themes use the bundled Liga Comic Mono.
    - Dark theme is the default; any light-mode work goes through the existing theme system, not hard-coded.
 4. **Don't add parallel components.** If a similar widget already exists in the app, extend it instead of writing a new one.
 

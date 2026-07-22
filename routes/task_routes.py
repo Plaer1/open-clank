@@ -310,7 +310,9 @@ def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
                 ModelEndpoint.id == endpoint_id,
                 ModelEndpoint.is_enabled == True,  # noqa: E712
             )
-            ep = owner_filter(query, ModelEndpoint, task.owner or "").first()
+            ep = owner_filter(
+                query, ModelEndpoint, task.owner or "", include_shared=False
+            ).first()
             if ep:
                 return build_chat_url(normalize_base(ep.base_url))
     except Exception:
@@ -346,7 +348,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 ModelEndpoint.id == endpoint_id,
                 ModelEndpoint.is_enabled == True,  # noqa: E712
             )
-            query = owner_filter(query, ModelEndpoint, owner or "")
+            query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
             endpoint = query.first()
             if endpoint is None:
                 raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")

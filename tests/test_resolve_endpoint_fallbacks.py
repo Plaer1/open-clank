@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import src.endpoint_resolver as endpoint_resolver
-from src.endpoint_resolver import resolve_endpoint
+from src.endpoint_resolver import resolve_endpoint, resolve_endpoint_by_id
 
 
 class _FakeColumn:
@@ -18,6 +18,7 @@ class _FakeColumn:
 class _FakeModelEndpoint:
     id = _FakeColumn("id")
     is_enabled = _FakeColumn("is_enabled")
+    owner = _FakeColumn("owner")
 
 
 class _FakeQuery:
@@ -54,6 +55,7 @@ def _endpoint(ep_id, model, *, hidden=None):
         cached_models=json.dumps([model]),
         hidden_models=json.dumps(hidden or []),
         is_enabled=True,
+        owner=None,
     )
 
 
@@ -183,6 +185,7 @@ def test_hidden_configured_model_selects_first_enabled_chat_model(monkeypatch):
         ]),
         hidden_models=json.dumps(["hidden-chat"]),
         is_enabled=True,
+        owner=None,
     )
     _install_resolver_fakes(monkeypatch, settings, [endpoint])
 
@@ -191,3 +194,36 @@ def test_hidden_configured_model_selects_first_enabled_chat_model(monkeypatch):
     assert url == "https://default.example/v1/chat/completions"
     assert model == "enabled-chat"
     assert headers == {"Authorization": "Bearer key-default"}
+
+
+def test_mimo_resolution_requires_model_in_callers_catalogue(monkeypatch):
+    import src.model_dispatch as model_dispatch
+
+    settings = {
+        "default_endpoint_id": "mimo",
+        "default_model": "alice/private-model",
+    }
+    _install_resolver_fakes(monkeypatch, settings, [])
+
+    class OwnerPool:
+        def available_models(self, owner=None):
+            if owner == "alice":
+                return [{"modelId": "alice/private-model"}]
+            return []
+
+    monkeypatch.setattr(model_dispatch, "_mimo_supervisor", OwnerPool())
+    assert resolve_endpoint("default", owner="alice") == (
+        "mimo://acp", "alice/private-model", {},
+    )
+
+    fallback = ("https://fallback.example/chat", "fallback-model", {"X-Test": "safe"})
+    assert resolve_endpoint(
+        "default",
+        fallback_url=fallback[0],
+        fallback_model=fallback[1],
+        fallback_headers=fallback[2],
+        owner="bob",
+    ) == fallback
+    assert resolve_endpoint_by_id(
+        "mimo", "alice/private-model", owner="bob"
+    ) is None
