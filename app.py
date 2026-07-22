@@ -103,7 +103,7 @@ try:
     _log_file = os.path.join(_log_dir, "app.log")
 
     # RotatingFileHandler is not multi-process safe (e.g. if uvicorn is run with --workers N).
-    # Odysseus is single-process by convention, so this is acceptable, but be aware that
+    # Open Clank is single-process by convention, so this is acceptable, but be aware that
     # concurrent log rotation issues can arise if multiple workers are configured.
     _file_h = logging.handlers.RotatingFileHandler(
         _log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
@@ -139,8 +139,8 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
-        "X-Odysseus-Internal-Token",
-        "X-Odysseus-Owner",
+        "X-Open Clank-Internal-Token",
+        "X-Open Clank-Owner",
         "X-Requested-With",
         "X-TZ-Offset",
     ],
@@ -280,6 +280,10 @@ if AUTH_ENABLED:
     import re as _re
     AUTH_EXEMPT_PATTERNS = [
         _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
+        # Opaque published-file grants authenticate in their route handler.
+        # Owner grants still require the matching session; public grants are
+        # deliberately anonymous until expiry or revocation.
+        _re.compile(r"^/api/files/download/[^/]+/?$"),
     ]
 
     def _is_auth_exempt(path: str) -> bool:
@@ -343,7 +347,7 @@ if AUTH_ENABLED:
         forwarding headers. A bare ``client.host in ('127.0.0.1','::1')`` check is
         unsafe behind a Cloudflare tunnel / reverse proxy: those connect from
         loopback, so a remote visitor would otherwise inherit local trust and
-        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Odysseus's own
+        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Open Clank's own
         in-process agent loopback calls carry none of these headers, so they still
         qualify."""
         host = request.client.host if request.client else None
@@ -377,10 +381,10 @@ if AUTH_ENABLED:
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
                 if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
                     # Impersonation: when the agent's loopback call sets
-                    # X-Odysseus-Owner, attribute the request to that user only
+                    # X-Open Clank-Owner, attribute the request to that user only
                     # if they exist. Authorization checks remain separate; this
                     # is just owner attribution for notes/calendar/etc.
-                    _impersonate = (request.headers.get("X-Odysseus-Owner") or "").strip()
+                    _impersonate = (request.headers.get("X-Open Clank-Owner") or "").strip()
                     _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
                     if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
                         request.state.current_user = _impersonate
@@ -652,6 +656,10 @@ upload_router, upload_cleanup_func = setup_upload_routes(upload_handler)
 app.include_router(upload_router)
 upload_cleanup_task = None
 
+# Agent-published downloads share one owner-scoped, revocable lifecycle.
+from routes.published_file_routes import setup_published_file_routes
+app.include_router(setup_published_file_routes())
+
 # Emoji SVG proxy (same-origin, lazy-cached Twemoji) — lets the chat render
 # emojis as flat SVG instead of system color glyphs.
 from routes.emoji_routes import setup_emoji_routes
@@ -724,7 +732,7 @@ app.include_router(setup_embedding_routes())
 from routes.model_routes import setup_model_routes
 app.include_router(setup_model_routes(model_discovery))
 
-# Native provider credentials for the supervised MiMo ACP child.
+# Native provider credentials for the supervised Open Clank agent ACP child.
 from routes.mimo_provider_routes import setup_mimo_provider_routes
 app.include_router(setup_mimo_provider_routes())
 
@@ -1377,7 +1385,7 @@ async def _startup_event():
 
                 # An existing auth.json does not make this a multi-user runtime
                 # when the operator explicitly launched with AUTH_ENABLED=false.
-                # Keep MiMo's single ownerless worker aligned with middleware and
+                # Keep Open Clank agent's single ownerless worker aligned with middleware and
                 # exact ownerless endpoint queries in that mode.
                 _auth_enabled = AUTH_ENABLED and bool(
                     getattr(auth_manager, "is_configured", False)
@@ -1425,7 +1433,7 @@ async def _startup_event():
 def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
     """Last-resort SIGTERM→SIGKILL containment for unregistered direct children.
 
-    Normal MCP and MiMo children are closed by their registered owners before
+    Normal MCP and Open Clank agent children are closed by their registered owners before
     this runs. Linux exposes the direct-child inventory through ``/proc``;
     other platforms skip this defensive check explicitly.
     """

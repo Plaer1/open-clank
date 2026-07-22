@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIMO_BIN = REPO_ROOT / "bin" / "mimo"
 
-# Odysseus skill root — where SkillsManager stores SKILL.md files.
+# Open Clank skill root — where SkillsManager stores SKILL.md files.
 # mimo's discoverSkills scans cfg.skills.paths for **/SKILL.md.
 _ODYSSEUS_ROOT = REPO_ROOT
 _ODYSSEUS_SKILLS_DIR = os.getenv(
-    "ODYSSEUS_DATA_DIR",
-    str(_ODYSSEUS_ROOT / "data"),
+    "OPEN_CLANK_DATA_DIR",
+    os.getenv("ODYSSEUS_DATA_DIR", str(_ODYSSEUS_ROOT / "data")),
 ) + "/skills"
 
 # Restart backoff
@@ -91,6 +91,38 @@ _OPENCLAW_PROVIDER_ENV = {
 # subscription token is currently ~2.3 KiB). Keep the handoff bounded while
 # allowing a normal HTTP authorization credential through.
 _MAX_PROVIDER_KEY_LENGTH = 8192
+
+
+def migrate_agent_runtime_root(data_dir: Path, *, rollback: bool = False) -> Path:
+    """Atomically move embedded-agent state under Open Clank's runtime root."""
+    data_dir = Path(data_dir)
+    legacy = data_dir / "mimocode"
+    current = data_dir / "runtime" / "agent-engine"
+    source, target = (current, legacy) if rollback else (legacy, current)
+    status = "unchanged"
+    if source.exists() and not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        status = "rolled_back" if rollback else "migrated"
+    elif source.exists() and target.exists():
+        status = "conflict"
+        logger.error(
+            "Open Clank agent-runtime migration conflict: both %s and %s exist",
+            source,
+            target,
+        )
+
+    marker_dir = data_dir / ".migrations"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker = marker_dir / "open-clank-agent-runtime-v1.json"
+    marker.write_text(json.dumps({
+        "canonical": str(current.relative_to(data_dir)),
+        "legacy": str(legacy.relative_to(data_dir)),
+        "status": status,
+        "version": 1,
+    }, sort_keys=True) + "\n", encoding="utf-8")
+    marker.chmod(0o600)
+    return legacy if rollback else current
 
 
 def _mimo_child_environment() -> dict[str, str]:
@@ -177,13 +209,13 @@ def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, 
             models[model_id] = item
         if not models:
             continue
-        # MiMo Router ships a built-in routing alias that picks the model per
+        # Open Clank agent Router ships a built-in routing alias that picks the model per
         # request ("auto" mode). It's absent from operator configs because it
         # isn't a real model row; synthesize it so users can turn it on.
         if provider_id == "xiaomi" and not any("auto" in mid for mid in models):
             models["mimo-auto"] = {
                 "id": "mimo-auto",
-                "name": "MiMo Auto",
+                "name": "Open Clank Auto",
                 "provider": {"npm": adapter, "api": base_url},
             }
 
@@ -211,7 +243,7 @@ ENDPOINT_PROVIDER_PREFIX = "ody-"
 
 
 def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]:
-    """Project Odysseus's ModelEndpoint registry into mimo providers.
+    """Project Open Clank's ModelEndpoint registry into mimo providers.
 
     Every enabled OpenAI-compatible endpoint becomes a provider named
     `ody-<endpoint_id>` (collision-proof against xiaomi/deepseek/native
@@ -219,7 +251,7 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
     (cached + pinned − hidden; no probing at spawn). Keys ride the
     credential dict for the pipe FD, NEVER the config content or env.
 
-    MiMo can drive every OpenAI-compatible model here. Per-model Tools
+    Open Clank agent can drive every OpenAI-compatible model here. Per-model Tools
     preferences control the turn's tool policy, not whether the model exists
     in the runtime catalog.
     """
@@ -398,7 +430,7 @@ class MimoSupervisor:
         self._provider_apis: dict[str, str] = {}
         self._mimocode_home: str | None = None
         # The ACP command already owns an HTTP server. Pin its loopback port so
-        # Odysseus can expose a narrow provider-auth adapter without launching
+        # Open Clank can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
         self._http_port = _loopback_port(
             None if partitioned else os.environ.get("ODYSSEUS_MIMO_PORT")
@@ -418,7 +450,7 @@ class MimoSupervisor:
 
         logger.info("starting mimo acp child: %s acp (http 127.0.0.1:%d)", MIMO_BIN, self._http_port)
 
-        # A1.1: inject odysseus skills path into mimo config via env.
+        # Inject Open Clank skills into the embedded agent engine.
         # MIMOCODE_CONFIG_CONTENT is loaded last in mimo's config chain
         # (config.ts L835) and merges on top of everything else.
         # Phase 5: os.environ.copy() inherits all env vars including
@@ -441,17 +473,17 @@ class MimoSupervisor:
             env["MIMOCODE_CONFIG_CONTENT"] = skills_config
             # A1.3: also expose the data dir so mimo's usage writer can find _usage.json
             env["ODYSSEUS_DATA_DIR"] = str(Path(_ODYSSEUS_SKILLS_DIR).parent)
-            logger.info("injected odysseus skills path: %s", _ODYSSEUS_SKILLS_DIR)
+            logger.info("injected Open Clank skills path: %s", _ODYSSEUS_SKILLS_DIR)
         else:
-            logger.warning("odysseus skills dir not found: %s", _ODYSSEUS_SKILLS_DIR)
+            logger.warning("Open Clank skills dir not found: %s", _ODYSSEUS_SKILLS_DIR)
 
         # The embedded mimo must NEVER share state with a personal mimocode
         # install: under XDG defaults it reads ~/.config/mimocode (the user's
         # model defaults + provider config) and writes sessions/auth/logs into
         # ~/.local/share/mimocode — both directions of that are wrong. Always
         # set MIMOCODE_HOME (redirects config/data/state/cache wholesale) to
-        # Odysseus's own data dir. Precedence: explicit MIMOCODE_HOME env >
-        # THESIUS_AGENT_HOME (Phase 4 agent home) > data/mimocode default.
+        # Open Clank's own data dir. Precedence: explicit MIMOCODE_HOME env >
+        # THESIUS_AGENT_HOME (Phase 4 agent home) > internal runtime default.
         # Config + auth in that home are hand-managed (e's ruling 2026-07-09:
         # no automatic copying of credential files — boot once, edit config).
         if self._runtime_home is not None:
@@ -471,8 +503,12 @@ class MimoSupervisor:
             if _agent_home:
                 env["MIMOCODE_HOME"] = os.path.join(os.path.expanduser(_agent_home), ".mimocode")
             else:
-                _data_dir = os.environ.get("ODYSSEUS_DATA_DIR", str(REPO_ROOT / "data"))
-                env["MIMOCODE_HOME"] = os.path.join(_data_dir, "mimocode")
+                _data_dir = (
+                    os.environ.get("OPEN_CLANK_DATA_DIR")
+                    or os.environ.get("ODYSSEUS_DATA_DIR")
+                    or str(REPO_ROOT / "data")
+                )
+                env["MIMOCODE_HOME"] = os.path.join(_data_dir, "runtime", "agent-engine")
         self._mimocode_home = env["MIMOCODE_HOME"]
         self._reconcile_auth_store()
         snapshot = self.projection_snapshot
@@ -504,7 +540,7 @@ class MimoSupervisor:
                 try:
                     payload = json.dumps(merged_credentials).encode()
                     if os.write(write_fd, payload) != len(payload):
-                        raise RuntimeError("incomplete MiMo provider credential handoff")
+                        raise RuntimeError("incomplete Open Clank agent provider credential handoff")
                 finally:
                     os.close(write_fd)
                 env["MIMOCODE_PROVIDER_AUTH_FD"] = str(provider_auth_fd)
@@ -618,7 +654,7 @@ class MimoSupervisor:
 
         # Warm the model catalog: mimo only reports availableModels in a
         # session handshake, so open one throwaway session at boot. Lives
-        # only in the isolated mimo store; Odysseus never lists it.
+        # only in the isolated mimo store; Open Clank never lists it.
         catalog_session = None
         try:
             catalog_session = await self._bridge.open_session(with_agent_tools=False)
@@ -706,7 +742,7 @@ class MimoSupervisor:
 
     async def _restart_with_backoff(self) -> None:
         """Compatibility entry point: one pool-owned readiness campaign replaces it."""
-        raise RuntimeError("MiMo restart is coordinated by MimoSupervisorPool")
+        raise RuntimeError("Open Clank agent restart is coordinated by MimoSupervisorPool")
 
     async def _reconcile_sessions(self) -> None:
         """Discard interrupted projections; the next turn replays canonical history."""
@@ -731,7 +767,7 @@ class MimoSupervisor:
                     session_id, mimo_session_id=mimo_session_id
                 )
             except Exception as exc:
-                logger.warning("failed to purge stale MiMo projection %s: %s", session_id, exc)
+                logger.warning("failed to purge stale Open Clank agent projection %s: %s", session_id, exc)
 
     async def _teardown_child(self) -> None:
         """Clean up the child process and associated tasks."""
@@ -739,7 +775,7 @@ class MimoSupervisor:
             try:
                 await self._bridge.terminal_manager.close()
             except Exception as exc:
-                logger.warning("MiMo terminal cleanup failed: %s", exc)
+                logger.warning("Open Clank agent terminal cleanup failed: %s", exc)
         if (
             self._health_task
             and self._health_task is not asyncio.current_task()
@@ -895,7 +931,7 @@ class MimoSupervisor:
         return self._grant_store
 
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
-        """Refresh MiMo's authenticated provider/model catalog in-place."""
+        """Refresh Open Clank agent's authenticated provider/model catalog in-place."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
         session_id = await self._bridge.open_session()
@@ -911,7 +947,7 @@ class MimoSupervisor:
         owner: str,
         cwd: str | None = None,
     ) -> dict:
-        """Refresh one canonical session's negotiated MiMo control plane."""
+        """Refresh one canonical session's negotiated Open Clank agent control plane."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
         await self._bridge.ensure_session(session_id, cwd=cwd, owner=owner)
@@ -934,7 +970,7 @@ class MimoSupervisor:
         owner: str,
         cwd: str | None = None,
     ) -> dict:
-        """Acknowledge and persist a typed MiMo session config value."""
+        """Acknowledge and persist a typed Open Clank agent session config value."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
         try:
@@ -956,7 +992,7 @@ class MimoSupervisor:
         owner: str | None = None,
         mimo_session_id: str | None = None,
     ) -> None:
-        """Delete a MiMo-side session and forget any Odysseus remap."""
+        """Delete a Open Clank agent-side session and forget any Open Clank remap."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
         mimo_session = mimo_session_id or self._bridge.mapped_session_id(
@@ -967,7 +1003,7 @@ class MimoSupervisor:
             try:
                 await self._client.release_session(mimo_session)
             except Exception as exc:
-                logger.warning("failed to release MiMo session MCP clients %s: %s", mimo_session, exc)
+                logger.warning("failed to release Open Clank agent session MCP clients %s: %s", mimo_session, exc)
         async with httpx.AsyncClient(
             base_url=self.http_base_url,
             follow_redirects=False,
@@ -1077,7 +1113,7 @@ class AgentWorkerLease:
 
 
 class MimoSupervisorPool:
-    """Lazy owner-keyed MiMo runtimes; auth-disabled mode keeps one worker."""
+    """Lazy owner-keyed Open Clank agent runtimes; auth-disabled mode keeps one worker."""
 
     def __init__(
         self,
@@ -1109,7 +1145,8 @@ class MimoSupervisorPool:
         from src.openclank.permission_grants import GrantStore
 
         root = Path(data_dir) if data_dir is not None else Path(DATA_DIR)
-        self._owners_root = root / "mimocode" / "owners"
+        self._agent_runtime_root = migrate_agent_runtime_root(root)
+        self._owners_root = self._agent_runtime_root / "owners"
         self._grant_store = grant_store or GrantStore(str(root / "app.db"))
 
     @staticmethod
@@ -1169,7 +1206,7 @@ class MimoSupervisorPool:
             raise last_error
         raise SupervisorAdmissionError(
             "SUPERVISOR_CRASHLOOP",
-            "MiMo readiness campaign exhausted its deadline",
+            "Open Clank agent readiness campaign exhausted its deadline",
             phase="startup",
         ) from last_error
 
@@ -1206,7 +1243,7 @@ class MimoSupervisorPool:
                 if state.breaker_open_until.get(snapshot.fingerprint, 0) > now:
                     raise SupervisorAdmissionError(
                         "SUPERVISOR_CRASHLOOP",
-                        "MiMo readiness breaker is open for this projection",
+                        "Open Clank agent readiness breaker is open for this projection",
                         phase="startup",
                     )
 
@@ -1282,7 +1319,7 @@ class MimoSupervisorPool:
     async def for_owner(self, owner: str | None) -> MimoSupervisor:
         key = self._key(owner)
         if self._auth_enabled and not key:
-            raise RuntimeError("authenticated MiMo execution requires an owner")
+            raise RuntimeError("authenticated Open Clank agent execution requires an owner")
         if not self._auth_enabled:
             key = ""
         return await self._ensure_worker(key)
@@ -1321,7 +1358,7 @@ class MimoSupervisorPool:
             if snapshot is None or snapshot.run_closure(provider_id, model_id) is None:
                 raise SupervisorAdmissionError(
                     "MODEL_NOT_PROJECTED",
-                    f"Endpoint model {provider_id}/{model_id} is not in the current MiMo spawn config",
+                    f"Endpoint model {provider_id}/{model_id} is not in the current Open Clank agent spawn config",
                     phase="routing", retryable=False,
                 )
             qualified_model = f"{provider_id}/{model_id}"
@@ -1333,7 +1370,7 @@ class MimoSupervisorPool:
             if qualified_model not in available:
                 raise SupervisorAdmissionError(
                     "MODEL_NOT_PROJECTED",
-                    f"MiMo did not advertise the selected endpoint/model {qualified_model}",
+                    f"Open Clank agent did not advertise the selected endpoint/model {qualified_model}",
                     phase="catalog", retryable=False,
                 )
             state = self._owner_state(key)
@@ -1443,7 +1480,7 @@ class MimoSupervisorPool:
                     worker = candidate
                     break
         if worker is None:
-            raise RuntimeError("owner MiMo runtime is unavailable")
+            raise RuntimeError("owner Open Clank agent runtime is unavailable")
         await worker.delete_session(
             odysseus_session, mimo_session_id=mimo_session_id
         )
@@ -1489,7 +1526,7 @@ class MimoSupervisorPool:
     def http_base_url(self) -> str:
         worker = self._default_worker()
         if worker is None:
-            raise RuntimeError("MiMo owner runtime is unavailable")
+            raise RuntimeError("Open Clank agent owner runtime is unavailable")
         return worker.http_base_url
 
     async def stop(self) -> None:
@@ -1518,7 +1555,7 @@ class MimoSupervisorPool:
         )
         for owner, result in zip(owners, results):
             if isinstance(result, BaseException):
-                logger.warning("MiMo reprojection pending for owner %r: %s", owner, result)
+                logger.warning("Open Clank agent reprojection pending for owner %r: %s", owner, result)
 
     async def rename_owner(self, old_owner: str, new_owner: str) -> None:
         old_key = self._key(old_owner)
@@ -1533,7 +1570,7 @@ class MimoSupervisorPool:
         new_path = self._runtime_home(new_key)
         if old_path.exists():
             if new_path.exists():
-                raise RuntimeError("target MiMo owner partition already exists")
+                raise RuntimeError("target Open Clank agent owner partition already exists")
             new_path.parent.mkdir(parents=True, exist_ok=True)
             old_path.rename(new_path)
         if self._initial_owner == old_key:

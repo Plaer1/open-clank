@@ -5,7 +5,7 @@ import { providerLogo } from './providers.js';
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
-import { catalogEntries, catalogModelIds } from './modelCatalog.js';
+import { catalogEntries, catalogModelIds, modelChoiceKey, resolveStoredModelChoices } from './modelCatalog.js';
 
 const API_BASE = window.location.origin;
 
@@ -30,18 +30,24 @@ function _saveList(key, list) {
   try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* quota / private mode */ }
 }
 function _loadRecent() { return _loadList(RECENT_KEY); }
-function _pushRecent(mid) {
-  if (!mid) return;
-  const next = _loadRecent().filter(x => x !== mid);
-  next.unshift(mid);
+function _pushRecent(model) {
+  if (!model?.mid) return;
+  const key = modelChoiceKey(model);
+  const next = _loadRecent().filter(x => x !== key && x !== model.mid);
+  next.unshift(key);
   _saveList(RECENT_KEY, next.slice(0, RECENT_MAX));
 }
 function _loadFavorites() { return _loadList(FAVORITES_KEY); }
-function _toggleFavorite(mid) {
+function _toggleFavorite(model) {
+  const key = modelChoiceKey(model);
   const favs = _loadFavorites();
-  const i = favs.indexOf(mid);
+  const i = favs.indexOf(key);
+  const legacy = favs.indexOf(model.mid);
   if (i >= 0) favs.splice(i, 1);
-  else favs.push(mid);
+  else {
+    if (legacy >= 0) favs.splice(legacy, 1);
+    favs.push(key);
+  }
   _saveList(FAVORITES_KEY, favs);
   // Keep the sidebar Models section (same key) in sync if it's mounted.
   try {
@@ -264,11 +270,12 @@ function _initModelPickerDropdown() {
       const isLocalDead = !!(probeResult && probeResult.alive === false);
       entries.forEach(entry => {
         const mid = entry.mid;
+        const choiceKey = modelChoiceKey(mid, item.endpoint_id, item.url);
         // Deduplicate by model ID — prefer ONLINE endpoint entries over
         // offline duplicates so the user gets a working endpoint first
         // when the same model is exposed by both.
-        if (seen.has(mid)) return;
-        seen.add(mid);
+        if (seen.has(choiceKey)) return;
+        seen.add(choiceKey);
         // Catalog-boundary rows (entry.family set) carry their own public
         // identity: the transport/endpoint behind them is invisible to users.
         const boundary = !!entry.family;
@@ -375,9 +382,15 @@ function _initModelPickerDropdown() {
     // Unique lookup so Recent/Favorites (stored as bare model IDs) can be
     // resolved back to full model objects; drops anything no longer offered.
     const byId = new Map();
-    all.forEach(m => { if (!byId.has(m.mid)) byId.set(m.mid, m); });
+    all.forEach(m => {
+      byId.set(modelChoiceKey(m), m);
+      if (!byId.has(m.mid)) byId.set(m.mid, m);
+    });
 
-    const favs = _loadFavorites();
+    const favs = resolveStoredModelChoices(_loadFavorites(), all);
+    const recent = resolveStoredModelChoices(_loadRecent(), all);
+    _saveList(FAVORITES_KEY, favs);
+    _saveList(RECENT_KEY, recent);
 
     function _addSection(label) {
       const el = document.createElement('div');
@@ -428,7 +441,8 @@ function _initModelPickerDropdown() {
       // Inline favorite dot — toggles favorite, never picks the model.
       const favDot = document.createElement('button');
       favDot.type = 'button';
-      favDot.className = 'mp-fav-dot' + (favs.includes(m.mid) ? ' active' : '');
+      const choiceKey = modelChoiceKey(m);
+      favDot.className = 'mp-fav-dot' + (favs.includes(choiceKey) ? ' active' : '');
       favDot.textContent = '●';
       const _setFavState = (on) => {
         favDot.classList.toggle('active', on);
@@ -436,17 +450,17 @@ function _initModelPickerDropdown() {
         favDot.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
         favDot.setAttribute('aria-pressed', on ? 'true' : 'false');
       };
-      _setFavState(favs.includes(m.mid));
+      _setFavState(favs.includes(choiceKey));
       favDot.addEventListener('click', (e) => {
         e.stopPropagation();
-        const nowFav = _toggleFavorite(m.mid);
+        const nowFav = _toggleFavorite(m);
         _setFavState(nowFav);
         favDot.classList.remove('pulse');
         void favDot.offsetWidth;
         favDot.classList.add('pulse');
         // Keep our in-memory copy aligned so a follow-up re-render is correct.
-        const idx = favs.indexOf(m.mid);
-        if (nowFav && idx < 0) favs.push(m.mid);
+        const idx = favs.indexOf(choiceKey);
+        if (nowFav && idx < 0) favs.push(choiceKey);
         else if (!nowFav && idx >= 0) favs.splice(idx, 1);
         if (uiModule && uiModule.showToast) uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
         // In browse mode the Favorites section membership changed — rebuild
@@ -494,33 +508,33 @@ function _initModelPickerDropdown() {
     const favModels = favs.map(id => byId.get(id)).filter(Boolean);
     if (favModels.length) {
       _addSection('Favorites');
-      favModels.forEach(m => { shown.add(m.mid); _addRow(m); });
+      favModels.forEach(m => { shown.add(modelChoiceKey(m)); _addRow(m); });
     }
     // Recent: only render when the catalog is big enough that surfacing
     // a recency shortlist is actually useful, AND only models that
     // aren't already in Favorites (dedupe).
     if (browsable.length > BROWSE_ALL_LIMIT) {
-      const recentModels = _loadRecent()
+      const recentModels = recent
         .map(id => byId.get(id))
         .filter(Boolean)
-        .filter(m => !shown.has(m.mid))
+        .filter(m => !shown.has(modelChoiceKey(m)))
         .slice(0, RECENT_MAX);
       if (recentModels.length) {
         _addSection('Recent');
-        recentModels.forEach(m => { shown.add(m.mid); _addRow(m); });
+        recentModels.forEach(m => { shown.add(modelChoiceKey(m)); _addRow(m); });
       }
     }
 
     // Small catalogs: still list everything so users aren't forced to search.
     if (browsable.length <= BROWSE_ALL_LIMIT) {
-      const rest = browsable.filter(m => !shown.has(m.mid));
+      const rest = browsable.filter(m => !shown.has(modelChoiceKey(m)));
       if (rest.length) {
         if (shown.size) _addSection('All models');
         rest.forEach(_addRow);
       }
     } else {
       // Large catalog: collapsible family/provider groups.
-      const rest = browsable.filter(m => !shown.has(m.mid));
+      const rest = browsable.filter(m => !shown.has(modelChoiceKey(m)));
       const groups = new Map();
       rest.forEach(m => {
         const label = _groupLabel(m);
@@ -574,7 +588,7 @@ function _initModelPickerDropdown() {
 
     // Remember this pick so it surfaces under "Recent" next time the picker
     // opens — the whole point of quick-switch.
-    if (m && m.mid) _pushRecent(m.mid);
+    if (m && m.mid) _pushRecent(m);
 
     // Broadcast immediately so listeners (e.g. the tour) can advance without
     // waiting for the async session-create/PATCH that follows.

@@ -83,7 +83,7 @@ def _validate_model_settings_update(body: dict, current: dict, request: Request,
     for provider_key, model_key in (("tts_provider", "tts_model"), ("stt_provider", "stt_model")):
         provider = str(body.get(provider_key, current.get(provider_key, "")) or "")
         if provider == "endpoint:mimo":
-            raise HTTPException(400, "MiMo ACP is not a speech endpoint")
+            raise HTTPException(400, "Open Clank agent ACP is not a speech endpoint")
         if provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
             model_id = str(body.get(model_key, current.get(model_key, "")) or "")
@@ -100,7 +100,7 @@ def _validate_model_settings_update(body: dict, current: dict, request: Request,
             item.get("modelId") for item in mimo_catalog if item.get("modelId")
         }
         if body["vision_model"] in mimo_models:
-            raise HTTPException(400, "MiMo does not advertise vision input")
+            raise HTTPException(400, "Open Clank agent does not advertise vision input")
 
 
 def _settings_for_user(settings: dict, user: str) -> dict:
@@ -726,7 +726,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             try:
                 await mimo_supervisor.rename_owner(old_username, new_username)
             except Exception as exc:
-                raise HTTPException(500, f"Failed to rename user MiMo state: {exc}") from exc
+                raise HTTPException(500, f"Failed to rename user Open Clank agent state: {exc}") from exc
 
         # The owner-rename loop above updated ApiToken.owner in the DB, but the
         # bearer-token cache still maps each token to the OLD owner. Without
@@ -841,7 +841,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             try:
                 await mimo_supervisor.purge_owner(target_owner)
             except Exception as exc:
-                raise HTTPException(500, f"User deleted; MiMo state purge failed: {exc}") from exc
+                raise HTTPException(500, f"User deleted; Open Clank agent state purge failed: {exc}") from exc
         # delete_user removes the user's ApiToken rows, but the bearer-auth
         # middleware serves from an in-memory prefix->token cache that only
         # rebuilds when flagged dirty. Without this, a deleted user's already
@@ -1035,7 +1035,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             api_key = integ.get("api_key", "")
             auth_type = (integ.get("auth_type") or "none").lower()
             headers = {
-                "Title": "Odysseus connectivity test",
+                "Title": "Open Clank connectivity test",
                 "Tags": "white_check_mark",
                 "Priority": "default",
             }
@@ -1048,7 +1048,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 async with httpx.AsyncClient(timeout=8.0) as client:
                     r = await client.post(
                         full_url,
-                        content="Connectivity test from Odysseus. If you see this on your phone, ntfy is wired up correctly.",
+                        content="Connectivity test from Open Clank. If you see this on your phone, ntfy is wired up correctly.",
                         headers=headers,
                     )
                 if r.is_success:
@@ -1079,7 +1079,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 return {"ok": False, "message": "No webhook URL set — paste the full Discord webhook URL into the Base URL field."}
             payload = {
                 "embeds": [{
-                    "title": "Odysseus connectivity test",
+                    "title": "Open Clank connectivity test",
                     "description": "If you see this, your Discord Webhook integration is wired up correctly.",
                     "color": 5793266,
                 }]

@@ -1,6 +1,6 @@
 // static/js/documentLibrary.js
 /**
- * Document Library — modal with Chats / Documents / Research / Archive tabs.
+ * Files — modal with chats, editable documents, published downloads, research, and archive.
  * Extracted from document.js to reduce file size.
  */
 
@@ -51,6 +51,7 @@ function _maybeCascadeGrid(grid, tabKey) {
   setTimeout(() => grid.classList.remove('doclib-just-opened'), 900);
 }
 let _libraryDocs = [];
+let _libraryFiles = [];
 let _libraryTotal = 0;
 let _libraryOffset = 0;
 let _docsVisibleLimit = 20;  // chunked reveal (matches the Chats tab's 20)
@@ -327,14 +328,23 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     if (_libraryArchivedView) params.set('archived', 'true');
 
     try {
-      const res = await fetch(`${API_BASE}/api/documents/library?${params}`);
-      if (!res.ok) throw new Error(res.statusText);
+      const [res, filesRes] = await Promise.all([
+        fetch(`${API_BASE}/api/documents/library?${params}`, { credentials: 'same-origin' }),
+        append || _libraryArchivedView || _libraryActiveLanguage
+          ? Promise.resolve(null)
+          : fetch(`${API_BASE}/api/files/library?search=${encodeURIComponent(_librarySearch)}`, { credentials: 'same-origin' }),
+      ]);
+      if (!res.ok || (filesRes && !filesRes.ok)) {
+        throw new Error(filesRes && !filesRes.ok ? filesRes.statusText : res.statusText);
+      }
       const data = await res.json();
+      const filesData = filesRes ? await filesRes.json() : null;
 
       if (append) {
         _libraryDocs = _libraryDocs.concat(data.documents);
       } else {
         _libraryDocs = data.documents;
+        _libraryFiles = filesData ? (filesData.files || []) : [];
         _docsVisibleLimit = 20;  // reset chunk on a fresh load / search / sort
       }
       _libraryTotal = data.total;
@@ -355,10 +365,102 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     if (!el) return;
     const totalAll = Object.values(_libraryLanguages).reduce((a, b) => a + b, 0);
     if (_librarySearch || _libraryActiveLanguage) {
-      el.textContent = `${_libraryTotal} of ${totalAll} document${totalAll !== 1 ? 's' : ''}`;
+      el.textContent = `${_libraryFiles.length} file${_libraryFiles.length !== 1 ? 's' : ''} · ${_libraryTotal} of ${totalAll} document${totalAll !== 1 ? 's' : ''}`;
     } else {
-      el.textContent = `${totalAll} document${totalAll !== 1 ? 's' : ''}`;
+      el.textContent = `${_libraryFiles.length} file${_libraryFiles.length !== 1 ? 's' : ''} · ${totalAll} document${totalAll !== 1 ? 's' : ''}`;
     }
+  }
+
+  function _fileSize(bytes) {
+    const n = Number(bytes || 0);
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  async function _publishedFileAction(file, action, body) {
+    const options = {
+      method: action === 'delete' ? 'DELETE' : 'POST',
+      credentials: 'same-origin',
+    };
+    if (body) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify(body);
+    }
+    const suffix = action === 'delete' ? '' : '/' + action;
+    const res = await fetch(`${API_BASE}/api/files/${encodeURIComponent(file.id)}${suffix}`, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText || 'File action failed');
+    return data;
+  }
+
+  function libraryCreatePublishedFileCard(file) {
+    const card = document.createElement('div');
+    card.className = 'doclib-card memory-item doclib-published-file';
+    card.dataset.fileId = file.id;
+
+    const content = document.createElement('div');
+    content.style.cssText = 'flex:1;min-width:0;padding-top:4px;';
+    const title = document.createElement('div');
+    title.className = 'memory-item-title';
+    title.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:.65"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' + _hlSearch(file.filename || 'file');
+    content.appendChild(title);
+    const meta = document.createElement('div');
+    meta.className = 'memory-item-meta';
+    const audience = (file.audiences || []).join(', ') || 'links broken';
+    meta.textContent = `${_fileSize(file.size)} · ${audience} · ${libraryRelativeTime(file.created_at)}`;
+    content.appendChild(meta);
+    card.appendChild(content);
+
+    const menu = document.createElement('button');
+    menu.className = 'memory-item-btn';
+    menu.title = 'File actions';
+    menu.setAttribute('aria-label', `Actions for ${file.filename || 'file'}`);
+    menu.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
+    menu.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const copyGrant = async (audience) => {
+        try {
+          const grant = await _publishedFileAction(file, 'grants', { audience });
+          const absolute = new URL(grant.download_url, window.location.origin).href;
+          if (uiModule?.copyToClipboard) await uiModule.copyToClipboard(absolute);
+          else await navigator.clipboard.writeText(absolute);
+          if (uiModule) uiModule.showToast(`${audience === 'public' ? 'Public' : 'Owner'} link copied`);
+          await libraryFetch(false);
+        } catch (err) {
+          if (uiModule) uiModule.showError(err.message);
+        }
+      };
+      _showLibDropdown(menu, [
+        { label: 'Download', icon: 'open', action: () => { window.location.href = `${API_BASE}/api/files/${encodeURIComponent(file.id)}/content`; } },
+        { label: 'Copy owner link', icon: 'copy', action: () => copyGrant('owner') },
+        { label: 'Copy public link', icon: 'copy', action: () => copyGrant('public') },
+        { label: 'Break links', icon: 'archive', action: async () => {
+          try {
+            await _publishedFileAction(file, 'revoke');
+            await libraryFetch(false);
+            if (uiModule) uiModule.showToast('Download links broken');
+          } catch (err) { if (uiModule) uiModule.showError(err.message); }
+        } },
+        { label: 'Delete', icon: 'delete', danger: true, action: async () => {
+          if (!window.confirm(`Delete ${file.filename || 'this file'}?`)) return;
+          try {
+            await _publishedFileAction(file, 'delete');
+            await libraryFetch(false);
+            if (uiModule) uiModule.showToast('File deleted');
+          } catch (err) { if (uiModule) uiModule.showError(err.message); }
+        } },
+      ]);
+    });
+    const actions = document.createElement('div');
+    actions.className = 'memory-item-actions';
+    actions.appendChild(menu);
+    card.appendChild(actions);
+    card.addEventListener('click', () => {
+      window.location.href = `${API_BASE}/api/files/${encodeURIComponent(file.id)}/content`;
+    });
+    _attachLongPressMenu(card, '.memory-item-btn');
+    return card;
   }
 
   function libraryRenderLangChips() {
@@ -433,14 +535,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     // Drop any previous inline load-more — regenerated below alongside the list.
     if (grid.parentElement) grid.parentElement.querySelectorAll(':scope > .doclib-inline-load-more').forEach(b => b.remove());
 
-    if (_libraryDocs.length === 0) {
+    if (_libraryDocs.length === 0 && _libraryFiles.length === 0) {
       if (_librarySearch || _libraryActiveLanguage) {
-        grid.innerHTML = '<div class="doclib-empty">No documents match your search.</div>';
+        grid.innerHTML = '<div class="doclib-empty">No files match your search.</div>';
       } else {
         const _impIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin:0 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
         grid.innerHTML =
           '<div class="doclib-empty" style="display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;">' +
-            '<span>No documents yet</span>' +
+            '<span>No files yet</span>' +
             '<span style="opacity:0.7;font-size:11px;">' +
               '<a href="#" data-doclib-import style="color:var(--accent,var(--red));text-decoration:underline;">Import' + _impIco + '</a>' +
               ' &middot; or create one in a session' +
@@ -454,6 +556,12 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       return;
     }
     _maybeCascadeGrid(grid, 'documents');
+
+    if (!_librarySelectMode) {
+      for (const file of _libraryFiles) {
+        grid.appendChild(libraryCreatePublishedFileCard(file));
+      }
+    }
 
     // Reveal in 20-at-a-time chunks (matches the Chats tab). The legacy
     // server-pagination button is suppressed in libraryRenderLoadMore; this
@@ -1590,6 +1698,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     _librarySort = 'recent';
     _libraryOffset = 0;
     _libraryDocs = [];
+    _libraryFiles = [];
 
     // Create modal
     const modal = document.createElement('div');
@@ -1599,7 +1708,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       <div class="modal-content doclib-modal-content" style="width:min(640px, 92vw);background:var(--bg);">
         <div class="modal-header">
           <!-- Header title + icon mirror the currently-active sub-tab (Chats /
-               Documents / Research / Archive) so the user sees ONE icon at
+               Files / Research / Archive) so the user sees ONE icon at
                the top representing the section they're in, with the tab
                strip below as sub-navigation. _switchLibTab() updates this. -->
           <h4 id="doclib-header-title"><span id="doclib-header-icon" style="vertical-align:-2px;margin-right:4px;display:inline-flex;"></span><span id="doclib-header-text">Library</span></h4>
@@ -1607,7 +1716,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         </div>
         <div class="lib-tabs" id="doclib-lib-tabs" style="padding:0 10px;">
           <button class="lib-tab" data-doclib-tab="chats"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chats</button>
-          <button class="lib-tab active" data-doclib-tab="documents"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>Documents</button>
+          <button class="lib-tab active" data-doclib-tab="documents"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>Files</button>
           <button class="lib-tab" data-doclib-tab="research"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px;margin-right:3px;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>Research</button>
           <button class="lib-tab" data-doclib-tab="archive"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>Archive</button>
         </div>
@@ -1696,11 +1805,11 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           </div>
           <div data-doclib-panel="documents" class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
-              <h2 style="margin:0;padding:0;line-height:1;">Documents <span id="doclib-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
+              <h2 style="margin:0;padding:0;line-height:1;">Files <span id="doclib-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
               <button class="memory-toolbar-btn" id="doclib-import-file-btn" title="Import files from disk" style="margin-left:auto;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:2px;"><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="21" x2="19" y2="21"/></svg> Import</button>
               <button class="memory-toolbar-btn" id="doclib-create-btn" title="Create new blank document"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> Create</button>
             </div>
-            <p class="memory-desc doclib-desc">Open documents in a session, clone to a new or import new files.</p>
+            <p class="memory-desc doclib-desc">Downloads posted by your agent, plus editable documents.</p>
             <div class="memory-toolbar">
               <div class="memory-category-filters">
                 <select class="memory-sort-select" id="doclib-sort">
@@ -1712,7 +1821,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
                 <button class="memory-toolbar-btn" id="doclib-select-btn" title="Select documents">Select</button>
                 <button class="memory-toolbar-btn" id="doclib-tidy-btn" title="Tidy: remove empty / junk / duplicate documents">Tidy</button>
               </div>
-              <input type="text" id="doclib-search" placeholder="Search titles &amp; content\u2026" class="memory-search-input" />
+              <input type="text" id="doclib-search" placeholder="Search files &amp; document content\u2026" class="memory-search-input" />
               <div id="doclib-chips" class="doclib-lang-chips"></div>
             </div>
             <input type="file" id="doclib-file-input" multiple style="display:none" />
@@ -1843,7 +1952,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
       },
       documents: {
-        label: 'Documents',
+        label: 'Files',
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
       },
       research: {

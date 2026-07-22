@@ -1993,12 +1993,12 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                             if not raw:
                                 continue
                             msg = _email_mod.message_from_bytes(raw)
-                            # Skip Odysseus-generated reminders so the scanner
+                            # Skip Open Clank-generated reminders so the scanner
                             # doesn't classify its own emails as urgent and
                             # trigger a feedback loop. Match on either the
                             # stamped headers OR the subject prefix.
-                            _ody_origin = (msg.get("X-Odysseus-Origin") or "").strip().lower()
-                            _ody_kind = (msg.get("X-Odysseus-Kind") or "").strip().lower()
+                            _ody_origin = (msg.get("X-Open Clank-Origin") or "").strip().lower()
+                            _ody_kind = (msg.get("X-Open Clank-Kind") or "").strip().lower()
                             _raw_subj = (msg.get("Subject") or "").lower()
                             # MCP path drops custom headers (email_server's
                             # schema doesn't accept them), so we ALSO match the
@@ -2323,7 +2323,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             # one — so the reminder email tells you which messages to act on,
             # not just "4 needing reply". Optional deep-link when the user has
             # `app_public_url` configured in Settings (so the email row links
-            # straight into the Odysseus Email tab).
+            # straight into the Open Clank Email tab).
             # Sort: highest-scored UIDs first; cap at 10 to keep the email tidy.
             sorted_urgent = sorted(
                 ((k, per_uid_scores[k]) for k in urgent_keys),
@@ -2530,7 +2530,7 @@ async def action_cookbook_serve(
 
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     if owner:
-        headers["X-Odysseus-Owner"] = owner
+        headers["X-Open Clank-Owner"] = owner
     try:
         cfg = json.loads(command or "{}")
     except Exception:

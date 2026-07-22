@@ -106,24 +106,24 @@ async function _loadMimoEntries(force = false) {
     entries.push({
       token: `/${mode.id}`,
       aliases: [],
-      category: 'MiMo modes',
-      help: mode.description || `Switch MiMo to ${mode.name || mode.id}`,
+      category: 'Agent modes',
+      help: mode.description || `Switch Open Clank agent to ${mode.name || mode.id}`,
       usage: `/${mode.id} [prompt]`,
     });
   }
   for (const command of state.commands || []) {
-    const help = command.description || 'Run MiMo command';
+    const help = command.description || 'Run agent command';
     entries.push({
       token: `/mimo:${command.name}`,
       aliases: [],
-      category: 'MiMo commands',
+      category: 'Agent commands',
       help,
       usage: `/mimo:${command.name} [arguments]`,
     });
     entries.push({
       token: `/${command.name}`,
       aliases: [],
-      category: 'MiMo commands',
+      category: 'Agent commands',
       help,
       usage: `/${command.name} [arguments]`,
       mimoBare: true,

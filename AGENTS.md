@@ -17,6 +17,8 @@ Only use `git commit --no-verify` in a genuine emergency: it bypasses the hooks 
 - Claude is never attributed in commits — no AI co-author, generated-with, or session trailers
 - No credentials in first-party code (in ./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*) _(warn)_
 - Glue/memory code changes update plans or robonotes (write it down as you go) _(warn)_
+- Canvas backgrounds retain one running scene when an unchanged pattern is reapplied (in ./static/js/theme.js, ./tests/clanker_browser_acceptance.mjs)
+  ↳ A duplicate animation loop or canvas remount presents as flicker and can be reintroduced by innocent theme-control changes.
 
 ### Behaviours
 

@@ -2877,7 +2877,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'protocol_error' || json.type === 'config_error') {
                 if (!_isBg) {
                   const detail = json.data || json;
-                  uiModule.showError(detail.message || detail.error || 'MiMo protocol error');
+                  uiModule.showError(detail.message || detail.error || 'Open Clank agent protocol error');
                 }
 
               } else if (json.type === 'retry_notice') {
@@ -3576,7 +3576,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (_box && sessionModule.getCurrentSessionId() === _timeoutSessionId) {
               var _timeoutMsg = document.createElement('div');
               _timeoutMsg.className = 'msg msg-ai';
-              _timeoutMsg.innerHTML = '<div class="role">Odysseus</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
+              _timeoutMsg.innerHTML = '<div class="role">Open Clank</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
               _box.appendChild(_timeoutMsg);
               uiModule.scrollHistory();
             }

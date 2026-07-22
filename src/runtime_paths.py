@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 
 def get_app_root() -> str:
@@ -21,10 +22,15 @@ def get_default_data_dir() -> str:
     """Return the default path to the data directory.
 
     In normal runs, this is a 'data' subdirectory under the app root.
-    In frozen builds, it is a persistent user directory (~/.odysseus/data)
+    In frozen builds, it is a persistent user directory (~/.open-clank/data)
     to prevent SQLite databases and other persistent files from being
     written to the ephemeral, temporary extraction bundle directory.
     """
     if getattr(sys, "frozen", False):
-        return os.path.join(os.path.expanduser("~"), ".odysseus", "data")
+        home = Path(os.path.expanduser("~"))
+        current = home / ".open-clank"
+        legacy = home / ".odysseus"
+        if legacy.is_dir() and not current.exists():
+            legacy.rename(current)
+        return str(current / "data")
     return os.path.join(get_app_root(), "data")

@@ -89,7 +89,7 @@ async function loadDefaultPersona() {
   } catch (e) { /* factory fallbacks apply */ }
 }
 
-function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Odysseus'; }
+function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Open Clank'; }
 function _defaultPersonaPrompt() { return (defaultPersona && defaultPersona.system_prompt) || ''; }
 
 // Branding follows the GLOBAL default persona only (e's ruling: the
@@ -151,15 +151,15 @@ function _syncSessionPersona(sessionId) {
  */
 export function applyAgentName() {
   const name = _activeAgentName();
-  const previous = window.__agentName || 'Odysseus';
+  const previous = window.__agentName || 'Open Clank';
   window.__agentName = name;
   const msg = document.getElementById('message');
   if (msg && /^Message .*\.\.\.$/.test(msg.placeholder || '')) msg.placeholder = `Message ${name}...`;
   const meta = document.getElementById('current-meta');
-  if (meta && (meta.textContent === `${previous} Chat` || meta.textContent === 'Odysseus Chat')) {
+  if (meta && (meta.textContent === `${previous} Chat` || meta.textContent === 'Open Clank Chat')) {
     meta.textContent = `${name} Chat`;
   }
-  if (document.title === `${previous} Chat` || document.title === 'Odysseus Chat') {
+  if (document.title === `${previous} Chat` || document.title === 'Open Clank Chat') {
     document.title = `${name} Chat`;
   }
   // Live rebrand of already-rendered message labels (R17): every role

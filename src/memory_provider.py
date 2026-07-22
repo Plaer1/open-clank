@@ -89,7 +89,7 @@ class MemoryAmbiguousIdError(MemoryProviderError):
 
 
 class MemoryProvider(ABC):
-    """Base contract for Odysseus memory providers.
+    """Base contract for Open Clank memory providers.
 
     The native memory provider should always be available. External providers
     can add recall/write behavior and their own tools without replacing the
@@ -251,10 +251,10 @@ class MemoryProvider(ABC):
 
 
 class NativeMemoryProvider(MemoryProvider):
-    """Provider adapter for Odysseus' built-in memory manager and vector store."""
+    """Provider adapter for Open Clank' built-in memory manager and vector store."""
 
     provider_id = "native"
-    display_name = "Odysseus native memory"
+    display_name = "Open Clank native memory"
 
     _CORE_FIELDS = {
         "id",

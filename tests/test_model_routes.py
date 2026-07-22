@@ -1398,6 +1398,47 @@ def test_post_same_base_url_same_api_key_still_dedupes(monkeypatch):
     assert db.added == []
 
 
+def test_post_same_endpoint_revives_disabled_row(monkeypatch):
+    existing = _make_endpoint(
+        base_url="https://api.example.test/v1",
+        is_enabled=False,
+        model_refresh_mode="disabled",
+    )
+    db = _PinnedFakeDb([existing])
+    _patch_create_deps(monkeypatch, db)
+    create = _get_route("/api/model-endpoints", "POST")
+
+    result = create(
+        _PinnedFakeRequest(),
+        base_url="https://api.example.test/v1",
+        **_create_form_kwargs(),
+    )
+
+    assert result["existing"] is True
+    assert result["is_enabled"] is True
+    assert existing.is_enabled is True
+    assert existing.model_refresh_mode == "auto"
+    assert db.added == []
+
+
+def test_post_url_spelling_variant_reuses_existing_row(monkeypatch):
+    existing = _make_endpoint(base_url="HTTPS://API.Example.test:443/v1/")
+    db = _PinnedFakeDb([existing])
+    _patch_create_deps(monkeypatch, db)
+    create = _get_route("/api/model-endpoints", "POST")
+
+    result = create(
+        _PinnedFakeRequest(),
+        base_url="https://api.example.test/v1/models?ignored=1",
+        **_create_form_kwargs(),
+    )
+
+    assert result["existing"] is True
+    assert result["id"] == existing.id
+    assert existing.base_url == "https://api.example.test/v1"
+    assert db.added == []
+
+
 class _RouteQuery:
     def __init__(self, rows):
         self.rows = list(rows)

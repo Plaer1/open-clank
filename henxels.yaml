@@ -32,3 +32,10 @@ henxels:
       when: [src/openclank/**, mcp_servers/**]
       expect: [.futures/**, .robonotes/**]
     level: warn
+
+  - henxel: "Canvas backgrounds retain one running scene when an unchanged pattern is reapplied"
+    in: [./static/js/theme.js, ./tests/clanker_browser_acceptance.mjs]
+    why: "A duplicate animation loop or canvas remount presents as flicker and can be reintroduced by innocent theme-control changes."
+    background_animation_lifecycle:
+      theme_module: static/js/theme.js
+      browser_test: tests/clanker_browser_acceptance.mjs

@@ -6853,6 +6853,21 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       background: var(--red); border: none; cursor: pointer;
     }
     .theme-fd-range:focus { outline: none; }
+    .theme-effect-controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 2px;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    }
+    .theme-effect-controls[hidden] { display: none; }
+    .theme-effect-control { min-width: 0; }
+    .theme-effect-control-label { display: flex; justify-content: space-between; gap: 6px; }
+    .theme-effect-control-label output { color: var(--red); font-variant-numeric: tabular-nums; }
+    .theme-effect-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .theme-effect-toggle .admin-switch { flex: 0 0 auto; margin: 0; }
+    @media (max-width: 520px) { .theme-effect-controls { grid-template-columns: 1fr; } }
     /* Color Harmony Generator */
     .theme-harmony-row { display: flex; gap: 8px; align-items: flex-end; }
     .harmony-generate-btn {
@@ -41176,11 +41191,17 @@ body.theme-frosted .modal {
 .copal-notes-workspace:dir(rtl), .copal-note-tabs:dir(rtl), .copal-shell-side-header:dir(rtl) { flex-direction: row-reverse; }
 .copal-group-menu { min-width: 27px; height: 100%; }
 .copal-note-leaf { flex: 1; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) 24px; overflow: hidden; }
+.copal-notes-workspace.right-closed .copal-note-leaf { grid-template-rows: auto minmax(0, 1fr); }
+.copal-notes-workspace.right-closed .copal-note-props-footer,
+.copal-notes-workspace.right-closed .copal-note-status { display: none; }
 .copal-note-view-header { min-width: 0; min-height: 58px; display: grid; grid-template-columns: minmax(120px, 1fr) auto auto; grid-template-rows: auto auto; align-items: center; gap: 0 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 62%, var(--bg)); }
 .copal-note-breadcrumb { grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--fg) 46%, transparent); font-size: 9px; }
 .copal-note-view-header .copal-inline-title { grid-column: 1; min-height: 30px; padding: 1px 2px; font-size: clamp(17px, 2vw, 25px); font-weight: 650; }
 .copal-leaf-mode { grid-column: 2; border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; font-size: 8px; opacity: .58; white-space: nowrap; }
 .copal-leaf-menu { grid-column: 3; height: 28px; }
+.copal-note-header-actions { grid-column: 3; display: flex; align-items: center; gap: 5px; min-width: 0; }
+.copal-note-header-actions .copal-leaf-menu { grid-column: auto; }
+.copal-note-trash-button { min-height: 28px; padding: 4px 8px; white-space: nowrap; }
 .copal-note-leaf-content { min-width: 0; min-height: 0; overflow: hidden; }
 .copal-note-editing-surface { width: 100%; height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
 .copal-note-editing-surface.side-by-side { grid-template-columns: minmax(260px, 1fr) minmax(240px, .82fr); }
@@ -41314,6 +41335,8 @@ body.theme-frosted .modal {
   .copal-note-view-header { grid-template-columns: minmax(100px, 1fr) auto; }
   .copal-leaf-mode { display: none; }
   .copal-leaf-menu { grid-column: 2; }
+  .copal-note-header-actions { grid-column: 2; }
+  .copal-note-trash-button { min-height: 36px; }
   .copal-note-status span:nth-of-type(2), .copal-note-status span:nth-of-type(3) { display: none; }
 }
 /* The model-comparison grid hard-codes 2-4 equal columns with no phone
@@ -41885,6 +41908,7 @@ body.bg-pattern-clanker-routefield,
 body.bg-pattern-clanker-kene-weave,
 body.bg-pattern-clanker-radar,
 body.bg-pattern-clanker-gem-drift,
+body.bg-pattern-clanker-emoji-drift,
 body.bg-pattern-synapse,
 body.bg-pattern-rain,
 body.bg-pattern-constellations,
@@ -42189,7 +42213,6 @@ body.theme-clanker-light .mimo-plan-dock {
   border-left: 4px solid var(--clanker-sky);
   border-radius: 16px 3px 16px 3px;
   box-shadow: inset 0 1px var(--clanker-bevel), 0 4px 0 var(--clanker-outline), 0 16px 34px color-mix(in srgb, var(--clanker-outline) 38%, transparent);
-  backdrop-filter: blur(7px) saturate(1.08);
 }
 
 body.theme-clanker-dark .mimo-plan-head,
@@ -42205,6 +42228,75 @@ body.theme-clanker-light .mimo-plan-dock pre {
 
 body.theme-clanker-dark .mimo-plan-dock ol,
 body.theme-clanker-light .mimo-plan-dock ol {
+  color: var(--clanker-ink);
+}
+
+/* Give the live tool timeline a readable surface while preserving the route
+   field beneath it as part of the theme. */
+body.theme-clanker-dark .agent-thread,
+body.theme-clanker-light .agent-thread {
+  background: color-mix(in srgb, var(--clanker-surface) 48%, transparent);
+  border: 1px solid color-mix(in srgb, var(--clanker-outline) 42%, transparent);
+  border-radius: 14px 3px 14px 3px;
+  box-shadow: inset 0 1px color-mix(in srgb, var(--clanker-bevel) 72%, transparent),
+    0 10px 26px color-mix(in srgb, var(--clanker-outline) 28%, transparent);
+}
+
+body.theme-clanker-dark .agent-thread-header,
+body.theme-clanker-light .agent-thread-header {
+  text-shadow: 0 1px 8px color-mix(in srgb, var(--clanker-field) 82%, transparent);
+}
+
+body.theme-clanker-dark .agent-thread-node.open .agent-thread-content,
+body.theme-clanker-light .agent-thread-node.open .agent-thread-content {
+  background: color-mix(in srgb, var(--clanker-field) 54%, transparent);
+  border-radius: 10px 2px 10px 2px;
+  padding: 8px;
+  margin: 4px 0 2px;
+}
+
+body.theme-frosted.theme-clanker-dark .mimo-plan-dock,
+body.theme-frosted.theme-clanker-light .mimo-plan-dock {
+  backdrop-filter: blur(7px) saturate(1.08);
+  -webkit-backdrop-filter: blur(7px) saturate(1.08);
+}
+
+body.theme-frosted.theme-clanker-dark .agent-thread,
+body.theme-frosted.theme-clanker-light .agent-thread {
+  backdrop-filter: blur(6px) saturate(1.06);
+  -webkit-backdrop-filter: blur(6px) saturate(1.06);
+}
+
+body.theme-frosted.theme-clanker-dark .agent-thread-node.open .agent-thread-content,
+body.theme-frosted.theme-clanker-light .agent-thread-node.open .agent-thread-content {
+  backdrop-filter: blur(7px) saturate(1.04);
+  -webkit-backdrop-filter: blur(7px) saturate(1.04);
+}
+
+body.theme-clanker-dark .agent-thread-cmd,
+body.theme-clanker-light .agent-thread-cmd {
+  background: color-mix(in srgb, var(--clanker-well) 86%, transparent) !important;
+  border-color: color-mix(in srgb, var(--clanker-sky) 34%, var(--clanker-outline));
+  box-shadow: inset 0 1px var(--clanker-bevel);
+}
+
+body.theme-clanker-dark .agent-tool-output,
+body.theme-clanker-light .agent-tool-output {
+  background: color-mix(in srgb, var(--clanker-surface) 78%, transparent) !important;
+  border-color: color-mix(in srgb, var(--clanker-sky) 32%, var(--clanker-outline));
+  box-shadow: inset 0 1px color-mix(in srgb, var(--clanker-bevel) 65%, transparent);
+}
+
+body.theme-clanker-dark .agent-tool-output summary,
+body.theme-clanker-light .agent-tool-output summary {
+  background: color-mix(in srgb, var(--clanker-sky) 18%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--clanker-sky) 30%, var(--clanker-outline));
+  color: var(--clanker-ink);
+}
+
+body.theme-clanker-dark .agent-tool-output pre,
+body.theme-clanker-light .agent-tool-output pre {
+  background: transparent;
   color: var(--clanker-ink);
 }
 

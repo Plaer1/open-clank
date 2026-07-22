@@ -444,6 +444,47 @@ class DocumentVersion(Base):
     document = relationship("Document", back_populates="versions")
 
 
+class PublishedFile(Base):
+    """Managed bytes an agent deliberately exposed through a download grant."""
+    __tablename__ = "published_files"
+
+    id          = Column(String, primary_key=True, index=True)
+    owner       = Column(String, nullable=False, index=True)
+    filename    = Column(String, nullable=False)
+    mime_type   = Column(String, nullable=False, default="application/octet-stream")
+    size        = Column(Integer, nullable=False)
+    sha256      = Column(String, nullable=False, index=True)
+    source      = Column(String, nullable=False, default="agent")
+    created_at  = Column(DateTime, default=utcnow_naive, nullable=False)
+
+    grants = relationship(
+        "PublishedFileGrant",
+        back_populates="file",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class PublishedFileGrant(Base):
+    """Revocable owner-only or expiring-public link for a published file."""
+    __tablename__ = "published_file_grants"
+
+    id          = Column(String, primary_key=True, index=True)
+    file_id     = Column(
+        String,
+        ForeignKey("published_files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash  = Column(String, nullable=False, unique=True, index=True)
+    audience    = Column(String, nullable=False, default="owner")
+    created_at  = Column(DateTime, default=utcnow_naive, nullable=False)
+    expires_at  = Column(DateTime, nullable=True, index=True)
+    revoked_at  = Column(DateTime, nullable=True, index=True)
+
+    file = relationship("PublishedFile", back_populates="grants")
+
+
 class GalleryAlbum(TimestampMixin, Base):
     """A photo album/folder."""
     __tablename__ = "gallery_albums"
@@ -1820,14 +1861,19 @@ def _migrate_assign_legacy_owner():
             "scheduled_tasks", "task_runs", "crew_members",
             "gallery_albums", "gallery_people", "user_tool_data",
             "api_tokens", "webhooks", "model_endpoints",
-            "provider_auth_sessions",
+            "provider_auth_sessions", "published_files",
         ]
         for table in tables:
             try:
                 cursor = conn.execute(f"PRAGMA table_info({table})")
                 columns = [row[1] for row in cursor.fetchall()]
                 if "owner" in columns:
-                    res = conn.execute(f"UPDATE {table} SET owner = ? WHERE owner IS NULL", (admin_user,))
+                    where = "owner IS NULL"
+                    if table == "published_files":
+                        # Auth-disabled publication uses the empty owner key;
+                        # claim it when this install later enables accounts.
+                        where += " OR TRIM(owner) = ''"
+                    res = conn.execute(f"UPDATE {table} SET owner = ? WHERE {where}", (admin_user,))
                     if res.rowcount > 0:
                         logger.info(f"Assigned {res.rowcount} legacy rows in {table} to '{admin_user}'")
             except Exception as e:

@@ -752,6 +752,12 @@ async def _execute_tool_block_impl(
         desc = f"{tool}: {first_line}"
         result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "publish_file":
+        desc = "publish_file"
+        result = await _direct_fallback(tool, content, owner=owner) \
+            or {"error": "publish_file: execution failed", "exit_code": 1}
+        if result.get("filename"):
+            desc = f"publish_file: {result['filename']}"
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"

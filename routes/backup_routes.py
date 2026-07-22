@@ -46,7 +46,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         """Export all user data as a downloadable JSON file."""
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        memory_owner = user or os.environ.get("OPEN_CLANK_MEMORY_OWNER") or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
 
         # Memories (filtered by owner when auth is enabled)
         memories = []
@@ -117,7 +117,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             "preferences": preferences,
         }
 
-        filename = f"odysseus_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"open-clank-backup-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         return Response(
             content=json.dumps(export_data, indent=2, ensure_ascii=False),
             media_type="application/json",
@@ -129,7 +129,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         """Import user data from a previously exported JSON file. Merges with existing data."""
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        memory_owner = user or os.environ.get("OPEN_CLANK_MEMORY_OWNER") or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
         try:
             body = await request.json()
         except Exception:

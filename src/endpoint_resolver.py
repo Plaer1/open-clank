@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
-from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _ollama_api_root
 
 logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ def resolve_model_target(
     scheme = urlparse(url).scheme.lower()
     if scheme == "mimo":
         if url.rstrip("/") != "mimo://acp":
-            raise ValueError(f"Unsupported MiMo target: {url!r}")
+            raise ValueError(f"Unsupported Open Clank agent target: {url!r}")
         transport: Literal["http", "acp"] = "acp"
         defaults: Dict[str, Optional[bool]] = {
             "chat": True,
@@ -200,9 +199,9 @@ def _resolve_mimo_model(
     model: Optional[str],
     owner: Optional[str],
 ) -> Optional[str]:
-    """Return an owner-advertised MiMo model, or fail closed.
+    """Return an owner-advertised Open Clank agent model, or fail closed.
 
-    MiMo is virtual and therefore has no ``ModelEndpoint`` row to enforce the
+    Open Clank agent is virtual and therefore has no ``ModelEndpoint`` row to enforce the
     owner boundary.  Its live, owner-keyed supervisor catalogue is the
     authority instead.  Legacy single-worker supervisors are usable only in
     ownerless/auth-disabled mode; they cannot prove an authenticated owner's
@@ -329,6 +328,56 @@ def normalize_base(url: str) -> str:
         if url.endswith("/api" + suffix):
             url = url[: -len(suffix)].rstrip("/")
     return url
+
+
+def canonical_endpoint_base(url: str) -> str:
+    """Canonical spelling used only for endpoint identity comparisons.
+
+    API paths remain case-sensitive; scheme/host and default ports do not.
+    Query strings and fragments are never part of an endpoint identity.
+    """
+    raw = (url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.hostname:
+        raw = urlunparse(parsed._replace(query="", fragment=""))
+    base = normalize_base(raw)
+    if not base:
+        return ""
+    parsed = urlparse(base)
+    if not parsed.scheme or not parsed.hostname:
+        return base
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        return base
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
+    return urlunparse((scheme, host, parsed.path.rstrip("/"), "", "", ""))
+
+
+def matching_endpoint(rows, base_url: str, api_key: str = ""):
+    """Find one same-route endpoint without merging distinct credentials.
+
+    An incoming credential may upgrade an otherwise identical keyless row,
+    matching the existing Settings behavior. Two non-empty, unequal keys stay
+    distinct.
+    """
+    wanted_base = canonical_endpoint_base(base_url)
+    wanted_key = (api_key or "").strip()
+    keyless = None
+    for row in rows:
+        if canonical_endpoint_base(getattr(row, "base_url", "")) != wanted_base:
+            continue
+        row_key = (getattr(row, "api_key", None) or "").strip()
+        if row_key == wanted_key:
+            return row
+        if wanted_key and not row_key and keyless is None:
+            keyless = row
+    return keyless
 
 
 def _validated_endpoint_base(url: str) -> str:
@@ -496,6 +545,7 @@ def resolve_endpoint(
             return fallback_url, fallback_model, fallback_headers
         return "mimo://acp", selected, fallback_headers or {}
 
+    from core.database import SessionLocal, ModelEndpoint
     db = SessionLocal()
     try:
         ep = db.query(ModelEndpoint).filter(
@@ -546,6 +596,7 @@ def endpoint_id_for_chat_url(chat_url: str, owner: Optional[str] = None) -> Opti
     wanted = (chat_url or "").strip().rstrip("/")
     if not wanted.startswith(("http://", "https://")):
         return None
+    from core.database import SessionLocal, ModelEndpoint
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
@@ -580,6 +631,7 @@ def resolve_endpoint_by_id(
         if not selected:
             return None
         return "mimo://acp", selected, {}
+    from core.database import SessionLocal, ModelEndpoint
     db = SessionLocal()
     try:
         q = db.query(ModelEndpoint).filter(

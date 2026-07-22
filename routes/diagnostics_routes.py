@@ -50,7 +50,7 @@ def setup_diagnostics_routes(
             {
                 "name": "mimo",
                 "status": "ok" if mimo_alive else ("down" if mimo_declared else "disabled"),
-                "detail": "Owner-partitioned ACP runtime; automatic dream/distill disabled by default" if mimo_alive else "MiMo ACP runtime unavailable",
+                "detail": "Owner-partitioned ACP runtime; automatic dream/distill disabled by default" if mimo_alive else "Open Clank agent ACP runtime unavailable",
             },
         ])
         if (memory_declared and not memory_alive) or (mimo_declared and not mimo_alive):

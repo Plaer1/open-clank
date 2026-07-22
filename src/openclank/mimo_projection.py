@@ -1,4 +1,4 @@
-"""Canonical, owner-scoped MiMo provider projection and durable generation."""
+"""Canonical, owner-scoped Open Clank agent provider projection and durable generation."""
 
 from __future__ import annotations
 

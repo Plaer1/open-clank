@@ -1,7 +1,7 @@
-# Copy to /etc/systemd/system/odysseus-ui.service
+# Legacy filename kept for upgrades; new installs use open-clank.service.
 # Edit User, WorkingDirectory, and ExecStart paths to match your setup
 [Unit]
-Description=Odysseus UI
+Description=Open Clank local AI workspace (legacy unit name)
 After=network.target
 
 [Service]

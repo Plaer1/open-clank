@@ -1,4 +1,4 @@
-"""One-way Copal planning projection into Odysseus's native calendar store.
+"""One-way Copal planning projection into Open Clank's native calendar store.
 
 Copal/Redb remains canonical.  This module only owns rows in one deterministic
 local calendar per Copal owner/workspace and never participates in native

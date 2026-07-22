@@ -560,24 +560,50 @@ async function showTrash(kind = null) {
 }
 
 async function deleteDocument(doc) {
-  if (!window.confirm(`Move ${doc.name} to Copal trash?`)) return;
-  const deleted = await api(`/documents/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
-  projectionChanged(deleted);
-  state.selected = null;
-  if (state.baseId === doc.id) state.baseId = null;
-  await loadDocuments();
+  if (!doc || doc.readOnly) {
+    setStatus('Built-in knowledge is read only.', true);
+    return false;
+  }
+  if (!window.confirm(`Move “${doc.name}” to Trash? You can restore it later.`)) return false;
+  if (notesFeature?.prepareDelete && !await notesFeature.prepareDelete(doc.id)) return false;
+  clearTimeout(state.saveTimers.get(doc.id));
+  state.saveTimers.delete(doc.id);
+  try {
+    const deleted = await api(`/documents/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
+    projectionChanged(deleted);
+    state.selected = null;
+    if (state.baseId === doc.id) state.baseId = null;
+    await loadDocuments();
+    setStatus(`Moved ${doc.name} to Trash`);
+    return true;
+  } catch (error) {
+    setStatus(error.message, true);
+    return false;
+  }
 }
 
 async function deleteDocuments(docs) {
-  const unique = [...new Map((docs || []).map((doc) => [doc.id, doc])).values()];
+  const unique = [...new Map((docs || []).filter((doc) => doc && !doc.readOnly).map((doc) => [doc.id, doc])).values()];
   if (!unique.length || !window.confirm(`Move ${unique.length} selected Copal document${unique.length === 1 ? '' : 's'} to trash?`)) return false;
   for (const doc of unique) {
-    const deleted = await api(`/documents/${encodeURIComponent(doc.id)}`, { method:'DELETE' });
-    projectionChanged(deleted);
-    if (state.baseId === doc.id) state.baseId = null;
+    if (notesFeature?.prepareDelete && !await notesFeature.prepareDelete(doc.id)) return false;
+    clearTimeout(state.saveTimers.get(doc.id));
+    state.saveTimers.delete(doc.id);
+  }
+  try {
+    for (const doc of unique) {
+      const deleted = await api(`/documents/${encodeURIComponent(doc.id)}`, { method:'DELETE' });
+      projectionChanged(deleted);
+      if (state.baseId === doc.id) state.baseId = null;
+    }
+  } catch (error) {
+    await loadDocuments();
+    setStatus(error.message, true);
+    return false;
   }
   if (unique.some((doc) => doc.id === state.selected)) state.selected = null;
   await loadDocuments();
+  setStatus(`Moved ${unique.length} document${unique.length === 1 ? '' : 's'} to Trash`);
   return true;
 }
 

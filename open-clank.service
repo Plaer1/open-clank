@@ -1,0 +1,17 @@
+# Copy to /etc/systemd/system/open-clank.service and replace placeholders.
+[Unit]
+Description=Open Clank local AI workspace
+After=network.target
+
+[Service]
+Type=simple
+User=YOURUSER
+WorkingDirectory=/home/YOURUSER/open-clank
+ExecStart=/home/YOURUSER/open-clank/.venv/bin/uvicorn app:app --port 7000 --host 127.0.0.1
+Restart=always
+RestartSec=3
+Environment=OPEN_CLANK_DATA_DIR=/home/YOURUSER/open-clank/data
+EnvironmentFile=-/home/YOURUSER/open-clank/.env
+
+[Install]
+WantedBy=multi-user.target

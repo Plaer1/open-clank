@@ -25,6 +25,8 @@ from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
     normalize_base as _normalize_base,
+    canonical_endpoint_base,
+    matching_endpoint,
     build_chat_url,
     build_models_url,
     build_headers,
@@ -35,6 +37,15 @@ from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
 logger = logging.getLogger(__name__)
+
+_MODEL_CATALOG_REVISION = 0
+
+
+def invalidate_model_catalogue_revision() -> int:
+    """Invalidate caches owned by any live route instance or agent writer."""
+    global _MODEL_CATALOG_REVISION
+    _MODEL_CATALOG_REVISION += 1
+    return _MODEL_CATALOG_REVISION
 
 _SPEECH_ENDPOINT_SETTINGS = (
     ("tts_provider", "tts_model", "tts-1", "Text to Speech"),
@@ -281,7 +292,7 @@ def _container_loopback_reachable(base_url: str, timeout: float = 0.2) -> bool:
     """True when the requested loopback host:port is already reachable from
     inside the current container.
 
-    This distinguishes "a model server running alongside Odysseus in the same
+    This distinguishes "a model server running alongside Open Clank in the same
     container" from "a model server running on the Docker host". Only the
     latter should be rewritten to host.docker.internal.
     """
@@ -307,11 +318,11 @@ def _container_loopback_reachable(base_url: str, timeout: float = 0.2) -> bool:
 def _rewrite_loopback_for_docker(base_url: str, *, container_local: bool = False) -> str:
     """Rewrite a loopback model-endpoint URL to ``host.docker.internal`` when
     running in Docker. A URL like ``http://localhost:1234/v1`` (the LM Studio
-    default) otherwise targets the Odysseus container itself, so the probe gets
+    default) otherwise targets the Open Clank container itself, so the probe gets
     a connection error and the endpoint is rejected with a misleading "No
     models found for that provider/key".
 
-    Cookbook local serves are the opposite case: Odysseus started the model
+    Cookbook local serves are the opposite case: Open Clank started the model
     server inside the same container/process environment, so the saved endpoint
     must remain container-local. In that mode, normalize a bind address such as
     0.0.0.0 to a connectable loopback host, but do not jump to the Docker host.
@@ -659,7 +670,7 @@ _DIRECT_PROVIDER_TO_MIMO = {
 # Provider prefix → the model-family label users see. The upstream/operator
 # provider is an admin detail; the family is the product identity.
 _MIMO_FAMILY_NAMES = {
-    "xiaomi": "MiMo",
+    "xiaomi": "Open Clank agent",
     "deepseek": "DeepSeek",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
@@ -695,7 +706,7 @@ def _mimo_model_families(model_ids) -> dict[str, str]:
 def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None) -> dict[str, dict]:
     """Map mimo provider prefixes to the enabled direct endpoint covering them.
 
-    MiMo fills gaps only: a provider Odysseus reaches natively must not show
+    Open Clank agent fills gaps only: a provider Open Clank reaches natively must not show
     up a second time through the agent transport (e's no-duplicates rule).
     The returned map records WHICH endpoint won, so Settings can show the
     suppression instead of making providers silently vanish."""
@@ -801,7 +812,7 @@ def _mimo_catalog(supervisor, owner: str | None = None):
 
 
 def _mimo_display_names(base: list[str], variants: list[str]) -> dict[str, str]:
-    """Keep MiMo model names intact when ACP encodes reasoning effort in IDs."""
+    """Keep Open Clank agent model names intact when ACP encodes reasoning effort in IDs."""
     displays = {model_id: model_id.split("/", 1)[-1] for model_id in base}
     for model_id in variants:
         model, _, effort = model_id.rpartition("/")
@@ -1370,7 +1381,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
                 return {
                     "reachable": False,
                     "status_code": r.status_code,
-                    "error": "That is Odysseus, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
+                    "error": "That is Open Clank, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
                 }
             return {"reachable": False, "status_code": r.status_code, "error": f"HTTP {r.status_code} redirect"}
         if 200 <= r.status_code < 300:
@@ -1554,7 +1565,7 @@ def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids):
     """Hide the broken MLX repo id when a launch-specific shim id is available.
 
     mlx_lm.server may advertise the original HF repo id even though generation
-    only works through Odysseus' sanitized local shim. Keep the shim as the
+    only works through Open Clank' sanitized local shim. Keep the shim as the
     submitted model id and remove the raw repo id from the picker/default list.
     """
     ids = list(model_ids or [])
@@ -1626,6 +1637,7 @@ def setup_model_routes(model_discovery):
         affects the visible endpoint list (CRUD on ModelEndpoint, prefs
         flip)."""
         _models_cache.clear()
+        invalidate_model_catalogue_revision()
 
     def _schedule_mimo_reprojection(request: Request) -> None:
         """Endpoint registry mutated: recycle mimo workers so the next turn
@@ -1925,6 +1937,7 @@ def setup_model_routes(model_discovery):
         _allowed_models = _allowed_model_ids(request, owner)
         now = _time.time()
         _cache_key = (
+            _MODEL_CATALOG_REVISION,
             owner,
             None if _allowed_models is None else tuple(sorted(_allowed_models)),
         )
@@ -1966,7 +1979,7 @@ def setup_model_routes(model_discovery):
                     capabilities={"chat": True, "tools": True, "vision": None},
                 ),
                 "endpoint_id": "mimo",
-                "endpoint_name": "MiMo runtime",
+                "endpoint_name": "Open Clank agent runtime",
                 # The runtime aggregates cloud provider APIs — classifying it
                 # "local" put it in the Local endpoints section with a LOCAL
                 # badge. "auto" kind renders no badge at all.
@@ -1981,7 +1994,7 @@ def setup_model_routes(model_discovery):
         result = _filter_catalog_for_allowed_models(result, _allowed_models)
         _models_cache[_cache_key] = {"data": result, "time": now}
         # Kick off background refresh to update caches from live endpoints.
-        # Page boot can opt out with background=false so opening Odysseus does
+        # Page boot can opt out with background=false so opening Open Clank does
         # not start endpoint probes against slow/offline model servers.
         if background or refresh:
             _refresh_caches_bg(owner=owner, force=refresh)
@@ -2006,7 +2019,11 @@ def setup_model_routes(model_discovery):
         owner = effective_user(request) or ""
         now = _time.time()
         cache_entry = _local_probe_cache.get(owner)
-        if cache_entry is not None and (now - cache_entry["time"]) < _LOCAL_PROBE_TTL:
+        if (
+            cache_entry is not None
+            and cache_entry.get("revision") == _MODEL_CATALOG_REVISION
+            and (now - cache_entry["time"]) < _LOCAL_PROBE_TTL
+        ):
             return cache_entry["data"]
 
         import asyncio as _asyncio
@@ -2066,7 +2083,11 @@ def setup_model_routes(model_discovery):
                 for eid in data["endpoint_ids"]:
                     results[eid] = r
 
-            _local_probe_cache[owner] = {"data": results, "time": _time.time()}
+            _local_probe_cache[owner] = {
+                "data": results,
+                "time": _time.time(),
+                "revision": _MODEL_CATALOG_REVISION,
+            }
             return results
 
         task = _asyncio.create_task(_compute_local_probe())
@@ -2424,7 +2445,7 @@ def setup_model_routes(model_discovery):
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
                 })
 
-            # Keep the settings catalog aligned with /api/models. MiMo is a
+            # Keep the settings catalog aligned with /api/models. Open Clank agent is a
             # virtual ACP endpoint, so it has no ModelEndpoint row to appear
             # in the original admin list. Expose the same handshake catalog
             # here so Default/Utility/Research settings can select it.
@@ -2515,16 +2536,17 @@ def setup_model_routes(model_discovery):
     ):
         require_admin(request)
         _caller = _model_owner(request) or None
-        base_url = _normalize_base(base_url)
+        base_url = canonical_endpoint_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
         # Resolve hostname via Tailscale if DNS fails
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
         # In Docker, manually added loopback URLs usually point at a host-local
-        # server. Cookbook local serves are launched inside Odysseus itself, so
+        # server. Cookbook local serves are launched inside Open Clank itself, so
         # keep those container-local when the frontend marks them as such.
         base_url = _rewrite_loopback_for_docker(base_url, container_local=_truthy(container_local))
+        base_url = canonical_endpoint_base(base_url)
 
         # Auto-generate name from URL if not provided
         if not name.strip():
@@ -2545,27 +2567,24 @@ def setup_model_routes(model_discovery):
         _incoming_api_key = api_key.strip()
         _db_dedup = SessionLocal()
         try:
-            _same_url_query = _db_dedup.query(ModelEndpoint).filter(
-                ModelEndpoint.base_url == base_url
-            )
+            _same_url_query = _db_dedup.query(ModelEndpoint)
             if _caller:
                 _same_url_query = _same_url_query.filter(ModelEndpoint.owner == _caller)
             else:
                 _same_url_query = _same_url_query.filter(ModelEndpoint.owner.is_(None))
             _same_url_rows = _same_url_query.all()
-            existing = None
-            _empty_key_existing = None
-            for _candidate in _same_url_rows:
-                _candidate_key = (getattr(_candidate, "api_key", None) or "").strip()
-                if _candidate_key == _incoming_api_key:
-                    existing = _candidate
-                    break
-                if _incoming_api_key and not _candidate_key and _empty_key_existing is None:
-                    _empty_key_existing = _candidate
-            if existing is None and _incoming_api_key and _empty_key_existing is not None:
-                existing = _empty_key_existing
+            existing = matching_endpoint(_same_url_rows, base_url, _incoming_api_key)
             if existing:
                 changed = False
+                if existing.base_url != base_url:
+                    existing.base_url = base_url
+                    changed = True
+                if not existing.is_enabled:
+                    existing.is_enabled = True
+                    changed = True
+                if _endpoint_refresh_mode(existing) == "disabled":
+                    existing.model_refresh_mode = refresh_mode
+                    changed = True
                 # Persist any incoming pinned IDs onto the existing row. An
                 # empty/omitted form field must not wipe previously pinned IDs.
                 _incoming_pinned = _normalize_model_ids(pinned_models)
@@ -2613,6 +2632,7 @@ def setup_model_routes(model_discovery):
                 if changed:
                     _db_dedup.commit()
                     _invalidate_models_cache()
+                    _schedule_mimo_reprojection(request)
                     _local_probe_cache.clear()
                 existing_models = _cached_model_ids(existing)
                 _existing_pinned = _normalize_model_ids(getattr(existing, "pinned_models", None))
@@ -2632,6 +2652,7 @@ def setup_model_routes(model_discovery):
                     "online": True,
                     "status": "online",
                     "existing": True,
+                    "is_enabled": bool(existing.is_enabled),
                     "endpoint_kind": existing_kind,
                     "category": _classify_endpoint(existing.base_url, existing_kind),
                     "catalog_probe": _catalog_probe_payload(existing),
@@ -2731,6 +2752,7 @@ def setup_model_routes(model_discovery):
             "pinned_models": _pinned,
             "online": bool(model_ids) or bool(_pinned) or bool(ping.get("reachable")),
             "status": "online" if (model_ids or _pinned) else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
+            "is_enabled": True,
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
@@ -2960,7 +2982,7 @@ def setup_model_routes(model_discovery):
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
             _fallbacks = _user_prefs.get("default_model_fallbacks") or []
-            # MiMo is a virtual per-owner runtime, not a shared database
+            # Open Clank agent is a virtual per-owner runtime, not a shared database
             # endpoint. Reusing the operator's virtual default is safe because
             # the catalogue below is still fetched for this caller and an
             # unconnected account resolves to nothing. This also preserves the

@@ -146,7 +146,7 @@ def odysseus_mcp_descriptors(*, is_admin: bool) -> tuple[list[dict], list[str]]:
         finally:
             db.close()
     except Exception as exc:
-        logger.warning("failed to compile Odysseus MCP descriptors: %s", exc)
+        logger.warning("failed to compile Open Clank MCP descriptors: %s", exc)
         return [], []
 
 
@@ -290,8 +290,8 @@ class ACPBridge:
         self._queues: Dict[str, asyncio.Queue] = {}
         # Per-session available models from mimo's handshake (modelId → {modelId, name})
         self._session_models: Dict[str, list] = {}
-        # Full negotiated control-plane state, keyed by MiMo session id. The
-        # canonical desired selection is persisted on the Odysseus session.
+        # Full negotiated control-plane state, keyed by Open Clank agent session id. The
+        # canonical desired selection is persisted on the Open Clank session.
         self._session_state: Dict[str, dict] = {}
         self._session_context: Dict[str, dict] = {}
         self.question_handler = QuestionHandler()
@@ -303,7 +303,7 @@ class ACPBridge:
         # Latest full catalog from any handshake — mimo is the model
         # authority; /api/models reports this list up to the picker.
         self.available_models: list = []
-        # Odysseus-session → mimo-session remap for sessions whose mimo-side
+        # Open Clank-session → mimo-session remap for sessions whose mimo-side
         # state is gone (e.g. created before the MIMOCODE_HOME isolation).
         # Persisted so the remap survives server restarts.
         self._session_map_path = session_map_path or (
@@ -472,7 +472,7 @@ class ACPBridge:
             None,
         )
         if option is None:
-            raise ValueError(f"MiMo did not advertise config option {config_id!r}")
+            raise ValueError(f"Open Clank agent did not advertise config option {config_id!r}")
         allowed = [item.get("value") for item in option.get("options", [])]
         if allowed and value not in allowed:
             raise ValueError(
@@ -762,11 +762,11 @@ class ACPBridge:
         """Memory injection for one mimo turn: returns (messages, trusted_block).
 
         The untrusted index card is prepended to turns that don't carry one
-        (Odysseus-prefaced turns already have it; the sentinel keeps it
+        (Open Clank-prefaced turns already have it; the sentinel keeps it
         single — this covers resume flows and any future mimo-first path).
         The TRUSTED guidance block (T6) is returned to the caller so it can
         ride envelope.system_prompt — true system tier — instead of being
-        demoted to synthetic prompt text. If the Odysseus preface already
+        demoted to synthetic prompt text. If the Open Clank preface already
         produced a trusted block, that exact text is reused (no second
         digest fetch, no drift). Fail-open: no digest, no blocks."""
         if incognito or self._memory_provider is None:
@@ -911,9 +911,9 @@ class ACPBridge:
                     owner=owner,
                 )
             except (ValueError, RPCError) as exc:
-                logger.warning("MiMo mode restore failed (%s): %s", desired_mode, exc)
+                logger.warning("Open Clank agent mode restore failed (%s): %s", desired_mode, exc)
                 yield f'data: {json.dumps({"type": "config_error", "config": "mode", "requested": desired_mode, "error": str(exc)})}\n\n'
-                yield f'event: error\ndata: {json.dumps({"error": f"MiMo rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
 
@@ -949,7 +949,7 @@ class ACPBridge:
                     if item.get("modelId")
                 ]
                 yield f'data: {json.dumps({"type": "config_error", "config": "model", "requested": model, "available": available, "error": str(e)})}\n\n'
-                yield f'event: error\ndata: {json.dumps({"error": f"MiMo rejected model {model!r}; the prompt was not sent", "status": 409})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected model {model!r}; the prompt was not sent", "status": 409})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
 
@@ -1085,7 +1085,7 @@ class ACPBridge:
                             mimo_session_id=mimo_session,
                         )
                     except Exception as exc:
-                        logger.warning("failed to delete incognito MiMo session %s: %s", mimo_session, exc)
+                        logger.warning("failed to delete incognito Open Clank agent session %s: %s", mimo_session, exc)
 
     def _persist_plan_update(self, mimo_session_id: str, payload: dict) -> dict:
         state = self._session_state.setdefault(mimo_session_id, {})
@@ -1661,14 +1661,14 @@ class QuestionHandler:
     @staticmethod
     def _questions(value: Any) -> list[dict]:
         if not isinstance(value, list) or not 1 <= len(value) <= 16:
-            raise ValueError("MiMo question must contain 1-16 prompts")
+            raise ValueError("Open Clank agent question must contain 1-16 prompts")
         result: list[dict] = []
         for raw in value:
             if not isinstance(raw, dict):
-                raise ValueError("MiMo question prompt must be an object")
+                raise ValueError("Open Clank agent question prompt must be an object")
             question = str(raw.get("question") or "").strip()[:4_096]
             if not question:
-                raise ValueError("MiMo question text is required")
+                raise ValueError("Open Clank agent question text is required")
             options = []
             for option in list(raw.get("options") or [])[:100]:
                 if not isinstance(option, dict):
@@ -1730,7 +1730,7 @@ class QuestionHandler:
             await self._on_request(req)
             return await req.wait()
         except Exception as exc:
-            logger.warning("failed to surface MiMo question: %s", exc)
+            logger.warning("failed to surface Open Clank agent question: %s", exc)
             return {"rejected": True}
         finally:
             self.pending_requests.pop(req.request_id, None)

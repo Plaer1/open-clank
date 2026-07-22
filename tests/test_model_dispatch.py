@@ -377,6 +377,34 @@ async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch
     await single_pool.stop()
 
 
+def test_agent_runtime_root_migration_is_idempotent_and_reversible(tmp_path):
+    import src.openclank.mimo_supervisor as module
+
+    legacy = tmp_path / "mimocode"
+    legacy.mkdir()
+    (legacy / "proof").write_text("kept")
+    current = module.migrate_agent_runtime_root(tmp_path)
+    assert current == tmp_path / "runtime" / "agent-engine"
+    assert (current / "proof").read_text() == "kept"
+    assert module.migrate_agent_runtime_root(tmp_path) == current
+    restored = module.migrate_agent_runtime_root(tmp_path, rollback=True)
+    assert restored == legacy
+    assert (restored / "proof").read_text() == "kept"
+
+
+def test_agent_runtime_root_conflict_never_merges(tmp_path):
+    import src.openclank.mimo_supervisor as module
+
+    (tmp_path / "mimocode").mkdir()
+    current = tmp_path / "runtime" / "agent-engine"
+    current.mkdir(parents=True)
+    (tmp_path / "mimocode" / "legacy").write_text("legacy")
+    (current / "current").write_text("current")
+    assert module.migrate_agent_runtime_root(tmp_path) == current
+    assert (tmp_path / "mimocode" / "legacy").exists()
+    assert (current / "current").exists()
+
+
 def test_owner_supervisor_pool_catalogue_never_falls_back_across_owners(tmp_path):
     """A real pool lookup for an unmaterialized owner must be empty, not merged."""
     import src.openclank.mimo_supervisor as module

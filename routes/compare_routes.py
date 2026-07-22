@@ -133,14 +133,14 @@ def setup_compare_routes(session_manager: SessionManager):
                     if eid == "mimo":
                         supervisor = getattr(request.app.state, "mimo_supervisor", None)
                         if not supervisor or not supervisor.is_alive(owner=user):
-                            raise HTTPException(503, "MiMo ACP is unavailable")
+                            raise HTTPException(503, "Open Clank agent ACP is unavailable")
                         available = {
                             item.get("modelId")
                             for item in supervisor.available_models(owner=user)
                             if item.get("modelId")
                         }
                         if available and model not in available:
-                            raise HTTPException(400, f"MiMo model {model!r} is unavailable")
+                            raise HTTPException(400, f"Open Clank agent model {model!r} is unavailable")
                         auth_manager = getattr(request.app.state, "auth_manager", None)
                         get_privileges = getattr(auth_manager, "get_privileges", None)
                         privileges = get_privileges(user) if get_privileges and user else {}

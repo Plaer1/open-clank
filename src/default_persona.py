@@ -2,7 +2,7 @@
 
 Identity metaplan rulings R10/R12/R13/R15 (2026-07-16):
 
-- R10: the default persona is REAL — name "Odysseus" plus an editable
+- R10: the default persona is REAL — name "Open Clank" plus an editable
   system prompt; the persona modal must not pretend the default is blank.
 - R12: the preset store (data/presets.json) is the canonical vehicle; the
   record lives there under "default_personas", keyed by owner.
@@ -26,9 +26,9 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Factory seed (reset target). The prompt is the pre-fork product default —
-# upstream Odysseus's legacy baseline persona — kept verbatim per Slice 03
+# upstream Open Clank's legacy baseline persona — kept verbatim per Slice 03
 # ("capture the existing built-in persona as a golden fixture").
-FACTORY_NAME = "Odysseus"
+FACTORY_NAME = "Open Clank"
 FACTORY_PROMPT = (
     "You are a helpful, balanced assistant. Match your response style to "
     "the user's needs."

@@ -12,7 +12,7 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
-import { catalogEntries } from './modelCatalog.js';
+import { catalogEntries, modelChoiceKey, resolveStoredModelChoices } from './modelCatalog.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -44,14 +44,19 @@ function _loadFavorites() {
 function _saveFavorites(list) {
   Storage.setJSON(FAVORITES_KEY, list);
 }
-function _isFavorite(mid) {
-  return _loadFavorites().includes(mid);
+function _isFavorite(mid, endpointId, url) {
+  return _loadFavorites().includes(modelChoiceKey(mid, endpointId, url));
 }
-function _toggleFavorite(mid) {
+function _toggleFavorite(mid, endpointId, url) {
+  const key = modelChoiceKey(mid, endpointId, url);
   const favs = _loadFavorites();
-  const idx = favs.indexOf(mid);
+  const idx = favs.indexOf(key);
   if (idx >= 0) favs.splice(idx, 1);
-  else favs.push(mid);
+  else {
+    const legacy = favs.indexOf(mid);
+    if (legacy >= 0) favs.splice(legacy, 1);
+    favs.push(key);
+  }
   _saveFavorites(favs);
   return idx < 0; // returns true if now favorited
 }
@@ -89,9 +94,11 @@ function _startChat(url, mid, endpointId) {
 }
 
 function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
+  const choiceKey = modelChoiceKey(mid, endpointId, url);
   const row = document.createElement('div');
   row.className = 'models-row' + (offline ? ' models-row-offline' : '');
-  row.setAttribute('data-model-id', mid);
+  row.setAttribute('data-model-id', choiceKey);
+  row.setAttribute('data-model-mid', mid);
   if (modelType === 'image') row.setAttribute('data-model-type', 'image');
 
   const handle = document.createElement('span');
@@ -105,16 +112,16 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   const _favColor = modelColor(mid);
   const _logo = providerLogo(mid);
   if (_logo) {
-    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid, endpointId, url) ? ' active' : '');
     fav.innerHTML = _logo;
     fav.style.opacity = '0.4';
   } else {
-    fav.className = 'model-fav-btn' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn' + (_isFavorite(mid, endpointId, url) ? ' active' : '');
   }
   fav.title = 'Toggle favorite';
   fav.addEventListener('click', (e) => {
     e.stopPropagation();
-    const nowFav = _toggleFavorite(mid);
+    const nowFav = _toggleFavorite(mid, endpointId, url);
     fav.classList.toggle('active', nowFav);
     uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
     refreshModels();
@@ -226,13 +233,14 @@ export async function refreshModels(force = false) {
       _cachedItems.forEach(item => {
         const cat = item.category === 'local' ? 'local' : 'api';
         const epName = item.endpoint_name || 'Unknown';
+        const epGroup = `${item.endpoint_id || item.url || epName}\u001f${epName}`;
         const isOffline = !!item.offline;
-        if (!groups[cat][epName]) groups[cat][epName] = [];
-        if (!extraGroups[cat][epName]) extraGroups[cat][epName] = [];
+        if (!groups[cat][epGroup]) groups[cat][epGroup] = [];
+        if (!extraGroups[cat][epGroup]) extraGroups[cat][epGroup] = [];
         const epModelType = item.model_type || 'llm';
         catalogEntries(item).forEach(entry => {
           const target = entry.extra ? extraGroups : groups;
-          target[cat][epName].push({
+          target[cat][epGroup].push({
             mid: entry.mid, url: item.url,
             displayName: entry.displayName,
             endpointId: item.endpoint_id || null,
@@ -244,14 +252,16 @@ export async function refreshModels(force = false) {
     }
 
     // ── Render Favorites section on top ──
-    const favs = _loadFavorites();
+    const allChoices = Object.values(groups.local).flat().concat(Object.values(groups.api).flat());
+    const favs = resolveStoredModelChoices(_loadFavorites(), allChoices);
+    _saveFavorites(favs);
     if (favs.length > 0) {
       const favModels = [];
       // Collect favorited models from all groups (keep them in originals too)
       for (const cat of ['local', 'api']) {
-        for (const [epName, epModels] of Object.entries(groups[cat])) {
+        for (const epModels of Object.values(groups[cat])) {
           for (const m of epModels) {
-            if (favs.includes(m.mid)) {
+            if (favs.includes(modelChoiceKey(m))) {
               favModels.push(m);
             }
           }
@@ -268,7 +278,7 @@ export async function refreshModels(force = false) {
         const usage = _loadUsage();
         favModels.sort((a, b) => ((usage[b.mid] || {}).count || 0) - ((usage[a.mid] || {}).count || 0));
       } else {
-        favModels.sort((a, b) => favs.indexOf(a.mid) - favs.indexOf(b.mid));
+        favModels.sort((a, b) => favs.indexOf(modelChoiceKey(a)) - favs.indexOf(modelChoiceKey(b)));
       }
 
       if (favModels.length > 0) {
@@ -306,11 +316,18 @@ export async function refreshModels(force = false) {
       }
     }
 
-    const localCount = Object.values(groups.local).reduce((s, a) => s + a.length, 0);
-    const apiCount = Object.values(groups.api).reduce((s, a) => s + a.length, 0);
+    const sourceGroups = { local: {}, api: {} };
+    for (const cat of ['local', 'api']) {
+      Object.entries(groups[cat]).forEach(([groupKey, models]) => {
+        const remaining = models.filter(model => !favs.includes(modelChoiceKey(model)));
+        if (remaining.length) sourceGroups[cat][groupKey] = remaining;
+      });
+    }
+    const localCount = Object.values(sourceGroups.local).reduce((s, a) => s + a.length, 0);
+    const apiCount = Object.values(sourceGroups.api).reduce((s, a) => s + a.length, 0);
     const hasMultipleCategories = localCount > 0 && apiCount > 0;
     const needsGrouping = hasMultipleCategories ||
-      Object.keys(groups.local).length > 1 || Object.keys(groups.api).length > 1;
+      Object.keys(sourceGroups.local).length > 1 || Object.keys(sourceGroups.api).length > 1;
 
     const categoryOrder = [
       { key: 'local', label: 'Local' },
@@ -318,7 +335,7 @@ export async function refreshModels(force = false) {
     ];
 
     categoryOrder.forEach(({ key, label }) => {
-      const endpoints = groups[key];
+      const endpoints = sourceGroups[key];
       const models = Object.values(endpoints).flat();
       if (models.length === 0) return;
 
@@ -359,13 +376,16 @@ export async function refreshModels(force = false) {
 
       // --- Endpoint sub-groups ---
       const extraEndpoints = extraGroups[key];
-      Object.entries(endpoints).forEach(([epName, epModels]) => {
-        const epExtra = extraEndpoints[epName] || [];
+      Object.entries(endpoints).forEach(([groupKey, epModels]) => {
+        const splitAt = groupKey.indexOf('\u001f');
+        const endpointKey = splitAt >= 0 ? groupKey.slice(0, splitAt) : groupKey;
+        const epName = splitAt >= 0 ? groupKey.slice(splitAt + 1) : groupKey;
+        const epExtra = extraEndpoints[groupKey] || [];
         const totalCount = epModels.length + epExtra.length;
         const isOfflineEndpoint = epModels.length > 0 && epModels[0].offline;
 
         if (multiEndpoints) {
-          const epKey = 'ep:' + key + ':' + epName;
+          const epKey = 'ep:' + key + ':' + endpointKey;
           const epCollapsed = collapseState[epKey] === true;
 
           const sub = document.createElement('div');
@@ -461,19 +481,23 @@ export async function refreshModels(force = false) {
       const savedModelOrder = Storage.getJSON('models-order', []);
       if (savedModelOrder.length) {
         const rowMap = new Map();
-        box.querySelectorAll('.models-row').forEach(r => {
-          const mid = r.dataset.modelId;
-          if (mid) rowMap.set(mid, r);
-        });
-        const ordered = [];
-        savedModelOrder.forEach(mid => {
-          if (rowMap.has(mid)) {
-            ordered.push(rowMap.get(mid));
-            rowMap.delete(mid);
+        const rows = Array.from(box.querySelectorAll('.models-row'));
+        rows.forEach(r => {
+          if (r.dataset.modelId) rowMap.set(r.dataset.modelId, r);
+          if (r.dataset.modelMid && !rowMap.has(r.dataset.modelMid)) {
+            rowMap.set(r.dataset.modelMid, r);
           }
         });
-        // Append remaining rows not in saved order
-        rowMap.forEach(r => ordered.push(r));
+        const ordered = [];
+        const used = new Set();
+        savedModelOrder.forEach(key => {
+          const row = rowMap.get(key);
+          if (row && !used.has(row)) {
+            ordered.push(row);
+            used.add(row);
+          }
+        });
+        rows.forEach(row => { if (!used.has(row)) ordered.push(row); });
         ordered.forEach(r => box.appendChild(r));
       }
     }

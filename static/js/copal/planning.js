@@ -666,7 +666,9 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
       // On first load (no previousScroll), left-align with today ~3 days from left edge.
       // On re-renders, prefer explicit anchor → previous position → saved anchor → today.
       const anchor = options.anchorDate || previousAnchor || (previousScroll ? savedAnchor() : null) || today;
-      const leftPad = previousScroll ? (LABEL_WIDTH + daysBetween(start, anchor) * dayWidth - scroll.clientWidth / 2) : (LABEL_WIDTH + daysBetween(start, addDays(anchor, -3)) * dayWidth);
+      const leftPad = previousScroll
+        ? LABEL_WIDTH + daysBetween(start, anchor) * dayWidth - scroll.clientWidth / 2
+        : daysBetween(start, addDays(anchor, -INITIAL_HISTORY_DAYS)) * dayWidth;
       scroll.scrollLeft = Math.max(0, leftPad);
     }
   }

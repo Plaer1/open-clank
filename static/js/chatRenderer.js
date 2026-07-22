@@ -2000,7 +2000,7 @@ export function displayMetrics(messageElement, metrics) {
           compactMsg.className = 'msg msg-ai';
           const compactRole = document.createElement('div');
           compactRole.className = 'role';
-          compactRole.textContent = window.__agentName || 'Odysseus';
+          compactRole.textContent = window.__agentName || 'Open Clank';
           const compactBody = document.createElement('div');
           compactBody.className = 'body';
           compactBody.innerHTML = 'Compacting context <span class="compact-wave">▁▂▃▅▂▁</span>';
@@ -2121,7 +2121,7 @@ function _renderMimoQuestionCard(aq, renderOptions) {
 
   const card = document.createElement('form');
   card.className = 'ask-user-card mimo-question-card';
-  card.setAttribute('aria-label', 'MiMo question');
+  card.setAttribute('aria-label', 'Open Clank agent question');
   const status = document.createElement('div');
   status.className = 'settings-save-status';
   status.setAttribute('role', 'status');
@@ -2719,7 +2719,7 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? (window.__agentName || 'Odysseus') : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? (window.__agentName || 'Open Clank') : modelRouteLabel(replyModels.requestedModel, resolvedModel);
     var _agentLabelKind = (role !== 'user' && (isSlash || isCompacted)) ? 'default' : '';
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';

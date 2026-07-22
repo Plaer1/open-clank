@@ -1,4 +1,4 @@
-"""User-scoped Odysseus API for Copal's owned Redb bridge."""
+"""User-scoped Open Clank API for Copal's owned Redb bridge."""
 
 from __future__ import annotations
 

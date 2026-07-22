@@ -260,6 +260,13 @@ def test_agent_endpoint_tool_is_owner_scoped(endpoint_db):
         owner="alice",
     ))
     assert added["exit_code"] == 0
+    repeated = asyncio.run(do_manage_endpoints(
+        '{"action":"add","name":"Duplicate spelling","base_url":"HTTPS://SECOND.invalid:443/v1/"}',
+        owner="alice",
+    ))
+    assert repeated["exit_code"] == 0
+    assert repeated["existing"] is True
+    assert repeated["endpoint_id"] == added["endpoint_id"]
     db = endpoint_db()
     try:
         assert db.query(ModelEndpoint).filter(

@@ -34,20 +34,20 @@ function safeRasterDataUrl(raw) {
 
 /* ── Tab switching ── */
 const SETTINGS_OWNERSHIP = Object.freeze({
-  services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
-  'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
+  services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Open Clank model catalogue' },
+  'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Open Clank model catalogue' },
   // The Persona card inside this panel is per-user too, served by
   // /api/presets/default-persona (chat default, assistant, reminder voice,
   // background work — one synced record, ruling R13).
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
-  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
-  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
+  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Open Clank search and research policy' },
+  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
   reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
   appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   account: { scope: 'per-user', api: '/api/auth', consumer: 'current account lifecycle' },
-  tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Odysseus and MiMo effective tool policy' },
+  tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Open Clank effective tool policy' },
   users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
   system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
 });
@@ -568,7 +568,7 @@ async function loadDefaultPersonaPanel() {
     selectEl.innerHTML = '';
     const defOpt = document.createElement('option');
     defOpt.value = '__default__';
-    defOpt.textContent = `Default (${(_personaState.defaultRecord || {}).name || 'Odysseus'})`;
+    defOpt.textContent = `Default (${(_personaState.defaultRecord || {}).name || 'Open Clank'})`;
     selectEl.appendChild(defOpt);
     if (_personaState.templates.length) {
       const group = document.createElement('optgroup');
@@ -599,7 +599,7 @@ async function loadDefaultPersonaPanel() {
     if (!value || value === '__default__') {
       _personaState.kind = 'default'; _personaState.id = null;
       const record = _personaState.defaultRecord || {};
-      nameEl.value = record.name || 'Odysseus';
+      nameEl.value = record.name || 'Open Clank';
       promptEl.value = record.system_prompt || '';
     } else if (value.startsWith('tmpl:')) {
       const template = _personaState.templates.find(t => `tmpl:${t.id}` === value);
@@ -1059,7 +1059,7 @@ async function initImageSettings() {
         if (_isInpaintModel(mid)) imageModels.push(mid);
       });
     });
-    sortModelIds(imageModels).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; modelSel.appendChild(opt); });
+    sortModelIds([...new Set(imageModels)]).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; modelSel.appendChild(opt); });
     // Hardcoded fallbacks shown as "(not detected)" so users know what to
     // download/serve to enable inpaint here.
     ['stable-diffusion-3.5-medium', 'stable-diffusion-inpainting'].forEach(mid => {
@@ -1121,7 +1121,7 @@ async function initVisionSettings() {
         }
       });
     });
-    sortModelIds(visionModels).forEach(mid => {
+    sortModelIds([...new Set(visionModels)]).forEach(mid => {
       var opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; vlSel.appendChild(opt);
     });
   } catch (e) { console.warn('Failed to load models for vision settings', e); }
@@ -2911,7 +2911,7 @@ async function initReminderSettings() {
   // regardless of channel). The hint should make that clear so
   // users don't think they have to choose between channels.
   const CHANNEL_HINTS = {
-    browser: 'Reminders appear as browser notifications inside Odysseus.',
+    browser: 'Reminders appear as browser notifications inside Open Clank.',
     email: 'Reminders are emailed and shown as a browser notification.',
     ntfy: 'Reminders are pushed via ntfy AND shown as a browser notification.',
     webhook: 'Reminders are POSTed to the selected integration AND shown as a browser notification. Use {{title}} and {{message}} in the payload template.',
@@ -3311,7 +3311,7 @@ async function initEmailAccountsSettings() {
     const eafProviderNotes = {
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Open Clank does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
       },
     };
     const eafNoteEl = el('eaf-provider-note');
@@ -4229,7 +4229,7 @@ async function initUnifiedIntegrations() {
       if (ntfyHint) {
         ntfyHint.style.display = isNtfy ? 'block' : 'none';
         if (isNtfy) {
-          ntfyHint.innerHTML = 'Enter the ntfy server URL Odysseus can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
+          ntfyHint.innerHTML = 'Enter the ntfy server URL Open Clank can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
         }
       }
       if (url) {
@@ -4829,7 +4829,7 @@ async function initUnifiedIntegrations() {
       },
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Open Clank does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
         url: 'https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online',
         linkLabel: 'Read Microsoft note',
       },
@@ -5649,7 +5649,7 @@ async function initUnifiedIntegrations() {
               </button>
             </div>
             <div id="uf-codex-config-body" style="display:none;">
-              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Open Clank tools this agent can use. New agents start with chat only.</div>
               <div id="uf-codex-inline-scopes"></div>
             </div>
           </div>

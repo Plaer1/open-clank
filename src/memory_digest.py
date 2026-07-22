@@ -5,7 +5,7 @@ contents. The model pulls details through the memory search/recall tools
 when a listed topic matters. Size is bounded by the engine's item caps
 (≤5 pinned, ≤6 clusters, ≤5 recent) — no token counting here.
 
-Both hosts share this renderer: Odysseus injects the block through the
+Both hosts share this renderer: Open Clank injects the block through the
 chat preface, the bridge prepends it to mimo turns. DIGEST_SENTINEL marks
 the block so the receiving side can drop a duplicate if both paths ever
 cover the same turn.

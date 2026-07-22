@@ -2,6 +2,7 @@
 import pytest
 
 from src.endpoint_resolver import (
+    canonical_endpoint_base,
     normalize_base,
     build_chat_url,
     build_models_url,
@@ -35,6 +36,12 @@ class TestNormalizeBase:
 
     def test_none_safe(self):
         assert normalize_base(None) == ""
+
+    def test_canonical_identity_collapses_host_port_and_suffix_variants(self):
+        assert canonical_endpoint_base(
+            "HTTPS://API.Example.test:443/v1/models?x=1#frag"
+        ) == "https://api.example.test/v1"
+        assert canonical_endpoint_base("http://LOCALHOST:80/v1/") == "http://localhost/v1"
 
 
 class TestBuildChatUrl:

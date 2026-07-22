@@ -1,4 +1,4 @@
-"""Canonical transcript revision and active MiMo projection records."""
+"""Canonical transcript revision and active Open Clank agent projection records."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def record_projection(
     mode_config_revision: int = 0,
 ) -> None:
     if not snapshot.owner:
-        raise ValueError("MiMo projections require an authenticated owner")
+        raise ValueError("Open Clank agent projections require an authenticated owner")
     db = SessionLocal()
     try:
         row = (
@@ -231,10 +231,10 @@ async def purge_execution_projection(
     *,
     owner: Optional[str] = None,
 ) -> bool:
-    """Securely remove any MiMo execution state for a canonical session."""
+    """Securely remove any Open Clank agent execution state for a canonical session."""
     row = get_projection(session_id)
     if row is not None and owner is not None and row["owner"] != owner:
-        raise PermissionError("MiMo projection belongs to another owner")
+        raise PermissionError("Open Clank agent projection belongs to another owner")
     effective_owner = owner or (row["owner"] if row is not None else None)
 
     if supervisor is not None and hasattr(supervisor, "mapped_sessions"):
@@ -252,7 +252,7 @@ async def purge_execution_projection(
     except TypeError:
         alive = bool(supervisor and supervisor.is_alive())
     if not alive:
-        raise RuntimeError("MiMo is unavailable; execution state was not deleted")
+        raise RuntimeError("Open Clank agent is unavailable; execution state was not deleted")
 
     try:
         await supervisor.delete_session(

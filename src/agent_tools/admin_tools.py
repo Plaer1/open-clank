@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict:
     """Manage model endpoints: list, add, delete, enable, disable."""
-    from core.database import SessionLocal, ModelEndpoint
+    from core.database import SessionLocal, ModelEndpoint, utcnow_naive
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -31,6 +31,17 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
     owner = (owner or "").strip().lower()
     db = SessionLocal()
     try:
+        async def _endpoint_changed():
+            from routes.model_routes import invalidate_model_catalogue_revision
+            invalidate_model_catalogue_revision()
+            try:
+                from src.model_dispatch import get_mimo_supervisor
+                supervisor = get_mimo_supervisor()
+                if supervisor:
+                    await supervisor.refresh_endpoint_projection()
+            except Exception as exc:
+                logger.warning("endpoint reprojection deferred: %s", exc)
+
         def _owned_endpoints():
             query = db.query(ModelEndpoint)
             if owner:
@@ -45,20 +56,32 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 
         elif action == "add":
             import uuid as _uuid
+            from src.endpoint_resolver import canonical_endpoint_base, matching_endpoint, resolve_url
             name = args.get("name", "")
-            base_url = args.get("base_url", "")
-            api_key = args.get("api_key", "")
+            base_url = canonical_endpoint_base(resolve_url(args.get("base_url", "")))
+            api_key = (args.get("api_key", "") or "").strip()
             if not base_url:
                 return {"error": "base_url is required", "exit_code": 1}
+            existing = matching_endpoint(_owned_endpoints().all(), base_url, api_key)
+            if existing:
+                existing.base_url = base_url
+                existing.is_enabled = True
+                if getattr(existing, "model_refresh_mode", None) == "disabled":
+                    existing.model_refresh_mode = "auto"
+                if api_key and not existing.api_key:
+                    existing.api_key = api_key
+                db.commit()
+                await _endpoint_changed()
+                return {"response": f"Enabled existing endpoint '{existing.name}' (id: {existing.id})", "endpoint_id": existing.id, "existing": True, "exit_code": 0}
             eid = str(_uuid.uuid4())[:8]
-            from datetime import datetime
             ep = ModelEndpoint(id=eid, name=name or base_url, base_url=base_url,
                                api_key=api_key, is_enabled=True,
                                owner=owner or None,
-                               created_at=datetime.utcnow(), updated_at=datetime.utcnow())
+                               created_at=utcnow_naive(), updated_at=utcnow_naive())
             db.add(ep)
             db.commit()
-            return {"response": f"Added endpoint '{name or base_url}' (id: {eid})", "exit_code": 0}
+            await _endpoint_changed()
+            return {"response": f"Added endpoint '{name or base_url}' (id: {eid})", "endpoint_id": eid, "exit_code": 0}
 
         elif action == "delete":
             eid = args.get("endpoint_id", "")
@@ -68,6 +91,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
             name = ep.name
             db.delete(ep)
             db.commit()
+            await _endpoint_changed()
             return {"response": f"Deleted endpoint '{name}'", "exit_code": 0}
 
         elif action in ("enable", "disable"):
@@ -77,6 +101,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
                 return {"error": f"Endpoint {eid} not found", "exit_code": 1}
             ep.is_enabled = (action == "enable")
             db.commit()
+            await _endpoint_changed()
             return {"response": f"Endpoint '{ep.name}' {action}d", "exit_code": 0}
 
         else:

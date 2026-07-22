@@ -818,13 +818,16 @@ checkpoint('slice05 tabs and overlays ready');
 await openView('timeline');
 const timelineBefore = await evaluate(`(() => {
   const canvas=document.querySelector('#copal-timeline-modal .copal-timeline-v2'); const scroll=document.querySelector('#copal-timeline-modal .copal-timeline-scroll');
+  const corner=document.querySelector('#copal-timeline-modal .copal-timeline-corner'); const firstDay=document.querySelector('#copal-timeline-modal .copal-day-row span');
   const now=new Date(); const today=\`${'${'}now.getFullYear()}-${'${'}String(now.getMonth()+1).padStart(2,'0')}-${'${'}String(now.getDate()).padStart(2,'0')}\`;
   return { dayWidth:Number(getComputedStyle(canvas).getPropertyValue('--copal-day-width').replace('px','')), firstDate:document.querySelector('#copal-timeline-modal .copal-day-row span')?.title, today, scrollLeft:scroll.scrollLeft,
+    firstDayAlignment:Math.round(firstDay.getBoundingClientRect().left-corner.getBoundingClientRect().right),
     months:document.querySelectorAll('#copal-timeline-modal .copal-month-row span').length, days:document.querySelectorAll('#copal-timeline-modal .copal-day-row span').length,
     controls:[...document.querySelectorAll('#copal-timeline-modal .copal-timeline-controls button')].map((node) => node.getAttribute('aria-label') || node.textContent.trim()) };
 })()`);
 assert(timelineBefore.months > 1 && timelineBefore.days > 20);
 assert.equal(timelineBefore.firstDate, shiftDay(timelineBefore.today, -3));
+assert(Math.abs(timelineBefore.firstDayAlignment) <= 1, `timeline starts ${timelineBefore.firstDayAlignment}px behind the track labels`);
 assert(timelineBefore.controls.includes('Zoom in'));
 await evaluate("document.querySelector('#copal-timeline-modal .copal-timeline-scroll').dispatchEvent(new WheelEvent('wheel', { deltaX:-120, bubbles:true }))");
 await waitFor(`document.querySelector('#copal-timeline-modal .copal-day-row span')?.title !== ${JSON.stringify(timelineBefore.firstDate)} && document.querySelector('#copal-timeline-modal .copal-timeline-scroll').scrollLeft > 500`, 'wheel backward range extension');

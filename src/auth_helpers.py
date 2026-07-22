@@ -60,7 +60,7 @@ def effective_user(request: Request) -> Optional[str]:
     # creating globally ownerless rows or an unusable internal-tool catalogue.
     if user == "internal-tool":
         headers = getattr(request, "headers", None)
-        owner = (headers.get("X-Odysseus-Owner") if headers is not None else None)
+        owner = (headers.get("X-Open Clank-Owner") if headers is not None else None)
         if owner:
             return str(owner).strip().lower()
     return user

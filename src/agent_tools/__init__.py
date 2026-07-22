@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool, PublishFileTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
@@ -50,6 +50,7 @@ TOOL_HANDLERS = {
     "suggest_document": SuggestDocumentTool().execute,
     "manage_documents": ManageDocumentTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
+    "publish_file": PublishFileTool().execute,
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
     "chat_with_model": ChatWithModelTool().execute,

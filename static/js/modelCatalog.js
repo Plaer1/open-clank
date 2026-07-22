@@ -27,3 +27,24 @@ export function catalogEntries(item) {
 export function catalogModelIds(item) {
   return catalogEntries(item).map(entry => entry.mid);
 }
+
+export function modelChoiceKey(model, endpointId, url) {
+  const mid = typeof model === 'string' ? model : (model?.mid || model?.model_id || '');
+  const route = endpointId || (typeof model === 'object' && model ? model.endpointId : '')
+    || url || (typeof model === 'object' && model ? model.url : '') || 'unknown';
+  return `endpoint:${encodeURIComponent(route)}:${encodeURIComponent(mid)}`;
+}
+
+export function resolveStoredModelChoices(stored, models) {
+  const choices = Array.isArray(models) ? models : [];
+  const byKey = new Map(choices.map(model => [modelChoiceKey(model), model]));
+  const byLegacyId = new Map();
+  choices.forEach(model => {
+    if (!byLegacyId.has(model.mid)) byLegacyId.set(model.mid, model);
+  });
+  return [...new Set((Array.isArray(stored) ? stored : []).map(value => {
+    if (byKey.has(value) || String(value).startsWith('endpoint:')) return value;
+    const match = byLegacyId.get(value);
+    return match ? modelChoiceKey(match) : value;
+  }))];
+}

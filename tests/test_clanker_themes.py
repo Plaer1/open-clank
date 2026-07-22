@@ -49,13 +49,15 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "window.requestAnimationFrame(frame)" in theme
     assert "window.cancelAnimationFrame(animationFrame)" in theme
     assert not re.search(r"previousFrame\s*&&\s*time\s*-\s*previousFrame\s*<", theme)
-    assert "animationTime += Math.min(time - previousFrame, 50)" in theme
+    assert "animationTime += Math.min(Math.max(time - previousFrame, 0), 34)" in theme
     assert "paint(motion.matches ? 0 : animationTime, motion.matches)" in theme
+    assert "window.clearTimeout(resizeTimer);" in theme
     assert "_disposeBackgroundEffect();" in theme
     assert "requestAnimationFrame(draw)" not in theme
     assert "const outer = [...upper, ...lower.slice(0, -1).reverse()];" in theme
     assert "return { paths, junctions, snakePoints, maxSnakeStep:" in theme
     assert "const tail = [];" in theme
+    assert "const progress = phase - cycle;" not in theme
     assert "window.matchMedia('(prefers-reduced-motion: reduce)')" in theme
     assert "@keyframes clanker-lcars-status-sweep" in style
     assert "@media (prefers-reduced-motion: reduce)" in style
@@ -69,6 +71,7 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
         ("clanker-kene-weave", "_initClankerKeneWeave", "clanker-kene-weave-canvas"),
         ("clanker-radar", "_initClankerRadar", "clanker-radar-canvas"),
         ("clanker-gem-drift", "_initClankerGemDrift", "clanker-gem-drift-canvas"),
+        ("clanker-emoji-drift", "_initClankerEmojiDrift", "clanker-emoji-drift-canvas"),
     ):
         assert f"'{pattern}': {function_name}" in theme
         assert f"id: '{canvas_id}'" in theme
@@ -89,7 +92,37 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     ):
         assert f"/static/themes/clanker/{name}" not in style
     assert "body.bg-pattern-synapse {\n  background-image: none;" in style
-    assert "body.bg-pattern-clanker-gem-drift,\nbody.bg-pattern-synapse" in style
+    assert "body.bg-pattern-clanker-gem-drift," in style
+    assert "body.bg-pattern-clanker-emoji-drift," in style
+
+
+def test_background_effect_controls_are_dynamic_and_persisted():
+    theme = _text("static/js/theme.js")
+    index = _text("static/index.html")
+
+    assert "export function registerBackgroundEffectControls(pattern, controls)" in theme
+    assert "export function getBackgroundEffectControlValue(pattern, key, fallback)" in theme
+    assert "bgEffectControls" in theme
+    assert 'id="theme-bg-effect-controls"' in index
+    for key in (
+        "snakeCount",
+        "snakeLengthVariation",
+        "snakeLifetimeVariation",
+        "shorterLastLonger",
+        "shorterLifetimeScale",
+        "longerDisappearSooner",
+        "longerLifetimeScale",
+        "driftSpeed",
+        "gemSizeVariation",
+        "intensityVariation",
+        "middleIntensity",
+        "totalQuantity",
+        "glowLikelihood",
+    ):
+        assert key in theme
+    assert "max: 999, step: 1, default: 100" in theme
+    assert "registerBackgroundEffectControls('clanker-emoji-drift', _CLANKER_DRIFT_CONTROLS)" in theme
+    assert '"Noto Color Emoji"' in theme
 
 
 def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
@@ -108,7 +141,14 @@ def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
     assert "body.theme-clanker-light #welcome-screen::before" in style
     assert "body.theme-clanker-dark .mimo-plan-dock" in style
     assert "background: color-mix(in srgb, var(--clanker-surface) 78%, transparent) !important" in style
+    assert "body.theme-clanker-dark .agent-thread" in style
+    assert "body.theme-clanker-dark .agent-thread-node.open .agent-thread-content" in style
+    assert "body.theme-frosted.theme-clanker-dark .agent-thread" in style
+    assert "backdrop-filter: blur(6px) saturate(1.06)" in style
+    assert "body.theme-clanker-dark .agent-tool-output summary" in style
     assert "backdrop-filter: blur(7px) saturate(1.08)" in style
+    base_agent_thread = style.split("body.theme-clanker-dark .agent-thread,", 1)[1].split("body.theme-clanker-dark .agent-thread-header,", 1)[0]
+    assert "backdrop-filter" not in base_agent_thread
 
 
 def test_theme_font_setting_reaches_notes_and_workspace_ui():

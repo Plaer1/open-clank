@@ -1,4 +1,4 @@
-"""Durable projection of MiMo actor lifecycle into one Agent turn."""
+"""Durable projection of Open Clank agent actor lifecycle into one Agent turn."""
 
 from __future__ import annotations
 

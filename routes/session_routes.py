@@ -95,7 +95,7 @@ def _reject_compact_during_active_run(session_id: str) -> None:
 
 
 async def _prepare_context_mutation(request: Request, session_id: str) -> None:
-    """Reject live mutations and purge stale MiMo execution projections."""
+    """Reject live mutations and purge stale Open Clank agent execution projections."""
     _reject_compact_during_active_run(session_id)
     from src.openclank.transcript_projection import purge_execution_projection
 
@@ -632,18 +632,18 @@ def setup_session_routes(
 
     @router.get("/session/{sid}/mimo-state")
     async def get_mimo_state(request: Request, sid: str, refresh: bool = False):
-        """Return the owner-scoped negotiated MiMo control-plane snapshot."""
+        """Return the owner-scoped negotiated Open Clank agent control-plane snapshot."""
         _verify_session_owner(request, sid)
         try:
             session = session_manager.get_session(sid)
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
         if session.endpoint_url != "mimo://acp":
-            return {"available": False, "reason": "Session does not use MiMo"}
+            return {"available": False, "reason": "Session does not use Open Clank agent"}
 
         owner = effective_user(request) or getattr(session, "owner", None)
         if not owner:
-            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+            raise HTTPException(403, "Open Clank agent sessions require an authenticated owner")
         from src.openclank.transcript_projection import get_mimo_state as _get_state
 
         state = _get_state(sid, owner=owner)
@@ -714,17 +714,17 @@ def setup_session_routes(
 
     @router.patch("/session/{sid}/mimo-config")
     async def set_mimo_config(request: Request, sid: str):
-        """Validate, acknowledge, and persist one negotiated MiMo option."""
+        """Validate, acknowledge, and persist one negotiated Open Clank agent option."""
         _verify_session_owner(request, sid)
         try:
             session = session_manager.get_session(sid)
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
         if session.endpoint_url != "mimo://acp":
-            raise HTTPException(409, "Session does not use MiMo")
+            raise HTTPException(409, "Session does not use Open Clank agent")
         owner = effective_user(request) or getattr(session, "owner", None)
         if not owner:
-            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+            raise HTTPException(403, "Open Clank agent sessions require an authenticated owner")
         body = await request.json()
         config_id = str(body.get("config_id") or "").strip()
         value = body.get("value")

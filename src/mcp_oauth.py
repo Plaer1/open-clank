@@ -1,7 +1,7 @@
 """mcp_oauth.py — generic OAuth for remote (Streamable HTTP) MCP servers.
 
 Bridges the mcp SDK's OAuthClientProvider (RFC 9728 discovery, Dynamic Client
-Registration, authorization-code + PKCE, token refresh) to Odysseus's web
+Registration, authorization-code + PKCE, token refresh) to Open Clank's web
 callback route. Tokens and the dynamic registration persist per-server,
 encrypted, so the interactive flow runs only once.
 """
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # paste-back flow. Deployments not reachable at http://localhost:7000 (custom
 # port, reverse proxy, or public domain) must set OAUTH_REDIRECT_BASE_URL (or
 # APP_PUBLIC_URL) to their externally reachable origin so the redirect lands back
-# on Odysseus. APP_PORT is intentionally not used: it is only the Docker host
+# on Open Clank. APP_PORT is intentionally not used: it is only the Docker host
 # port-map; the app always listens on 7000 inside the container.
 _REDIRECT_BASE = (
     os.environ.get("OAUTH_REDIRECT_BASE_URL")

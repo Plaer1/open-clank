@@ -299,6 +299,17 @@ export function createNotesFeature({
     return succeeded && current.noteDrafts.has(docId) ? saveDraft(docId) : succeeded;
   }
 
+  async function prepareDelete(docId) {
+    if (!await saveDraft(docId)) {
+      context()?.window?.setStatus('Could not save the latest edit, so the note was not moved to Trash.', true);
+      return false;
+    }
+    clearTimeout(state.saveTimers.get(docId));
+    state.saveTimers.delete(docId);
+    context()?.noteDrafts?.delete(docId);
+    return true;
+  }
+
   function queueSave(doc, value) {
     const current = context();
     const existing = current.noteDrafts.get(doc.id);
@@ -718,7 +729,8 @@ export function createNotesFeature({
       ...(doc?.virtual ? [] : [['Toggle bookmark', '', () => doc && toggleBookmark(doc.id)]]),
       ['Reopen closed note', '', reopenClosed],
       ...(doc?.virtual ? [] : [['History', '', () => doc && showHistory(doc)]]),
-      ['Trash', '', () => showTrash()],
+      ['Open Trash', '', () => showTrash()],
+      ...(doc && !doc.virtual && !doc.readOnly ? [['Move current note to Trash', '', () => deleteDocument(doc)]] : []),
       ['Import Markdown or Obsidian backup', '', importVault],
       ['Syntax gallery', '', () => { const gallery = state.docs.find((d) => d.name.includes('Syntax Gallery') || d.name.includes('syntax-gallery')); if (gallery) open(gallery.id); else showSyntaxGallery(); }],
       ['Export Markdown backup', '', () => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; }],
@@ -1181,8 +1193,15 @@ export function createNotesFeature({
       ...(leaf.view === 'canvas' || leaf.view === 'base' ? [commandButton(leaf.rawSource ? 'Back to typed view' : 'View raw source', () => { leaf.rawSource = !leaf.rawSource; persist(true); render(); })] : []),
       commandButton('Rename', () => renameWithForm(doc)),
       commandButton('Move to trash', () => deleteDocument(doc), { class:'copal-btn danger' }))));
+    const actions = h('div', { class:'copal-note-header-actions' },
+      commandButton('Trash', () => deleteDocument(doc), {
+        class:'copal-btn copal-note-trash-button danger',
+        title:'Move this note to Trash',
+        'aria-label':`Move ${doc.name} to Trash`,
+      }),
+      menu);
     const mode = leaf.mode === 'live' ? doc.kind === 'note' ? 'Editing' : 'Live Preview' : leaf.mode === 'source' ? 'Source' : 'Reading';
-    cache.header.replaceChildren(breadcrumb, title, h('span', { class:'copal-leaf-mode', text:mode }), menu);
+    cache.header.replaceChildren(breadcrumb, title, h('span', { class:'copal-leaf-mode', text:mode }), actions);
   }
 
   function renderLeaf(leaf, doc, workspace, group) {
@@ -1832,7 +1851,7 @@ export function createNotesFeature({
 
   return {
     render, open, destroy, flushAll, loadSaved, showChooser, showCommands, showSearch, showSettings,
-    acceptSavedDocument, getSettings, updateSettings,
+    acceptSavedDocument, prepareDelete, getSettings, updateSettings,
     toggleLeft:() => toggleSidebar('left'),
     toggleRight:() => toggleSidebar('right'),
   };

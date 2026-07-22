@@ -714,6 +714,7 @@
               <option value="clanker-kene-weave">Shipibo Kene-Inspired Signal Weave</option>
               <option value="clanker-radar">Clanker Radar Ripples</option>
               <option value="clanker-gem-drift">Clanker Gem Drift</option>
+              <option value="clanker-emoji-drift">Clanker Emoji Drift</option>
               <option value="clanker-blueprint">Clanker LCARS Status Sweep</option>
               <option value="dots">Dots</option>
               <option value="synapse">Synapse</option>
@@ -743,6 +744,7 @@
             <input type="range" id="theme-bg-size" class="theme-fd-range" min="30" max="250" step="10" value="100">
           </div>
         </div>
+        <div id="theme-bg-effect-controls" class="theme-effect-controls" hidden></div>
       </div>
       <div class="admin-card" style="margin-top:8px;">
         <h2>Save / Share</h2>
@@ -780,7 +782,7 @@
     <div class="rail-separator"></div>
     <!-- Dynamic contextual indicators (shown only while active) -->
     <button class="icon-rail-btn rail-dynamic" id="rail-chats" title="Chat ready" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
-    <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Documents" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
+    <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Files" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
     <!-- Tool launchers — always visible, alphabetical -->
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
@@ -1114,8 +1116,8 @@
     })();
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
-    <aside id="mimo-plan-dock" class="mimo-plan-dock" aria-label="MiMo plan" hidden>
-      <div class="mimo-plan-head"><strong>MiMo Plan</strong><span data-plan-revision></span></div>
+    <aside id="mimo-plan-dock" class="mimo-plan-dock" aria-label="Open Clank plan" hidden>
+      <div class="mimo-plan-head"><strong>Open Clank Plan</strong><span data-plan-revision></span></div>
       <pre data-plan-text></pre>
       <ol data-plan-todos></ol>
     </aside>
@@ -1152,7 +1154,7 @@
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
         </div>
-        <select id="mimo-mode-select" class="model-picker-btn hidden" aria-label="MiMo mode" title="MiMo session mode"></select>
+        <select id="mimo-mode-select" class="model-picker-btn hidden" aria-label="Open Clank agent mode" title="Open Clank agent session mode"></select>
       </div>
       <div id="pinned-tools-bar"></div>
       <div class="chat-input-bottom" style="visibility:hidden">
@@ -1174,7 +1176,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
                 </svg>
-                <span>Documents</span>
+                <span>Files</span>
               </button>
               <button type="button" class="overflow-menu-item" id="overflow-rag-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2498,7 +2500,7 @@
 
           <div class="admin-card">
             <h2>Stack health</h2>
-            <div class="admin-toggle-sub">Current Open Clank, Frankenmemory, MiMo, provider, and integration state.</div>
+            <div class="admin-toggle-sub">Current Open Clank model, memory, provider, and integration state.</div>
             <button type="button" class="admin-btn-sm" id="settings-stack-health-refresh">Refresh</button>
             <div id="settings-stack-health" role="status" aria-live="polite"></div>
           </div>

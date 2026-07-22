@@ -305,7 +305,7 @@ function slashReply(text) {
   div.className = 'msg msg-ai';
   const role = document.createElement('div');
   role.className = 'role';
-  role.textContent = window.__agentName || 'Odysseus';
+  role.textContent = window.__agentName || 'Open Clank';
   div.appendChild(role);
   const body = document.createElement('div');
   body.className = 'body';
@@ -361,7 +361,7 @@ export async function loadMimoControlState(force = false) {
       credentials: 'same-origin'
     });
     const state = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(state.detail || 'MiMo state is unavailable');
+    if (!res.ok) throw new Error(state.detail || 'Open Clank agent state is unavailable');
     _mimoStateCache = { sid, at: now, state };
     return state;
   } catch {
@@ -381,7 +381,7 @@ async function _setMimoConfig(configId, value) {
     body: JSON.stringify({ config_id: configId, value })
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `MiMo rejected ${configId}`);
+  if (!res.ok) throw new Error(data.detail || `Open Clank agent rejected ${configId}`);
   const state = { available: true, ...data };
   _mimoStateCache = { sid, at: Date.now(), state };
   return state;
@@ -412,7 +412,7 @@ export async function refreshMimoModeControl(force = false) {
     select.disabled = true;
     try {
       await _setMimoConfig('mode', select.value);
-      uiModule.showToast(`MiMo mode: ${select.options[select.selectedIndex]?.textContent || select.value}`);
+      uiModule.showToast(`Open Clank agent mode: ${select.options[select.selectedIndex]?.textContent || select.value}`);
       document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
     } catch (error) {
       select.value = previous;
@@ -500,7 +500,7 @@ function typewriterReply(text, options = {}) {
     div.className = 'msg msg-ai';
     const role = document.createElement('div');
     role.className = 'role';
-    role.textContent = window.__agentName || 'Odysseus';
+    role.textContent = window.__agentName || 'Open Clank';
     div.appendChild(role);
     const body = document.createElement('div');
     body.className = 'body';
@@ -540,7 +540,7 @@ function typewriterBlocksReply(blocks, options = {}) {
     div.className = 'msg msg-ai';
     const role = document.createElement('div');
     role.className = 'role';
-    role.textContent = window.__agentName || 'Odysseus';
+    role.textContent = window.__agentName || 'Open Clank';
     div.appendChild(role);
     const body = document.createElement('div');
     body.className = 'body';
@@ -731,7 +731,7 @@ async function connectDetectedSetupEndpoint(detected) {
   spinnerDiv.className = 'msg msg-ai';
   const spinnerRole = document.createElement('div');
   spinnerRole.className = 'role';
-  spinnerRole.textContent = window.__agentName || 'Odysseus';
+  spinnerRole.textContent = window.__agentName || 'Open Clank';
   spinnerDiv.appendChild(spinnerRole);
   const spinnerBody = document.createElement('div');
   spinnerBody.className = 'body';
@@ -2533,7 +2533,7 @@ async function _cmdDemo(args, ctx) {
   const delay = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Welcome ──
-  await typewriterReply('Welcome to Odysseus! Lets begin the tour!');
+  await typewriterReply('Welcome to Open Clank! Lets begin the tour!');
   // Beat between the welcome line and the first hint so it doesn't snap in.
   await delay(900);
 
@@ -2561,7 +2561,7 @@ async function _cmdDemo(args, ctx) {
     { sel: '#sidebar-new-chat-btn', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
       before() { if (sidebar?.classList.contains('hidden')) sidebar.classList.remove('hidden'); } },
     { sel: '#model-picker-btn',   text: 'Pick your LLM, Local or API.', advanceOnClick: true },
-    { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Odysseus comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
+    { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Open Clank comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
     { sel: '#overflow-plus-btn',  text: 'More tools can be found here, or in your sidebar. <b>Click to peek.</b>',
       advanceOnClick: true, pulseNext: true, afterDelay: 2200 },
     { sel: '#message',            text: 'Write your prompt here. Drag and drop files to attach them. <b>/prompt</b> for random prompt, <b>/help</b> for more.',
@@ -2591,7 +2591,7 @@ async function _cmdDemo(args, ctx) {
   }
 
   _clearTour();
-  await typewriterReply('Odysseus is yours to explore, enjoy the voyage!');
+  await typewriterReply('Open Clank is yours to explore, enjoy the voyage!');
   return true;
 }
 
@@ -3306,7 +3306,7 @@ async function _cmdTourTheme(args, ctx) {
   // work as a fallback (read past without touching anything).
   const steps = [
     { sel: '#theme-popup',
-      text: '<b>Welcome to Theme.</b> Odysseus is yours to customize!',
+      text: '<b>Welcome to Theme.</b> Open Clank is yours to customize!',
       placement: 'center-above',
       before: () => _clickTab('theme-tab-browse') },
     { sel: '#themeGrid',
@@ -3538,7 +3538,7 @@ async function _cmdTourSettings(args, ctx) {
       text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
       before: () => _clickNav('ai') },
     { sel: '#settings-modal .admin-card:has(#set-defaultModelSelect)',
-      text: '<b>Default Chat Model</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
+      text: '<b>Default Chat Model</b> — your main model. The one Open Clank reaches for whenever you start a new chat.',
       before: () => _clickNav('ai') },
     { sel: '#settings-modal .admin-card:has(#set-utilityModelSelect)',
       text: '<b>Utility Model</b> — your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn\'t burn cycles on chores. <b>Recommend a small local model</b> here — it\'s free and always on.',
@@ -3559,7 +3559,7 @@ async function _cmdTourSettings(args, ctx) {
       text: '<b>Email</b> — sync schedule, drafts, snooze defaults — everything email-flow related.',
       before: () => _clickNav('email') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="reminders"]',
-      text: '<b>Reminders</b> — quiet hours and how Odysseus nudges you about calendar + urgent email.',
+      text: '<b>Reminders</b> — quiet hours and how Open Clank nudges you about calendar + urgent email.',
       before: () => _clickNav('reminders') },
   ];
 
@@ -3972,7 +3972,7 @@ async function _cmdTourNotes(args, ctx) {
       text: '<b>Notes</b> is your basic todo list, and also where reminders are managed.',
       placement: 'center-above' },
     { sel: '#notes-pane .notes-pane-body',
-      text: 'Your notes show up here. You can also <b>ask Odysseus in chat</b> to take a note for you.' },
+      text: 'Your notes show up here. You can also <b>ask Open Clank in chat</b> to take a note for you.' },
     { sel: '#notes-search',
       text: '<b>Search</b> across every note — title, body, tags, the works.' },
     { sel: '#notes-view-toggle',
@@ -4411,7 +4411,7 @@ async function _cmdTourTask1(args, ctx) {
       text: 'Tasks are <b>paused by default</b> — resume whichever ones make sense for you. (Or pause anything that\'s running.)' },
     { sel: '#tasks-modal .modal-body',
       text: 'When enabled, Tasks use the <b>utility model configured in Settings</b> for cleanup and organization jobs.' },
-  ], 'Use Clanker Tasks when you want Odysseus to handle background housekeeping.', {
+  ], 'Use Clanker Tasks when you want Open Clank to handle background housekeeping.', {
     continueLabel: 'continue →',
     continueText: '<b>Part 1 done.</b> Want to keep going into <b>adding & managing tasks</b>?',
   });
@@ -4435,7 +4435,7 @@ async function _cmdTourTask2(args, ctx) {
     // re-show it when the user moves past this step so the tour lands
     // back where it started.
     { sel: '#message',
-      text: 'You can also <b>just ask in chat</b> — say "every weekday at 9am check for urgent emails" and Odysseus will create the task for you.',
+      text: 'You can also <b>just ask in chat</b> — say "every weekday at 9am check for urgent emails" and Open Clank will create the task for you.',
       before: () => document.getElementById('tasks-modal')?.classList.add('hidden'),
       after:  () => document.getElementById('tasks-modal')?.classList.remove('hidden') },
   ], 'That\'s Clanker Tasks. Have it run the background bits so you can stay in chat.');
@@ -5366,7 +5366,7 @@ function _eggRender(html) {
   div.className = 'msg msg-ai';
   const role = document.createElement('div');
   role.className = 'role';
-  role.textContent = window.__agentName || 'Odysseus';
+  role.textContent = window.__agentName || 'Open Clank';
   div.appendChild(role);
   const body = document.createElement('div');
   body.className = 'body';
@@ -5467,7 +5467,7 @@ async function _cmdOdyssey(args, ctx) {
 }
 
 async function _cmdAscii(args, ctx) {
-  const text = args.join(' ') || 'Odysseus';
+  const text = args.join(' ') || 'Open Clank';
   const FONT = {
     'A':'  #  \n # # \n#####\n#   #\n#   #','B':'#### \n#   #\n#### \n#   #\n#### ','C':' ####\n#    \n#    \n#    \n ####',
     'D':'#### \n#   #\n#   #\n#   #\n#### ','E':'#####\n#    \n###  \n#    \n#####','F':'#####\n#    \n###  \n#    \n#    ',
@@ -6436,7 +6436,7 @@ async function handleSlashCommand(input) {
       const commands = state.commands || [];
       if (!state.available || !commands.some(command => command.name === name)) {
         _showUser();
-        slashReply(`MiMo command <b>/${ctx.esc(name)}</b> is not available in this session.`);
+        slashReply(`Open Clank agent command <b>/${ctx.esc(name)}</b> is not available in this session.`);
         return true;
       }
       return false;
@@ -6450,12 +6450,12 @@ async function handleSlashCommand(input) {
         try {
           await _setMimoConfig('mode', mode.id);
         } catch (error) {
-          slashReply(`MiMo rejected mode <b>${ctx.esc(mode.id)}</b>: ${ctx.esc(error.message)}`);
+          slashReply(`Open Clank agent rejected mode <b>${ctx.esc(mode.id)}</b>: ${ctx.esc(error.message)}`);
           return true;
         }
         const prompt = args.join(' ').trim();
         if (prompt) _submitComposedMessage(prompt);
-        else slashReply(`MiMo mode is now <b>${ctx.esc(mode.name || mode.id)}</b>.`);
+        else slashReply(`Open Clank agent mode is now <b>${ctx.esc(mode.name || mode.id)}</b>.`);
         document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
         return true;
       }

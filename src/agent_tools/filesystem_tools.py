@@ -5,6 +5,7 @@ import re
 import difflib
 import fnmatch
 import shutil
+import pathlib
 from typing import Optional, Dict, Any, Tuple
 
 from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
@@ -16,6 +17,81 @@ _CODENAV_SKIP_DIRS = frozenset({
 })
 _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
+
+
+class PublishFileTool:
+    """Copy one allowed local file into managed storage and issue a grant."""
+
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.published_files import PublishedFileError, PublishedFileService
+        from src.settings import get_setting
+        from src.tool_execution import (
+            _is_sensitive_path,
+            _resolve_tool_path,
+            get_active_workspace,
+        )
+        from src.tool_security import owner_is_admin_or_single_user
+
+        try:
+            args = json.loads(content) if content.strip().startswith("{") else {"path": content.strip()}
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        raw_path = str(args.get("path") or "").strip()
+        if not raw_path:
+            return {"error": "publish_file: path required", "exit_code": 1}
+
+        # Reject a final symlink even when it resolves inside an allowed root;
+        # the caller should name the real file it intends to publish.
+        workspace = get_active_workspace()
+        lexical = os.path.expanduser(raw_path)
+        if workspace and not os.path.isabs(lexical):
+            lexical = os.path.join(workspace, lexical)
+        if os.path.islink(os.path.abspath(lexical)):
+            return {"error": "publish_file: the source may not be a symlink", "exit_code": 1}
+
+        try:
+            path = _resolve_tool_path(raw_path)
+        except ValueError as confined_error:
+            # Admins on a self-host can publish from their own home directory,
+            # which is the explicit local-PC use case. Regular users remain
+            # confined to the workspace/root policy shared by all file tools.
+            owner = str(ctx.get("owner") or "").strip().lower()
+            if not owner_is_admin_or_single_user(owner):
+                return {"error": f"publish_file: {confined_error}", "exit_code": 1}
+            path = os.path.realpath(os.path.expanduser(raw_path))
+            home = os.path.realpath(str(pathlib.Path.home()))
+            try:
+                inside_home = os.path.commonpath([os.path.normcase(path), os.path.normcase(home)]) == os.path.normcase(home)
+            except ValueError:
+                inside_home = False
+            if not inside_home or _is_sensitive_path(path):
+                return {"error": f"publish_file: {confined_error}", "exit_code": 1}
+
+        owner = str(ctx.get("owner") or "").strip().lower()
+        try:
+            result = await asyncio.to_thread(
+                PublishedFileService().publish,
+                path,
+                owner=owner,
+                audience=str(args.get("audience") or "owner"),
+                expires_in_hours=args.get("expires_in_hours"),
+                public_origin=os.getenv("APP_PUBLIC_URL") or get_setting("app_public_url"),
+            )
+        except (PublishedFileError, OSError, ValueError) as exc:
+            return {"error": f"publish_file: {exc}", "exit_code": 1}
+
+        url = result["download_url"]
+        return {
+            "output": f"Published [{result['filename']}]({url})\nBreak or replace this link from Files.",
+            "exit_code": 0,
+            "file_id": result["id"],
+            "filename": result["filename"],
+            "download_url": url,
+            "audience": result["audience"],
+            "expires_at": result["expires_at"],
+        }
 
 
 def _glob_to_regex(pat: str) -> "re.Pattern":

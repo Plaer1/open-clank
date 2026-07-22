@@ -1,4 +1,4 @@
-"""Narrow Odysseus adapter for the HTTP server already owned by `mimo acp`."""
+"""Narrow Open Clank adapter for the HTTP server already owned by `mimo acp`."""
 
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ class ApiKeyCredential(_StrictModel):
 
 def _validate_supervisor(supervisor):
     if not supervisor or not supervisor.is_alive():
-        raise HTTPException(503, "MiMo is not running")
+        raise HTTPException(503, "Open Clank agent is not running")
     base_url = supervisor.http_base_url
     parsed = urlsplit(base_url)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
-        raise HTTPException(503, "MiMo provider service is not loopback-only")
+        raise HTTPException(503, "Open Clank agent provider service is not loopback-only")
     return supervisor
 
 
@@ -129,7 +129,7 @@ async def _native(supervisor, method: str, path: str, body: dict | None = None, 
     except asyncio.CancelledError:
         raise
     except (httpx.HTTPError, ValueError) as exc:
-        raise HTTPException(502, "MiMo provider operation failed") from exc
+        raise HTTPException(502, "Open Clank agent provider operation failed") from exc
 
 
 async def _catalog(supervisor) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -138,7 +138,7 @@ async def _catalog(supervisor) -> tuple[dict[str, Any], dict[str, Any]]:
         _native(supervisor, "GET", "/provider/auth"),
     )
     if not isinstance(providers, dict) or not isinstance(methods, dict):
-        raise HTTPException(502, "MiMo returned an invalid provider catalog")
+        raise HTTPException(502, "Open Clank agent returned an invalid provider catalog")
     return providers, methods
 
 
@@ -149,7 +149,7 @@ def _known_provider(provider_id: str, providers: dict[str, Any], methods: dict[s
         None,
     )
     if provider is None and provider_id not in methods:
-        raise HTTPException(404, "Unknown MiMo provider")
+        raise HTTPException(404, "Unknown Open Clank agent provider")
     return provider or {"id": provider_id, "name": provider_id}, methods.get(provider_id) or []
 
 
@@ -162,7 +162,7 @@ def _check_method(index: int, provider_methods: list, expected: str) -> None:
 
 async def _refresh(supervisor) -> bool:
     # Every connect/disconnect ends here: mirror the runtime's auth store
-    # into app.db so Odysseus owns the credentials, not the child's files.
+    # into app.db so Open Clank owns the credentials, not the child's files.
     try:
         sync = getattr(supervisor, "sync_auth_to_db", None)
         if callable(sync):
@@ -221,7 +221,7 @@ def setup_mimo_provider_routes() -> APIRouter:
         return {
             "available": True,
             "endpoint": "mimo",
-            "storage": "MiMo's isolated MIMOCODE_HOME",
+            "storage": "Open Clank agent's isolated MIMOCODE_HOME",
             "providers": clean,
         }
 
@@ -244,7 +244,7 @@ def setup_mimo_provider_routes() -> APIRouter:
             timeout=60.0,
         )
         if not isinstance(result, dict) or result.get("method") not in {"auto", "code"}:
-            raise HTTPException(502, "MiMo returned an invalid authorization response")
+            raise HTTPException(502, "Open Clank agent returned an invalid authorization response")
         return {
             "url": _bounded(result.get("url"), 8_192),
             "method": result["method"],
@@ -270,7 +270,7 @@ def setup_mimo_provider_routes() -> APIRouter:
             timeout=300.0,
         )
         if result is not True:
-            raise HTTPException(502, "MiMo did not accept the authorization")
+            raise HTTPException(502, "Open Clank agent did not accept the authorization")
         return {"connected": True, "catalog_refreshed": await _refresh(supervisor)}
 
     @router.put("/{provider_id}/api-key")
@@ -287,7 +287,7 @@ def setup_mimo_provider_routes() -> APIRouter:
             {"type": "api", "key": payload.key},
         )
         if result is not True:
-            raise HTTPException(502, "MiMo did not save the credential")
+            raise HTTPException(502, "Open Clank agent did not save the credential")
         return {"connected": True, "catalog_refreshed": await _refresh(supervisor)}
 
     @router.delete("/{provider_id}")
@@ -299,7 +299,7 @@ def setup_mimo_provider_routes() -> APIRouter:
         _known_provider(provider_id, providers, methods)
         result = await _native(supervisor, "DELETE", f"/auth/{provider_id}")
         if result is not True:
-            raise HTTPException(502, "MiMo did not remove the credential")
+            raise HTTPException(502, "Open Clank agent did not remove the credential")
         return {"connected": False, "catalog_refreshed": await _refresh(supervisor)}
 
     return router

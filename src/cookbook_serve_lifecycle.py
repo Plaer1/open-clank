@@ -29,7 +29,7 @@ def _internal_headers(owner: str | None = None) -> dict:
     from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     if owner:
-        headers["X-Odysseus-Owner"] = owner
+        headers["X-Open Clank-Owner"] = owner
     return headers
 
 

@@ -42,7 +42,7 @@ class AuxiliaryRequest:
 
 
 class AgentSessionLease:
-    """Delete one ephemeral MiMo session exactly once on every terminal path."""
+    """Delete one ephemeral Open Clank agent session exactly once on every terminal path."""
 
     def __init__(self, worker, session_id: str, *, ephemeral: bool):
         self.worker = worker
@@ -59,7 +59,7 @@ class AgentSessionLease:
         try:
             await self.worker.delete_session(self.session_id)
         except Exception as exc:
-            logger.debug("MiMo ephemeral session cleanup %s: %s", self.session_id, exc)
+            logger.debug("Open Clank agent ephemeral session cleanup %s: %s", self.session_id, exc)
 
 
 def _typed_error_sse(exc: Exception) -> tuple[str, str]:
@@ -147,7 +147,7 @@ async def mimo_agent_target(
     pool = supervisor or _mimo_supervisor
     if pool is None:
         from src.openclank.mimo_supervisor import SupervisorAdmissionError
-        raise SupervisorAdmissionError("SUPERVISOR_UNAVAILABLE", "MiMo Agent runtime is unavailable")
+        raise SupervisorAdmissionError("SUPERVISOR_UNAVAILABLE", "Open Clank agent runtime is unavailable")
 
     from core.database import ModelEndpoint, SessionLocal
     from src.auth_helpers import owner_filter
@@ -205,7 +205,7 @@ async def _supervisor(explicit: Any = None, *, owner: Optional[str] = None) -> A
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
     if not supervisor or not supervisor.is_alive() or not supervisor.bridge:
-        raise HTTPException(503, "MiMo ACP is unavailable")
+        raise HTTPException(503, "Open Clank agent ACP is unavailable")
     return supervisor
 
 
@@ -255,7 +255,7 @@ async def stream_chat_target(
             try:
                 await sup.delete_session(session_id)
             except Exception as exc:
-                logger.debug("Failed to clean up auxiliary MiMo stream %s: %s", session_id, exc)
+                logger.debug("Failed to clean up auxiliary Open Clank agent stream %s: %s", session_id, exc)
         return
 
     from src.llm_core import stream_llm_with_fallback
@@ -307,7 +307,7 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     if pool is None or not callable(getattr(pool, "admit_agent", None)):
         from src.openclank.mimo_supervisor import SupervisorAdmissionError
         exc = SupervisorAdmissionError(
-            "SUPERVISOR_UNAVAILABLE", "The strict MiMo Agent coordinator is unavailable"
+            "SUPERVISOR_UNAVAILABLE", "The strict Open Clank agent coordinator is unavailable"
         )
         for event in _typed_error_sse(exc):
             yield event
@@ -330,7 +330,7 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     if len(qualified) != 2:
         from src.openclank.mimo_supervisor import SupervisorAdmissionError
         exc = SupervisorAdmissionError(
-            "MODEL_NOT_PROJECTED", "MiMo Agent models must retain provider identity",
+            "MODEL_NOT_PROJECTED", "Open Clank agent models must retain provider identity",
             phase="routing", retryable=False,
         )
         for event in _typed_error_sse(exc):
@@ -456,7 +456,7 @@ async def run_auxiliary_inference(request: AuxiliaryRequest) -> str:
                 if event == "error" or data.get("error"):
                     error = (
                         int(data.get("status") or 502),
-                        str(data.get("error") or data.get("text") or "MiMo ACP call failed"),
+                        str(data.get("error") or data.get("text") or "Open Clank agent ACP call failed"),
                     )
                     continue
                 if isinstance(data.get("delta"), str) and not data.get("thinking"):

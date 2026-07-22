@@ -152,6 +152,7 @@ COMPARE_READONLY_TOOLS = frozenset({
 # new mutating tools.
 _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "create_document", "edit_document", "update_document",
+    "publish_file",
     "suggest_document", "manage_documents", "create_session", "manage_session",
     "send_to_session", "pipeline", "manage_memory", "manage_skills",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",

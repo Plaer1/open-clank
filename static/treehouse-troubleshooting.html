@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenClank Troubleshooting Guide</title>
+<title>Open Clank Troubleshooting Guide</title>
 <style>
   :root { --bg: #0f0f0f; --fg: #e0e0e0; --accent: #4ecdc4; --warn: #ffd93d; --danger: #ff6b6b; --muted: #888; --card: #1a1a2e; --border: #2a2a3e; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -29,7 +29,7 @@
 </head>
 <body>
 
-<h1>OpenClank Troubleshooting Guide</h1>
+<h1>Open Clank Troubleshooting Guide</h1>
 <p style="color: var(--muted); margin-bottom: 1.5rem;">Common issues and their solutions. Organized by severity.</p>
 
 <h2>Startup &amp; Connectivity</h2>
@@ -97,7 +97,7 @@
 <div class="issue">
   <h3>"TreeHouse state is corrupt"</h3>
   <p>The treehouse-state.json file has invalid JSON or schema.</p>
-  <div class="fix"><strong>Fix:</strong> Check <code>~/.odysseus/.copal/treehouse-state.json</code> for valid JSON. If corrupted, restore from backup or create a fresh state.</div>
+  <div class="fix"><strong>Fix:</strong> Check <code>~/.open-clank/.copal/treehouse-state.json</code> for valid JSON. If corrupted, restore from backup or create a fresh state.</div>
 </div>
 
 <div class="issue">
@@ -133,13 +133,13 @@
   <tr><td>No LLM response</td><td>Verify API key in Settings → Providers</td></tr>
   <tr><td>Tool call fails</td><td>Check Settings → Tool Permissions</td></tr>
   <tr><td>Memory empty</td><td>Check ~/.claude/projects/ for files</td></tr>
-  <tr><td>TreeHouse corrupt</td><td>Check ~/.odysseus/.copal/treehouse-state.json</td></tr>
+  <tr><td>TreeHouse corrupt</td><td>Check ~/.open-clank/.copal/treehouse-state.json</td></tr>
   <tr><td>Slow responses</td><td>Reduce context budget, use faster model</td></tr>
   <tr><td>Backup needed</td><td>Visit /backup endpoint or Diagnostics view</td></tr>
 </table>
 
 <footer style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; text-align: center;">
-  OpenClank Troubleshooting Guide · Based on live source analysis
+  Open Clank Troubleshooting Guide · Based on live source analysis
 </footer>
 
 <script type="module" src="/static/js/i18n.js"></script>

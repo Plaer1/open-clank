@@ -142,6 +142,7 @@ export function saveCustomTheme(name, colors, opts) {
     if (opts.bgEffectColor) entry.bgEffectColor = opts.bgEffectColor;
     if (opts.bgEffectIntensity !== undefined) entry.bgEffectIntensity = opts.bgEffectIntensity;
     if (opts.bgEffectSize !== undefined) entry.bgEffectSize = opts.bgEffectSize;
+    if (opts.bgEffectControls) entry.bgEffectControls = _copyBackgroundEffectControlValues(opts.bgEffectControls);
     if (opts.frosted !== undefined) entry.frosted = !!opts.frosted;
   }
   ct[name] = entry;
@@ -443,7 +444,7 @@ export function applyUiScale(scale) {
 }
 
 const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-kene-weave',
-  'bg-pattern-clanker-radar', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
+  'bg-pattern-clanker-radar', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-emoji-drift', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
@@ -451,11 +452,205 @@ const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
   'clanker-kene-weave': _initClankerKeneWeave,
   'clanker-radar': _initClankerRadar,
   'clanker-gem-drift': _initClankerGemDrift,
+  'clanker-emoji-drift': _initClankerEmojiDrift,
   synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
 const _BACKGROUND_CANVAS_SELECTOR = '[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas';
 let _activeBackgroundEffectDispose = null;
+const _BACKGROUND_EFFECT_CONTROLS = new Map();
+let _backgroundEffectControlValues = {};
+
+function _copyBackgroundEffectControlValues(values = _backgroundEffectControlValues) {
+  if (!values || typeof values !== 'object') return {};
+  return Object.fromEntries(Object.entries(values)
+    .filter(([, controls]) => controls && typeof controls === 'object')
+    .map(([pattern, controls]) => [pattern, { ...controls }]));
+}
+
+function _backgroundEffectControlsFor(pattern) {
+  return _BACKGROUND_EFFECT_CONTROLS.get(pattern) || [];
+}
+
+function _backgroundEffectControl(pattern, key) {
+  return _backgroundEffectControlsFor(pattern).find(control => control.key === key);
+}
+
+function _normalizeBackgroundEffectControlValue(control, value) {
+  if (control?.type === 'toggle') {
+    if (value === undefined || value === null) return !!control.default;
+    return value === true || value === 'true' || value === 1;
+  }
+  const min = Number.isFinite(control?.min) ? control.min : 0;
+  const max = Number.isFinite(control?.max) ? control.max : 100;
+  const fallback = Number.isFinite(control?.default) ? control.default : min;
+  const candidate = Number(value);
+  return Math.min(max, Math.max(min, Number.isFinite(candidate) ? candidate : fallback));
+}
+
+export function getBackgroundEffectControlValue(pattern, key, fallback) {
+  const control = _backgroundEffectControl(pattern, key);
+  if (!control) return fallback;
+  return _normalizeBackgroundEffectControlValue(control, _backgroundEffectControlValues[pattern]?.[key]);
+}
+
+function _setBackgroundEffectControlValue(pattern, key, value) {
+  const control = _backgroundEffectControl(pattern, key);
+  if (!control) return;
+  _backgroundEffectControlValues = _copyBackgroundEffectControlValues();
+  _backgroundEffectControlValues[pattern] = { ..._backgroundEffectControlValues[pattern] };
+  _backgroundEffectControlValues[pattern][key] = _normalizeBackgroundEffectControlValue(control, value);
+}
+
+function _persistBackgroundEffectControls() {
+  const saved = getSaved();
+  const name = saved?.name || DEFAULT_THEME;
+  const colors = saved?.colors || THEMES[name] || THEMES[DEFAULT_THEME];
+  const opts = _getThemeOptions(name, saved || {});
+  const pattern = document.getElementById('theme-bg-pattern-select');
+  const effectColor = document.getElementById('theme-bg-effect-color');
+  const intensity = document.getElementById('theme-bg-intensity');
+  const size = document.getElementById('theme-bg-size');
+  if (pattern) opts.bgPattern = pattern.value;
+  if (effectColor) opts.bgEffectColor = effectColor.value;
+  if (intensity) opts.bgEffectIntensity = Number(intensity.value) / 100;
+  if (size) opts.bgEffectSize = Number(size.value) / 100;
+  opts.bgEffectControls = _copyBackgroundEffectControlValues();
+  save(name, colors, opts);
+}
+
+function _backgroundEffectControlHost() {
+  if (typeof document === 'undefined') return null;
+  let host = document.getElementById('theme-bg-effect-controls');
+  if (host) return host;
+  const anchor = document.getElementById('theme-bg-size-group')?.closest('.theme-fd-row');
+  if (!anchor) return null;
+  host = document.createElement('div');
+  host.id = 'theme-bg-effect-controls';
+  host.className = 'theme-effect-controls';
+  anchor.insertAdjacentElement('afterend', host);
+  return host;
+}
+
+function _formatBackgroundEffectControlValue(control, value) {
+  return `${value}${control.unit || ''}`;
+}
+
+function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
+  const host = _backgroundEffectControlHost();
+  if (!host) return;
+  const controls = _backgroundEffectControlsFor(pattern);
+  host.replaceChildren();
+  host.hidden = controls.length === 0;
+  for (const control of controls) {
+    const when = control.showWhen;
+    if (when && getBackgroundEffectControlValue(pattern, when.key, false) !== when.value) continue;
+    const id = `theme-bg-effect-${pattern}-${control.key}`;
+    const value = getBackgroundEffectControlValue(pattern, control.key, control.default);
+    const group = document.createElement('div');
+    group.className = 'theme-effect-control';
+    if (control.type === 'toggle') {
+      group.classList.add('theme-effect-toggle');
+      const label = document.createElement('label');
+      label.className = 'theme-fd-label';
+      label.htmlFor = id;
+      label.textContent = control.label;
+      const toggle = document.createElement('label');
+      toggle.className = 'admin-switch';
+      const input = document.createElement('input');
+      input.id = id;
+      input.type = 'checkbox';
+      input.checked = value;
+      input.setAttribute('aria-label', control.label);
+      const slider = document.createElement('span');
+      slider.className = 'admin-slider';
+      toggle.append(input, slider);
+      input.addEventListener('change', () => {
+        _setBackgroundEffectControlValue(pattern, control.key, input.checked);
+        _persistBackgroundEffectControls();
+        _renderBackgroundEffectControls(pattern);
+      });
+      group.append(label, toggle);
+    } else {
+      const label = document.createElement('label');
+      label.className = 'theme-fd-label theme-effect-control-label';
+      label.htmlFor = id;
+      const name = document.createElement('span');
+      name.textContent = control.label;
+      const output = document.createElement('output');
+      output.textContent = _formatBackgroundEffectControlValue(control, value);
+      label.append(name, output);
+      const input = document.createElement('input');
+      input.id = id;
+      input.className = 'theme-fd-range';
+      input.type = 'range';
+      input.min = String(control.min);
+      input.max = String(control.max);
+      input.step = String(control.step);
+      input.value = String(value);
+      input.setAttribute('aria-label', control.label);
+      input.addEventListener('input', () => {
+        _setBackgroundEffectControlValue(pattern, control.key, input.value);
+        output.textContent = _formatBackgroundEffectControlValue(control, input.value);
+      });
+      input.addEventListener('change', _persistBackgroundEffectControls);
+      group.append(label, input);
+    }
+    host.append(group);
+  }
+}
+
+export function registerBackgroundEffectControls(pattern, controls) {
+  if (!pattern || !Array.isArray(controls)) return;
+  const keys = new Set();
+  const normalized = controls.filter(control => {
+    if (!control || typeof control.key !== 'string' || keys.has(control.key)) return false;
+    keys.add(control.key);
+    return true;
+  })
+    .map(control => {
+      const min = Number.isFinite(Number(control.min)) ? Number(control.min) : 0;
+      const max = Math.max(min, Number.isFinite(Number(control.max)) ? Number(control.max) : 100);
+      return {
+        ...control,
+        type: control.type === 'toggle' ? 'toggle' : 'range',
+        min,
+        max,
+        step: Number.isFinite(Number(control.step)) ? Number(control.step) : 1,
+        default: control.type === 'toggle' ? !!control.default : Math.min(max, Math.max(min,
+          Number.isFinite(Number(control.default)) ? Number(control.default) : min)),
+      };
+    });
+  _BACKGROUND_EFFECT_CONTROLS.set(pattern, normalized);
+  _renderBackgroundEffectControls();
+}
+
+export function applyBackgroundEffectControls(values) {
+  _backgroundEffectControlValues = _copyBackgroundEffectControlValues(values);
+  _renderBackgroundEffectControls();
+}
+
+registerBackgroundEffectControls('clanker-kene-weave', [
+  { key: 'snakeCount', label: 'Number of snakes', min: 1, max: 18, step: 1, default: 7 },
+  { key: 'snakeLengthVariation', label: 'Snake length variation', min: 0, max: 100, step: 5, default: 0, unit: '%' },
+  { key: 'snakeLifetimeVariation', label: 'Snake lifetime variation', min: 0, max: 100, step: 5, default: 0, unit: '%' },
+  { key: 'shorterLastLonger', label: 'Shorter snakes last longer', type: 'toggle', default: false },
+  { key: 'shorterLifetimeScale', label: 'Short snake lifetime scale', min: 0, max: 200, step: 5, default: 100, unit: '%', showWhen: { key: 'shorterLastLonger', value: true } },
+  { key: 'longerDisappearSooner', label: 'Longer snakes disappear sooner', type: 'toggle', default: false },
+  { key: 'longerLifetimeScale', label: 'Long snake lifetime scale', min: 0, max: 200, step: 5, default: 100, unit: '%', showWhen: { key: 'longerDisappearSooner', value: true } },
+]);
+
+const _CLANKER_DRIFT_CONTROLS = [
+  { key: 'driftSpeed', label: 'Drift speed', min: 25, max: 250, step: 5, default: 100, unit: '%' },
+  { key: 'gemSizeVariation', label: 'Size variation', min: 0, max: 999, step: 1, default: 100, unit: '%' },
+  { key: 'intensityVariation', label: 'Intensity variation', min: 0, max: 999, step: 1, default: 100, unit: '%' },
+  { key: 'middleIntensity', label: 'Middle intensity', min: 0, max: 200, step: 1, default: 100, unit: '%' },
+  { key: 'totalQuantity', label: 'Total quantity', min: 0, max: 250, step: 5, default: 100, unit: '%' },
+  { key: 'glowLikelihood', label: 'Glow likelihood', min: 0, max: 100, step: 1, default: 11, unit: '%' },
+];
+
+registerBackgroundEffectControls('clanker-gem-drift', _CLANKER_DRIFT_CONTROLS);
+registerBackgroundEffectControls('clanker-emoji-drift', _CLANKER_DRIFT_CONTROLS);
 
 function _disposeBackgroundEffect() {
   const dispose = _activeBackgroundEffectDispose;
@@ -501,18 +696,37 @@ function _getEffectSize() {
 // Patterns where the intensity/size sliders have no visible effect.
 const _STATIC_PATTERNS = new Set(['none', 'dots']);
 
-export function applyBgPattern(pattern) {
-  const p = pattern || 'none';
-  document.body.classList.remove(..._BG_CLASSES);
-  _disposeBackgroundEffect();
-  if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
-  if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
-  // Hide sliders that do nothing on static patterns.
-  const hide = _STATIC_PATTERNS.has(p);
+function _activeBgPattern() {
+  const activeClass = _BG_CLASSES.find(className => document.body.classList.contains(className));
+  return activeClass ? activeClass.slice('bg-pattern-'.length) : 'none';
+}
+
+function _syncBgPatternControlVisibility(pattern) {
+  const hide = _STATIC_PATTERNS.has(pattern);
   const ig = document.getElementById('theme-bg-intensity-group');
   const sg = document.getElementById('theme-bg-size-group');
   if (ig) ig.style.display = hide ? 'none' : '';
   if (sg) sg.style.display = hide ? 'none' : '';
+}
+
+function _isCurrentBgPatternHealthy(pattern) {
+  const activeCanvas = document.querySelector(_BACKGROUND_CANVAS_SELECTOR);
+  return _CANVAS_PATTERNS[pattern] ? !!activeCanvas?.isConnected : !activeCanvas;
+}
+
+export function applyBgPattern(pattern) {
+  const p = pattern || 'none';
+  if (_activeBgPattern() === p && _isCurrentBgPatternHealthy(p)) {
+    _syncBgPatternControlVisibility(p);
+    _renderBackgroundEffectControls(p);
+    return;
+  }
+  document.body.classList.remove(..._BG_CLASSES);
+  _disposeBackgroundEffect();
+  if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
+  if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
+  _syncBgPatternControlVisibility(p);
+  _renderBackgroundEffectControls(p);
 }
 
 export function getSaved() {
@@ -543,6 +757,7 @@ export function save(name, colors, opts) {
     if (opts.bgEffectColor) obj.bgEffectColor = opts.bgEffectColor;
     if (opts.bgEffectIntensity !== undefined && opts.bgEffectIntensity !== 1) obj.bgEffectIntensity = opts.bgEffectIntensity;
     if (opts.bgEffectSize !== undefined && opts.bgEffectSize !== 1) obj.bgEffectSize = opts.bgEffectSize;
+    if (opts.bgEffectControls && Object.keys(opts.bgEffectControls).length) obj.bgEffectControls = _copyBackgroundEffectControlValues(opts.bgEffectControls);
     if (opts.frosted) obj.frosted = true;
   }
   Storage.setJSON(LS_KEY, obj);
@@ -592,6 +807,7 @@ function _getThemeOptions(name, source = {}) {
     bgEffectSize: source.bgEffectSize !== undefined
       ? source.bgEffectSize
       : (THEME_DEFAULT_SIZE[name] !== undefined ? THEME_DEFAULT_SIZE[name] : 1),
+    bgEffectControls: _copyBackgroundEffectControlValues(source.bgEffectControls),
     frosted: source.frosted !== undefined ? !!source.frosted : THEME_DEFAULT_FROSTED[name] === true,
   };
 }
@@ -636,6 +852,7 @@ export function applyTheme(name, providedColors = null, config = {}) {
   applyBgEffectColor(opts.bgEffectColor);
   applyBgEffectIntensity(opts.bgEffectIntensity);
   applyBgEffectSize(opts.bgEffectSize);
+  applyBackgroundEffectControls(opts.bgEffectControls);
   applyFrostedGlass(opts.frosted);
   applyBgPattern(opts.bgPattern);
   _syncThemeControls(name, colors, opts);
@@ -839,6 +1056,7 @@ export function initThemeUI() {
     if (ec) opts.bgEffectColor = ec.value;
     if (es) opts.bgEffectIntensity = parseFloat(es.value) / 100;
     if (sz) opts.bgEffectSize = parseFloat(sz.value) / 100;
+    opts.bgEffectControls = _copyBackgroundEffectControlValues();
     const fr = document.getElementById('theme-frosted-toggle');
     if (fr) opts.frosted = !!fr.checked;
     return opts;
@@ -1202,11 +1420,13 @@ export function initThemeUI() {
   const _initEffectColor = _initialOptions.bgEffectColor;
   const _initEffectIntensity = _initialOptions.bgEffectIntensity;
   const _initEffectSize = _initialOptions.bgEffectSize;
+  const _initEffectControls = _initialOptions.bgEffectControls;
   const _initFrosted = _initialOptions.frosted;
   applyFontDensity(_initFont, _initDensity);
   applyBgEffectColor(_initEffectColor);
   applyBgEffectIntensity(_initEffectIntensity);
   applyBgEffectSize(_initEffectSize);
+  applyBackgroundEffectControls(_initEffectControls);
   applyFrostedGlass(_initFrosted);
   applyBgPattern(_initPattern);
 
@@ -1382,6 +1602,7 @@ export function initThemeUI() {
       if (cur && cur.density) obj.density = cur.density;
       if (cur && cur.bgPattern) obj.bgPattern = cur.bgPattern;
       if (cur && cur.bgEffectColor) obj.bgEffectColor = cur.bgEffectColor;
+      if (cur && cur.bgEffectControls) obj.bgEffectControls = cur.bgEffectControls;
       const json = JSON.stringify(obj, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -1431,12 +1652,14 @@ export function initThemeUI() {
       if (parsed.density) opts.density = parsed.density;
       if (parsed.bgPattern) opts.bgPattern = parsed.bgPattern;
       if (parsed.bgEffectColor) opts.bgEffectColor = parsed.bgEffectColor;
+      if (parsed.bgEffectControls && typeof parsed.bgEffectControls === 'object') opts.bgEffectControls = parsed.bgEffectControls;
       const result = saveCustomTheme(slug, colorData, opts);
       if (result === 'limit') { saveError.textContent = 'Max ' + MAX_CUSTOM_THEMES + ' custom themes. Delete one first.'; saveError.style.display = 'block'; return; }
       save(slug, colorData, opts);
       applyColors(colorData);
       applyFontDensity(opts.font || DEFAULT_FONT, opts.density || DEFAULT_DENSITY);
       applyBgEffectColor(opts.bgEffectColor || '');
+      applyBackgroundEffectControls(opts.bgEffectControls);
       applyBgPattern(opts.bgPattern || 'none');
       importAreaEl.classList.add('hidden');
       importActionsEl.classList.add('hidden');
@@ -1644,14 +1867,42 @@ function _readClankerEffectConfig() {
 function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   let animationFrame = 0;
+  let resizeFrame = 0;
+  let resizeTimer = 0;
   let animationTime = 0;
   let previousFrame = 0;
+  let viewportKey = '';
   let disposed = false;
+
+  function cancelFrame() {
+    if (!animationFrame) return;
+    window.cancelAnimationFrame(animationFrame);
+    animationFrame = 0;
+  }
+
+  function scheduleFrame() {
+    if (!disposed && !motion.matches && !animationFrame) {
+      animationFrame = window.requestAnimationFrame(frame);
+    }
+  }
+
+  function resizeIfNeeded(force = false) {
+    const nextViewportKey = `${window.innerWidth}:${window.innerHeight}:${window.devicePixelRatio || 1}`;
+    if (!force && viewportKey === nextViewportKey) return false;
+    viewportKey = nextViewportKey;
+    resize();
+    canvas.__backgroundResizeCount = (canvas.__backgroundResizeCount || 0) + 1;
+    return true;
+  }
 
   function dispose() {
     if (disposed) return;
     disposed = true;
-    window.cancelAnimationFrame(animationFrame);
+    cancelFrame();
+    window.cancelAnimationFrame(resizeFrame);
+    window.clearTimeout(resizeTimer);
+    resizeFrame = 0;
+    resizeTimer = 0;
     window.removeEventListener('resize', handleResize);
     if (motion.removeEventListener) motion.removeEventListener('change', handleMotionChange);
     else if (motion.removeListener) motion.removeListener(handleMotionChange);
@@ -1661,6 +1912,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   }
 
   function frame(time = 0) {
+    animationFrame = 0;
     if (disposed) return;
     if (!canvas.isConnected || !document.body.classList.contains(bodyClass)) {
       dispose();
@@ -1672,25 +1924,37 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
       return;
     }
     canvas.dataset.motion = motion.matches ? 'reduced' : 'active';
-    if (!motion.matches && previousFrame) animationTime += Math.min(time - previousFrame, 50);
+    if (!motion.matches && previousFrame) animationTime += Math.min(Math.max(time - previousFrame, 0), 34);
     previousFrame = time;
+    canvas.__backgroundFrameCount = (canvas.__backgroundFrameCount || 0) + 1;
     paint(motion.matches ? 0 : animationTime, motion.matches);
-    if (!motion.matches) animationFrame = window.requestAnimationFrame(frame);
+    scheduleFrame();
   }
 
   function handleResize() {
-    resize();
-    if (motion.matches) frame(0);
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      resizeTimer = 0;
+      if (disposed || resizeFrame) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        if (!resizeIfNeeded() || disposed) return;
+        // A canvas resize clears its bitmap. Repaint in this callback so the
+        // compositor never receives a cleared canvas while its RAF is pending.
+        canvas.__backgroundFrameCount = (canvas.__backgroundFrameCount || 0) + 1;
+        paint(motion.matches ? 0 : animationTime, motion.matches);
+      });
+    }, 96);
   }
 
   function handleMotionChange() {
-    window.cancelAnimationFrame(animationFrame);
+    cancelFrame();
     previousFrame = 0;
     frame(performance.now());
   }
 
   function handleVisibilityChange() {
-    window.cancelAnimationFrame(animationFrame);
+    cancelFrame();
     previousFrame = 0;
     if (document.hidden) {
       canvas.dataset.motion = 'paused';
@@ -1708,7 +1972,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   if (motion.addEventListener) motion.addEventListener('change', handleMotionChange);
   else if (motion.addListener) motion.addListener(handleMotionChange);
   document.addEventListener('visibilitychange', handleVisibilityChange);
-  resize();
+  resizeIfNeeded(true);
   frame(performance.now());
 }
 
@@ -2035,18 +2299,31 @@ function _initClankerKeneWeave() {
         ctx.fill();
       });
 
-      for (let signalIndex = 0; signalIndex < 7; signalIndex += 1) {
-        const duration = 16000 + signalIndex * 2300;
-        const phase = time / duration + signalIndex * .31;
-        const cycle = Math.floor(phase);
-        const progress = phase - cycle;
+      const snakeCount = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeCount', 7);
+      const lengthVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLengthVariation', 0) / 100;
+      const lifetimeVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLifetimeVariation', 0) / 100;
+      const shorterLastLonger = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLastLonger', false);
+      const shorterLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLifetimeScale', 100) / 100;
+      const longerDisappearSooner = getBackgroundEffectControlValue('clanker-kene-weave', 'longerDisappearSooner', false);
+      const longerLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'longerLifetimeScale', 100) / 100;
+      for (let signalIndex = 0; signalIndex < snakeCount; signalIndex += 1) {
+        const baseDuration = 16000 + signalIndex * 2300;
+        const basePhase = time / baseDuration + signalIndex * .31;
+        const cycle = Math.floor(basePhase);
         const random = scene.snakeSeed + signalIndex * 131 + cycle * 47;
+        const tailSteps = Math.max(8, Math.round(64 * (1 + (_clankerNoise(random + 43) * 2 - 1) * lengthVariation * .6)));
+        const lengthRatio = tailSteps / 64;
+        let duration = baseDuration * (1 + (_clankerNoise(random + 61) * 2 - 1) * lifetimeVariation * .45);
+        if (shorterLastLonger && lengthRatio < 1) duration *= 1 + (1 - lengthRatio) * shorterLifetimeScale;
+        if (longerDisappearSooner && lengthRatio > 1) duration *= Math.max(.2, 1 - (lengthRatio - 1) * longerLifetimeScale);
+        const phase = time / duration + signalIndex * .31;
+        const progress = phase - Math.floor(phase);
         const route = scene.snakePoints[Math.floor(_clankerNoise(random) * scene.snakePoints.length)];
         const reverse = _clankerNoise(random + 17) > .5;
         const headProgress = reverse ? 1 - progress : progress;
         const fade = Math.min(1, progress * 7, (1 - progress) * 7);
         const tail = [];
-        for (let step = 64; step >= 0; step -= 1) {
+        for (let step = tailSteps; step >= 0; step -= 1) {
           const pointProgress = headProgress + (reverse ? step : -step) * .0024;
           if (pointProgress >= 0 && pointProgress <= 1) tail.push(_pointOnPolyline(route, pointProgress));
         }
@@ -2183,37 +2460,82 @@ function _clankerNoise(seed) {
   return value - Math.floor(value);
 }
 
+const _CLANKER_EMOJI_RANGES = [
+  [0x1F300, 0x1F5FF], [0x1F600, 0x1F64F], [0x1F680, 0x1F6FF],
+  [0x1F900, 0x1F9FF], [0x1FA70, 0x1FAFF], [0x2600, 0x27BF],
+];
+const _CLANKER_EMOJI_FONT = '"Noto Color Emoji", "Noto Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
+
+function _clankerEmoji(seed) {
+  const range = _CLANKER_EMOJI_RANGES[Math.floor(_clankerNoise(seed) * _CLANKER_EMOJI_RANGES.length)];
+  const codePoint = range[0] + Math.floor(_clankerNoise(seed + 1) * (range[1] - range[0] + 1));
+  return String.fromCodePoint(codePoint, 0xFE0F);
+}
+
+function _buildClankerDriftScene({ width, height, size }) {
+  const baseCount = Math.max(140, Math.ceil(width * height / 5600));
+  const count = Math.min(720, Math.ceil(baseCount * 2.5));
+  return {
+    baseCount,
+    shards: Array.from({ length: count }, (_, index) => {
+      const seed = index * 47 + 11;
+      return {
+        x: _clankerNoise(seed) * width,
+        y: _clankerNoise(seed + 5) * height,
+        baseRadius: 9,
+        radiusNoise: _clankerNoise(seed + 9) * 2 - 1,
+        stretch: .7 + _clankerNoise(seed + 13) * .55,
+        rotation: _clankerNoise(seed + 17) * Math.PI * 2,
+        color: index % 6,
+        shape: index % 4,
+        phase: _clankerNoise(seed + 23) * Math.PI * 2,
+        drift: (3 + _clankerNoise(seed + 29) * 9) * size,
+        glowNoise: _clankerNoise(seed + 31),
+        intensityNoise: _clankerNoise(seed + 37) * 2 - 1,
+        emoji: _clankerEmoji(seed + 41),
+      };
+    }),
+  };
+}
+
+function _clankerDriftControls(pattern) {
+  return {
+    driftSpeed: getBackgroundEffectControlValue(pattern, 'driftSpeed', 100) / 100,
+    sizeVariation: getBackgroundEffectControlValue(pattern, 'gemSizeVariation', 100) / 100,
+    intensityVariation: getBackgroundEffectControlValue(pattern, 'intensityVariation', 100) / 100,
+    middleIntensity: getBackgroundEffectControlValue(pattern, 'middleIntensity', 100) / 100,
+    totalQuantity: getBackgroundEffectControlValue(pattern, 'totalQuantity', 100) / 100,
+    glowLikelihood: getBackgroundEffectControlValue(pattern, 'glowLikelihood', 11) / 100,
+  };
+}
+
+function _clankerDriftState(shard, index, time, size, controls) {
+  const driftX = Math.sin(time * controls.driftSpeed / (5900 + index % 7 * 340) + shard.phase) * shard.drift;
+  const driftY = Math.cos(time * controls.driftSpeed / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72;
+  return {
+    x: shard.x + driftX,
+    y: shard.y + driftY,
+    radius: Math.max(1.5 * size, (shard.baseRadius + shard.radiusNoise * 5 * controls.sizeVariation) * size),
+    bright: shard.glowNoise < controls.glowLikelihood,
+    alphaScale: controls.middleIntensity * Math.max(0, 1 + shard.intensityNoise * .28 * controls.intensityVariation),
+  };
+}
+
 function _initClankerGemDrift() {
   _mountClankerEffect({
     id: 'clanker-gem-drift-canvas',
     bodyClass: 'bg-pattern-clanker-gem-drift',
-    build: ({ width, height, size }) => {
-      const count = Math.max(140, Math.ceil(width * height / 5600));
-      return { shards: Array.from({ length: count }, (_, index) => {
-        const seed = index * 47 + 11;
-        return {
-          x: _clankerNoise(seed) * width,
-          y: _clankerNoise(seed + 5) * height,
-          radius: (4 + _clankerNoise(seed + 9) * 10) * size,
-          stretch: .7 + _clankerNoise(seed + 13) * .55,
-          rotation: _clankerNoise(seed + 17) * Math.PI * 2,
-          color: index % 6,
-          shape: index % 4,
-          phase: _clankerNoise(seed + 23) * Math.PI * 2,
-          drift: (3 + _clankerNoise(seed + 29) * 9) * size,
-          bright: index % 9 === 0,
-        };
-      }) };
-    },
+    build: _buildClankerDriftScene,
     draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      scene.shards.forEach((shard, index) => {
-        const driftX = Math.sin(time / (5900 + index % 7 * 340) + shard.phase) * shard.drift;
-        const driftY = Math.cos(time / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72;
-        const radius = shard.radius;
+      const controls = _clankerDriftControls('clanker-gem-drift');
+      const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
+      for (let index = 0; index < count; index += 1) {
+        const shard = scene.shards[index];
+        const { x, y, radius, bright, alphaScale } = _clankerDriftState(shard, index, time, size, controls);
         ctx.save();
-        ctx.translate(shard.x + driftX, shard.y + driftY);
+        ctx.translate(x, y);
         ctx.rotate(shard.rotation + Math.sin(time / 8400 + shard.phase) * .12);
         ctx.scale(shard.stretch, 1);
         ctx.beginPath();
@@ -2229,21 +2551,48 @@ function _initClankerGemDrift() {
         ctx.closePath();
         ctx.fillStyle = colors[shard.color];
         ctx.strokeStyle = outline;
-        ctx.lineWidth = (shard.bright ? 2 : 1.4) * size;
-        ctx.globalAlpha = intensity * (shard.bright ? .62 : .22);
-        if (shard.bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 9 * size; }
+        ctx.lineWidth = (bright ? 2 : 1.4) * size;
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .62 : .22));
+        if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 9 * size; }
         ctx.fill();
         ctx.shadowBlur = 0;
-        ctx.globalAlpha = intensity * (shard.bright ? .8 : .34);
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .8 : .34));
         ctx.stroke();
         ctx.beginPath();
         ctx.moveTo(0, -radius * .7); ctx.lineTo(0, 0); ctx.lineTo(radius * .5, radius * .34);
         ctx.strokeStyle = colors[(shard.color + 2) % colors.length];
         ctx.lineWidth = .9 * size;
-        ctx.globalAlpha = intensity * (shard.bright ? .58 : .26);
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .58 : .26));
         ctx.stroke();
         ctx.restore();
-      });
+      }
+    },
+  });
+}
+
+function _initClankerEmojiDrift() {
+  _mountClankerEffect({
+    id: 'clanker-emoji-drift-canvas',
+    bodyClass: 'bg-pattern-clanker-emoji-drift',
+    build: _buildClankerDriftScene,
+    draw: (ctx, { time, scene, intensity, size, colors }) => {
+      const controls = _clankerDriftControls('clanker-emoji-drift');
+      const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let index = 0; index < count; index += 1) {
+        const shard = scene.shards[index];
+        const { x, y, radius, bright, alphaScale } = _clankerDriftState(shard, index, time, size, controls);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(shard.rotation + Math.sin(time / 8400 + shard.phase) * .055);
+        ctx.font = `${Math.max(12, radius * 2.3)}px ${_CLANKER_EMOJI_FONT}`;
+        ctx.fillStyle = colors[shard.color];
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34));
+        if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 12 * size; }
+        ctx.fillText(shard.emoji, 0, 0);
+        ctx.restore();
+      }
     },
   });
 }

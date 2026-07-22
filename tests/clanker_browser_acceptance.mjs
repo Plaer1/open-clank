@@ -141,7 +141,32 @@ try {
     try { await new Promise(resolve=>setTimeout(resolve, ${Number(duration)})); }
     finally { proto.clearRect=clearRect; }
     const intervals=stamps.slice(1).map((stamp,index)=>stamp-stamps[index]).sort((a,b)=>a-b);
-    return { paints:stamps.length, median:intervals[Math.floor(intervals.length/2)] || 0, max:intervals.at(-1) || 0 };
+    return { paints:stamps.length, min:intervals[0] || 0, median:intervals[Math.floor(intervals.length/2)] || 0, max:intervals.at(-1) || 0 };
+  })()`);
+  const canvasCadenceStable = async id => {
+    const cadence = await canvasCadence(id, 340);
+    const minimumPaints = id.startsWith('clanker-') ? 10 : 2;
+    assert(cadence?.paints >= minimumPaints, `${id} only painted ${cadence?.paints || 0} frames`);
+    assert(cadence.min >= 7, `${id} rendered twice inside a single frame (${cadence.min.toFixed(1)}ms)`);
+    return cadence;
+  };
+  const canvasSceneStable = id => evaluate(`(async () => {
+    const canvas=document.getElementById(${JSON.stringify(id)});
+    if (!canvas) return false;
+    const scene=canvas.__backgroundScene;
+    const resizeCount=canvas.__backgroundResizeCount;
+    for (let index=0; index<6; index+=1) window.dispatchEvent(new Event('resize'));
+    await new Promise(resolve=>setTimeout(resolve, 140));
+    return canvas.__backgroundScene===scene && canvas.__backgroundResizeCount===resizeCount;
+  })()`);
+  const canvasPatternStable = id => evaluate(`(async () => {
+    const canvas=document.getElementById(${JSON.stringify(id)});
+    const select=document.getElementById('theme-bg-pattern-select');
+    if (!canvas || !select) return false;
+    const scene=canvas.__backgroundScene;
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    return document.getElementById(${JSON.stringify(id)})===canvas && canvas.__backgroundScene===scene;
   })()`);
 
   await command('Page.enable');
@@ -215,7 +240,10 @@ try {
   assert(routeStability?.changed > 0); assert(routeStability.ratio < 0.08, `route field changed ${Math.round(routeStability.ratio * 100)}% of painted samples`);
   const routeCadence = await canvasCadence('clanker-routefield-canvas');
   assert(routeCadence?.paints >= 10, `route field only painted ${routeCadence?.paints || 0} frames`);
+  assert(routeCadence.min >= 7, `route field rendered twice inside a single frame (${routeCadence.min.toFixed(1)}ms)`);
   assert(routeCadence.median < 24, `route field median frame interval was ${routeCadence.median.toFixed(1)}ms`);
+  assert(await canvasSceneStable('clanker-routefield-canvas'), 'route field rebuilt its scene without a viewport change');
+  assert(await canvasPatternStable('clanker-routefield-canvas'), 'route field rebuilt its scene for an unchanged pattern');
   await screenshot('clanker-dark-page');
   await screenshot('clanker-dark', 'popup');
 
@@ -224,6 +252,7 @@ try {
     ['clanker-kene-weave', 'clanker-kene-weave-canvas', 'clanker-kene-weave', 70000],
     ['clanker-radar', 'clanker-radar-canvas', 'clanker-radar', 120000],
     ['clanker-gem-drift', 'clanker-gem-drift-canvas', 'clanker-gem-drift', 12000],
+    ['clanker-emoji-drift', 'clanker-emoji-drift-canvas', 'clanker-emoji-drift', 6000],
   ]) {
     await evaluate(`(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value=${JSON.stringify(pattern)}; select.dispatchEvent(new Event('change', {bubbles:true})); return select.value; })()`);
     await waitFor(`document.body.classList.contains('bg-pattern-${pattern}') && document.getElementById('${canvasId}')?.dataset.motion === 'active'`, pattern);
@@ -237,28 +266,191 @@ try {
     await screenshot(screenshotName);
   }
 
+  const effectControlResults = await evaluate(`(async () => {
+    const select=document.getElementById('theme-bg-pattern-select');
+    const pause=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const choose=async pattern=>{
+      select.value=pattern;
+      select.dispatchEvent(new Event('change',{bubbles:true}));
+      await pause();
+    };
+    const control=(pattern,key)=>document.getElementById('theme-bg-effect-'+pattern+'-'+key);
+    const setRange=(input,value)=>{
+      input.value=String(value);
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      input.dispatchEvent(new Event('change',{bubbles:true}));
+    };
+
+    await choose('clanker-kene-weave');
+    const keneCanvas=document.getElementById('clanker-kene-weave-canvas');
+    const keneScene=keneCanvas?.__backgroundScene;
+    const keneKeys=['snakeCount','snakeLengthVariation','snakeLifetimeVariation','shorterLastLonger','longerDisappearSooner'];
+    const shortScaleAbsent=!control('clanker-kene-weave','shorterLifetimeScale');
+    const longScaleAbsent=!control('clanker-kene-weave','longerLifetimeScale');
+    setRange(control('clanker-kene-weave','snakeCount'), 11);
+    setRange(control('clanker-kene-weave','snakeLengthVariation'), 60);
+    setRange(control('clanker-kene-weave','snakeLifetimeVariation'), 45);
+    const shorter=control('clanker-kene-weave','shorterLastLonger');
+    shorter.checked=true;
+    shorter.dispatchEvent(new Event('change',{bubbles:true}));
+    setRange(control('clanker-kene-weave','shorterLifetimeScale'), 150);
+    const longer=control('clanker-kene-weave','longerDisappearSooner');
+    longer.checked=true;
+    longer.dispatchEvent(new Event('change',{bubbles:true}));
+    setRange(control('clanker-kene-weave','longerLifetimeScale'), 55);
+    await pause();
+    const kene={
+      controls:keneKeys.every(key=>!!control('clanker-kene-weave',key)),
+      shortScaleAbsent,
+      longScaleAbsent,
+      shortScale:!!control('clanker-kene-weave','shorterLifetimeScale'),
+      longScale:!!control('clanker-kene-weave','longerLifetimeScale'),
+      stable:document.getElementById('clanker-kene-weave-canvas')===keneCanvas && keneCanvas?.__backgroundScene===keneScene,
+    };
+
+    await choose('clanker-gem-drift');
+    const gemCanvas=document.getElementById('clanker-gem-drift-canvas');
+    const gemScene=gemCanvas?.__backgroundScene;
+    const gemSize=control('clanker-gem-drift','gemSizeVariation');
+    const gemSizeRange={min:gemSize.min,max:gemSize.max,value:gemSize.value};
+    setRange(control('clanker-gem-drift','driftSpeed'), 140);
+    setRange(gemSize, 0);
+    setRange(gemSize, 999);
+    setRange(gemSize, 650);
+    setRange(control('clanker-gem-drift','intensityVariation'), 425);
+    setRange(control('clanker-gem-drift','middleIntensity'), 120);
+    setRange(control('clanker-gem-drift','totalQuantity'), 160);
+    setRange(control('clanker-gem-drift','glowLikelihood'), 35);
+    await pause();
+    const gem={
+      controls:['driftSpeed','gemSizeVariation','intensityVariation','middleIntensity','totalQuantity','glowLikelihood'].every(key=>!!control('clanker-gem-drift',key)),
+      stable:document.getElementById('clanker-gem-drift-canvas')===gemCanvas && gemCanvas?.__backgroundScene===gemScene,
+      sizeRange:gemSizeRange,
+    };
+
+    await choose('clanker-emoji-drift');
+    const emojiCanvas=document.getElementById('clanker-emoji-drift-canvas');
+    const emojiScene=emojiCanvas?.__backgroundScene;
+    const emojiSize=control('clanker-emoji-drift','gemSizeVariation');
+    const emojiSizeRange={min:emojiSize.min,max:emojiSize.max,value:emojiSize.value};
+    setRange(control('clanker-emoji-drift','driftSpeed'), 80);
+    setRange(control('clanker-emoji-drift','gemSizeVariation'), 825);
+    setRange(control('clanker-emoji-drift','intensityVariation'), 480);
+    setRange(control('clanker-emoji-drift','middleIntensity'), 80);
+    setRange(control('clanker-emoji-drift','totalQuantity'), 120);
+    setRange(control('clanker-emoji-drift','glowLikelihood'), 45);
+    await pause();
+    const saved=JSON.parse(localStorage.getItem('odysseus-theme'));
+    const emoji={
+      controls:['driftSpeed','gemSizeVariation','intensityVariation','middleIntensity','totalQuantity','glowLikelihood'].every(key=>!!control('clanker-emoji-drift',key)),
+      stable:document.getElementById('clanker-emoji-drift-canvas')===emojiCanvas && emojiCanvas?.__backgroundScene===emojiScene,
+      font:document.fonts.check('24px "Noto Color Emoji"'),
+      glyphs:new Set(emojiScene?.shards.map(shard=>shard.emoji)).size,
+      sizeRange:emojiSizeRange,
+    };
+
+    await choose('clanker-radar');
+    return { kene, gem, emoji, hidden:document.getElementById('theme-bg-effect-controls')?.hidden, saved, controls:saved?.bgEffectControls };
+  })()`);
+  assert(effectControlResults.kene.controls);
+  assert(effectControlResults.kene.shortScaleAbsent && effectControlResults.kene.longScaleAbsent);
+  assert(effectControlResults.kene.shortScale && effectControlResults.kene.longScale);
+  assert(effectControlResults.kene.stable, 'Signal Weave controls remounted its canvas');
+  assert(effectControlResults.gem.controls && effectControlResults.gem.stable, 'Gem Drift controls remounted its canvas');
+  assert.deepEqual(effectControlResults.gem.sizeRange, { min:'0', max:'999', value:'100' });
+  assert(effectControlResults.emoji.controls && effectControlResults.emoji.stable, 'Emoji Drift controls remounted its canvas');
+  assert.deepEqual(effectControlResults.emoji.sizeRange, { min:'0', max:'999', value:'100' });
+  assert(effectControlResults.emoji.font, 'Emoji Drift did not resolve Noto Color Emoji');
+  assert(effectControlResults.emoji.glyphs > 8, 'Emoji Drift did not draw a broad emoji range');
+  assert(effectControlResults.hidden, 'effects without controls left a stale control panel visible');
+  assert(effectControlResults.controls, `effect controls did not persist: ${JSON.stringify(effectControlResults.saved)}`);
+  assert.equal(effectControlResults.controls['clanker-kene-weave'].snakeCount, 11);
+  assert.equal(effectControlResults.controls['clanker-kene-weave'].shorterLifetimeScale, 150);
+  assert.equal(effectControlResults.controls['clanker-kene-weave'].longerLifetimeScale, 55);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].driftSpeed, 140);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].gemSizeVariation, 650);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].intensityVariation, 425);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].middleIntensity, 120);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].totalQuantity, 160);
+  assert.equal(effectControlResults.controls['clanker-gem-drift'].glowLikelihood, 35);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].driftSpeed, 80);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].gemSizeVariation, 825);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].intensityVariation, 480);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].middleIntensity, 80);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].totalQuantity, 120);
+  assert.equal(effectControlResults.controls['clanker-emoji-drift'].glowLikelihood, 45);
+  await evaluate("(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value='clanker-kene-weave'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
+  await waitFor("document.getElementById('clanker-kene-weave-canvas')?.dataset.motion === 'active'", 'Signal Weave control screenshot');
+  await evaluate("(() => { document.getElementById('theme-modal')?.classList.remove('hidden'); document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')?.click(); document.getElementById('theme-bg-effect-controls')?.scrollIntoView({block:'center'}); })()");
+  await screenshot('clanker-kene-controls', 'popup');
+  await evaluate("(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value='clanker-gem-drift'; select.dispatchEvent(new Event('change',{bubbles:true})); document.getElementById('theme-bg-effect-controls')?.scrollIntoView({block:'center'}); })()");
+  await waitFor("document.getElementById('clanker-gem-drift-canvas')?.dataset.motion === 'active'", 'Gem Drift control screenshot');
+  await screenshot('clanker-gem-controls', 'popup');
+  await evaluate("(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value='clanker-emoji-drift'; select.dispatchEvent(new Event('change',{bubbles:true})); document.getElementById('theme-bg-effect-controls')?.scrollIntoView({block:'center'}); })()");
+  await waitFor("document.getElementById('clanker-emoji-drift-canvas')?.dataset.motion === 'active'", 'Emoji Drift control screenshot');
+  await screenshot('clanker-emoji-controls', 'popup');
+  await evaluate(`(() => {
+    const select=document.getElementById('theme-bg-pattern-select');
+    const control=(pattern,key)=>document.getElementById('theme-bg-effect-'+pattern+'-'+key);
+    const setRange=(input,value)=>{
+      input.value=String(value);
+      input.dispatchEvent(new Event('input',{bubbles:true}));
+      input.dispatchEvent(new Event('change',{bubbles:true}));
+    };
+    select.value='clanker-kene-weave';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    setRange(control('clanker-kene-weave','snakeCount'), 7);
+    setRange(control('clanker-kene-weave','snakeLengthVariation'), 0);
+    setRange(control('clanker-kene-weave','snakeLifetimeVariation'), 0);
+    let toggle=control('clanker-kene-weave','shorterLastLonger');
+    if (toggle.checked) { toggle.checked=false; toggle.dispatchEvent(new Event('change',{bubbles:true})); }
+    toggle=control('clanker-kene-weave','longerDisappearSooner');
+    if (toggle.checked) { toggle.checked=false; toggle.dispatchEvent(new Event('change',{bubbles:true})); }
+    select.value='clanker-gem-drift';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    setRange(control('clanker-gem-drift','driftSpeed'), 100);
+    setRange(control('clanker-gem-drift','gemSizeVariation'), 100);
+    setRange(control('clanker-gem-drift','intensityVariation'), 100);
+    setRange(control('clanker-gem-drift','middleIntensity'), 100);
+    setRange(control('clanker-gem-drift','totalQuantity'), 100);
+    setRange(control('clanker-gem-drift','glowLikelihood'), 11);
+    select.value='clanker-emoji-drift';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    setRange(control('clanker-emoji-drift','driftSpeed'), 100);
+    setRange(control('clanker-emoji-drift','gemSizeVariation'), 100);
+    setRange(control('clanker-emoji-drift','intensityVariation'), 100);
+    setRange(control('clanker-emoji-drift','middleIntensity'), 100);
+    setRange(control('clanker-emoji-drift','totalQuantity'), 100);
+    setRange(control('clanker-emoji-drift','glowLikelihood'), 11);
+    select.value='clanker-kene-weave';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+  })()`);
+  await waitFor("document.getElementById('clanker-kene-weave-canvas')?.dataset.motion === 'active'", 'restored Signal Weave defaults');
+
   const canvasPatternIds = {
     'clanker-routefield':'clanker-routefield-canvas',
     'clanker-kene-weave':'clanker-kene-weave-canvas',
     'clanker-radar':'clanker-radar-canvas',
     'clanker-gem-drift':'clanker-gem-drift-canvas',
+    'clanker-emoji-drift':'clanker-emoji-drift-canvas',
     synapse:'synapse-canvas', rain:'rain-canvas', constellations:'constellations-canvas',
     'perlin-flow':'perlin-flow-canvas', petals:'petals-canvas', sparkles:'sparkles-canvas', embers:'embers-canvas',
   };
   const patternOrder = [
     'none', 'clanker-routefield', 'clanker-kene-weave', 'clanker-radar',
-    'clanker-gem-drift', 'clanker-blueprint', 'dots', 'synapse', 'rain',
+    'clanker-gem-drift', 'clanker-emoji-drift', 'clanker-blueprint', 'dots', 'synapse', 'rain',
     'constellations', 'perlin-flow', 'petals', 'sparkles', 'embers',
   ];
   assert.deepEqual(await evaluate("[...document.getElementById('theme-bg-pattern-select').options].map(option => option.value)"), patternOrder);
-  const transitionMatrix = await evaluate(`(async () => {
-    const patterns=${JSON.stringify(patternOrder)};
-    const canvasIds=${JSON.stringify(canvasPatternIds)};
-    const select=document.getElementById('theme-bg-pattern-select');
-    const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-    const failures=[];
-    let checked=0;
-    for (const from of patterns) {
+  const transitionMatrix = { checked: 0, failures: [] };
+  for (const from of patternOrder) {
+    const row = await evaluate(`(async () => {
+      const from=${JSON.stringify(from)};
+      const patterns=${JSON.stringify(patternOrder)};
+      const canvasIds=${JSON.stringify(canvasPatternIds)};
+      const select=document.getElementById('theme-bg-pattern-select');
+      const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+      const failures=[];
       for (const to of patterns) {
         select.value=from;
         select.dispatchEvent(new Event('change',{bubbles:true}));
@@ -277,11 +469,12 @@ try {
           && (!expectedCanvas || (canvases[0].id===expectedCanvas && canvases[0].dataset.motion==='active'
             && background.backgroundImage==='none' && background.animationName==='none'));
         if (!valid) failures.push({from,to,classes,canvases:canvases.map(node=>({id:node.id,motion:node.dataset.motion})),backgroundImage:background.backgroundImage,animationName:background.animationName});
-        checked+=1;
       }
-    }
-    return {checked,failures};
-  })()`);
+      return {checked:patterns.length,failures};
+    })()`);
+    transitionMatrix.checked += row.checked;
+    transitionMatrix.failures.push(...row.failures);
+  }
   assert.equal(transitionMatrix.checked, patternOrder.length ** 2);
   assert.deepEqual(transitionMatrix.failures, []);
 
@@ -297,7 +490,10 @@ try {
     assert(frameA?.painted > 0, `${pattern} did not paint`);
     assert.notEqual(frameA.hash, frameB?.hash, `${pattern} did not animate`);
     assert(change?.coverage < 0.08, `${pattern} changed ${Math.round((change?.coverage || 0) * 100)}% of sampled pixels`);
-    effectMotionResults[pattern] = { frameA, frameB, change };
+    assert(await canvasSceneStable(canvasId), `${pattern} rebuilt its scene without a viewport change`);
+    assert(await canvasPatternStable(canvasId), `${pattern} rebuilt its scene for an unchanged pattern`);
+    const cadence = await canvasCadenceStable(canvasId);
+    effectMotionResults[pattern] = { frameA, frameB, change, cadence };
   }
 
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
@@ -411,7 +607,7 @@ try {
   assert(mobileLogin.overflow <= 0); assert(mobileLogin.left >= 0); assert(mobileLogin.right <= mobileLogin.viewport);
   await screenshot('clanker-login-mobile');
   assert.deepEqual(exceptions, []);
-  process.stdout.write(`${JSON.stringify({ dark, routeStability, routeCadence, patternResults, transitionMatrix, effectMotionResults, light, original, fontViews, migration, reducedResults, mobile, mobilePatternResults, login, mobileLogin, screenshots:outputDir }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ dark, routeStability, routeCadence, patternResults, effectControlResults, transitionMatrix, effectMotionResults, light, original, fontViews, migration, reducedResults, mobile, mobilePatternResults, login, mobileLogin, screenshots:outputDir }, null, 2)}\n`);
 } finally {
   if (socket) socket.close();
   chromium.kill('SIGTERM');

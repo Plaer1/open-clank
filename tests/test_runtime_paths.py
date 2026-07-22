@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from unittest import mock
 import pytest
 from src.runtime_paths import get_app_root, get_default_data_dir
@@ -46,5 +47,17 @@ def test_get_default_data_dir_frozen():
     """Verify that get_default_data_dir resolves to a persistent user path under ~ when frozen."""
     with mock.patch.object(sys, "frozen", True, create=True):
         res = get_default_data_dir()
-        expected = os.path.join(os.path.expanduser("~"), ".odysseus", "data")
+        expected = os.path.join(os.path.expanduser("~"), ".open-clank", "data")
         assert res == expected
+
+
+def test_get_default_data_dir_migrates_legacy_frozen_root(tmp_path):
+    legacy = tmp_path / ".odysseus"
+    (legacy / "data").mkdir(parents=True)
+    (legacy / "data" / "proof.txt").write_text("kept")
+    with mock.patch.object(sys, "frozen", True, create=True), \
+         mock.patch("src.runtime_paths.os.path.expanduser", return_value=str(tmp_path)):
+        result = Path(get_default_data_dir())
+    assert result == tmp_path / ".open-clank" / "data"
+    assert (result / "proof.txt").read_text() == "kept"
+    assert not legacy.exists()
