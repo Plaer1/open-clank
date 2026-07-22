@@ -280,19 +280,58 @@ fn legacy_wiki_seed(doc: &DocView) -> Option<&'static LegacyWikiSeed> {
         .find(|seed| doc.name == seed.name && hash == seed.blob)
 }
 
+fn legacy_event_tail(name: &str) -> Option<&str> {
+    let prefix = name.get(..7)?;
+    if !prefix.eq_ignore_ascii_case("events/") {
+        return None;
+    }
+    name.get(7..).filter(|tail| !tail.is_empty())
+}
+
+fn has_event_frontmatter(text: Option<&str>) -> bool {
+    let mut lines = text.unwrap_or_default().lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return false;
+    }
+    let mut event = false;
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            return event;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() == "copal_type"
+            && value
+                .trim()
+                .trim_matches(|character| character == '\"' || character == '\'')
+                == "event"
+        {
+            event = true;
+        }
+    }
+    false
+}
+
 fn hidden_namespace_target(doc: &DocView) -> Option<String> {
     if let Some(seed) = legacy_wiki_seed(doc) {
         return Some(seed.target.to_string());
     }
-    let (legacy, hidden) = match doc.kind.as_str() {
-        "copal-event" => ("events/", ".events/"),
-        "wiki" => ("Wiki/", ".wik/"),
-        _ => return None,
-    };
-    doc.name
-        .strip_prefix(legacy)
-        .filter(|tail| !tail.is_empty())
-        .map(|tail| format!("{hidden}{tail}"))
+    if doc.kind == "copal-event"
+        || (matches!(doc.kind.as_str(), "markdown" | "note")
+            && has_event_frontmatter(doc.text.as_deref()))
+    {
+        return legacy_event_tail(&doc.name).map(|tail| format!(".events/{tail}"));
+    }
+    if doc.kind == "wiki" {
+        return doc
+            .name
+            .strip_prefix("Wiki/")
+            .filter(|tail| !tail.is_empty())
+            .map(|tail| format!(".wik/{tail}"));
+    }
+    None
 }
 
 /// Move only Copal's known internal namespaces. Preflight all names first;
@@ -314,7 +353,6 @@ fn migrate_hidden_namespaces(db: &Db) -> Result<usize, String> {
             other.id != doc.id
                 && other.owner == doc.owner
                 && other.workspace_id == doc.workspace_id
-                && other.kind == doc.kind
                 && other.corpus == doc.corpus
                 && other.name == *target
         }) {
@@ -1357,6 +1395,16 @@ mod tests {
                 None,
             )
             .unwrap();
+        let markdown_event = db
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "markdown",
+                "Events/Imported.md",
+                "---\ncopal_type: \"event\"\n---\nImported event.\n",
+                None,
+            )
+            .unwrap();
         let wiki = db
             .create_doc_scoped("alice", "home", "wiki", "Wiki/Launch", "# Launch", None)
             .unwrap();
@@ -1370,12 +1418,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 2);
+        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 3);
         assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 0);
 
         let migrated_event = db.get_doc(&event.id).unwrap().unwrap();
+        let migrated_markdown_event = db.get_doc(&markdown_event.id).unwrap().unwrap();
         let migrated_wiki = db.get_doc(&wiki.id).unwrap().unwrap();
         assert_eq!(migrated_event.name, ".events/Launch.md");
+        assert_eq!(migrated_markdown_event.name, ".events/Imported.md");
+        assert_eq!(migrated_markdown_event.kind, "markdown");
         assert_eq!(migrated_wiki.name, ".wik/Launch");
         assert_ne!(migrated_event.head, event.head);
         assert_ne!(migrated_wiki.head, wiki.head);
