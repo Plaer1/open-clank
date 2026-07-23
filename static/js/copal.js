@@ -24,6 +24,7 @@ const state = {
   baseId: null, baseView: null, basePage: 1, basePageSize: 100, baseQueryToken: 0, baseDefinition: null,
   baseSourceDocs: new Map(), baseFocusRow: -1, baseFocusCol: -1, baseFocusTable: null,
   noteEditors: new Set(),
+  entryVisibility: null,
 };
 let planningFeature = null;
 let notesFeature = null;
@@ -1820,8 +1821,81 @@ function buildWorkspace() {
   for (const view of VIEWS) ensureViewWindow(view);
 }
 
+// --- Per-entry Copal visibility (Appearance) ---
+// Visibility is a per-user appearance preference (not authorization): hiding a
+// launcher only removes its sidebar link. `open(view)` and open windows keep
+// working, so direct links/commands/agent actions still reach hidden features
+// and no data is touched. Driven by the same VIEWS/LABELS registry as navigation.
+const ENTRY_VIS_KEY = 'copal_entry_visibility';
+function defaultEntryVisibility() {
+  const map = {};
+  for (const view of VIEWS) map[view] = true;
+  return map;
+}
+async function loadEntryVisibility() {
+  const stored = await fetch(`/api/prefs/${ENTRY_VIS_KEY}`).then((r) => r.ok ? r.json() : { value: null }).then((res) => res?.value || {}).catch(() => ({}));
+  const merged = defaultEntryVisibility();
+  for (const view of VIEWS) if (typeof stored[view] === 'boolean') merged[view] = stored[view];
+  state.entryVisibility = merged;
+}
+async function saveEntryVisibility() {
+  await fetch(`/api/prefs/${ENTRY_VIS_KEY}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: state.entryVisibility }) });
+}
+function applyEntryVisibility() {
+  const map = state.entryVisibility || defaultEntryVisibility();
+  document.querySelectorAll('[data-copal-view]').forEach((link) => {
+    const view = link.dataset.copalView;
+    if (!VIEWS.includes(view)) return;
+    link.style.display = map[view] === false ? 'none' : '';
+  });
+}
+function openCopalAppearance() {
+  const existing = document.getElementById('copal-appearance-overlay');
+  if (existing) { existing.remove(); return; }
+  const overlay = h('div', { id: 'copal-appearance-overlay', class: 'copal-modal-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Copal appearance' });
+  const panel = h('div', { class: 'copal-appearance-panel' });
+  panel.append(h('h3', { class: 'copal-appearance-title', text: 'Copal appearance' }));
+  panel.append(h('p', { class: 'copal-appearance-hint', text: 'Show or hide Copal launchers. Hiding never deletes data; hidden views stay reachable by direct link.' }));
+  const list = h('div', { class: 'copal-appearance-list' });
+  const renderRows = () => {
+    list.innerHTML = '';
+    const map = state.entryVisibility || defaultEntryVisibility();
+    for (const view of VIEWS) {
+      const checkbox = h('input', { type: 'checkbox', id: `copal-vis-${view}`, ...(map[view] !== false ? { checked: true } : {}) });
+      checkbox.addEventListener('change', async () => {
+        state.entryVisibility = { ...(state.entryVisibility || defaultEntryVisibility()), [view]: checkbox.checked };
+        await saveEntryVisibility();
+        applyEntryVisibility();
+        renderRows();
+      });
+      list.append(h('label', { class: 'copal-appearance-row', for: `copal-vis-${view}` }, checkbox, h('span', { text: LABELS[view] || view })));
+    }
+  };
+  renderRows();
+  panel.append(list);
+  const setAll = async (value) => {
+    const map = defaultEntryVisibility();
+    if (value) for (const view of VIEWS) map[view] = true;
+    else for (const view of VIEWS) map[view] = false;
+    state.entryVisibility = map;
+    await saveEntryVisibility();
+    applyEntryVisibility();
+    renderRows();
+  };
+  panel.append(h('div', { class: 'copal-appearance-actions' },
+    h('button', { type: 'button', class: 'copal-btn', text: 'Show all', onclick: () => setAll(true) }),
+    h('button', { type: 'button', class: 'copal-btn', text: 'Hide all', onclick: () => setAll(false) }),
+    h('button', { type: 'button', class: 'copal-btn', text: 'Reset to defaults', onclick: () => setAll(true) }),
+    h('button', { type: 'button', class: 'copal-btn primary', text: 'Done', onclick: () => overlay.remove() }),
+  ));
+  overlay.append(panel);
+  overlay.addEventListener('click', (event) => { if (event.target === overlay) overlay.remove(); });
+  document.body.append(overlay);
+}
+
 function bindSidebar() {
   document.querySelectorAll('[data-copal-view]').forEach((link) => link.addEventListener('click', (event) => { event.preventDefault(); open(link.dataset.copalView); }));
+  document.getElementById('copal-appearance-btn')?.addEventListener('click', (event) => { event.preventDefault(); openCopalAppearance(); });
   document.getElementById('rail-copal')?.addEventListener('click', () => {
     const view = localStorage.getItem(copalStorageKey('odysseus-copal-view')) || 'notes'; const context = ensureViewWindow(view);
     context.window.visible ? close(view) : open(view);
@@ -1882,6 +1956,8 @@ export async function init(apiBase = window.location.origin) {
   planningFeature.loadState(state.workspace);
   treeHouse.loadState();
   buildWorkspace(); bindSidebar(); connectEvents();
+  await loadEntryVisibility();
+  applyEntryVisibility();
   window.addEventListener('popstate', () => {
     const match = location.pathname.match(/^\/copal(?:\/([^/]+))?\/?$/);
     if (!match) return;
