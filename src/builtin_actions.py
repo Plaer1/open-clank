@@ -73,8 +73,38 @@ async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
 
 
 async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Consolidate/deduplicate memories for the owner."""
+    """Consolidate/deduplicate memories for the owner.
+
+    When a provider (frankenmemory) is active, routes through
+    ``audit_provider_memories`` so the tidy hits the real store, not the
+    empty legacy ``memory.json``.  Falls back to the native JSON path when
+    no provider is configured.
+    """
     try:
+        # Provider path: use the active store, not the legacy JSON file.
+        from src.ai_interaction import _memory_provider
+        if _memory_provider and getattr(_memory_provider, "provider_id", "native") != "native":
+            from src.task_endpoint import resolve_task_candidates
+            from services.memory.memory_extractor import audit_provider_memories
+
+            candidates = resolve_task_candidates(owner=owner or None)
+            if not candidates:
+                raise TaskNoop("no task endpoint configured for provider memory audit")
+            # Pick the first candidate endpoint — audit is a background job.
+            endpoint_url, model, headers = candidates[0]
+            result = await audit_provider_memories(
+                _memory_provider, endpoint_url, model, headers, owner=owner,
+            )
+            if "error" in result:
+                return f"Memory audit failed: {result['error']}", False
+            before = result.get("before", 0)
+            after = result.get("after", 0)
+            removed = before - after
+            if removed == 0:
+                raise TaskNoop(f"provider store already tidy ({after} memories)")
+            return f"Provider memory audit: {before} → {after} ({removed} removed)", True
+
+        # Native path: legacy JSON store.
         import json
         import re
         from src.constants import DATA_DIR

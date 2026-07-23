@@ -146,6 +146,15 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             text = _normalize_question(text)
         if not text:
             raise HTTPException(400, "empty memory")
+
+        # Memory gate: refuse direct-to-curated writes in off/manual modes.
+        from src.memory_gate import write_allowed
+        from routes.prefs_routes import _load_for_user
+        _prefs = _load_for_user(user) or {}
+        _ok, _reason = write_allowed(_prefs)
+        if not _ok:
+            raise HTTPException(403, _reason)
+
         try:
             user_mem = [_provider_record(record) for record in await _all_provider_records(user)]
         except Exception as exc:

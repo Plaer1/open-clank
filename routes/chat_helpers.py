@@ -18,6 +18,7 @@ from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
+from src.memory_gate import capture_allowed
 from src.attachment_refs import attachment_ref
 from src.transcript_layout import build_transcript_layout, normalize_tool_events
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
@@ -1278,9 +1279,7 @@ def run_post_response_tasks(
         # follows on the task endpoint.
         if (
             allow_background_extraction
-            and not incognito
-            and not compare_mode
-            and uprefs.get("auto_memory", True)
+            and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode)
             and (message or full_response)
         ):
             from services.memory.graph_extractor import capture_turn_and_enrich
@@ -1303,7 +1302,7 @@ def run_post_response_tasks(
         # excess LLM calls
         _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
         _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-        if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+        if allow_background_extraction and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode) and _should_extract:
             from services.memory.memory_extractor import extract_and_store
             from src.task_endpoint import resolve_task_endpoint
             t_url, t_model, t_headers = resolve_task_endpoint(

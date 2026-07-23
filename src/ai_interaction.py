@@ -464,6 +464,13 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 text = _normalize_question(text)
             if not text:
                 return {"error": "Memory text cannot be empty"}
+            # Memory gate: refuse direct-to-curated writes in off/manual modes.
+            from src.memory_gate import write_allowed
+            from routes.prefs_routes import _load_for_user
+            prefs = _load_for_user(owner) or {}
+            ok, reason = write_allowed(prefs)
+            if not ok:
+                return {"error": reason}
             try:
                 record = await _memory_provider.remember(
                     text, owner=owner, session_id=session_id,

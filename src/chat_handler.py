@@ -360,6 +360,14 @@ class ChatHandler:
             if incognito:
                 return "Memory is disabled in incognito mode."
 
+            # Memory gate: refuse direct writes in off/manual modes.
+            from src.memory_gate import write_allowed
+            from routes.prefs_routes import _load_for_user
+            _prefs = _load_for_user(owner) or {}
+            _ok, _reason = write_allowed(_prefs)
+            if not _ok:
+                return _reason
+
             provider = self.chat_processor.memory_provider
             try:
                 if provider:
