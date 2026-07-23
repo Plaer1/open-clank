@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed the OpenClank + Copal TreeHouse sample class.
+"""Seed the Open Clank + Copal TreeHouse sample class.
 
 Run: python scripts/seed_treehouse_class.py
 Idempotent: skips if the course already exists.
@@ -38,7 +38,7 @@ def _run(state: dict, cmd: str, payload: dict | None = None, **kw) -> tuple:
 # -- Skill tree ---------------------------------------------------------------
 
 SKILLS = [
-    {"id": "skill:system-basics", "title": "System Basics", "description": "Navigate OpenClank's startup, health, logs, and data directories.", "prerequisiteIds": []},
+    {"id": "skill:system-basics", "title": "System Basics", "description": "Navigate Open Clank's startup, health, logs, and data directories.", "prerequisiteIds": []},
     {"id": "skill:models-auth", "title": "Models & Auth", "description": "Configure LLM providers, manage API keys, and understand capability certification.", "prerequisiteIds": ["skill:system-basics"]},
     {"id": "skill:agent-tools", "title": "Agent & Tools", "description": "Use the Agent loop, MCP servers, built-in tools, permissions, and sub-agents.", "prerequisiteIds": ["skill:models-auth"]},
     {"id": "skill:memory", "title": "Memory & Trust", "description": "Capture, review, promote, and recall memory. Understand trust boundaries.", "prerequisiteIds": ["skill:agent-tools"]},
@@ -50,39 +50,39 @@ SKILLS = [
 # -- Module/lesson content ----------------------------------------------------
 
 COURSE_ID = "course:openclank-copal-101"
-COURSE_TITLE = "OpenClank + Copal: System Mastery"
+COURSE_TITLE = "Open Clank + Copal: System Mastery"
 COURSE_DESC = (
     "A hands-on course teaching you to understand, operate, troubleshoot, and safely extend "
-    "OpenClank and Copal. Every lesson maps to the actual current app — no fabricated claims."
+    "Open Clank and Copal. Every lesson maps to the actual current app — no fabricated claims."
 )
 
 MODULES = [
     {
         "id": "module:orientation",
         "title": "1. System Orientation",
-        "description": "Start here. Understand what OpenClank is, how it starts, and where things live.",
+        "description": "Start here. Understand what Open Clank is, how it starts, and where things live.",
         "activities": [
             {
                 "id": "act:what-is-openclank",
-                "title": "What is OpenClank?",
+                "title": "What is Open Clank?",
                 "activityType": "lesson",
                 "points": 10,
                 "skillIds": ["skill:system-basics"],
                 "content": (
-                    "# What is OpenClank?\n\n"
-                    "OpenClank (also called Odysseus) is a **local-first AI assistant** that runs on your "
+                    "# What is Open Clank?\n\n"
+                    "Open Clank is a **local-first AI assistant** that runs on your "
                     "machine. It wraps multiple LLM providers behind a single interface with persistent memory, "
                     "documents, tools, and a database-native knowledge layer called Copal.\n\n"
                     "## Key principles\n"
                     "- **Local-first**: your data stays on your machine unless you explicitly send it somewhere\n"
-                    "- **Multi-provider**: supports OpenAI, Anthropic, Google, local models, and MiMo\n"
+                    "- **Multi-provider**: supports OpenAI, Anthropic, Google, local models (Ollama), and MiMo\n"
                     "- **Persistent**: memory, documents, sessions, and settings survive restarts\n"
                     "- **Extensible**: MCP servers, skills, tools, and hooks let you customize behavior\n\n"
                     "## What you will learn\n"
                     "This course walks through every major surface of the app: startup, models, agent tools, "
                     "memory, Copal views, security, and a hands-on capstone.\n\n"
                     "---\n\n"
-                    "**Next**: Learn about the data directories and how OpenClank stores state."
+                    "**Next**: Learn about the data directories and how Open Clank stores state."
                 ),
             },
             {
@@ -93,22 +93,22 @@ MODULES = [
                 "skillIds": ["skill:system-basics"],
                 "content": (
                     "# Data Directories & Startup\n\n"
-                    "OpenClank stores everything under your home directory:\n\n"
+                    "Open Clank stores everything under the app's `data/` directory:\n\n"
                     "```\n"
-                    "~/.odysseus/           # Main app data\n"
-                    "  settings.json       # App configuration\n"
-                    "  sessions/           # Chat session transcripts\n"
-                    "  documents/          # User documents (Copal)\n"
-                    "  memory/             # Persistent memory files\n"
-                    "  .copal/             # Copal state (treehouse-state.json, etc.)\n"
-                    "~/.config/openclank/   # User-level config overrides\n"
+                    "data/\n"
+                    "  app.db              # Main SQLite database (sessions, models, tasks)\n"
+                    "  frankenmemory.db    # Frankenmemory store (memory, candidates, graph)\n"
+                    "  auth.json           # User accounts and roles\n"
+                    "  user_prefs.json     # Per-user preferences\n"
+                    "  runtime/            # Agent engine, logs, generated content\n"
+                    "  personal_docs/      # Personal documents (RAG)\n"
                     "```\n\n"
                     "## Startup sequence\n"
-                    "1. `python launcher.py` or `./open.sh`\n"
+                    "1. `systemctl --user start open-clank` (or `python app.py`)\n"
                     "2. Loads settings, validates config\n"
                     "3. Initializes database (SQLite via SQLAlchemy)\n"
-                    "4. Starts FastAPI server on `localhost:PORT`\n"
-                    "5. Opens browser to the UI\n\n"
+                    "4. Connects Frankenmemory provider (fm-mcp over MCP stdio)\n"
+                    "5. Starts FastAPI server on `127.0.0.1:7000`\n\n"
                     "## Health check\n"
                     "Visit `/health` or use the Diagnostics view in the UI to verify all services are running.\n\n"
                     "---\n\n"
@@ -123,7 +123,7 @@ MODULES = [
                 "skillIds": ["skill:system-basics"],
                 "content": (
                     "# Settings & Configuration\n\n"
-                    "OpenClank's settings live in `settings.json` and are managed through the Settings UI.\n\n"
+                    "Open Clank's settings live in `settings.json` and are managed through the Settings UI.\n\n"
                     "## Settings model\n"
                     "- **Global settings**: API keys, provider selection, default model\n"
                     "- **Per-session settings**: persona, context budget, tool permissions\n"
@@ -151,7 +151,7 @@ MODULES = [
                 "content": (
                     "# Logs, Shutdown & Backup\n\n"
                     "## Logs\n"
-                    "OpenClank writes logs to stdout and optionally to a file:\n"
+                    "Open Clank writes logs to stdout and optionally to a file:\n"
                     "- Application logs: request/response cycles, errors, tool calls\n"
                     "- Session logs: per-session transcripts in `~/.odysseus/sessions/`\n"
                     "- Diagnostics view shows live log output\n\n"
@@ -187,7 +187,7 @@ MODULES = [
                 "skillIds": ["skill:models-auth"],
                 "content": (
                     "# Provider Architecture\n\n"
-                    "OpenClank supports multiple LLM providers through a unified dispatch layer:\n\n"
+                    "Open Clank supports multiple LLM providers through a unified dispatch layer:\n\n"
                     "## Supported providers\n"
                     "- **OpenAI**: GPT-4o, GPT-4o-mini, o1, o3\n"
                     "- **Anthropic**: Claude 3.5 Sonnet, Claude 3 Opus\n"
@@ -217,7 +217,7 @@ MODULES = [
                 "skillIds": ["skill:models-auth"],
                 "content": (
                     "# API Key Management\n\n"
-                    "OpenClank stores API keys securely:\n\n"
+                    "Open Clank stores API keys securely:\n\n"
                     "## Storage\n"
                     "- Keys are stored in `settings.json` (encrypted at rest)\n"
                     "- Never logged or exposed in API responses\n"
@@ -252,7 +252,7 @@ MODULES = [
                 "skillIds": ["skill:agent-tools"],
                 "content": (
                     "# The Agent Loop\n\n"
-                    "The Agent is OpenClank's core execution engine:\n\n"
+                    "The Agent is Open Clank's core execution engine:\n\n"
                     "## How it works\n"
                     "1. User sends a message\n"
                     "2. Context is assembled (system prompt + history + tools)\n"
@@ -280,7 +280,7 @@ MODULES = [
                 "skillIds": ["skill:agent-tools"],
                 "content": (
                     "# Built-in Tools\n\n"
-                    "OpenClank ships with a rich set of tools:\n\n"
+                    "Open Clank ships with a rich set of tools:\n\n"
                     "## File tools\n"
                     "- `read`: Read files and directories\n"
                     "- `edit`: Precise string replacements\n"
@@ -312,7 +312,7 @@ MODULES = [
                 "skillIds": ["skill:agent-tools"],
                 "content": (
                     "# MCP Server Integration\n\n"
-                    "MCP (Model Context Protocol) extends OpenClank with external tool and resource providers:\n\n"
+                    "MCP (Model Context Protocol) extends Open Clank with external tool and resource providers:\n\n"
                     "## What is MCP?\n"
                     "A JSON-RPC based protocol that lets external servers provide:\n"
                     "- **Tools**: Functions the agent can call\n"
@@ -374,57 +374,59 @@ MODULES = [
     {
         "id": "module:memory",
         "title": "4. Memory, Trust & Review",
-        "description": "Capture, review, promote, and recall memory. Understand trust boundaries.",
+        "description": "Frankenmemory tiers, off/automatic/manual modes, candidate review, and trust boundaries.",
         "activities": [
             {
                 "id": "act:memory-capture",
-                "title": "Memory Capture",
+                "title": "Memory Architecture",
                 "activityType": "lesson",
                 "points": 15,
                 "skillIds": ["skill:memory"],
                 "content": (
-                    "# Memory Capture\n\n"
-                    "OpenClank has a multi-layer memory system:\n\n"
-                    "## Memory types\n"
-                    "- **Session memory**: Conversation context for the current session\n"
-                    "- **Project memory**: Persistent notes at `~/.claude/projects/<slug>/memory/`\n"
-                    "- **Global memory**: Cross-project preferences at `~/.claude/projects/<slug>/memory/global/`\n\n"
-                    "## Auto-memory protocol\n"
-                    "The system automatically writes memory when:\n"
-                    "- User states a preference or rule\n"
-                    "- A significant decision is made\n"
-                    "- An error and its fix are discovered\n\n"
-                    "## Manual memory\n"
-                    "Use the `memory` tool to search:\n"
-                    "- BM25 ranking over markdown bodies\n"
-                    "- Supports scoped queries (global, project, session)\n"
-                    "- Frontmatter metadata for type filtering\n\n"
+                    "# Memory Architecture\n\n"
+                    "Open Clank uses **Frankenmemory** — a tiered memory engine (fm-mcp, Rust) over MCP stdio.\n\n"
+                    "## Memory tiers\n"
+                    "- **Raw**: every captured turn (evidence trail, not recallable)\n"
+                    "- **Candidates**: extracted facts pending user review\n"
+                    "- **Curated**: approved memories (recallable, injected via digest)\n"
+                    "- **Quarantine**: suspicious or duplicate items (not recallable)\n\n"
+                    "## Per-turn flow\n"
+                    "1. After each chat turn, background capture writes to candidates (pending)\n"
+                    "2. Graph enrichment extracts entities/edges/cues (LLM-assisted, throttled)\n"
+                    "3. User reviews candidates: accept (→ curated) or reject\n"
+                    "4. Digest injection: index card per turn, details via `recall_memory` tool\n\n"
+                    "## Recall\n"
+                    "- The `recall_memory` tool is read-only (chat lane)\n"
+                    "- `manage_memory` tool can add/edit/delete (agent lane)\n"
+                    "- Both respect owner scope and trust firewall\n\n"
                     "---\n\n"
-                    "**Next**: Understand trust and memory review."
+                    "**Next**: Understand memory modes and the policy gate."
                 ),
             },
             {
                 "id": "act:memory-trust",
-                "title": "Trust & Memory Review",
+                "title": "Modes, Trust & Candidate Review",
                 "activityType": "lesson",
                 "points": 15,
                 "skillIds": ["skill:memory"],
                 "content": (
-                    "# Trust & Memory Review\n\n"
-                    "Memory carries claims about past state. Not all claims are equally reliable:\n\n"
-                    "## Trust levels\n"
-                    "- **Checkpoint-derived**: Written by the checkpoint writer subagent — reliable\n"
-                    "- **User-stated**: Rules and preferences the user explicitly set — authoritative\n"
-                    "- **Auto-discovered**: System-detected patterns — useful but verify\n\n"
-                    "## Memory review\n"
-                    "Periodically review memory to:\n"
-                    "- Remove stale entries\n"
-                    "- Promote important learnings\n"
-                    "- Consolidate related entries\n\n"
-                    "## Security considerations\n"
-                    "- Memory files may contain personal context\n"
-                    "- Sub-agents may be exposed to prompt-injected content\n"
-                    "- Filter by type when searching in shared contexts\n\n"
+                    "# Modes, Trust & Candidate Review\n\n"
+                    "## Memory modes (per-user pref: `memory_mode`)\n"
+                    "- **off**: no memory writes at all. Existing memories preserved.\n"
+                    "- **automatic**: capture enters candidates (pending). Manual/tool writes go to curated.\n"
+                    "- **manual**: capture enters candidates as pending and STAYS there until you approve. "
+                    "Direct writes are refused — you must use candidate review.\n\n"
+                    "Mode switching is non-destructive: switching modes never deletes, approves, or discards memories.\n\n"
+                    "## Trust firewall\n"
+                    "At injection, every memory is classified:\n"
+                    "- **Trusted** (hand-authored or pinned): carries force, injected as standing guidance\n"
+                    "- **Untrusted** (auto-captured): wrapped in firewall, never carries instructions\n"
+                    "- Controlled by `memory_trust_auto` master toggle + per-kind switches\n\n"
+                    "## Candidate review\n"
+                    "- View pending: `/api/memory/inspect?tier=candidate&status=pending`\n"
+                    "- Accept: promotes to curated (recallable)\n"
+                    "- Reject: marks rejected (not recallable)\n"
+                    "- Provenance recorded on every review\n\n"
                     "---\n\n"
                     "**Checkpoint**: You understand memory. Move on to Copal Views."
                 ),
@@ -446,18 +448,23 @@ MODULES = [
                     "# Notes & Wiki\n\n"
                     "Copal provides a database-native document system:\n\n"
                     "## Documents\n"
-                    "- Stored in the Copal database (not filesystem)\n"
-                    "- Support markdown content\n"
+                    "- Stored in the Copal database (Redb via stdio bridge)\n"
+                    "- Support markdown content with frontmatter\n"
                     "- Versioned with head hashes\n"
                     "- Full-text searchable\n\n"
                     "## Wiki\n"
-                    "- Interlinked documents\n"
+                    "- `.wiki/` namespace for interlinked docs\n"
                     "- Backlinks and graph connections\n"
-                    "- Import from filesystem or other sources\n\n"
-                    "## Editor\n"
-                    "- In-app markdown editor\n"
-                    "- Tabs and panels for multi-document work\n"
-                    "- Conflict detection on concurrent edits\n\n"
+                    "- Built-in shared/global docs projected per-user\n"
+                    "- Import from Obsidian vaults or filesystem\n\n"
+                    "## Bases\n"
+                    "- Structured data containers with custom fields\n"
+                    "- Query and filter across note frontmatter\n"
+                    "- Owner-scoped (Brain Vault import is e-only)\n\n"
+                    "## Appearance\n"
+                    "- Per-entry visibility controls (show/hide in nav)\n"
+                    "- One registry drives nav + panel\n"
+                    "- Show-all/Reset available in UI\n\n"
                     "---\n\n"
                     "**Next**: Learn about Events and Timeline."
                 ),
@@ -526,7 +533,7 @@ MODULES = [
                 "skillIds": ["skill:security"],
                 "content": (
                     "# Owner Scope & Access Control\n\n"
-                    "OpenClank enforces access boundaries:\n\n"
+                    "Open Clank enforces access boundaries:\n\n"
                     "## Owner scope\n"
                     "- The `owner` profile has admin access to everything\n"
                     "- Other profiles see only what they're authorized for\n"
@@ -557,7 +564,7 @@ MODULES = [
                     "3. **Never** send secrets in chat output\n"
                     "4. Env vars with KEY/TOKEN/SECRET are radioactive\n\n"
                     "## Threat model\n"
-                    "OpenClank's `THREAT_MODEL.md` covers:\n"
+                    "Open Clank's `THREAT_MODEL.md` covers:\n"
                     "- Prompt injection from untrusted content\n"
                     "- Tool result trust boundaries\n"
                     "- MCP server isolation\n"
@@ -587,7 +594,7 @@ MODULES = [
                     "# Capstone: Inspect the App\n\n"
                     "Complete these verification steps:\n\n"
                     "## 1. Startup verification\n"
-                    "- Start OpenClank from a clean configuration\n"
+                    "- Start Open Clank from a clean configuration\n"
                     "- Verify health endpoint returns OK\n"
                     "- Check that all routes are accessible\n\n"
                     "## 2. Provider verification\n"
@@ -637,7 +644,7 @@ MODULES = [
                     "- Export a full backup via the backup route\n"
                     "- Verify the backup contains your documents and settings\n\n"
                     "## 2. Restart\n"
-                    "- Gracefully shut down OpenClank\n"
+                    "- Gracefully shut down Open Clank\n"
                     "- Restart the application\n"
                     "- Verify all state is preserved\n\n"
                     "## 3. Integrity check\n"
@@ -645,7 +652,7 @@ MODULES = [
                     "- Verify event count matches expectations\n"
                     "- Confirm projections are consistent\n\n"
                     "---\n\n"
-                    "**Congratulations**: You have demonstrated end-to-end mastery of OpenClank and Copal!"
+                    "**Congratulations**: You have demonstrated end-to-end mastery of Open Clank and Copal!"
                 ),
             },
         ],
@@ -659,7 +666,7 @@ ASSIGNMENTS = [
         "id": "asgn:system-check",
         "moduleId": "module:orientation",
         "title": "System Health Check",
-        "prompt": "Start OpenClank, visit the Diagnostics view, and describe what you see. List the services that are running and any that are degraded.",
+        "prompt": "Start Open Clank, visit the Diagnostics view, and describe what you see. List the services that are running and any that are degraded.",
         "maxPoints": 50,
         "skillIds": ["skill:system-basics"],
     },
@@ -699,7 +706,7 @@ ASSIGNMENTS = [
         "id": "asgn:security-audit",
         "moduleId": "module:security",
         "title": "Security Self-Audit",
-        "prompt": "Review your OpenClank configuration for security: Are API keys stored safely? Are file permissions correct? Is the owner scope properly set? List three things you verified and one you improved.",
+        "prompt": "Review your Open Clank configuration for security: Are API keys stored safely? Are file permissions correct? Is the owner scope properly set? List three things you verified and one you improved.",
         "maxPoints": 75,
         "skillIds": ["skill:security"],
     },
@@ -707,7 +714,7 @@ ASSIGNMENTS = [
         "id": "asgn:capstone-project",
         "moduleId": "module:capstone",
         "title": "Capstone: Full System Walkthrough",
-        "prompt": "Perform a complete walkthrough: start OpenClank, configure a provider, create a Copal document, build a Base, verify the Timeline, run a backup, restart, and verify integrity. Document each step with what you observed.",
+        "prompt": "Perform a complete walkthrough: start Open Clank, configure a provider, create a Copal document, build a Base, verify the Timeline, run a backup, restart, and verify integrity. Document each step with what you observed.",
         "maxPoints": 200,
         "skillIds": ["skill:capstone"],
     },
@@ -719,7 +726,7 @@ BADGES = [
     {"id": "badge:opener", "title": "Course Opener", "description": "Complete the first module", "criteria": {"type": "course", "courseId": COURSE_ID}},
     {"id": "badge:centurion", "title": "Centurion", "description": "Earn 100+ points", "criteria": {"type": "points", "threshold": 100}},
     {"id": "badge:security-aware", "title": "Security Aware", "description": "Complete the security module", "criteria": {"type": "skill", "skillId": "skill:security", "threshold": 60}},
-    {"id": "badge:master", "title": "OpenClank Master", "description": "Complete all modules and earn 500+ points", "criteria": {"type": "points", "threshold": 500}},
+    {"id": "badge:master", "title": "Open Clank Master", "description": "Complete all modules and earn 500+ points", "criteria": {"type": "points", "threshold": 500}},
 ]
 
 # -- Quests -------------------------------------------------------------------
@@ -731,7 +738,7 @@ QUESTS = [
 
 
 def seed_class(state: dict) -> dict:
-    """Seed the OpenClank + Copal course into a TreeHouse state. Idempotent."""
+    """Seed the Open Clank + Copal course into a TreeHouse state. Idempotent."""
     validate_treehouse_state(state)
 
     # Skip if already seeded
@@ -808,7 +815,7 @@ if __name__ == "__main__":
         state = json.loads(state_path.read_text())
         validate_treehouse_state(state)
     else:
-        state = new_treehouse_state("OpenClank Learner")
+        state = new_treehouse_state("Open Clank Learner")
         state_path.parent.mkdir(parents=True, exist_ok=True)
 
     if COURSE_ID in state["courses"]:
