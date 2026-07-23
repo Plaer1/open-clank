@@ -670,7 +670,7 @@ _DIRECT_PROVIDER_TO_MIMO = {
 # Provider prefix → the model-family label users see. The upstream/operator
 # provider is an admin detail; the family is the product identity.
 _MIMO_FAMILY_NAMES = {
-    "xiaomi": "Open Clank agent",
+    "xiaomi": "MiMo",
     "deepseek": "DeepSeek",
     "openai": "OpenAI",
     "anthropic": "Anthropic",
