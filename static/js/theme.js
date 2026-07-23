@@ -1979,7 +1979,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   frame(performance.now());
 }
 
-function _mountClankerEffect({ id, bodyClass, build, draw, noClear = false }) {
+function _mountClankerEffect({ id, bodyClass, build, draw }) {
   if (document.getElementById(id)) return;
   const canvas = document.createElement('canvas');
   canvas.id = id;
@@ -2013,7 +2013,7 @@ function _mountClankerEffect({ id, bodyClass, build, draw, noClear = false }) {
       canvas.__backgroundScene = scene;
       sceneKey = nextSceneKey;
     }
-    if (!noClear) ctx.clearRect(0, 0, width, height);
+    ctx.clearRect(0, 0, width, height);
     draw(ctx, { width, height, time, reduced, scene, ...config });
     ctx.globalAlpha = 1;
     ctx.setLineDash([]);
@@ -2206,7 +2206,6 @@ function _initClankerKeneWeave() {
   _mountClankerEffect({
     id: 'clanker-kene-weave-canvas',
     bodyClass: 'bg-pattern-clanker-kene-weave',
-    noClear: true,
     build: ({ width, height, size }) => {
       const columns = Math.max(4, Math.ceil(width / (220 * size)));
       const rows = Math.max(4, Math.ceil(height / (220 * size)));
@@ -2315,16 +2314,7 @@ function _initClankerKeneWeave() {
         layerVectors: [{ x: 1, y: 0 }, { x: 0, y: 1 }], mirroredPairs: paths.length / 2,
         junctionOffsetError: junctionNodes.length === junctions.length ? 0 : Infinity };
     },
-    draw: (ctx, { time, scene, intensity, size, colors, outline, width, height }) => {
-      const paintTrail = getBackgroundEffectControlValue('clanker-kene-weave', 'snakePaintTrail', false);
-      if (paintTrail) {
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.fillStyle = 'rgba(0,0,0,0.04)';
-        ctx.fillRect(0, 0, width, height);
-        ctx.globalCompositeOperation = 'source-over';
-      } else {
-        ctx.clearRect(0, 0, width, height);
-      }
+    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       scene.paths.forEach(path => {
