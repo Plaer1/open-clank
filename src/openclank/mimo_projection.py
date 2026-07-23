@@ -51,22 +51,17 @@ class ProjectionSnapshot:
         })
 
 
-def build_projection_snapshot(owner: str, *, inherit_host_providers: bool = False) -> ProjectionSnapshot:
+def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
     """Build the exact effective spawn projection; raw secrets stay in-memory."""
     from src.openclank.mimo_supervisor import (
         ENDPOINT_PROVIDER_PREFIX,
         _endpoint_registry_providers,
-        _load_openclaw_providers,
         _load_stored_auth,
         _pick_small_model,
     )
 
     providers: dict[str, dict] = {}
     credentials: dict[str, str] = {}
-    if inherit_host_providers:
-        config, secret_values = _load_openclaw_providers()
-        providers.update(config.get("provider") or {})
-        credentials.update(secret_values)
     config, secret_values = _endpoint_registry_providers(owner)
     for provider_id, provider in (config.get("provider") or {}).items():
         providers.setdefault(provider_id, provider)

@@ -79,14 +79,6 @@ def _pick_small_model(providers: dict) -> str | None:
     return None
 
 
-_OPENCLAW_PROVIDER_ADAPTERS = {
-    "openai-completions": "@ai-sdk/openai-compatible",
-    "anthropic-messages": "@ai-sdk/anthropic",
-}
-_OPENCLAW_PROVIDER_ENV = {
-    "xiaomi": "XIAOMI_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-}
 # OAuth access JWTs are routinely larger than static API keys (the ChatGPT
 # subscription token is currently ~2.3 KiB). Keep the handoff bounded while
 # allowing a normal HTTP authorization credential through.
@@ -132,111 +124,6 @@ def _mimo_child_environment() -> dict[str, str]:
         if any(marker in env_name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
             env.pop(env_name, None)
     return env
-
-
-def _load_openclaw_providers(path: Path | None = None) -> tuple[dict, dict[str, str]]:
-    """Translate the operator's Xiaomi/DeepSeek config without copying its keys."""
-    if path is None:
-        configured = os.environ.get("OPENCLAW_CONFIG_PATH", "")
-        if not configured:
-            return {}, {}
-        source = Path(configured).expanduser()
-    else:
-        source = path
-    if not source.is_file():
-        return {}, {}
-    try:
-        payload = json.loads(source.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("unable to load OpenClaw model providers from %s: %s", source, exc)
-        return {}, {}
-
-    if not isinstance(payload, dict):
-        return {}, {}
-    source_models = payload.get("models")
-    if not isinstance(source_models, dict):
-        return {}, {}
-    source_providers = source_models.get("providers")
-    if not isinstance(source_providers, dict):
-        return {}, {}
-    providers: dict[str, dict] = {}
-    credentials: dict[str, str] = {}
-    for provider_id, env_name in _OPENCLAW_PROVIDER_ENV.items():
-        provider = source_providers.get(provider_id)
-        if not isinstance(provider, dict):
-            continue
-        base_url = provider.get("baseUrl")
-        adapter = _OPENCLAW_PROVIDER_ADAPTERS.get(provider.get("api"))
-        if not isinstance(base_url, str) or not base_url or adapter is None:
-            logger.warning("OpenClaw provider %s has no supported API configuration", provider_id)
-            continue
-
-        models: dict[str, dict] = {}
-        source_model_list = provider.get("models")
-        if not isinstance(source_model_list, list):
-            continue
-        for model in source_model_list:
-            if not isinstance(model, dict):
-                continue
-            model_id = model.get("id")
-            if not isinstance(model_id, str) or not model_id:
-                continue
-            item: dict = {
-                "id": model_id,
-                "name": model.get("name") or model_id,
-                "provider": {"npm": adapter, "api": base_url},
-            }
-            if isinstance(model.get("reasoning"), bool):
-                item["reasoning"] = model["reasoning"]
-            inputs = model.get("input")
-            if isinstance(inputs, list):
-                inputs = [kind for kind in inputs if kind in {"text", "audio", "image", "video", "pdf"}]
-                if inputs:
-                    item["modalities"] = {"input": inputs, "output": ["text"]}
-                    item["attachment"] = any(kind != "text" for kind in inputs)
-            context = model.get("contextWindow")
-            output = model.get("maxTokens")
-            if isinstance(context, (int, float)) and isinstance(output, (int, float)):
-                item["limit"] = {"context": context, "output": output}
-            cost = model.get("cost")
-            if isinstance(cost, dict):
-                item["cost"] = {
-                    "input": cost.get("input", 0),
-                    "output": cost.get("output", 0),
-                    "cache_read": cost.get("cacheRead", 0),
-                    "cache_write": cost.get("cacheWrite", 0),
-                }
-            models[model_id] = item
-        if not models:
-            continue
-        # Open Clank agent Router ships a built-in routing alias that picks the model per
-        # request ("auto" mode). It's absent from operator configs because it
-        # isn't a real model row; synthesize it so users can turn it on.
-        if provider_id == "xiaomi" and not any("auto" in mid for mid in models):
-            models["mimo-auto"] = {
-                "id": "mimo-auto",
-                "name": "Open Clank Auto",
-                "provider": {"npm": adapter, "api": base_url},
-            }
-
-        options = {"baseURL": base_url}
-        timeout = provider.get("timeoutSeconds")
-        if isinstance(timeout, (int, float)) and timeout > 0:
-            options["timeout"] = int(timeout * 1000)
-        providers[provider_id] = {
-            "name": provider_id.title(),
-            "env": [env_name],
-            "npm": adapter,
-            "api": base_url,
-            "options": options,
-            "models": models,
-            "only_configured_models": True,
-        }
-        api_key = provider.get("apiKey")
-        if isinstance(api_key, str) and 0 < len(api_key) <= _MAX_PROVIDER_KEY_LENGTH:
-            credentials[provider_id] = api_key
-
-    return ({"provider": providers} if providers else {}), credentials
 
 
 ENDPOINT_PROVIDER_PREFIX = "ody-"
@@ -403,7 +290,6 @@ class MimoSupervisor:
         safe_dirs: list[str] | None = None,
         runtime_home: Path | None = None,
         partitioned: bool = False,
-        inherit_host_providers: bool = False,
         grant_store=None,
         projection_snapshot=None,
         projection_generation: int = 0,
@@ -422,7 +308,6 @@ class MimoSupervisor:
         self._grant_store = grant_store
         self._runtime_home = runtime_home
         self._partitioned = partitioned
-        self._inherit_host_providers = inherit_host_providers
         self.projection_snapshot = projection_snapshot
         self.installed_fingerprint = getattr(projection_snapshot, "fingerprint", "")
         self.installed_generation = projection_generation
@@ -514,9 +399,7 @@ class MimoSupervisor:
         snapshot = self.projection_snapshot
         if snapshot is None:
             from src.openclank.mimo_projection import build_projection_snapshot
-            snapshot = build_projection_snapshot(
-                self._owner, inherit_host_providers=self._inherit_host_providers
-            )
+            snapshot = build_projection_snapshot(self._owner)
             self.projection_snapshot = snapshot
             self.installed_fingerprint = snapshot.fingerprint
         merged_providers = dict(snapshot.providers)
@@ -1163,9 +1046,6 @@ class MimoSupervisorPool:
     def _owner_state(self, owner: str) -> _OwnerLifecycle:
         return self._states.setdefault(owner, _OwnerLifecycle())
 
-    def _inherit_host(self, owner: str) -> bool:
-        return not self._auth_enabled or owner == self._host_provider_owner
-
     def _new_worker(self, owner: str, snapshot, generation: int, fence: str) -> MimoSupervisor:
         runtime_home = None
         if self._auth_enabled:
@@ -1176,7 +1056,6 @@ class MimoSupervisorPool:
             safe_dirs=self._safe_dirs,
             runtime_home=runtime_home,
             partitioned=self._auth_enabled,
-            inherit_host_providers=self._inherit_host(owner),
             grant_store=self._grant_store,
             projection_snapshot=snapshot,
             projection_generation=generation,
@@ -1223,9 +1102,7 @@ class MimoSupervisorPool:
             # Coalesce drift until the candidate is built from the newest
             # committed snapshot immediately before publication.
             while True:
-                snapshot = build_projection_snapshot(
-                    owner, inherit_host_providers=self._inherit_host(owner)
-                )
+                snapshot = build_projection_snapshot(owner)
                 desired = reconcile_projection(snapshot, materializing=True)
                 generation = int(desired["generation"])
                 state = self._owner_state(owner)
@@ -1270,9 +1147,7 @@ class MimoSupervisorPool:
                         await old.stop()
                     raise
 
-                current = build_projection_snapshot(
-                    owner, inherit_host_providers=self._inherit_host(owner)
-                )
+                current = build_projection_snapshot(owner)
                 current_state = reconcile_projection(current, materializing=True)
                 if current.fingerprint != snapshot.fingerprint:
                     await candidate.stop()
@@ -1340,7 +1215,7 @@ class MimoSupervisorPool:
         try:
             worker = await self._ensure_worker(key)
         except SupervisorAdmissionError:
-            desired = build_projection_snapshot(key, inherit_host_providers=self._inherit_host(key))
+            desired = build_projection_snapshot(key)
             state = self._owner_state(key)
             old = state.active
             if not (

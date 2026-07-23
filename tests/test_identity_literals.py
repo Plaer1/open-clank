@@ -76,15 +76,16 @@ def test_no_personal_identity_literals_in_first_party_source():
     )
 
 
-def test_supervisor_has_no_provider_config_path_fallback():
-    """OPENCLAW_CONFIG_PATH must be explicit; no guessed personal default."""
+def test_supervisor_has_no_openclaw_config_loader():
+    """The OpenClaw config file loader has been removed — provider injection
+    goes through Odysseus DB endpoints only (provider unification metaplan P1)."""
     source = (REPO / "src/openclank/mimo_supervisor.py").read_text(encoding="utf-8")
-    match = re.search(
-        r"os\.environ\.get\(\s*[\"']OPENCLAW_CONFIG_PATH[\"']\s*,\s*([\"'])(.*?)\1",
-        source,
+    assert "_load_openclaw_providers" not in source, (
+        "OpenClaw config loader should be removed"
     )
-    assert match is not None, "OPENCLAW_CONFIG_PATH lookup missing from supervisor"
-    assert match.group(2) == "", (
-        f"OPENCLAW_CONFIG_PATH must default to empty (explicit configuration "
-        f"only), found fallback {match.group(2)!r}"
+    assert "OPENCLAW_CONFIG_PATH" not in source, (
+        "OPENCLAW_CONFIG_PATH reference should be removed"
+    )
+    assert "inherit_host_providers" not in source, (
+        "inherit_host_providers parameter should be removed"
     )
