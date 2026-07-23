@@ -631,7 +631,11 @@ export function applyBackgroundEffectControls(values) {
 }
 
 registerBackgroundEffectControls('clanker-kene-weave', [
-  { key: 'snakeCount', label: 'Number of snakes', min: 1, max: 18, step: 1, default: 7 },
+  { key: 'snakeCount', label: 'Number of snakes', min: 1, max: 64, step: 1, default: 7 },
+  { key: 'snakeSpeed', label: 'Snake speed', min: 25, max: 500, step: 5, default: 100, unit: '%' },
+  { key: 'snakeSpeedVariationToggle', label: 'Vary speed per snake', type: 'toggle', default: false },
+  { key: 'snakeSpeedVariation', label: 'Speed variation amount', min: 0, max: 100, step: 5, default: 30, unit: '%', showWhen: { key: 'snakeSpeedVariationToggle', value: true } },
+  { key: 'snakePaintTrail', label: 'Paint trail on grid', type: 'toggle', default: false },
   { key: 'snakeLengthVariation', label: 'Snake length variation', min: 0, max: 100, step: 5, default: 0, unit: '%' },
   { key: 'snakeLifetimeVariation', label: 'Snake lifetime variation', min: 0, max: 100, step: 5, default: 0, unit: '%' },
   { key: 'shorterLastLonger', label: 'Shorter snakes last longer', type: 'toggle', default: false },
@@ -641,7 +645,7 @@ registerBackgroundEffectControls('clanker-kene-weave', [
 ]);
 
 const _CLANKER_DRIFT_CONTROLS = [
-  { key: 'driftSpeed', label: 'Drift speed', min: 25, max: 250, step: 5, default: 100, unit: '%' },
+  { key: 'driftSpeed', label: 'Drift speed', min: 25, max: 500, step: 5, default: 100, unit: '%' },
   { key: 'gemSizeVariation', label: 'Size variation', min: 0, max: 999, step: 1, default: 100, unit: '%' },
   { key: 'intensityVariation', label: 'Intensity variation', min: 0, max: 999, step: 1, default: 100, unit: '%' },
   { key: 'middleIntensity', label: 'Middle intensity', min: 0, max: 200, step: 1, default: 100, unit: '%' },
@@ -827,9 +831,8 @@ function _syncThemeControls(name, colors, opts) {
   }
   const font = document.getElementById('theme-font-select');
   if (font) {
-    const locked = !!THEME_DEFAULT_FONT[name];
-    font.disabled = locked;
-    font.title = locked ? 'Clanker themes bundle and lock Liga Comic Mono' : '';
+    font.disabled = false;
+    font.title = '';
   }
   const frosted = document.getElementById('theme-frosted-toggle');
   if (frosted) frosted.checked = opts.frosted;
@@ -1976,7 +1979,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   frame(performance.now());
 }
 
-function _mountClankerEffect({ id, bodyClass, build, draw }) {
+function _mountClankerEffect({ id, bodyClass, build, draw, noClear = false }) {
   if (document.getElementById(id)) return;
   const canvas = document.createElement('canvas');
   canvas.id = id;
@@ -2010,7 +2013,7 @@ function _mountClankerEffect({ id, bodyClass, build, draw }) {
       canvas.__backgroundScene = scene;
       sceneKey = nextSceneKey;
     }
-    ctx.clearRect(0, 0, width, height);
+    if (!noClear) ctx.clearRect(0, 0, width, height);
     draw(ctx, { width, height, time, reduced, scene, ...config });
     ctx.globalAlpha = 1;
     ctx.setLineDash([]);
@@ -2177,9 +2180,12 @@ function _initClankerRoutefield() {
 // (16000ms baseDuration / 7 ≈ 2286ms), rounded; clamped to half the cycle so a
 // pathologically short lifetime still reaches full visibility before fading.
 const SNAKE_FADE_OUT_MS = 2200;
+const SNAKE_FADE_IN_MS = 2200;
 function snakeFadeAlpha(progress, duration, fadeOutMs = SNAKE_FADE_OUT_MS) {
-  const fadeIn = progress * 7; // phase-relative fade-in (unchanged semantics)
-  const cap = Math.min(fadeOutMs, duration * 0.5); // safe clamp for very short lifetimes
+  const fadeInMs = Math.min(SNAKE_FADE_IN_MS, duration * 0.5);
+  const elapsedMs = progress * duration;
+  const fadeIn = elapsedMs < fadeInMs ? Math.max(0, elapsedMs / fadeInMs) : 1;
+  const cap = Math.min(fadeOutMs, duration * 0.5);
   const remainingMs = (1 - progress) * duration;
   const fadeOut = remainingMs < cap ? Math.max(0, remainingMs / cap) : 1;
   return Math.min(1, fadeIn, fadeOut);
@@ -2200,6 +2206,7 @@ function _initClankerKeneWeave() {
   _mountClankerEffect({
     id: 'clanker-kene-weave-canvas',
     bodyClass: 'bg-pattern-clanker-kene-weave',
+    noClear: true,
     build: ({ width, height, size }) => {
       const columns = Math.max(4, Math.ceil(width / (220 * size)));
       const rows = Math.max(4, Math.ceil(height / (220 * size)));
@@ -2244,6 +2251,30 @@ function _initClankerKeneWeave() {
         }
       }
 
+      // Offset duplicate: same grid shifted right half a column, down half a row
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const color = (row * 2 + column + 3) % 6;
+          addMotif(points => place(points, column + .5, row + .5), color, 0, `h2:${row}:${column}`);
+        }
+      }
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column <= columns; column += 1) {
+          const junction = {
+            x: (column + .5) * tileWidth,
+            y: (row + 1) * tileHeight,
+            color: (row * 2 + column + 3) % 6,
+          };
+          junctions.push(junction);
+          addMotif(
+            points => placeRotated(points, junction.x, junction.y),
+            (junction.color + 3) % 6,
+            1,
+            `v2:${row}:${column}`,
+          );
+        }
+      }
+
       const graph = new Map();
       const pointKey = point => `${point.x.toFixed(3)}:${point.y.toFixed(3)}`;
       const graphPoint = point => {
@@ -2284,7 +2315,16 @@ function _initClankerKeneWeave() {
         layerVectors: [{ x: 1, y: 0 }, { x: 0, y: 1 }], mirroredPairs: paths.length / 2,
         junctionOffsetError: junctionNodes.length === junctions.length ? 0 : Infinity };
     },
-    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+    draw: (ctx, { time, scene, intensity, size, colors, outline, width, height }) => {
+      const paintTrail = getBackgroundEffectControlValue('clanker-kene-weave', 'snakePaintTrail', false);
+      if (paintTrail) {
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.fillStyle = 'rgba(0,0,0,0.04)';
+        ctx.fillRect(0, 0, width, height);
+        ctx.globalCompositeOperation = 'source-over';
+      } else {
+        ctx.clearRect(0, 0, width, height);
+      }
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       scene.paths.forEach(path => {
@@ -2316,23 +2356,30 @@ function _initClankerKeneWeave() {
       });
 
       const snakeCount = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeCount', 7);
+      const snakeSpeedPct = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeed', 100) / 100;
+      const speedVariationOn = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeedVariationToggle', false);
+      const speedVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeedVariation', 30) / 100;
       const lengthVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLengthVariation', 0) / 100;
       const lifetimeVariation = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeLifetimeVariation', 0) / 100;
       const shorterLastLonger = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLastLonger', false);
       const shorterLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'shorterLifetimeScale', 100) / 100;
       const longerDisappearSooner = getBackgroundEffectControlValue('clanker-kene-weave', 'longerDisappearSooner', false);
       const longerLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'longerLifetimeScale', 100) / 100;
+      const baseTraverse = 16000 / snakeSpeedPct;
       for (let signalIndex = 0; signalIndex < snakeCount; signalIndex += 1) {
-        const baseDuration = 16000 + signalIndex * 2300;
-        const basePhase = time / baseDuration + signalIndex * .31;
+        const basePhase = time / baseTraverse + signalIndex * .31;
         const cycle = Math.floor(basePhase);
         const random = scene.snakeSeed + signalIndex * 131 + cycle * 47;
         const tailSteps = Math.max(8, Math.round(64 * (1 + (_clankerNoise(random + 43) * 2 - 1) * lengthVariation * .6)));
         const lengthRatio = tailSteps / 64;
-        let duration = baseDuration * (1 + (_clankerNoise(random + 61) * 2 - 1) * lifetimeVariation * .45);
+        let traverseTime = baseTraverse;
+        if (speedVariationOn) {
+          traverseTime *= 1 + (_clankerNoise(random + 71) * 2 - 1) * speedVariation * .45;
+        }
+        let duration = traverseTime * (1 + (_clankerNoise(random + 61) * 2 - 1) * lifetimeVariation * .45);
         if (shorterLastLonger && lengthRatio < 1) duration *= 1 + (1 - lengthRatio) * shorterLifetimeScale;
         if (longerDisappearSooner && lengthRatio > 1) duration *= Math.max(.2, 1 - (lengthRatio - 1) * longerLifetimeScale);
-        const phase = time / duration + signalIndex * .31;
+        const phase = time / traverseTime + signalIndex * .31;
         const progress = phase - Math.floor(phase);
         const route = scene.snakePoints[Math.floor(_clankerNoise(random) * scene.snakePoints.length)];
         const reverse = _clankerNoise(random + 17) > .5;
@@ -2526,8 +2573,8 @@ function _clankerDriftControls(pattern) {
 }
 
 function _clankerDriftState(shard, index, time, size, controls) {
-  const driftX = Math.sin(time * controls.driftSpeed / (5900 + index % 7 * 340) + shard.phase) * shard.drift;
-  const driftY = Math.cos(time * controls.driftSpeed / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72;
+  const driftX = Math.sin(time * controls.driftSpeed / (5900 + index % 7 * 340) + shard.phase) * shard.drift * controls.driftSpeed;
+  const driftY = Math.cos(time * controls.driftSpeed / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72 * controls.driftSpeed;
   return {
     x: shard.x + driftX,
     y: shard.y + driftY,

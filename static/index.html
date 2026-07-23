@@ -212,8 +212,15 @@
   })();
   </script>
   <script defer src="/static/lib/highlight.min.js"></script>
-  <!-- Inter font — self-hosted, no Google dependencies -->
+  <!-- Self-hosted fonts — inlined so mobile clients fetch immediately -->
   <style>
+    @font-face { font-family: 'Fira Code'; font-weight: 300; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Light.woff2') format('woff2'); }
+    @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
+    @font-face { font-family: 'Liga Comic Mono'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/LigaComicMono-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'Fredoka'; font-weight: 300 700; font-style: normal; font-display: swap; src: url('/static/fonts/Fredoka-Variable.woff2') format('woff2'); }
+    @font-face { font-family: 'OpenDyslexic'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Regular.woff2') format('woff2'); }
+    @font-face { font-family: 'OpenDyslexic'; font-weight: 700; font-style: normal; font-display: swap; src: url('/static/fonts/OpenDyslexic-Bold.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-Regular.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-Medium.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-SemiBold.woff2') format('woff2'); }
@@ -235,7 +242,7 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260721clankerdeck2">
+  <link rel="stylesheet" href="/static/style.css?v=20260723gui1">
   <link rel="modulepreload" href="/static/app.js?v=20260630mdfontsize">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260719errsurface">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -2698,7 +2705,7 @@
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/compare/index.js"></script>
-<script type="module" src="/static/js/theme.js"></script>
+<script type="module" src="/static/js/theme.js?v=20260723gui1"></script>
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js"></script>
 <script type="module" src="/static/js/admin.js"></script>
