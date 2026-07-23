@@ -14,7 +14,8 @@ It also made the Clanker theme—and, buried under that, the system that generat
 ## We did it!!
 
 <p align="center">
-  <img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/2ba35e8f-fb70-4f62-87c0-e2a53154f32a" />
+<img width="3839" height="2004" alt="image" src="https://github.com/user-attachments/assets/4a423519-25d0-4057-a09c-998b05d91778" />
+
 </p>
 
 <p align="center">
