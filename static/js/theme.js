@@ -2170,6 +2170,22 @@ function _initClankerRoutefield() {
   });
 }
 
+// Fixed real-time fade-out for Signal Weave snakes: every snake fades out over
+// the same wall-clock interval regardless of its per-snake lifetime/duration
+// (which the lifetime/length controls still freely adjust). Fade-in stays
+// phase-relative — unchanged. Derived from the default visual baseline
+// (16000ms baseDuration / 7 ≈ 2286ms), rounded; clamped to half the cycle so a
+// pathologically short lifetime still reaches full visibility before fading.
+const SNAKE_FADE_OUT_MS = 2200;
+function snakeFadeAlpha(progress, duration, fadeOutMs = SNAKE_FADE_OUT_MS) {
+  const fadeIn = progress * 7; // phase-relative fade-in (unchanged semantics)
+  const cap = Math.min(fadeOutMs, duration * 0.5); // safe clamp for very short lifetimes
+  const remainingMs = (1 - progress) * duration;
+  const fadeOut = remainingMs < cap ? Math.max(0, remainingMs / cap) : 1;
+  return Math.min(1, fadeIn, fadeOut);
+}
+if (typeof window !== 'undefined') window.snakeFadeAlpha = snakeFadeAlpha; // test seam
+
 // Original signal weave informed by the interconnected symmetry and pathway
 // quality of Shipibo-Konibo kene. It deliberately avoids reproducing a
 // traditional motif or claiming cultural meaning.
@@ -2321,7 +2337,7 @@ function _initClankerKeneWeave() {
         const route = scene.snakePoints[Math.floor(_clankerNoise(random) * scene.snakePoints.length)];
         const reverse = _clankerNoise(random + 17) > .5;
         const headProgress = reverse ? 1 - progress : progress;
-        const fade = Math.min(1, progress * 7, (1 - progress) * 7);
+        const fade = snakeFadeAlpha(progress, duration);
         const tail = [];
         for (let step = tailSteps; step >= 0; step -= 1) {
           const pointProgress = headProgress + (reverse ? step : -step) * .0024;
