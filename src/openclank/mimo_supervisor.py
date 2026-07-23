@@ -128,6 +128,26 @@ def _mimo_child_environment() -> dict[str, str]:
 
 ENDPOINT_PROVIDER_PREFIX = "ody-"
 
+# When an Odysseus endpoint covers a MiMo built-in provider (same API host),
+# inject it under MiMo's own provider ID so MiMo routes to it correctly.
+# Without this, MiMo uses its built-in (no key) instead of the Odysseus
+# endpoint (with key).
+_HOSTNAME_TO_MIMO_PROVIDER = {
+    "api.xiaomimimo.com": "xiaomi",
+    "token-plan-sgp.xiaomimimo.com": "xiaomi",
+    "api.deepseek.com": "deepseek",
+}
+
+
+def _mimo_provider_id_for_url(base_url: str) -> str | None:
+    """Return the MiMo built-in provider ID if this URL covers one."""
+    try:
+        from urllib.parse import urlparse
+        hostname = urlparse(base_url).hostname or ""
+        return _HOSTNAME_TO_MIMO_PROVIDER.get(hostname)
+    except Exception:
+        return None
+
 
 def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]:
     """Project Open Clank's ModelEndpoint registry into mimo providers.
@@ -179,7 +199,7 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
             model_ids = _endpoint_enabled_models(ep)
             if not model_ids:
                 continue
-            provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
+            provider_id = _mimo_provider_id_for_url(base) or f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
             is_chatgpt_subscription = is_chatgpt_subscription_base(base)
             adapter = (
                 "@ai-sdk/openai"
