@@ -100,7 +100,7 @@ Return to [[OpenClank/Start Here]].
 
 Copal is Open Clank's notes workspace. A note keeps the same ID and remembers its edits, links, properties, trash, and recovery. If an old browser tab tries to overwrite newer work, Copal refuses the stale save.
 
-Timeline uses the same owner-scoped Copal records as Notes. Canonical event files live under `.events/`; that folder is hidden in the normal file view unless you ask to show dot-folders. Wiki records use `.wik/` and follow the same default.
+Timeline uses the same owner-scoped Copal records as Notes. Canonical event files live under `.events/`; that folder is hidden in the normal file view unless you ask to show dot-folders. Wiki records use `.wiki/` and follow the same default.
 
 Obsidian-style ZIP import and export are account-scoped. Compatibility files and attachments are kept as data; importing them does not run scripts or install plugins.
 
@@ -137,7 +137,7 @@ struct WikiSeed {
 
 const WIKI_SEEDS: &[WikiSeed] = &[
     WikiSeed {
-        name: ".wik/What Is Wiki",
+        name: ".wiki/What Is Wiki",
         body: r##"# What Is Wiki
 Wiki is a separate knowledge store inside Copal, dedicated to meme-style pages. It lives in its own database file (`copal-wiki.redb`) and is fully isolated from Notes.
 
@@ -153,7 +153,7 @@ Create a new meme with the "+ Meme" button in the Wiki sidebar. Give it a name a
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wik/Creating and Linking Memes",
+        name: ".wiki/Creating and Linking Memes",
         body: r##"# Creating and Linking Memes
 ## Creating a meme
 Click "+ Meme" in the Wiki sidebar. Enter a name. The new meme opens in edit mode — start writing.
@@ -171,7 +171,7 @@ You can link from a Wiki meme to a Notes document and vice versa. The link shows
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wik/Story Navigation",
+        name: ".wiki/Story Navigation",
         body: r##"# Story Navigation
 Wiki uses a "story" model — multiple memes can be open side by side.
 
@@ -190,7 +190,7 @@ Click × to remove a meme from the story (unless it's pinned).
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wik/Fields and Properties",
+        name: ".wiki/Fields and Properties",
         body: r##"# Fields and Properties
 Every Wiki meme can have properties (also called fields). These appear as a compact footer strip below the meme content.
 
@@ -208,7 +208,7 @@ When editing a meme, you can add or modify properties. Properties are stored as 
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wik/Wiki vs Notes",
+        name: ".wiki/Wiki vs Notes",
         body: r##"# Wiki vs Notes
 Copal has two knowledge stores: **Notes** and **Wiki**. Here's when to use each.
 
@@ -230,6 +230,32 @@ Notes and Wiki are separate stores but you can link between them. A Wiki meme ca
 
 #wiki #howto #seed"##,
     },
+    WikiSeed {
+        name: ".wiki/How Wiki Works",
+        body: r##"# How Wiki Works
+Wiki is Copal's meme garden: small, interlinked pages in its own store (`copal-wiki.redb`), separate from Notes. Its home is the hidden `.wiki/` folder — invisible in the normal file tree, visible through Wiki mode.
+
+## The loop
+- **Create:** "+ Meme" in the Wiki sidebar → name → write.
+- **Link:** `[[Page Name]]` anywhere. Existing target = clickable; missing = greyed "broken" link you can click to create.
+- **Backlinks:** opening a page lists every other page that links to it.
+- **Tags / search:** `#tag` organizes; the sidebar search covers titles, bodies, tags.
+- **Edit / save:** Edit toggle, type, Save. A stale tab that overwrites newer work is refused — reopen and merge.
+- **Recover:** deleted pages live in Wiki trash; restore from there.
+
+See a complete working example at [[Meme-sized Tiddler]].
+
+#wiki #howto #guide"##,
+    },
+    WikiSeed {
+        name: ".wiki/Meme-sized Tiddler",
+        body: r##"# Meme-sized Tiddler
+One idea per page: this whole meme is the example.
+
+It links back to [[How Wiki Works]] (which links here — open it to see the backlink).
+
+#wiki #example #meme"##,
+    },
 ];
 
 struct LegacyWikiSeed {
@@ -243,27 +269,27 @@ struct LegacyWikiSeed {
 const LEGACY_WIKI_SEEDS: &[LegacyWikiSeed] = &[
     LegacyWikiSeed {
         name: "Wiki/Creating and Linking Tiddlers",
-        target: ".wik/Creating and Linking Memes",
+        target: ".wiki/Creating and Linking Memes",
         blob: "032b23b359978236a0f75228a9e3c30df6fce1f5012f3b7f9f685bb81841bc6a",
     },
     LegacyWikiSeed {
         name: "Wiki/Fields and Properties",
-        target: ".wik/Fields and Properties",
+        target: ".wiki/Fields and Properties",
         blob: "79a26b736bbc6fc613e9e350202c123baed1c028206451a14ed20d1fbdfd1bc0",
     },
     LegacyWikiSeed {
         name: "Wiki/Story Navigation",
-        target: ".wik/Story Navigation",
+        target: ".wiki/Story Navigation",
         blob: "eb4d7413bd0afd5e4f7f6b9f1414400eec909134f4565157ede23e685adda6a8",
     },
     LegacyWikiSeed {
         name: "Wiki/What Is Wiki",
-        target: ".wik/What Is Wiki",
+        target: ".wiki/What Is Wiki",
         blob: "93d36071f83856a09881a35d18b3bfb0031075a3ee2263ba2c9fb91ab7164481",
     },
     LegacyWikiSeed {
         name: "Wiki/Wiki vs Notes",
-        target: ".wik/Wiki vs Notes",
+        target: ".wiki/Wiki vs Notes",
         blob: "b3ada6681af29a23d943f63421da091157ccae20d6dadea3e677cf631813b91d",
     },
 ];
@@ -325,11 +351,21 @@ fn hidden_namespace_target(doc: &DocView) -> Option<String> {
         return legacy_event_tail(&doc.name).map(|tail| format!(".events/{tail}"));
     }
     if doc.kind == "wiki" {
+        // One-time namespace repair: the wiki home was briefly shipped as `.wik/`.
+        // Fold any surviving `.wik/` page into the canonical `.wiki/` home so the
+        // seeded builtins rename in place instead of orphaning duplicates.
+        if let Some(tail) = doc
+            .name
+            .strip_prefix(".wik/")
+            .filter(|tail| !tail.is_empty())
+        {
+            return Some(format!(".wiki/{tail}"));
+        }
         return doc
             .name
             .strip_prefix("Wiki/")
             .filter(|tail| !tail.is_empty())
-            .map(|tail| format!(".wik/{tail}"));
+            .map(|tail| format!(".wiki/{tail}"));
     }
     None
 }
@@ -358,6 +394,24 @@ fn migrate_hidden_namespaces(db: &Db) -> Result<usize, String> {
         }) {
             return Err(format!(
                 "cannot migrate {} to {target}: target already exists in this scope",
+                doc.name
+            ));
+        }
+    }
+
+    // Two legacy sources (e.g. `Wiki/Foo` and `.wik/Foo`) must not collapse into
+    // one canonical name. Refuse before any rename so the operator can reconcile.
+    let mut seen_targets = std::collections::HashSet::new();
+    for (doc, target) in &moves {
+        let key = (
+            doc.owner.as_str(),
+            doc.workspace_id.as_str(),
+            doc.corpus.as_str(),
+            target.as_str(),
+        );
+        if !seen_targets.insert(key) {
+            return Err(format!(
+                "cannot migrate {}: multiple sources collapse to {target}",
                 doc.name
             ));
         }
@@ -1408,6 +1462,9 @@ mod tests {
         let wiki = db
             .create_doc_scoped("alice", "home", "wiki", "Wiki/Launch", "# Launch", None)
             .unwrap();
+        let legacy_wik = db
+            .create_doc_scoped("alice", "home", "wiki", ".wik/Legacy", "# Legacy", None)
+            .unwrap();
         db.create_doc_scoped(
             "bob",
             "home",
@@ -1418,16 +1475,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 3);
+        assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 4);
         assert_eq!(migrate_hidden_namespaces(&db).unwrap(), 0);
 
         let migrated_event = db.get_doc(&event.id).unwrap().unwrap();
         let migrated_markdown_event = db.get_doc(&markdown_event.id).unwrap().unwrap();
         let migrated_wiki = db.get_doc(&wiki.id).unwrap().unwrap();
+        let migrated_legacy_wik = db.get_doc(&legacy_wik.id).unwrap().unwrap();
         assert_eq!(migrated_event.name, ".events/Launch.md");
         assert_eq!(migrated_markdown_event.name, ".events/Imported.md");
         assert_eq!(migrated_markdown_event.kind, "markdown");
-        assert_eq!(migrated_wiki.name, ".wik/Launch");
+        assert_eq!(migrated_wiki.name, ".wiki/Launch");
+        assert_eq!(migrated_legacy_wik.name, ".wiki/Legacy");
         assert_ne!(migrated_event.head, event.head);
         assert_ne!(migrated_wiki.head, wiki.head);
         assert_eq!(
@@ -1454,7 +1513,7 @@ mod tests {
         };
         assert_eq!(
             hidden_namespace_target(&wiki).as_deref(),
-            Some(".wik/Creating and Linking Memes")
+            Some(".wiki/Creating and Linking Memes")
         );
 
         wiki.content = Content::Blob {
@@ -1462,7 +1521,7 @@ mod tests {
         };
         assert_eq!(
             hidden_namespace_target(&wiki).as_deref(),
-            Some(".wik/Creating and Linking Tiddlers")
+            Some(".wiki/Creating and Linking Tiddlers")
         );
     }
 
@@ -1474,7 +1533,7 @@ mod tests {
         let legacy = db
             .create_doc_scoped("alice", "home", "wiki", "Wiki/Same", "old", None)
             .unwrap();
-        db.create_doc_scoped("alice", "home", "wiki", ".wik/Same", "new", None)
+        db.create_doc_scoped("alice", "home", "wiki", ".wiki/Same", "new", None)
             .unwrap();
 
         assert!(migrate_hidden_namespaces(&db)
