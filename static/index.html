@@ -2430,7 +2430,7 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Clear offline <span id="adm-epOfflineCount" style="opacity:0.6;margin-left:2px;"></span>
               </button>
             </h2>
-            <div class="admin-toggle-sub" style="margin-bottom:12px">Endpoints you've connected. Probe re-tests them all; Clear offline removes the dead ones.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:12px">All providers in one place. Direct endpoints you've added plus cloud providers available through Open Clank agent.</div>
             <div class="adm-ep-section">
               <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
@@ -2443,20 +2443,20 @@
               </div>
               <div id="adm-epList-api"><div class="admin-empty">No API endpoints yet.</div></div>
             </div>
-          </div>
-          <div id="mimo-providers-section" class="admin-only">
-            <div class="admin-card" style="margin-top:12px">
-              <h2>Connect a provider</h2>
-              <div class="admin-toggle-sub" style="margin-bottom:10px">Sign in or add an API key for built-in providers. A connection never duplicates an endpoint you've added above — direct endpoints always win.</div>
-              <div class="settings-row">
-                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search providers…" autocomplete="off">
-                <button id="mimo-provider-refresh" type="button" class="btn secondary">Refresh</button>
+            <div class="adm-ep-section" style="margin-top:18px;">
+              <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Cloud providers
+                <span style="flex:1"></span>
+                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search…" autocomplete="off" style="font-size:11px;padding:2px 6px;width:120px;">
+                <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
               </div>
-              <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+              <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
+              <div id="mimo-provider-flow"></div>
+              <div id="mimo-provider-list"></div>
             </div>
-            <div id="mimo-provider-flow"></div>
-            <div id="mimo-provider-list"></div>
-            <div class="admin-card" style="margin-top:12px">
+          </div>
+          <div id="mimo-providers-section" class="admin-only" style="display:none">
+            <div id="mimo-permission-grants-section" class="admin-card" style="margin-top:12px">
               <h2>Persistent permissions</h2>
               <div class="admin-toggle-sub">Owner/session/workspace-scoped agent grants. One-time approvals are never stored.</div>
               <div id="mimo-permission-grants-status" role="status" aria-live="polite"></div>

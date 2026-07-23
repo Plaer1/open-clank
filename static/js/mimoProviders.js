@@ -17,7 +17,7 @@ function node(tag, attrs = {}, text = '') {
 }
 
 function setStatus(message, error = false) {
-  const status = root?.querySelector('#mimo-provider-status');
+  const status = document.getElementById('mimo-provider-status');
   if (!status) return;
   status.textContent = message || '';
   status.style.color = error ? 'var(--red, #ff5555)' : '';
@@ -43,13 +43,13 @@ async function changed(message) {
 function closeFlow() {
   if (activeAbort) activeAbort.abort();
   activeAbort = undefined;
-  const flow = root?.querySelector('#mimo-provider-flow');
+  const flow = document.getElementById('mimo-provider-flow');
   if (flow) flow.replaceChildren();
 }
 
 function flowShell(provider, title) {
   closeFlow();
-  const flow = root.querySelector('#mimo-provider-flow');
+  const flow = document.getElementById('mimo-provider-flow');
   const card = node('div', { class: 'admin-card' });
   const heading = node('h2', {}, `${provider.name} — ${title}`);
   const body = node('div', { class: 'settings-col' });
@@ -199,8 +199,8 @@ async function disconnect(provider, button) {
 }
 
 function render() {
-  const list = root.querySelector('#mimo-provider-list');
-  const query = (root.querySelector('#mimo-provider-search')?.value || '').trim().toLowerCase();
+  const list = document.getElementById('mimo-provider-list');
+  const query = (document.getElementById('mimo-provider-search')?.value || '').trim().toLowerCase();
   list.replaceChildren();
   providers.filter(provider => !query || `${provider.name} ${provider.id}`.toLowerCase().includes(query)).forEach(provider => {
     const card = node('div', { class: 'admin-card' });
@@ -250,12 +250,12 @@ export async function load() {
 }
 
 export function init(options = {}) {
-  root = document.getElementById('mimo-providers-section');
-  if (!root || root.dataset.bound === '1') return;
-  root.dataset.bound = '1';
+  root = document.getElementById('mimo-providers-section') || document.body;
+  if (_bound) return;
+  _bound = true;
   onCatalogChanged = options.onCatalogChanged || onCatalogChanged;
-  root.querySelector('#mimo-provider-refresh')?.addEventListener('click', load);
-  root.querySelector('#mimo-provider-search')?.addEventListener('input', render);
+  document.getElementById('mimo-provider-refresh')?.addEventListener('click', load);
+  document.getElementById('mimo-provider-search')?.addEventListener('input', render);
 }
 
 export default { init, load };
