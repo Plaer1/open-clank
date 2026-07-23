@@ -14,7 +14,7 @@ It also made the Clanker theme—and, buried under that, the system that generat
 ## We did it!!
 
 <p align="center">
-<img width="3839" height="2004" alt="image" src="https://github.com/user-attachments/assets/4a423519-25d0-4057-a09c-998b05d91778" />
+<img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/8ffa8e21-afa4-4bb8-883d-06a17a8ac9c4" />
 
 </p>
 
@@ -30,7 +30,7 @@ It also made the Clanker theme—and, buried under that, the system that generat
 </p>
 
 <p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Open Clank interface">
+<img width="3839" height="2004" alt="image" src="https://github.com/user-attachments/assets/4a423519-25d0-4057-a09c-998b05d91778" />
 </p>
 
 ---
