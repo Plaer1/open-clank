@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qs, urlencode
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -245,8 +245,29 @@ def setup_mimo_provider_routes() -> APIRouter:
         )
         if not isinstance(result, dict) or result.get("method") not in {"auto", "code"}:
             raise HTTPException(502, "Open Clank agent returned an invalid authorization response")
+        oauth_url = _bounded(result.get("url"), 8_192)
+        # Rewrite the redirect_uri in the OAuth URL so callbacks route through
+        # Odysseus's public URL instead of MiMo's internal port. This enables
+        # remote access (phone, different network).
+        if oauth_url:
+            try:
+                scheme, netloc, path, query, fragment = urlsplit(oauth_url)
+                params = parse_qs(query, keep_blank_values=True)
+                if "redirect_uri" in params:
+                    # Build Odysseus's callback URL from the incoming request
+                    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+                    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.hostname))
+                    if request.url.port and ":" not in str(host):
+                        host = f"{host}:{request.url.port}"
+                    callback_path = f"/api/mimo/providers/{provider_id}/oauth/callback"
+                    odysseus_callback = f"{proto}://{host}{callback_path}"
+                    params["redirect_uri"] = [odysseus_callback]
+                    query = urlencode(params, doseq=True)
+                    oauth_url = urlunsplit((scheme, netloc, path, query, fragment))
+            except Exception:
+                pass  # If rewriting fails, return the original URL
         return {
-            "url": _bounded(result.get("url"), 8_192),
+            "url": oauth_url,
             "method": result["method"],
             "instructions": _bounded(result.get("instructions"), 4_096),
         }
