@@ -1,6 +1,7 @@
 // Native MiMo provider authentication, surfaced inside Odysseus Settings.
 
 let root;
+let _bound = false;
 let providers = [];
 let activeAbort;
 let onCatalogChanged = async () => {};
