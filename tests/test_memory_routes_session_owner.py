@@ -251,6 +251,70 @@ def test_add_memory_rejects_other_users_session(monkeypatch):
     assert provider.remember_calls == []
 
 
+def test_add_memory_stages_candidate_in_review_first_mode(monkeypatch):
+    import routes.prefs_routes as prefs_mod
+
+    _allow_memory_management(monkeypatch)
+    monkeypatch.setattr(
+        prefs_mod,
+        "_load_for_user",
+        lambda _owner: {"memory_mode": "manual"},
+    )
+    memory_manager = MagicMock()
+    memory_manager.find_duplicates.return_value = []
+    provider = _StubProvider()
+    router = mr.setup_memory_routes(
+        memory_manager=memory_manager,
+        session_manager=MagicMock(),
+        memory_provider=provider,
+    )
+    add_memory = _route(router, "/api/memory/add", "POST")
+
+    out = asyncio.run(
+        add_memory(
+            request=_request("alice"),
+            memory_data=MemoryAddRequest(
+                text="Alice reviewed note",
+                category="fact",
+                source="user",
+            ),
+        )
+    )
+
+    assert out["pending_review"] is True
+    assert out["candidate_id"] == "m_new"
+    assert provider.remember_calls[0][1]["capture_mode"] == "review_only"
+
+
+def test_add_memory_refuses_off_mode(monkeypatch):
+    import routes.prefs_routes as prefs_mod
+
+    _allow_memory_management(monkeypatch)
+    monkeypatch.setattr(
+        prefs_mod,
+        "_load_for_user",
+        lambda _owner: {"memory_mode": "off"},
+    )
+    provider = _StubProvider()
+    router = mr.setup_memory_routes(
+        memory_manager=MagicMock(),
+        session_manager=MagicMock(),
+        memory_provider=provider,
+    )
+    add_memory = _route(router, "/api/memory/add", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            add_memory(
+                request=_request("alice"),
+                memory_data=MemoryAddRequest(text="must not save"),
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert provider.remember_calls == []
+
+
 def test_timeline_does_not_expose_other_users_session_name():
     memory_manager = MagicMock()
     session_manager = MagicMock()

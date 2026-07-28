@@ -457,7 +457,9 @@ const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
 const _BACKGROUND_CANVAS_SELECTOR = '[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas';
+const _BACKGROUND_RUNTIME_VERSION = 'clanker-palette-stable-20260726';
 let _activeBackgroundEffectDispose = null;
+let _clankerPaletteEnabled = false;
 const _BACKGROUND_EFFECT_CONTROLS = new Map();
 let _backgroundEffectControlValues = {};
 
@@ -714,8 +716,12 @@ function _syncBgPatternControlVisibility(pattern) {
 }
 
 function _isCurrentBgPatternHealthy(pattern) {
-  const activeCanvas = document.querySelector(_BACKGROUND_CANVAS_SELECTOR);
-  return _CANVAS_PATTERNS[pattern] ? !!activeCanvas?.isConnected : !activeCanvas;
+  const canvases = [...document.querySelectorAll(_BACKGROUND_CANVAS_SELECTOR)];
+  return _CANVAS_PATTERNS[pattern]
+    ? canvases.length === 1
+      && canvases[0].isConnected
+      && canvases[0].dataset.backgroundRuntime === _BACKGROUND_RUNTIME_VERSION
+    : canvases.length === 0;
 }
 
 export function applyBgPattern(pattern) {
@@ -780,8 +786,9 @@ function _syncToServer(obj) {
 }
 
 export function applyThemeIdentity(name) {
+  _clankerPaletteEnabled = name === 'clanker-dark' || name === 'clanker-light';
   document.body.classList.remove('theme-clanker-dark', 'theme-clanker-light');
-  if (name === 'clanker-dark' || name === 'clanker-light') {
+  if (_clankerPaletteEnabled) {
     document.body.classList.add('theme-' + name);
     document.documentElement.style.setProperty('color-scheme', name === 'clanker-light' ? 'light' : 'dark');
   } else {
@@ -831,8 +838,9 @@ function _syncThemeControls(name, colors, opts) {
   }
   const font = document.getElementById('theme-font-select');
   if (font) {
-    font.disabled = false;
-    font.title = '';
+    const locked = !!THEME_DEFAULT_FONT[name];
+    font.disabled = locked;
+    font.title = locked ? 'Clanker themes bundle and lock Liga Comic Mono' : '';
   }
   const frosted = document.getElementById('theme-frosted-toggle');
   if (frosted) frosted.checked = opts.frosted;
@@ -1431,7 +1439,6 @@ export function initThemeUI() {
   applyBgEffectSize(_initEffectSize);
   applyBackgroundEffectControls(_initEffectControls);
   applyFrostedGlass(_initFrosted);
-  applyBgPattern(_initPattern);
 
   const fontSelect = document.getElementById('theme-font-select');
   const densitySelect = document.getElementById('theme-density-select');
@@ -1844,13 +1851,11 @@ export function closePopup() {
 // Expose for app.js wiring + AI ui_control
 export function getCustomThemes() { return _loadCustomThemes(); }
 
-function _readClankerEffectConfig() {
+function _readClankerEffectConfig(fullPalette = false) {
   const styles = getComputedStyle(document.body);
   const color = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
   const rawIntensity = parseFloat(styles.getPropertyValue('--bg-effect-intensity'));
   const effectColor = color('--bg-effect-color', color('--fg', '#62C7E8'));
-  const isClanker = document.body.classList.contains('theme-clanker-dark')
-    || document.body.classList.contains('theme-clanker-light');
   const clankerColors = [
     effectColor,
     color('--clanker-gold', '#F6BE48'),
@@ -1863,7 +1868,7 @@ function _readClankerEffectConfig() {
     intensity: Number.isFinite(rawIntensity) ? Math.max(0, Math.min(1, rawIntensity)) : 0.64,
     size: _getEffectSize(),
     outline: color('--clanker-outline', '#0E0F12'),
-    colors: isClanker ? clankerColors : clankerColors.map(() => effectColor),
+    colors: (fullPalette || _clankerPaletteEnabled) ? clankerColors : clankerColors.map(() => effectColor),
   };
 }
 
@@ -1970,6 +1975,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   if (_activeBackgroundEffectDispose) _activeBackgroundEffectDispose();
   _activeBackgroundEffectDispose = dispose;
   canvas.dataset.backgroundEffectCanvas = 'true';
+  canvas.dataset.backgroundRuntime = _BACKGROUND_RUNTIME_VERSION;
   canvas.__disposeEffect = dispose;
   window.addEventListener('resize', handleResize);
   if (motion.addEventListener) motion.addEventListener('change', handleMotionChange);
@@ -1977,6 +1983,31 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint }) {
   document.addEventListener('visibilitychange', handleVisibilityChange);
   resizeIfNeeded(true);
   frame(performance.now());
+}
+
+function _clankerSafeBounds(width, height, size) {
+  const shortest = Math.max(1, Math.min(width, height));
+  const inset = Math.max(12, Math.min(shortest * .14, 34 * Math.max(.5, size)));
+  return {
+    inset,
+    left: inset,
+    top: inset,
+    right: Math.max(inset, width - inset),
+    bottom: Math.max(inset, height - inset),
+    width: Math.max(1, width - inset * 2),
+    height: Math.max(1, height - inset * 2),
+  };
+}
+
+function _clankerEdgeAlpha(x, y, extent, bounds) {
+  const distance = Math.min(
+    x - bounds.left,
+    bounds.right - x,
+    y - bounds.top,
+    bounds.bottom - y,
+  );
+  const fadeBand = Math.max(8, Math.min(48, extent * .75));
+  return Math.max(0, Math.min(1, (distance - extent) / fadeBand));
 }
 
 function _mountClankerEffect({ id, bodyClass, build, draw }) {
@@ -1987,6 +2018,8 @@ function _mountClankerEffect({ id, bodyClass, build, draw }) {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
 
+  // Match the working built-in effects: one synchronized visible Canvas2D,
+  // cleared and painted once inside the shared requestAnimationFrame callback.
   const ctx = canvas.getContext('2d');
   if (!ctx) { canvas.remove(); return; }
   let width = 0;
@@ -2006,16 +2039,33 @@ function _mountClankerEffect({ id, bodyClass, build, draw }) {
   }
 
   function paint(time, reduced) {
-    const config = _readClankerEffectConfig();
-    const nextSceneKey = `${width}:${height}:${config.size}:${config.colors.join(':')}`;
+    // Clanker-native canvases own their full palette. Tying it to a body class
+    // on every frame created a second, monochrome render state.
+    const config = _readClankerEffectConfig(true);
+    // Scene geometry follows the vanilla lifecycle: rebuild only when geometry
+    // changes. Palette reads stay live without resetting animation state.
+    const safeBounds = _clankerSafeBounds(width, height, config.size);
+    const nextSceneKey = `${width}:${height}:${config.size}:${safeBounds.inset}`;
     if (sceneKey !== nextSceneKey) {
-      scene = build({ width, height, ...config });
+      scene = build({ width, height, safeBounds, ...config });
       canvas.__backgroundScene = scene;
       sceneKey = nextSceneKey;
     }
+    canvas.__backgroundSafeInset = safeBounds.inset;
     ctx.clearRect(0, 0, width, height);
-    draw(ctx, { width, height, time, reduced, scene, ...config });
+    ctx.save();
+    draw(ctx, {
+      width,
+      height,
+      time,
+      reduced,
+      scene,
+      safeBounds,
+      ...config,
+    });
+    ctx.restore();
     ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     ctx.setLineDash([]);
   }
 
@@ -2058,20 +2108,20 @@ function _initClankerRoutefield() {
   _mountClankerEffect({
     id: 'clanker-routefield-canvas',
     bodyClass: 'bg-pattern-clanker-routefield',
-    build: ({ width, height, size }) => {
-      const columns = Math.max(6, Math.ceil(width / (210 * size)) + 1);
-      const rows = Math.max(5, Math.ceil(height / (165 * size)) + 1);
-      const gapX = width / (columns - 1);
-      const gapY = height / (rows - 1);
+    build: ({ size, safeBounds }) => {
+      const columns = Math.max(6, Math.ceil(safeBounds.width / (210 * size)) + 1);
+      const rows = Math.max(5, Math.ceil(safeBounds.height / (165 * size)) + 1);
+      const gapX = safeBounds.width / (columns - 1);
+      const gapY = safeBounds.height / (rows - 1);
       const nodes = [];
       for (let row = 0; row < rows; row += 1) {
         for (let column = 0; column < columns; column += 1) {
           const seed = row * 97 + column * 29;
-          const baseX = column * gapX;
-          const baseY = row * gapY;
+          const baseX = safeBounds.left + column * gapX;
+          const baseY = safeBounds.top + row * gapY;
           nodes.push({
-            x: column === 0 ? 12 : column === columns - 1 ? width - 12 : baseX + (_clankerNoise(seed) - .5) * gapX * .38,
-            y: row === 0 ? 12 : row === rows - 1 ? height - 12 : baseY + (_clankerNoise(seed + 13) - .5) * gapY * .34,
+            x: column === 0 ? safeBounds.left : column === columns - 1 ? safeBounds.right : baseX + (_clankerNoise(seed) - .5) * gapX * .38,
+            y: row === 0 ? safeBounds.top : row === rows - 1 ? safeBounds.bottom : baseY + (_clankerNoise(seed + 13) - .5) * gapY * .34,
             color: (row * 2 + column) % 6,
             hub: (row + column * 2) % 6 === 0,
           });
@@ -2088,8 +2138,8 @@ function _initClankerRoutefield() {
           a, b,
           phase: _clankerNoise(seed + 41),
           color: (a.color + b.color + seed) % 6,
-          cx: (a.x + b.x) / 2 - (dy / length) * bend,
-          cy: (a.y + b.y) / 2 + (dx / length) * bend,
+          cx: Math.max(safeBounds.left, Math.min(safeBounds.right, (a.x + b.x) / 2 - (dy / length) * bend)),
+          cy: Math.max(safeBounds.top, Math.min(safeBounds.bottom, (a.y + b.y) / 2 + (dx / length) * bend)),
         });
       };
       for (let row = 0; row < rows; row += 1) {
@@ -2206,7 +2256,7 @@ function _initClankerKeneWeave() {
   _mountClankerEffect({
     id: 'clanker-kene-weave-canvas',
     bodyClass: 'bg-pattern-clanker-kene-weave',
-    build: ({ width, height, size }) => {
+    build: ({ width, height, size, safeBounds }) => {
       const columns = Math.max(4, Math.ceil(width / (220 * size)));
       const rows = Math.max(4, Math.ceil(height / (220 * size)));
       const tileWidth = width / columns;
@@ -2274,6 +2324,21 @@ function _initClankerKeneWeave() {
         }
       }
 
+      // The motif is intentionally built as an interlocking overscan grid.
+      // Fit that completed artwork into the same safe drawing area as the
+      // vanilla effects instead of letting the viewport crop half motifs.
+      const geometryPoints = paths.flatMap(path => path.points);
+      const minX = Math.min(...geometryPoints.map(point => point.x), ...junctions.map(point => point.x));
+      const maxX = Math.max(...geometryPoints.map(point => point.x), ...junctions.map(point => point.x));
+      const minY = Math.min(...geometryPoints.map(point => point.y), ...junctions.map(point => point.y));
+      const maxY = Math.max(...geometryPoints.map(point => point.y), ...junctions.map(point => point.y));
+      const fitPoint = point => {
+        point.x = safeBounds.left + (point.x - minX) / Math.max(1, maxX - minX) * safeBounds.width;
+        point.y = safeBounds.top + (point.y - minY) / Math.max(1, maxY - minY) * safeBounds.height;
+      };
+      geometryPoints.forEach(fitPoint);
+      junctions.forEach(fitPoint);
+
       const graph = new Map();
       const pointKey = point => `${point.x.toFixed(3)}:${point.y.toFixed(3)}`;
       const graphPoint = point => {
@@ -2291,13 +2356,19 @@ function _initClankerKeneWeave() {
       }
 
       const junctionNodes = junctions.map(junction => graph.get(pointKey(junction))).filter(Boolean);
+      const insideSafeBounds = node => node
+        && node.x >= safeBounds.left && node.x <= safeBounds.right
+        && node.y >= safeBounds.top && node.y <= safeBounds.bottom;
+      const safeStarts = junctionNodes.filter(insideSafeBounds);
       const randomWalk = seed => {
-        let current = junctionNodes[Math.floor(_clankerNoise(seed) * junctionNodes.length)];
+        let current = safeStarts[Math.floor(_clankerNoise(seed) * safeStarts.length)];
+        if (!current) return [];
         let previous = null;
         const points = [{ x: current.x, y: current.y }];
         for (let step = 0; step < 120; step += 1) {
-          let candidates = [...current.neighbors.values()].filter(node => node !== previous);
-          if (!candidates.length) candidates = [...current.neighbors.values()];
+          let candidates = [...current.neighbors.values()].filter(node => node !== previous && insideSafeBounds(node));
+          if (!candidates.length) candidates = [...current.neighbors.values()].filter(insideSafeBounds);
+          if (!candidates.length) break;
           const choice = Math.floor(_clankerNoise(seed + step * 37 + current.x * .013 + current.y * .017) * candidates.length);
           const next = candidates[Math.min(choice, candidates.length - 1)];
           if (!next) break;
@@ -2307,7 +2378,9 @@ function _initClankerKeneWeave() {
         }
         return points;
       };
-      const snakePoints = Array.from({ length: 36 }, (_, index) => randomWalk(snakeSeed + index * 113));
+      const snakePoints = Array.from({ length: 72 }, (_, index) => randomWalk(snakeSeed + index * 113))
+        .filter(route => route.length > 1)
+        .slice(0, 36);
       const maxSnakeStep = snakePoints.reduce((maximum, route) => Math.max(maximum,
         ...route.slice(1).map((point, index) => Math.hypot(point.x - route[index].x, point.y - route[index].y))), 0);
       return { paths, junctions, snakePoints, maxSnakeStep: maxSnakeStep, snakeSeed,
@@ -2357,6 +2430,7 @@ function _initClankerKeneWeave() {
       const longerLifetimeScale = getBackgroundEffectControlValue('clanker-kene-weave', 'longerLifetimeScale', 100) / 100;
       const baseTraverse = 16000 / snakeSpeedPct;
       for (let signalIndex = 0; signalIndex < snakeCount; signalIndex += 1) {
+        if (!scene.snakePoints.length) break;
         const basePhase = time / baseTraverse + signalIndex * .31;
         const cycle = Math.floor(basePhase);
         const random = scene.snakeSeed + signalIndex * 131 + cycle * 47;
@@ -2418,17 +2492,30 @@ function _initClankerRadar() {
   _mountClankerEffect({
     id: 'clanker-radar-canvas',
     bodyClass: 'bg-pattern-clanker-radar',
-    build: ({ width, height }) => {
-      const base = Math.min(width, height);
-      return { centers: [
-        { x: width * -.01, y: height * .2, radius: base * .18, color: 4, phase: .08 },
-        { x: width * .25, y: height * .3, radius: base * .17, color: 2, phase: .31 },
-        { x: width * .55, y: height * .18, radius: base * .15, color: 0, phase: .52 },
-        { x: width * .84, y: height * .34, radius: base * .21, color: 3, phase: .74 },
-        { x: width * .16, y: height * .73, radius: base * .19, color: 1, phase: .93 },
-        { x: width * .52, y: height * .72, radius: base * .18, color: 5, phase: .43 },
-        { x: width * .88, y: height * .83, radius: base * .17, color: 4, phase: .19 },
-      ] };
+    build: ({ size, safeBounds }) => {
+      const base = Math.min(safeBounds.width, safeBounds.height);
+      const specs = [
+        [.16, .18, .17, 4, .08],
+        [.34, .34, .17, 2, .31],
+        [.58, .18, .16, 0, .52],
+        [.82, .36, .18, 3, .74],
+        [.18, .72, .18, 1, .93],
+        [.54, .70, .18, 5, .43],
+        [.82, .82, .16, 4, .19],
+      ];
+      return {
+        centers: specs.map(([xRatio, yRatio, radiusRatio, color, phase]) => {
+          const x = safeBounds.left + safeBounds.width * xRatio;
+          const y = safeBounds.top + safeBounds.height * yRatio;
+          const available = Math.max(1, Math.min(
+            x - safeBounds.left,
+            safeBounds.right - x,
+            y - safeBounds.top,
+            safeBounds.bottom - y,
+          ) - 6 * size);
+          return { x, y, radius: Math.min(base * radiusRatio, available), color, phase };
+        }),
+      };
     },
     draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
       scene.centers.forEach((center, centerIndex) => {
@@ -2525,7 +2612,7 @@ function _clankerEmoji(seed) {
   return String.fromCodePoint(codePoint, 0xFE0F);
 }
 
-function _buildClankerDriftScene({ width, height, size }) {
+function _buildClankerDriftScene({ width, height, size, safeBounds }) {
   const baseCount = Math.max(140, Math.ceil(width * height / 5600));
   const count = Math.min(720, Math.ceil(baseCount * 2.5));
   return {
@@ -2533,8 +2620,8 @@ function _buildClankerDriftScene({ width, height, size }) {
     shards: Array.from({ length: count }, (_, index) => {
       const seed = index * 47 + 11;
       return {
-        x: _clankerNoise(seed) * width,
-        y: _clankerNoise(seed + 5) * height,
+        x: safeBounds.left + _clankerNoise(seed) * safeBounds.width,
+        y: safeBounds.top + _clankerNoise(seed + 5) * safeBounds.height,
         baseRadius: 9,
         radiusNoise: _clankerNoise(seed + 9) * 2 - 1,
         stretch: .7 + _clankerNoise(seed + 13) * .55,
@@ -2579,14 +2666,18 @@ function _initClankerGemDrift() {
     id: 'clanker-gem-drift-canvas',
     bodyClass: 'bg-pattern-clanker-gem-drift',
     build: _buildClankerDriftScene,
-    draw: (ctx, { time, scene, intensity, size, colors, outline }) => {
+    draw: (ctx, { width, height, time, scene, intensity, size, colors, outline }) => {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       const controls = _clankerDriftControls('clanker-gem-drift');
+      const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
         const { x, y, radius, bright, alphaScale } = _clankerDriftState(shard, index, time, size, controls);
+        const extent = radius * Math.max(1, shard.stretch) + (bright ? 12 : 3) * size;
+        const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
+        if (!edgeAlpha) continue;
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(shard.rotation + Math.sin(time / 8400 + shard.phase) * .12);
@@ -2605,17 +2696,17 @@ function _initClankerGemDrift() {
         ctx.fillStyle = colors[shard.color];
         ctx.strokeStyle = outline;
         ctx.lineWidth = (bright ? 2 : 1.4) * size;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .62 : .22));
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .62 : .22)) * edgeAlpha;
         if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 9 * size; }
         ctx.fill();
         ctx.shadowBlur = 0;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .8 : .34));
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .8 : .34)) * edgeAlpha;
         ctx.stroke();
         ctx.beginPath();
         ctx.moveTo(0, -radius * .7); ctx.lineTo(0, 0); ctx.lineTo(radius * .5, radius * .34);
         ctx.strokeStyle = colors[(shard.color + 2) % colors.length];
         ctx.lineWidth = .9 * size;
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .58 : .26));
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .58 : .26)) * edgeAlpha;
         ctx.stroke();
         ctx.restore();
       }
@@ -2628,20 +2719,24 @@ function _initClankerEmojiDrift() {
     id: 'clanker-emoji-drift-canvas',
     bodyClass: 'bg-pattern-clanker-emoji-drift',
     build: _buildClankerDriftScene,
-    draw: (ctx, { time, scene, intensity, size, colors }) => {
+    draw: (ctx, { width, height, time, scene, intensity, size, colors }) => {
       const controls = _clankerDriftControls('clanker-emoji-drift');
+      const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
         const { x, y, radius, bright, alphaScale } = _clankerDriftState(shard, index, time, size, controls);
+        const extent = radius * 1.5 + (bright ? 12 : 3) * size;
+        const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
+        if (!edgeAlpha) continue;
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(shard.rotation + Math.sin(time / 8400 + shard.phase) * .055);
         ctx.font = `${Math.max(12, radius * 2.3)}px ${_CLANKER_EMOJI_FONT}`;
         ctx.fillStyle = colors[shard.color];
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34));
+        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34)) * edgeAlpha;
         if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 12 * size; }
         ctx.fillText(shard.emoji, 0, 0);
         ctx.restore();

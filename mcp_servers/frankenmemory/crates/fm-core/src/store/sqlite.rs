@@ -223,6 +223,7 @@ impl SqliteStore {
         // on every open rather than being skipped forever after one stamp.
         Self::fts_schema(&conn);
         Self::graph_fts_sync(&conn);
+        super::graph::backfill_curated_projections_inner(&conn)?;
 
         Ok(())
     }
@@ -1088,15 +1089,17 @@ impl SqliteStore {
                 object.insert(key.clone(), value.clone());
             }
         }
-        conn.execute(
-            "UPDATE curated SET archived = 1, metadata = ?1, updated_at = ?2 WHERE id = ?3",
-            params![
-                serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into()),
-                chrono::Utc::now().to_rfc3339(),
-                id
-            ],
-        )
-        .is_ok()
+        let archived = conn
+            .execute(
+                "UPDATE curated SET archived = 1, metadata = ?1, updated_at = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into()),
+                    chrono::Utc::now().to_rfc3339(),
+                    id
+                ],
+            )
+            .is_ok();
+        archived && super::graph::sync_curated_projection_inner(&conn, id).is_ok()
     }
 
     pub fn owner_counts(&self, owner: &str) -> Result<serde_json::Value, String> {
@@ -1623,6 +1626,10 @@ impl MemoryStore for SqliteStore {
                 r.workspace_id
             ],
         );
+        if let Err(error) = super::graph::sync_curated_projection_inner(&conn, &r.id) {
+            warn!("curated graph projection failed for {}: {error}", r.id);
+            return false;
+        }
 
         info!("upserted curated record {}", r.id);
         true
@@ -1631,7 +1638,13 @@ impl MemoryStore for SqliteStore {
     async fn delete_curated_batch(&self, ids: &[String]) -> bool {
         let conn = self.conn.lock().unwrap();
         for id in ids {
-            let _ = conn.execute("DELETE FROM curated WHERE id = ?1", params![id]);
+            if conn
+                .execute("DELETE FROM curated WHERE id = ?1", params![id])
+                .is_err()
+                || super::graph::sync_curated_projection_inner(&conn, id).is_err()
+            {
+                return false;
+            }
         }
         true
     }
@@ -1727,7 +1740,7 @@ impl MemoryStore for SqliteStore {
             params![id],
         );
         let _ = rowid;
-        true
+        super::graph::sync_curated_projection_inner(&conn, id).is_ok()
     }
 
     async fn delete_curated_record(
@@ -1758,8 +1771,10 @@ impl MemoryStore for SqliteStore {
             return false;
         }
         let _ = conn.execute("DELETE FROM curated_fts WHERE rowid = ?1", params![rowid]);
-        conn.execute("DELETE FROM curated WHERE id = ?1", params![id])
-            .is_ok()
+        let deleted = conn
+            .execute("DELETE FROM curated WHERE id = ?1", params![id])
+            .is_ok();
+        deleted && super::graph::sync_curated_projection_inner(&conn, id).is_ok()
     }
 
     async fn delete_curated_expired(&self, cutoff_iso: &str) -> usize {
@@ -2565,6 +2580,316 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn curated_upsert_projects_fetchable_structured_graph_node() {
+        let store = SqliteStore::memory(4).unwrap();
+        let mut record = test_record("keeper of the amber greenhouse ledger");
+        record.metadata = serde_json::json!({"category": "greenhouse"});
+        assert!(store.upsert_curated(&record, None).await);
+
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
+        let memory_id = scope.node_id("memory", &record.id);
+        let (node, content) = store.graph_fetch(&scope, &memory_id).unwrap().unwrap();
+        assert_eq!(node.kind, "memory");
+        assert_eq!(node.layer, "episodic");
+        assert_eq!(node.name, record.id);
+        assert_eq!(content.as_deref(), Some(record.content.as_str()));
+        assert!(store
+            .graph_cues(&scope, "amber greenhouse", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.node.id == memory_id));
+
+        let overview = store.graph_overview(&scope, 10).unwrap();
+        let category_id = scope.node_id("category", "greenhouse");
+        assert!(overview
+            .nodes
+            .iter()
+            .any(|node| node.id == category_id && node.kind == "category"));
+        assert!(overview.edges.iter().any(|edge| {
+            edge.src_id == memory_id && edge.dst_id == category_id && edge.tag == "is"
+        }));
+        let category_ref: (Option<String>, Option<String>) = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT ref_table, ref_id FROM graph_nodes WHERE id = ?1",
+                params![category_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(category_ref, (None, None));
+    }
+
+    #[tokio::test]
+    async fn curated_update_replaces_projection_cues_and_category() {
+        let store = SqliteStore::memory(4).unwrap();
+        let mut record = test_record("amber greenhouse ledger");
+        record.metadata = serde_json::json!({"category": "greenhouse"});
+        assert!(store.upsert_curated(&record, None).await);
+
+        assert!(
+            store
+                .update_curated_record(
+                    &record.id,
+                    Some("cobalt observatory notebook"),
+                    Some(MemoryKind::Persona),
+                    Some("astronomy"),
+                    None,
+                    Some("alice"),
+                    Some("global"),
+                )
+                .await
+        );
+
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
+        let memory_id = scope.node_id("memory", &record.id);
+        assert!(store
+            .graph_cues(&scope, "amber greenhouse", 10)
+            .unwrap()
+            .is_empty());
+        let hits = store.graph_cues(&scope, "cobalt observatory", 10).unwrap();
+        assert!(hits.iter().any(|hit| hit.node.id == memory_id));
+        let (node, content) = store.graph_fetch(&scope, &memory_id).unwrap().unwrap();
+        assert_eq!(node.label.as_deref(), Some("cobalt observatory notebook"));
+        assert_eq!(content.as_deref(), Some("cobalt observatory notebook"));
+
+        let overview = store.graph_overview(&scope, 10).unwrap();
+        let astronomy_id = scope.node_id("category", "astronomy");
+        assert!(overview.edges.iter().any(|edge| {
+            edge.src_id == memory_id && edge.dst_id == astronomy_id && edge.tag == "is"
+        }));
+        assert!(!overview
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("category", "greenhouse")));
+        assert!(!overview
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("category", "persona")));
+    }
+
+    #[tokio::test]
+    async fn curated_delete_paths_remove_only_memory_projection() {
+        let store = SqliteStore::memory(4).unwrap();
+        let first = test_record("first lunar archive");
+        let second = test_record("second solar archive");
+        assert!(store.upsert_curated(&first, None).await);
+        assert!(store.upsert_curated(&second, None).await);
+
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
+        store
+            .graph_upsert(
+                &scope,
+                &crate::graph::GraphUpsertInput {
+                    nodes: vec![
+                        crate::graph::GraphNodeInput {
+                            kind: "project".into(),
+                            name: "independent overlay".into(),
+                            label: None,
+                            layer: None,
+                            trust: None,
+                        },
+                        crate::graph::GraphNodeInput {
+                            kind: "category".into(),
+                            name: "manual taxonomy".into(),
+                            label: Some("Hand-maintained taxonomy".into()),
+                            layer: Some("semantic".into()),
+                            trust: None,
+                        },
+                    ],
+                    edges: vec![],
+                    cues: vec![crate::graph::GraphCueInput {
+                        cue: "independent overlay".into(),
+                        node: crate::graph::NodeRef {
+                            kind: "project".into(),
+                            name: "independent overlay".into(),
+                        },
+                        source: Some("extracted".into()),
+                    }],
+                },
+            )
+            .unwrap();
+
+        let first_id = scope.node_id("memory", &first.id);
+        assert!(
+            store
+                .delete_curated_record(&first.id, Some("alice"), Some("global"))
+                .await
+        );
+        assert!(store.graph_fetch(&scope, &first_id).unwrap().is_none());
+        assert!(store
+            .graph_cues(&scope, "first lunar", 10)
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .graph_cues(&scope, "independent overlay", 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .graph_overview(&scope, 10)
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("category", "episodic")));
+
+        let second_id = scope.node_id("memory", &second.id);
+        assert!(store.delete_curated_batch(&[second.id.clone()]).await);
+        assert!(store.graph_fetch(&scope, &second_id).unwrap().is_none());
+        assert!(store
+            .graph_cues(&scope, "second solar", 10)
+            .unwrap()
+            .is_empty());
+        let overview = store.graph_overview(&scope, 10).unwrap();
+        assert!(!overview
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("category", "episodic")));
+        assert!(overview
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("project", "independent overlay")));
+        assert!(overview
+            .nodes
+            .iter()
+            .any(|node| node.id == scope.node_id("category", "manual taxonomy")));
+    }
+
+    #[tokio::test]
+    async fn curated_projection_preserves_preexisting_semantic_category_node() {
+        let store = SqliteStore::memory(4).unwrap();
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
+        store
+            .graph_upsert(
+                &scope,
+                &crate::graph::GraphUpsertInput {
+                    nodes: vec![crate::graph::GraphNodeInput {
+                        kind: "category".into(),
+                        name: "custom taxonomy".into(),
+                        label: Some("Hand-maintained custom taxonomy".into()),
+                        layer: Some("semantic".into()),
+                        trust: None,
+                    }],
+                    edges: vec![],
+                    cues: vec![],
+                },
+            )
+            .unwrap();
+
+        let mut record = test_record("custom taxonomy memory");
+        record.metadata = serde_json::json!({"category": "custom taxonomy"});
+        assert!(store.upsert_curated(&record, None).await);
+        let category_id = scope.node_id("category", "custom taxonomy");
+        let (category, _) = store.graph_fetch(&scope, &category_id).unwrap().unwrap();
+        assert_eq!(
+            category.label.as_deref(),
+            Some("Hand-maintained custom taxonomy")
+        );
+
+        assert!(
+            store
+                .delete_curated_record(&record.id, Some("alice"), Some("global"))
+                .await
+        );
+        let (category, _) = store.graph_fetch(&scope, &category_id).unwrap().unwrap();
+        assert_eq!(
+            category.label.as_deref(),
+            Some("Hand-maintained custom taxonomy")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_backfills_curated_graph_projection_idempotently() {
+        let path = std::env::temp_dir().join(format!(
+            "fm-graph-backfill-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_s = path.to_str().unwrap().to_string();
+        let mut record = test_record("backfilled violet compass");
+        record.metadata = serde_json::json!({"category": "navigation"});
+        {
+            let store = SqliteStore::new(&path_s, 4).unwrap();
+            assert!(store.upsert_curated(&record, None).await);
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "DELETE FROM graph_edges;
+                     DELETE FROM graph_cues;
+                     DELETE FROM graph_nodes;",
+                )
+                .unwrap();
+        }
+
+        let scope = crate::graph::GraphScope::new("alice", "global").unwrap();
+        let memory_id = scope.node_id("memory", &record.id);
+        {
+            let store = SqliteStore::new(&path_s, 4).unwrap();
+            let (_, content) = store.graph_fetch(&scope, &memory_id).unwrap().unwrap();
+            assert_eq!(content.as_deref(), Some(record.content.as_str()));
+            assert!(!store
+                .graph_cues(&scope, "violet compass", 10)
+                .unwrap()
+                .is_empty());
+            let overview = store.graph_overview(&scope, 10).unwrap();
+            assert_eq!(overview.node_total, 2);
+            assert_eq!(overview.edge_total, 1);
+            assert!(overview
+                .nodes
+                .iter()
+                .any(|node| node.id == scope.node_id("category", "navigation")));
+        }
+        {
+            let store = SqliteStore::new(&path_s, 4).unwrap();
+            let overview = store.graph_overview(&scope, 10).unwrap();
+            assert_eq!(overview.node_total, 2);
+            assert_eq!(overview.edge_total, 1);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn curated_graph_projection_is_owner_isolated() {
+        let store = SqliteStore::memory(4).unwrap();
+        let alice_record = test_record("shared quartz observatory");
+        let mut bob_record = test_record("shared quartz observatory");
+        bob_record.owner = Some("bob".into());
+        assert!(store.upsert_curated(&alice_record, None).await);
+        assert!(store.upsert_curated(&bob_record, None).await);
+
+        let alice = crate::graph::GraphScope::new("alice", "global").unwrap();
+        let bob = crate::graph::GraphScope::new("bob", "global").unwrap();
+        let alice_id = alice.node_id("memory", &alice_record.id);
+        let bob_id = bob.node_id("memory", &bob_record.id);
+        let alice_hits = store.graph_cues(&alice, "quartz observatory", 10).unwrap();
+        let bob_hits = store.graph_cues(&bob, "quartz observatory", 10).unwrap();
+        assert_eq!(
+            alice_hits
+                .iter()
+                .filter(|hit| hit.node.kind == "memory")
+                .map(|hit| &hit.node.id)
+                .collect::<Vec<_>>(),
+            vec![&alice_id]
+        );
+        assert_eq!(
+            bob_hits
+                .iter()
+                .filter(|hit| hit.node.kind == "memory")
+                .map(|hit| &hit.node.id)
+                .collect::<Vec<_>>(),
+            vec![&bob_id]
+        );
+        assert!(store.graph_fetch(&bob, &alice_id).unwrap().is_none());
+        assert_eq!(store.graph_overview(&alice, 10).unwrap().node_total, 2);
+        assert_eq!(store.graph_overview(&bob, 10).unwrap().node_total, 2);
+    }
+
+    #[tokio::test]
     async fn vector_search_with_embedding() {
         let store = SqliteStore::memory(4).unwrap();
         let mut r = test_record("hello world");
@@ -2812,7 +3137,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(quarantined, 4);
+        assert_eq!(quarantined, 8);
         assert_eq!(
             store.quality_status().unwrap()["graph"]["integrity_ok"],
             true
@@ -2898,8 +3223,15 @@ mod tests {
             .unwrap()
             .is_empty());
         let renamed = store.graph_cues(&new_scope, "private", 10).unwrap();
-        assert_eq!(renamed.len(), 1);
-        assert_eq!(renamed[0].node.id, new_scope.node_id("project", "private"));
+        assert!(renamed
+            .iter()
+            .any(|hit| hit.node.id == new_scope.node_id("project", "private")));
+        let renamed_memory_id = new_scope.node_id("memory", "m_alice");
+        assert!(renamed.iter().any(|hit| hit.node.id == renamed_memory_id));
+        assert!(store
+            .graph_fetch(&new_scope, &renamed_memory_id)
+            .unwrap()
+            .is_some());
 
         store.purge_owner("alicia").unwrap();
         assert_eq!(store.owner_counts("alicia").unwrap()["curated"], 0);

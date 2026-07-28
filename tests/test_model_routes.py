@@ -58,7 +58,7 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _mimo_catalog,
         _mimo_display_names,
         _mimo_model_families,
-        _covered_direct_providers,
+        _covered_direct_models,
         _PROVIDER_CURATED,
     )
     from src.llm_core import ANTHROPIC_MODELS
@@ -1108,9 +1108,182 @@ def test_list_model_endpoints_returns_key_fingerprint(monkeypatch):
     assert result[1]["api_key_fingerprint"] == ""
 
 
+def test_regular_user_lists_only_owned_endpoints(monkeypatch):
+    rows = [
+        _route_ep(
+            "alice-ep",
+            "https://alice.example/v1",
+            cached_models=["alice-model"],
+            owner="alice",
+        ),
+        _route_ep(
+            "bob-ep",
+            "https://bob.example/v1",
+            cached_models=["bob-model"],
+            owner="bob",
+        ),
+    ]
+    db = _RouteDb(rows)
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth)),
+    )
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        "src.model_capabilities.endpoint_capability_states",
+        lambda db, endpoint: [],
+    )
+    route = _route_endpoint(
+        model_routes.setup_model_routes(model_discovery=None),
+        "/api/model-endpoints",
+    )
+
+    result = route(request)
+
+    assert [item["id"] for item in result] == ["alice-ep"]
+
+
+def test_endpoint_list_returns_one_selector_only_native_aggregate(monkeypatch):
+    monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi", "deepseek"},
+    )
+    db = _RouteDb([])
+    supervisor = SimpleNamespace(available_models=lambda owner=None: [
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "deepseek/deepseek-reasoner"},
+    ])
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=auth,
+                mimo_supervisor=supervisor,
+            )
+        ),
+    )
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    route = _route_endpoint(
+        model_routes.setup_model_routes(model_discovery=None),
+        "/api/model-endpoints",
+    )
+
+    result = route(request)
+
+    assert [item["id"] for item in result] == ["mimo:auto"]
+    assert result[0]["name"] == "Automatic"
+    assert result[0]["selector_only"] is True
+    assert "provider_row" not in result[0]
+    assert result[0]["models"] == [
+        "xiaomi/mimo-v2.5-pro",
+        "deepseek/deepseek-reasoner",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_regular_user_cannot_edit_or_delete_another_users_endpoint(monkeypatch):
+    db = _RouteDb([
+        _route_ep(
+            "bob-ep",
+            "https://bob.example/v1",
+            cached_models=["bob-model"],
+            owner="bob",
+        ),
+    ])
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+    )
+
+    class Request:
+        state = SimpleNamespace(current_user="alice")
+        app = SimpleNamespace(state=SimpleNamespace(auth_manager=auth))
+        headers = {"content-length": "0"}
+
+        async def json(self):
+            return {}
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    with pytest.raises(HTTPException) as edit_error:
+        await _route_endpoint(
+            router,
+            "/api/model-endpoints/{ep_id}",
+            "PATCH",
+        )("bob-ep", Request())
+    with pytest.raises(HTTPException) as delete_error:
+        _route_endpoint(
+            router,
+            "/api/model-endpoints/{ep_id}",
+            "DELETE",
+        )("bob-ep", Request())
+
+    assert edit_error.value.status_code == 404
+    assert delete_error.value.status_code == 404
+
+
+def test_regular_user_create_stamps_owner_and_does_not_dedupe_bob(monkeypatch):
+    import routes.prefs_routes as prefs_routes
+
+    bob = _make_endpoint(
+        id="bob-ep",
+        base_url="https://api.example.test/v1",
+        owner="bob",
+    )
+    db = _PinnedFakeDb([bob])
+    _patch_create_deps(monkeypatch, db)
+    prefs = {}
+    monkeypatch.setattr(model_routes, "effective_user", lambda request: "alice")
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda owner: dict(prefs))
+    monkeypatch.setattr(
+        prefs_routes,
+        "_save_for_user",
+        lambda owner, value: prefs.update(value),
+    )
+    monkeypatch.setattr(
+        "src.url_security.validate_public_http_url",
+        lambda url: url,
+    )
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth)),
+    )
+    create = _get_route("/api/model-endpoints", "POST")
+
+    result = create(
+        request,
+        base_url="https://api.example.test/v1",
+        **_create_form_kwargs(),
+    )
+
+    assert result.get("existing") is not True
+    assert len(db.added) == 1
+    assert db.added[0].owner == "alice"
+    assert bob.owner == "bob"
+
+
 def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
     monkeypatch.setenv("MIMO_HIDDEN_MODELS", "openai/hidden")
-    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: set())
+    monkeypatch.setattr(model_routes, "_connected_mimo_provider_ids", lambda owner: {"openai"})
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
     supervisor = SimpleNamespace(available_models=lambda: [
         {"modelId": "openai/gpt-5"},
         {"modelId": "openai/gpt-5/low"},
@@ -1119,35 +1292,113 @@ def test_mimo_catalog_filters_hidden_models_and_separates_variants(monkeypatch):
     ])
 
     models, base, variants, hidden_count = _mimo_catalog(supervisor)
+    breakdown = model_routes._mimo_provider_breakdown(supervisor)
 
     assert models == ["openai/gpt-5", "openai/gpt-5/low"]
     assert base == ["openai/gpt-5"]
     assert variants == ["openai/gpt-5/low"]
-    assert hidden_count == 2
+    assert hidden_count == 1
+    assert breakdown[0]["model_ids"] == models
 
 
-def test_mimo_catalog_drops_providers_direct_endpoints_already_cover(monkeypatch):
-    """e's no-duplicates rule: mimo only fills gaps. A provider reachable via
-    an enabled direct endpoint disappears from the mimo catalog entirely."""
+def test_mimo_catalog_only_includes_connected_provider_accounts(monkeypatch):
+    monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"openai"},
+    )
+    supervisor = SimpleNamespace(available_models=lambda owner=None: [
+        {"modelId": "openai/gpt-5"},
+        {"modelId": "deepseek/deepseek-chat"},
+        {"modelId": "mimo/mimo-auto"},
+    ])
+
+    models, _base, _variants, hidden_count = _mimo_catalog(supervisor, "alice")
+
+    assert models == ["openai/gpt-5", "xiaomi/mimo-auto"]
+    assert hidden_count == 0
+
+
+def test_mimo_catalog_exposes_free_mimo_route_under_xiaomi(monkeypatch):
+    monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
+    monkeypatch.setattr(model_routes, "_connected_mimo_provider_ids", lambda owner: {"xiaomi"})
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
+    supervisor = SimpleNamespace(available_models=lambda owner=None: [
+        {"modelId": "mimo/mimo-auto"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+    ])
+
+    models, base, variants, hidden_count = _mimo_catalog(supervisor)
+
+    assert models == ["xiaomi/mimo-auto", "xiaomi/mimo-v2.5-pro"]
+    assert base == models
+    assert variants == []
+    assert hidden_count == 0
+
+
+def test_mimo_catalog_excludes_direct_projection_providers(monkeypatch):
     monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
     monkeypatch.setattr(
-        model_routes, "_covered_direct_providers",
-        lambda prefixes, owner=None: {"openai", "deepseek"} & prefixes,
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi", "deepseek"},
+    )
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
+    supervisor = SimpleNamespace(available_models=lambda owner=None: [
+        {"modelId": "ody-zai-endpoint/glm-4.5"},
+        {"modelId": "ody-deepseek-endpoint/deepseek-chat"},
+        {"modelId": "xiaomi/mimo-v2.5-pro"},
+        {"modelId": "deepseek/deepseek-reasoner"},
+    ])
+
+    models, _base, _variants, hidden_count = _mimo_catalog(supervisor)
+    breakdown = model_routes._mimo_provider_breakdown(supervisor)
+
+    assert models == [
+        "xiaomi/mimo-v2.5-pro",
+        "deepseek/deepseek-reasoner",
+    ]
+    assert hidden_count == 0
+    assert {item["id"] for item in breakdown} == {"xiaomi", "deepseek"}
+
+
+def test_mimo_catalog_drops_exact_overlap_without_hiding_provider(monkeypatch):
+    monkeypatch.delenv("MIMO_HIDDEN_MODELS", raising=False)
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"openai", "deepseek", "xiaomi"},
+    )
+    monkeypatch.setattr(
+        model_routes,
+        "_covered_direct_models",
+        lambda models, owner=None: {
+            "deepseek/deepseek-v4-flash": {
+                "endpoint_id": "direct-deepseek",
+                "endpoint_name": "DeepSeek",
+            },
+        },
     )
     supervisor = SimpleNamespace(available_models=lambda: [
         {"modelId": "openai/gpt-5"},
         {"modelId": "openai/gpt-5/low"},
         {"modelId": "deepseek/deepseek-v4-flash"},
+        {"modelId": "deepseek/deepseek-reasoner"},
         {"modelId": "xiaomi/mimo-v2.5-pro"},
         {"modelId": "xiaomi/mimo-v2.5-pro/high"},
     ])
 
     models, base, variants, hidden_count = _mimo_catalog(supervisor)
 
-    assert models == ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro/high"]
-    assert base == ["xiaomi/mimo-v2.5-pro"]
-    assert variants == ["xiaomi/mimo-v2.5-pro/high"]
-    assert hidden_count == 3
+    assert "deepseek/deepseek-v4-flash" not in models
+    assert "deepseek/deepseek-reasoner" in models
+    assert "openai/gpt-5" in base
+    assert "openai/gpt-5/low" in variants
+    assert "xiaomi/mimo-v2.5-pro" in base
+    assert "xiaomi/mimo-v2.5-pro/high" in variants
+    assert hidden_count == 1
 
 
 def test_mimo_display_names_keep_model_name_and_reasoning_effort():
@@ -1162,15 +1413,27 @@ def test_mimo_display_names_keep_model_name_and_reasoning_effort():
     }
 
 
-def test_covered_direct_providers_matches_detection_and_hostname(monkeypatch):
+def test_covered_direct_models_matches_only_logical_overlap(monkeypatch):
     _mr = model_routes
 
     class _Ep(SimpleNamespace):
         pass
 
     endpoints = [
-        _Ep(id="a2c233cc", name="DeepSeek", base_url="https://api.deepseek.com/v1", model_type="llm"),
-        _Ep(id="2e6939b5", name="ChatGPT Subscription", base_url="https://chatgpt.com/backend-api", model_type="llm"),
+        _Ep(
+            id="a2c233cc",
+            name="DeepSeek",
+            base_url="https://api.deepseek.com/v1",
+            model_type="llm",
+            cached_models='["deepseek-v4-flash"]',
+        ),
+        _Ep(
+            id="2e6939b5",
+            name="ChatGPT Subscription",
+            base_url="https://chatgpt.com/backend-api",
+            model_type="llm",
+            cached_models='["gpt-5"]',
+        ),
         _Ep(id="local-1", name="Local", base_url="http://localhost:11434/v1", model_type="llm"),
         _Ep(id="emb-1", name="Embedder", base_url="https://api.xiaomi.example/v1", model_type="embedding"),
     ]
@@ -1190,22 +1453,37 @@ def test_covered_direct_providers_matches_detection_and_hostname(monkeypatch):
         lambda base: "chatgpt-subscription" if "chatgpt" in base else "",
     )
 
-    covered = _covered_direct_providers({"deepseek", "openai", "xiaomi"})
+    covered = _covered_direct_models([
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-reasoner",
+        "openai/gpt-5",
+        "openai/gpt-5/low",
+        "xiaomi/mimo-v2.5-pro",
+    ])
 
-    # deepseek matched by hostname, openai via chatgpt-subscription mapping;
-    # xiaomi endpoint is not model_type=llm so it does not count. The map
-    # records WHICH endpoint claimed each provider so Settings can say so.
-    assert set(covered) == {"deepseek", "openai"}
-    assert covered["deepseek"]["endpoint_name"] == "DeepSeek"
-    assert covered["openai"]["endpoint_name"] == "ChatGPT Subscription"
+    assert set(covered) == {
+        "deepseek/deepseek-v4-flash",
+        "openai/gpt-5",
+    }
+    assert covered["deepseek/deepseek-v4-flash"]["endpoint_name"] == "DeepSeek"
+    assert covered["openai/gpt-5"]["endpoint_name"] == "ChatGPT Subscription"
 
 
 def test_mimo_provider_breakdown_reports_live_and_suppressed(monkeypatch):
     monkeypatch.setattr(
-        model_routes, "_covered_direct_providers",
-        lambda prefixes, owner=None: {
-            "deepseek": {"endpoint_id": "a2c233cc", "endpoint_name": "DeepSeek"},
-        } if "deepseek" in prefixes else {},
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi", "deepseek"},
+    )
+    monkeypatch.setattr(
+        model_routes,
+        "_covered_direct_models",
+        lambda models, owner=None: {
+            "deepseek/deepseek-v4-flash": {
+                "endpoint_id": "a2c233cc",
+                "endpoint_name": "DeepSeek",
+            },
+        },
     )
     supervisor = SimpleNamespace(available_models=lambda: [
         {"modelId": "xiaomi/mimo-v2.5-pro"},
@@ -1242,6 +1520,23 @@ def test_mimo_model_families_map_operator_prefixes_to_public_brands():
     assert families["openai/gpt-5"] == "OpenAI"
     assert families["somevendor/custom-model"] == "Somevendor"
     assert "bare-model-no-prefix" not in families
+
+
+def test_native_connection_ids_are_canonical():
+    assert model_routes.normalize_mimo_connection_id("mimo") == "mimo:auto"
+    assert model_routes.normalize_mimo_connection_id("MIMO:AUTO") == "mimo:auto"
+    assert model_routes.normalize_mimo_connection_id("mimo:xiaomi") == "mimo:xiaomi"
+    assert model_routes.normalize_mimo_connection_id("direct-endpoint") is None
+
+
+def test_catalogue_revision_can_invalidate_one_owner():
+    alice_before = model_routes.model_catalogue_revision("alice")
+    bob_before = model_routes.model_catalogue_revision("bob")
+
+    model_routes.invalidate_model_catalogue_revision("alice")
+
+    assert model_routes.model_catalogue_revision("alice")[1] == alice_before[1] + 1
+    assert model_routes.model_catalogue_revision("bob") == bob_before
 
 
 def test_post_creates_endpoint_with_pinned_models(monkeypatch):
@@ -1462,6 +1757,9 @@ class _RouteQuery:
     def order_by(self, *args, **kwargs):
         return self
 
+    def join(self, *args, **kwargs):
+        return self
+
     def all(self):
         return list(self.rows)
 
@@ -1477,7 +1775,16 @@ class _RouteDb:
         self.commits = 0
         self.closed = False
 
-    def query(self, model):
+    def query(self, *models):
+        if (
+            len(models) != 1
+            or models[0] in {
+                model_routes.ModelShare,
+                model_routes.ModelShareSubscription,
+            }
+            or getattr(models[0], "__tablename__", "") == "mimo_auth_store"
+        ):
+            return _RouteQuery([])
         return _RouteQuery(self.rows)
 
     def commit(self):
@@ -1647,15 +1954,16 @@ def test_api_models_filters_http_and_mimo_catalog_by_user_allowlist(monkeypatch)
     router = model_routes.setup_model_routes(model_discovery=None)
     supervisor = SimpleNamespace(
         available_models=lambda: [
-            {"modelId": "mimo-allowed"},
-            {"modelId": "mimo-blocked"},
+            {"modelId": "deepseek/mimo-allowed"},
+            {"modelId": "deepseek/mimo-blocked"},
+            {"modelId": "openai/not-connected"},
         ]
     )
     auth = SimpleNamespace(
         is_configured=True,
         is_admin=lambda _user: False,
         get_privileges=lambda _user: {
-            "allowed_models": ["http-allowed", "mimo-allowed"],
+            "allowed_models": ["http-allowed", "deepseek/mimo-allowed"],
             "allowed_models_restricted": True,
         },
     )
@@ -1666,15 +1974,75 @@ def test_api_models_filters_http_and_mimo_catalog_by_user_allowlist(monkeypatch)
 
     monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
     monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"deepseek"},
+    )
     monkeypatch.setattr(threading, "Thread", _NoopThread)
 
     result = _route_endpoint(router, "/api/models")(request)
 
     by_id = {item["endpoint_id"]: item for item in result["items"]}
     assert by_id["http"]["models"] == ["http-allowed"]
-    assert by_id["mimo"]["models"] == ["mimo-allowed"]
-    assert by_id["mimo"]["read_only"] is True
-    assert by_id["mimo"]["actions"] == ["configure_providers"]
+    assert by_id["mimo:deepseek"]["models"] == ["deepseek/mimo-allowed"]
+    assert by_id["mimo:deepseek"]["endpoint_name"] == "DeepSeek"
+    assert by_id["mimo:deepseek"]["read_only"] is True
+    assert by_id["mimo:deepseek"]["actions"] == ["configure_providers"]
+    assert "mimo:openai" not in by_id
+
+
+def test_api_models_wakes_cold_owner_worker_before_caching(monkeypatch):
+    db = _RouteDb([])
+    worker = SimpleNamespace(
+        available_models=lambda: [{"modelId": "xiaomi/mimo-v2.5-pro"}],
+    )
+
+    class ColdPool:
+        def __init__(self):
+            self.worker = None
+            self.started = []
+
+        def available_models(self, owner=None):
+            return self.worker.available_models() if self.worker else []
+
+        async def for_owner(self, owner):
+            self.started.append(owner)
+            self.worker = worker
+            return worker
+
+    supervisor = ColdPool()
+    auth = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda _user: False,
+        get_privileges=lambda _user: {},
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(current_user="mom"),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=auth,
+                mimo_supervisor=supervisor,
+            )
+        ),
+    )
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi"},
+    )
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    result = _route_endpoint(router, "/api/models")(request)
+
+    assert supervisor.started == ["mom"]
+    native = next(
+        item for item in result["items"]
+        if item["endpoint_id"] == "mimo:xiaomi"
+    )
+    assert native["models"] == ["xiaomi/mimo-v2.5-pro"]
 
 
 def test_virtual_mimo_endpoint_only_exposes_read_actions(monkeypatch):
@@ -1687,6 +2055,11 @@ def test_virtual_mimo_endpoint_only_exposes_read_actions(monkeypatch):
         app=SimpleNamespace(state=SimpleNamespace(mimo_supervisor=supervisor)),
     )
     monkeypatch.setattr(model_routes, "require_admin", lambda _request: None)
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi"},
+    )
 
     listed = _route_endpoint(router, "/api/model-endpoints/{ep_id}/models")(
         "mimo", request, SimpleNamespace(headers={})

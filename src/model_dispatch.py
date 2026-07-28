@@ -10,7 +10,11 @@ from typing import Any, AsyncGenerator, Iterable, Optional
 
 from fastapi import HTTPException
 
-from src.endpoint_resolver import ResolvedModelTarget, resolve_model_target
+from src.endpoint_resolver import (
+    ResolvedModelTarget,
+    direct_runtime_provider_id,
+    resolve_model_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +156,7 @@ async def mimo_agent_target(
     from core.database import ModelEndpoint, SessionLocal
     from src.auth_helpers import owner_filter
     from src.model_capabilities import endpoint_capability_states
-    from src.openclank.mimo_supervisor import ENDPOINT_PROVIDER_PREFIX, SupervisorAdmissionError
+    from src.openclank.mimo_supervisor import SupervisorAdmissionError
 
     endpoint_id = (target.endpoint_id or "").strip()
     if not endpoint_id:
@@ -186,7 +190,7 @@ async def mimo_agent_target(
         tools_enabled = capability.get("tools_enabled", True) if capability else True
     finally:
         db.close()
-    provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{endpoint_id}"
+    provider_id = direct_runtime_provider_id(endpoint_id)
     return resolve_model_target(
         "mimo://acp",
         f"{provider_id}/{target.model_id}",
@@ -207,6 +211,69 @@ async def _supervisor(explicit: Any = None, *, owner: Optional[str] = None) -> A
     if not supervisor or not supervisor.is_alive() or not supervisor.bridge:
         raise HTTPException(503, "Open Clank agent ACP is unavailable")
     return supervisor
+
+
+def _shared_runtime_target(
+    target: ResolvedModelTarget,
+    owner: Optional[str],
+):
+    """Resolve one enabled trusted grant to its private runtime model."""
+    from src.model_shares import (
+        resolve_shared_model_access,
+        runtime_model_for_access,
+        share_id_from_endpoint,
+        source_tools_enabled,
+    )
+
+    if share_id_from_endpoint(target.endpoint_id) is None:
+        return None
+    from core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        access = resolve_shared_model_access(
+            db,
+            actor_owner=owner or "",
+            endpoint_id=target.endpoint_id,
+            model_id=target.model_id,
+        )
+        if access is None:
+            raise HTTPException(
+                403,
+                "This shared model is no longer available to your account",
+            )
+        runtime_model = runtime_model_for_access(db, access)
+        if runtime_model is None:
+            raise HTTPException(410, "The shared model source is invalid")
+        return access, runtime_model, source_tools_enabled(db, access)
+    finally:
+        db.close()
+
+
+async def _acp_turn_worker(
+    target: ResolvedModelTarget,
+    *,
+    owner: Optional[str],
+    supervisor: Any,
+):
+    """Return the isolated worker/model for one ACP turn and optional lease."""
+    shared = _shared_runtime_target(target, owner)
+    if shared is not None:
+        access, runtime_model, _tools_enabled = shared
+        pool = supervisor or _mimo_supervisor
+        admit_shared = getattr(pool, "admit_shared_agent", None)
+        if not callable(admit_shared):
+            raise HTTPException(503, "Trusted model sharing is unavailable")
+        provider_id, separator, model_id = runtime_model.partition("/")
+        if not separator:
+            raise HTTPException(410, "The shared model source is invalid")
+        lease = await admit_shared(access, provider_id, model_id)
+        return lease.worker, runtime_model, lease
+
+    from src.openclank.mimo_projection import runtime_native_model_id
+
+    worker = await _supervisor(supervisor, owner=owner)
+    return worker, runtime_native_model_id(target.model_id), None
 
 
 def _validated_candidates(
@@ -232,12 +299,18 @@ async def stream_chat_target(
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
     if target.transport == "acp":
+        worker_lease = None
+        successful_terminal = False
         try:
-            sup = await _supervisor(supervisor, owner=owner)
-            bridge = sup.bridge
-        except HTTPException as exc:
-            yield f'event: error\ndata: {json.dumps({"error": exc.detail, "status": exc.status_code})}\n\n'
-            yield "data: [DONE]\n\n"
+            worker, runtime_model, worker_lease = await _acp_turn_worker(
+                target,
+                owner=owner,
+                supervisor=supervisor,
+            )
+            bridge = worker.bridge
+        except Exception as exc:
+            for event in _typed_error_sse(exc):
+                yield event
             return
         try:
             envelope = dict(kwargs.get("turn_envelope") or {})
@@ -245,17 +318,23 @@ async def stream_chat_target(
             async for chunk in bridge.run_turn(
                 session_id,
                 messages,
-                model=target.model_id,
+                model=runtime_model,
                 cwd=None,
                 owner=owner,
                 turn_envelope=envelope,
             ):
+                if chunk.strip() == "data: [DONE]":
+                    successful_terminal = True
                 yield chunk
         finally:
             try:
-                await sup.delete_session(session_id)
+                await worker.delete_session(session_id)
             except Exception as exc:
                 logger.debug("Failed to clean up auxiliary Open Clank agent stream %s: %s", session_id, exc)
+            if worker_lease is not None:
+                await worker_lease.release(
+                    successful_terminal=successful_terminal,
+                )
         return
 
     from src.llm_core import stream_llm_with_fallback
@@ -313,12 +392,22 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             yield event
         return
 
+    shared_access = None
+    shared_tools_enabled = None
     try:
-        target = await mimo_agent_target(
-            request.target,
-            owner=request.owner,
-            supervisor=pool,
-        )
+        shared = _shared_runtime_target(request.target, request.owner)
+        if shared is not None:
+            shared_access, runtime_model, shared_tools_enabled = shared
+            target = request.target
+        else:
+            target = await mimo_agent_target(
+                request.target,
+                owner=request.owner,
+                supervisor=pool,
+            )
+            from src.openclank.mimo_projection import runtime_native_model_id
+
+            runtime_model = runtime_native_model_id(target.model_id)
     except Exception as exc:
         if not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
             logger.exception("Unexpected strict Agent admission failure")
@@ -326,7 +415,7 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             yield event
         return
 
-    qualified = target.model_id.split("/", 1)
+    qualified = runtime_model.split("/", 1)
     if len(qualified) != 2:
         from src.openclank.mimo_supervisor import SupervisorAdmissionError
         exc = SupervisorAdmissionError(
@@ -341,7 +430,24 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     session_lease = None
     successful_terminal = False
     try:
-        worker_lease = await pool.admit_agent(request.owner, provider_id, model_id)
+        if shared_access is not None:
+            admit_shared = getattr(pool, "admit_shared_agent", None)
+            if not callable(admit_shared):
+                raise HTTPException(
+                    503,
+                    "Trusted model sharing is unavailable",
+                )
+            worker_lease = await admit_shared(
+                shared_access,
+                provider_id,
+                model_id,
+            )
+        else:
+            worker_lease = await pool.admit_agent(
+                request.owner,
+                provider_id,
+                model_id,
+            )
         worker = worker_lease.worker
         incognito = bool((request.turn_envelope or {}).get("incognito"))
         session_lease = AgentSessionLease(
@@ -350,15 +456,20 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             # The bridge owns exact-id cleanup for Temporary Agent sessions.
             ephemeral=target.lifecycle == "ephemeral" and not incognito,
         )
-        yield f'data: {json.dumps({"type": "projection", "data": {"generation": worker_lease.generation, "fingerprint": worker_lease.fingerprint[:12], "projection_pending": worker_lease.projection_pending}})}\n\n'
+        yield f'data: {json.dumps({"type": "projection", "data": {"generation": worker_lease.generation, "fingerprint": worker_lease.fingerprint[:12], "projection_pending": worker_lease.projection_pending, **({"shared": True} if shared_access is not None else {})}})}\n\n'
         envelope = dict(request.turn_envelope or {})
         envelope["lane"] = "agent"
-        if target.capabilities.get("tools") is False:
+        if shared_access is not None:
+            envelope["shared_model"] = shared_access.share_id
+        if (
+            shared_tools_enabled is False
+            or target.capabilities.get("tools") is False
+        ):
             envelope["allowed_tools"] = []
         async for chunk in worker.bridge.run_turn(
             request.session_id,
             request.messages,
-            model=target.model_id,
+            model=runtime_model,
             cwd=request.cwd,
             owner=request.owner,
             turn_envelope=envelope,
@@ -425,20 +536,27 @@ async def run_auxiliary_inference(request: AuxiliaryRequest) -> str:
             **options,
         )
 
-    sup = await _supervisor(request.supervisor, owner=request.owner)
+    worker, runtime_model, worker_lease = await _acp_turn_worker(
+        target,
+        owner=request.owner,
+        supervisor=request.supervisor,
+    )
     turn_session = request.session_id or f"aux-{request.purpose}-{uuid.uuid4().hex}"
     parts: list[str] = []
     error: Optional[tuple[int, str]] = None
-    lease = AgentSessionLease(sup, turn_session, ephemeral=True)
+    session_lease = AgentSessionLease(worker, turn_session, ephemeral=True)
+    successful_terminal = False
     try:
-        async for chunk in sup.bridge.run_turn(
+        async for chunk in worker.bridge.run_turn(
             turn_session,
             request.messages,
-            model=target.model_id,
+            model=runtime_model,
             cwd=None,
             owner=request.owner,
             turn_envelope={"lane": "auxiliary", "purpose": request.purpose, "incognito": True},
         ):
+            if chunk.strip() == "data: [DONE]":
+                successful_terminal = True
             event = "message"
             for line in chunk.splitlines():
                 if line.startswith("event:"):
@@ -465,4 +583,8 @@ async def run_auxiliary_inference(request: AuxiliaryRequest) -> str:
             raise HTTPException(*error)
         return "".join(parts)
     finally:
-        await lease.close()
+        await session_lease.close()
+        if worker_lease is not None:
+            await worker_lease.release(
+                successful_terminal=successful_terminal,
+            )

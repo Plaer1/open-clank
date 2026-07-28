@@ -29,7 +29,13 @@ from core.database import Session as DBSession, ChatMessage as DBChatMessage
 from core.database import Document as DBDocument, ModelEndpoint
 from core.log_safety import redact_url
 from routes.research_routes import _resolve_research_endpoint
-from routes.model_routes import _visible_models
+from routes.model_routes import (
+    _canonical_mimo_provider_id,
+    _mimo_endpoint_provider,
+    _visible_models,
+    is_mimo_connection_id,
+)
+from routes.prefs_routes import _load_for_user as _load_prefs_for_user
 from routes.chat_helpers import (
     resolve_session_auth,
     build_chat_context,
@@ -127,6 +133,20 @@ def _request_owner_is_admin(request: Request, owner: str | None) -> bool:
         return False
 
 
+def _agent_memory_read_allowed(
+    prefs: dict,
+    *,
+    incognito: bool = False,
+    no_memory: bool = False,
+) -> bool:
+    """Resolve the one per-turn read/write memory authority sent to ACP."""
+    if incognito or no_memory or not prefs.get("memory_enabled", True):
+        return False
+    from src.memory_gate import memory_mode
+
+    return memory_mode(prefs) != "off"
+
+
 def _turn_envelope(
     *,
     session_id: str,
@@ -144,6 +164,7 @@ def _turn_envelope(
     active_document=None,
     active_email=None,
     no_memory: bool = False,
+    memory_read_allowed: bool = True,
     compare_mode: bool = False,
     is_admin: bool = False,
 ) -> dict:
@@ -163,6 +184,7 @@ def _turn_envelope(
         "mode": mode or "agent",
         "incognito": bool(incognito),
         "no_memory": bool(no_memory),
+        "memory_read_allowed": bool(memory_read_allowed),
         "compare_mode": bool(compare_mode),
         "is_admin": bool(is_admin),
         "disabled_tools": sorted(str(name) for name in (disabled_tools or ())),
@@ -261,13 +283,68 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     return workspace, (requested if not workspace else "")
 
 
+def _native_connection_is_available(
+    endpoint_id: str | None,
+    owner: str | None,
+) -> bool | None:
+    """Return availability for native routes, or ``None`` for other routes.
+
+    ``mimo:auto`` remains valid as the automatic selector. Provider-scoped
+    routes remain valid only while that user still has the provider connected.
+    Read failures fail closed against destructive cleanup.
+    """
+    is_native, provider = _mimo_endpoint_provider(endpoint_id)
+    if not is_native:
+        return None
+    if not provider:
+        return True
+
+    from src.model_shares import own_native_auth
+
+    db = SessionLocal()
+    try:
+        connected = {
+            _canonical_mimo_provider_id(provider_id)
+            for provider_id in own_native_auth(db, owner or "")
+            if _canonical_mimo_provider_id(provider_id)
+        }
+        return provider in connected
+    except Exception as exc:
+        logger.warning(
+            "Could not verify native provider %r for owner %r",
+            provider,
+            owner,
+            exc_info=exc,
+        )
+        return True
+    finally:
+        db.close()
+
+
 def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
     """Clear a session model only when its persisted endpoint identity is gone."""
     if not getattr(sess, "endpoint_url", ""):
         return False
     endpoint_id = getattr(sess, "endpoint_id", None)
-    if endpoint_id == "mimo":
+    if _native_connection_is_available(endpoint_id, owner) is True:
         return False
+    from src.model_shares import (
+        resolve_shared_model_access,
+        share_id_from_endpoint,
+    )
+
+    if share_id_from_endpoint(endpoint_id) is not None:
+        db = SessionLocal()
+        try:
+            if resolve_shared_model_access(
+                db,
+                actor_owner=owner or "",
+                endpoint_id=endpoint_id,
+                model_id=getattr(sess, "model", None),
+            ) is not None:
+                return False
+        finally:
+            db.close()
     # Legacy ambiguous/unregistered rows fail explicitly at Agent admission;
     # never mutate them by guessing a same-URL endpoint.
     if not endpoint_id:
@@ -339,11 +416,17 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     if not endpoint_url:
         return False
 
+    endpoint_id = getattr(sess, "endpoint_id", None)
+    from src.model_shares import share_id_from_endpoint
+
+    if (
+        not endpoint_id
+        or is_mimo_connection_id(endpoint_id)
+        or share_id_from_endpoint(endpoint_id) is not None
+    ):
+        return False
     db = SessionLocal()
     try:
-        endpoint_id = getattr(sess, "endpoint_id", None)
-        if not endpoint_id or endpoint_id == "mimo":
-            return False
         q = db.query(ModelEndpoint).filter(
             ModelEndpoint.id == endpoint_id,
             ModelEndpoint.is_enabled == True,
@@ -384,21 +467,28 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
                 return False
         except Exception:
             return False
+    endpoint_id = getattr(sess, "endpoint_id", None)
+    from src.model_shares import share_id_from_endpoint
+
+    if (
+        not endpoint_id
+        or is_mimo_connection_id(endpoint_id)
+        or share_id_from_endpoint(endpoint_id) is not None
+    ):
+        return False
     db = SessionLocal()
     try:
         # Prefer the endpoint whose base URL matches the session — we know the
         # user already pointed this session at that endpoint, so its first
         # cached model is the most defensible default.
         ep = None
-        endpoint_id = getattr(sess, "endpoint_id", None)
-        if endpoint_id and endpoint_id != "mimo":
-            q = db.query(ModelEndpoint).filter(
-                ModelEndpoint.id == endpoint_id,
-                ModelEndpoint.is_enabled == True,
-            )
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
-            ep = q.first()
+        q = db.query(ModelEndpoint).filter(
+            ModelEndpoint.id == endpoint_id,
+            ModelEndpoint.is_enabled == True,
+        )
+        from src.auth_helpers import owner_filter
+        q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
+        ep = q.first()
         if not ep:
             return False
         if not is_chatgpt_subscription:
@@ -701,6 +791,12 @@ def setup_chat_routes(
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        _turn_memory_prefs = _load_prefs_for_user(owner) or {}
+        memory_read_allowed = _agent_memory_read_allowed(
+            _turn_memory_prefs,
+            incognito=incognito,
+            no_memory=no_memory,
+        )
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
@@ -713,7 +809,11 @@ def setup_chat_routes(
                 from src.auth_helpers import require_privilege
                 require_privilege(request, "can_manage_memory")
             memory_response = await chat_handler.handle_memory_command(
-                sess, message, owner=owner, incognito=incognito
+                sess,
+                message,
+                owner=owner,
+                incognito=incognito,
+                no_memory=no_memory,
             )
         if memory_response:
             async def inline_memory_stream():
@@ -733,7 +833,7 @@ def setup_chat_routes(
             use_rag=use_rag,
             time_filter=time_filter,
             incognito=incognito,
-            no_memory=no_memory,
+            no_memory=not memory_read_allowed,
             search_context=search_context,
             compare_mode=compare_mode,
             webhook_manager=webhook_manager,
@@ -856,7 +956,7 @@ def setup_chat_routes(
             # when the request's explicit web setting enabled them.
             disabled_tools.update({
                 "bash", "python",
-                "search_chats", "manage_skills", "manage_memory",
+                "search_chats", "manage_skills", "manage_memory", "recall_memory",
                 "read_file", "write_file", "edit_file",
                 "create_document", "edit_document", "update_document",
                 "send_email", "reply_to_email",
@@ -875,9 +975,12 @@ def setup_chat_routes(
         if incognito:
             disabled_tools.update({
                 "manage_memory",      # persistent memory store
+                "recall_memory",      # persistent memory reads
                 "search_chats",       # past chat history
                 "manage_skills",      # skill presets tied to user
             })
+        if not memory_read_allowed:
+            disabled_tools.update({"manage_memory", "recall_memory"})
 
         # Active email reader open → strip the tools that let the agent drift
         # away from the visible email or skip review. The only allowed compose
@@ -909,7 +1012,7 @@ def setup_chat_routes(
             if not _privs.get("can_generate_images", True):
                 disabled_tools.add("generate_image")
             if not _privs.get("can_manage_memory", True):
-                disabled_tools.update({"manage_memory", "manage_skills"})
+                disabled_tools.update({"manage_memory", "recall_memory", "manage_skills"})
             if not _privs.get("can_use_research", True):
                 _research_flags["do"] = False
             if not _privs.get("can_use_agent", True):
@@ -1260,6 +1363,7 @@ def setup_chat_routes(
                         active_document=active_doc,
                         active_email=active_email_ctx,
                         no_memory=no_memory,
+                        memory_read_allowed=memory_read_allowed,
                         compare_mode=compare_mode,
                         is_admin=_request_owner_is_admin(request, _user),
                     )
@@ -1452,6 +1556,7 @@ def setup_chat_routes(
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=(not tool_policy.block_all_tool_calls),
                                     memory_provider=chat_processor.memory_provider,
+                                    no_memory=no_memory,
                                 )
                             if _agent_error is None:
                                 _stream_set(session, status="done")
@@ -1568,7 +1673,10 @@ def setup_chat_routes(
         sup = getattr(request.app.state, "mimo_supervisor", None)
         owner = effective_user(request)
         if sup and hasattr(sup, "permission_handler_for"):
-            handler = sup.permission_handler_for(owner)
+            handler = sup.permission_handler_for(
+                owner,
+                request_id=request_id,
+            )
         else:
             handler = getattr(sup, "permission_handler", None) if sup else None
         if handler is None:
@@ -1608,7 +1716,10 @@ def setup_chat_routes(
         owner = effective_user(request) or ""
         sup = getattr(request.app.state, "mimo_supervisor", None)
         if sup and hasattr(sup, "question_handler_for"):
-            handler = sup.question_handler_for(owner)
+            handler = sup.question_handler_for(
+                owner,
+                request_id=request_id,
+            )
         else:
             handler = getattr(sup, "question_handler", None) if sup else None
         if handler is None:

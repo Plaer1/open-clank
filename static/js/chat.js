@@ -904,7 +904,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
         if (dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
@@ -3977,6 +3977,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             metricsData = json.data || metricsData;
           } else if (json.type === 'actor_accounting' || json.type === 'actor_accounting_failure') {
             chatRenderer.renderActorAccounting(holder, json.data || {});
+          } else if (json.type === 'ask_user') {
+            const question = json.data || {};
+            if (question.request_id && Array.isArray(question.questions)) {
+              _storeSessionState('question', sessionId, question);
+            }
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderAskUserCard(json.data || {});
+          } else if (json.type === 'permission_request') {
+            _storeSessionState('permission', sessionId, json.data || {});
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderPermissionCard(json.data || {}, sessionId);
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
                      json.type === 'tool_progress') {
             rich = true;

@@ -308,8 +308,8 @@ impl NativeProvider {
         if let Some(existing) = candidate.accepted_curated_id {
             return Ok(Some(existing));
         }
-        if prefilter_candidate(&candidate.content, &candidate.evidence_role).is_some() {
-            return Err("candidate still fails deterministic admission policy".into());
+        if candidate.status != CandidateStatus::Pending {
+            return Err("only pending candidates can be accepted".into());
         }
         let curated_id = stable_id("m", &[id]);
         let mut record = MemoryRecord::new(&candidate.content);
@@ -517,6 +517,26 @@ fn metadata_strings(metadata: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn capture_source_type(turn: &CompletedTurn, capture_mode: &str) -> SourceType {
+    let declared = metadata_string(&turn.metadata, "source_type")
+        .trim()
+        .to_lowercase();
+    let source = turn.source.trim().to_lowercase();
+    match declared.as_str() {
+        "human" | "user" | "user_created" => SourceType::Human,
+        "ai" | "ai_agent" | "agent_explicit" => SourceType::Ai,
+        "procedural" => SourceType::Procedural,
+        "auto_extracted" | "odysseus" => SourceType::AutoExtracted,
+        _ => match source.as_str() {
+            "user" | "user_created" => SourceType::Human,
+            "ai_agent" | "agent_explicit" => SourceType::Ai,
+            "odysseus" | "auto_extracted" => SourceType::AutoExtracted,
+            _ if capture_mode == "manual" => SourceType::Human,
+            _ => SourceType::AutoExtracted,
+        },
+    }
+}
+
 #[async_trait]
 impl MemoryProvider for NativeProvider {
     fn id(&self) -> &str {
@@ -669,14 +689,17 @@ impl MemoryProvider for NativeProvider {
             content
         };
         let manual = capture_mode == "manual";
+        let review_only = capture_mode == "review_only";
         let rejection = if question {
             if content.is_empty() {
                 Some("empty_question")
-            } else if !manual {
+            } else if !manual && !review_only {
                 Some("unknown_kind_requires_manual")
             } else {
                 None
             }
+        } else if manual || (review_only && explicit_kind.is_some()) {
+            None
         } else {
             prefilter_candidate(content, evidence_role)
         };
@@ -692,6 +715,8 @@ impl MemoryProvider for NativeProvider {
             .unwrap_or(MemoryKind::Episodic);
         let admission_reason = if manual {
             Some("manual_admission")
+        } else if review_only {
+            None
         } else {
             auto_admission.map(|(reason, _, _, _)| reason)
         };
@@ -818,7 +843,7 @@ impl MemoryProvider for NativeProvider {
             }
         }
         record.source = turn.source.clone();
-        record.source_type = SourceType::Human;
+        record.source_type = capture_source_type(turn, capture_mode);
         record.owner = Some(effective_owner.to_string());
         record.workspace_id = effective_workspace.to_string();
         record.workspace_path = turn.workspace_path.clone();
@@ -1270,6 +1295,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn short_manual_fact_returns_curated_id_and_is_recallable() {
+        let (p, _) = provider();
+        let mut manual = turn_with_mode("Saturn", "", "manual", "evt-manual-short-fact");
+        manual.category = Some("fact".into());
+        manual.source = "ai_agent".into();
+        manual.metadata["source_type"] = "ai".into();
+
+        let captured = p.capture(&manual).await;
+        let curated_id = captured.record_ids.first().unwrap().clone();
+        assert!(curated_id.starts_with("m_"));
+
+        let recalled = p
+            .recall(&RecallQuery {
+                query: "Saturn".into(),
+                workspace_id: Some("workspace-test".into()),
+                owner: Some("alice".into()),
+                ..RecallQuery::default()
+            })
+            .await;
+        let hit = recalled
+            .memories
+            .iter()
+            .find(|hit| hit.record.id == curated_id && hit.record.content == "Saturn")
+            .unwrap();
+        assert_eq!(hit.record.source_type, SourceType::Ai);
+    }
+
+    #[tokio::test]
+    async fn explicit_review_only_short_fact_is_pending_but_automatic_short_turn_is_rejected() {
+        let (p, store) = provider();
+        let mut deliberate = turn_with_mode("Saturn", "", "review_only", "evt-review-short-fact");
+        deliberate.category = Some("fact".into());
+        let proposed = p.capture(&deliberate).await;
+        assert!(proposed.record_ids.iter().all(|id| !id.starts_with("m_")));
+
+        let mut question = turn_with_mode(
+            "favorite color",
+            "",
+            "review_only",
+            "evt-review-short-question",
+        );
+        question.category = Some("unknown".into());
+        let proposed_question = p.capture(&question).await;
+        assert!(proposed_question
+            .record_ids
+            .iter()
+            .all(|id| !id.starts_with("m_")));
+
+        let automatic = turn_with_mode("Venus", "", "review_only", "evt-review-short-auto");
+        p.capture(&automatic).await;
+
+        let pending = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+            .unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|candidate| {
+            candidate.content == "Saturn" && candidate.reason == "awaiting_review"
+        }));
+        assert!(pending.iter().any(|candidate| {
+            candidate.content == "favorite color?"
+                && candidate.kind == MemoryKind::Unknown
+                && candidate.reason == "awaiting_review"
+        }));
+        let rejected = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("rejected"), 10)
+            .unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].content, "Venus");
+        assert_eq!(rejected[0].reason, "empty_or_short_acknowledgement");
+
+        let saturn = pending
+            .iter()
+            .find(|candidate| candidate.content == "Saturn")
+            .unwrap();
+        let curated_id = p
+            .review_candidate(
+                &saturn.id,
+                true,
+                "explicitly approved",
+                "alice",
+                "workspace-test",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(curated_id.starts_with("m_"));
+        let approved = store
+            .search_curated_fts_scoped("Saturn", 10, Some("alice"), Some("workspace-test"))
+            .await;
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].record.source_type, SourceType::Human);
+
+        assert!(p
+            .review_candidate(
+                &rejected[0].id,
+                true,
+                "must remain rejected",
+                "alice",
+                "workspace-test",
+            )
+            .await
+            .is_err());
+        assert!(store
+            .search_curated_fts_scoped("Venus", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn manual_unknown_add_stores_normalized_question() {
         let (p, store) = provider();
         let mut add = turn_with_mode("users name", "", "manual", "evt-unknown-manual");
@@ -1384,14 +1518,14 @@ mod tests {
     #[tokio::test]
     async fn safe_user_claim_auto_admits_and_identity_is_pinned() {
         let (p, store) = provider();
-        let result = p
-            .capture(&turn_with_mode(
-                "My name is Alice",
-                "Nice to meet you.",
-                "candidate",
-                "evt-identity",
-            ))
-            .await;
+        let mut automatic = turn_with_mode(
+            "My name is Alice",
+            "Nice to meet you.",
+            "candidate",
+            "evt-identity",
+        );
+        automatic.source = "odysseus".into();
+        let result = p.capture(&automatic).await;
         assert!(result
             .record_ids
             .first()
@@ -1402,6 +1536,7 @@ mod tests {
             .await;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].record.kind, MemoryKind::Persona);
+        assert_eq!(hits[0].record.source_type, SourceType::AutoExtracted);
         assert_eq!(hits[0].record.metadata["pinned"], true);
         assert!(hits[0].record.exempt_from_decay);
         assert_eq!(
@@ -1411,6 +1546,36 @@ mod tests {
                 .reason,
             "auto_identity_claim"
         );
+    }
+
+    #[tokio::test]
+    async fn review_only_capture_stays_pending_when_claim_would_auto_admit() {
+        let (p, store) = provider();
+        let result = p
+            .capture(&turn_with_mode(
+                "My name is Alice",
+                "Nice to meet you.",
+                "review_only",
+                "evt-review-only-identity",
+            ))
+            .await;
+
+        assert!(
+            result.record_ids.iter().all(|id| !id.starts_with("m_")),
+            "review-only capture must not create a curated record"
+        );
+        assert_eq!(result.vectors_written, 0);
+        assert!(store
+            .search_curated_fts_scoped("Alice", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+
+        let pending = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].reason, "awaiting_review");
+        assert_eq!(pending[0].kind, MemoryKind::Persona);
     }
 
     #[tokio::test]

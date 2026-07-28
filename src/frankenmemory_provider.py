@@ -17,7 +17,7 @@ from src.memory_provider import (
     MemorySearchHit,
     MemoryTransportError,
 )
-from src.memory_scope import chat_workspace
+from src.memory_scope import chat_workspace, memory_owner
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,16 @@ class FrankenmemoryProvider(MemoryProvider):
         requests = self._requests
         try:
             async with AsyncExitStack() as stack:
+                server_env = {**os.environ, **(self._env or {})}
+                # A database path and its identity are one atomic binding.
+                # Callers that deliberately select another database must not
+                # inherit the identity of the process-wide production store.
+                if "FM_DB_PATH" in self._env and "FM_DB_ID" not in self._env:
+                    server_env.pop("FM_DB_ID", None)
                 server_params = StdioServerParameters(
                     command=self._command,
                     args=[],
-                    env={**os.environ, **(self._env or {})},
+                    env=server_env,
                 )
                 # fm-mcp stderr goes to a log file, never the operator's
                 # terminal — inherited stderr kept printing after server exit.
@@ -90,7 +96,7 @@ class FrankenmemoryProvider(MemoryProvider):
                 health = await session.call_tool("memory_quality", {"rebuild_graph_fts": False})
                 health_text = health.content[0].text if health.content else "{}"
                 health_data = json.loads(health_text)
-                expected_id = (self._env or {}).get("FM_DB_ID") or os.environ.get("FM_DB_ID")
+                expected_id = server_env.get("FM_DB_ID")
                 if expected_id and health_data.get("database_id") != expected_id:
                     raise RuntimeError(
                         "frankenmemory database identity mismatch during provider handshake"
@@ -160,7 +166,7 @@ class FrankenmemoryProvider(MemoryProvider):
 
     def _scope(self, owner: Optional[str], session_id: Optional[str] = None) -> MemoryScope:
         return MemoryScope(
-            owner=owner or "",
+            owner=memory_owner(owner),
             workspace_id=self._workspace_id,
             workspace_path=self._workspace_id,
             session_id=session_id,
@@ -199,7 +205,9 @@ class FrankenmemoryProvider(MemoryProvider):
             updated_at=data.get("updated_at"),
             uses=int(metadata.get("uses", 0) or 0),
             kind=str(data.get("kind") or "fact"),
-            source_type=str(data.get("source_type") or "human"),
+            # Frankenmemory is an external wire boundary. Missing provenance
+            # must not silently turn an engine record into user-authored truth.
+            source_type=str(data.get("source_type") or "auto_extracted"),
             priority=int(data["priority"]) if isinstance(data.get("priority"), (int, float)) else None,
             trust_score=_score("trust_score"),
             confidence_score=_score("confidence_score"),
@@ -222,15 +230,17 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
         session_id: Optional[str] = None,
         source: str = "odysseus",
+        capture_mode: str = "candidate",
     ) -> Dict[str, Any]:
-        """Automatic per-turn capture — the same candidates-tier pipeline
-        mimo's capture.ts feeds. The engine derives a stable event id from
-        (owner, workspace, session, texts), so retried saves dedup."""
+        """Automatic per-turn capture through the candidates-tier pipeline.
+        ``review_only`` stages eligible content without auto-admission. The
+        engine derives a stable event id from the scope and texts, so retries
+        deduplicate."""
         scope = self._scope(owner, session_id)
         args: Dict[str, Any] = {
             "user_text": user_text or "",
             "assistant_text": assistant_text or "",
-            "capture_mode": "candidate",
+            "capture_mode": capture_mode,
             "workspace_id": scope.workspace_id,
             "workspace_path": scope.workspace_path,
             "owner": scope.owner,
@@ -251,17 +261,29 @@ class FrankenmemoryProvider(MemoryProvider):
         source: str = "user",
         metadata: Optional[Dict[str, Any]] = None,
         workspace_id: Optional[str] = None,
+        capture_mode: str = "manual",
+        source_type: Optional[str] = None,
     ) -> MemoryRecord:
         scope = self._scope(owner, session_id)
+        resolved_source_type = str(
+            source_type or _SOURCE_TYPE_MAP.get(source, "auto_extracted")
+        ).strip().lower()
+        if resolved_source_type not in {
+            "human",
+            "ai",
+            "auto_extracted",
+            "procedural",
+        }:
+            resolved_source_type = "auto_extracted"
         args: Dict[str, Any] = {
             "content": text,
-            "capture_mode": "manual",
+            "capture_mode": capture_mode,
             "workspace_id": workspace_id or scope.workspace_id,
             "workspace_path": scope.workspace_path,
             "owner": scope.owner,
             "source": source,
             "category": category,
-            "source_type": _SOURCE_TYPE_MAP.get(source, "auto_extracted"),
+            "source_type": resolved_source_type,
         }
         if session_id:
             args["session_id"] = session_id
@@ -273,16 +295,34 @@ class FrankenmemoryProvider(MemoryProvider):
         record_ids = result.get("record_ids") or []
         if not record_ids:
             raise RuntimeError("frankenmemory capture returned no durable record id")
-        record_id = record_ids[0]
+        if capture_mode == "review_only":
+            record_id = next(
+                (rid for rid in record_ids if str(rid).startswith("candidate_")),
+                None,
+            )
+        else:
+            record_id = next(
+                (rid for rid in record_ids if str(rid).startswith("m_")),
+                None,
+            )
+        if not record_id:
+            raise RuntimeError(
+                "frankenmemory capture did not admit the requested memory"
+            )
+        record_metadata = dict(metadata or {})
+        if capture_mode == "review_only":
+            record_metadata["pending_review"] = True
         return MemoryRecord(
             id=record_id,
             text=text,
             category=category,
             source=source,
-            owner=owner,
+            source_type=resolved_source_type,
+            owner=scope.owner,
             session_id=session_id,
-            metadata=metadata or {},
-            pinned=bool((metadata or {}).get("pinned", False)),
+            metadata=record_metadata,
+            pinned=bool(record_metadata.get("pinned", False)),
+            workspace_id=workspace_id or scope.workspace_id,
         )
 
     async def recall(

@@ -499,10 +499,14 @@
         <div class="memory-tab-panel hidden" data-memory-panel="settings">
           <div class="admin-card">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px">
-              <h2 style="margin:0;display:inline-flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Auto-extract memories</h2>
-              <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="auto-memory-toggle" checked /><span class="admin-slider"></span></label>
+              <h2 style="margin:0;display:inline-flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Memory mode</h2>
+              <select id="memory-mode-select" class="memory-sort-select" aria-label="Memory mode">
+                <option value="automatic">Automatic</option>
+                <option value="manual">Review first</option>
+                <option value="off">Off</option>
+              </select>
             </div>
-            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Automatically extract memories from conversations.</span>
+            <span id="memory-mode-help" class="admin-toggle-sub" style="display:block;margin-top:6px">Capture useful memories automatically. Agent saves are admitted immediately.</span>
           </div>
           <div class="admin-card" id="memory-trust-card">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px">
@@ -2363,7 +2367,7 @@
                 </div>
               </div>
             </h2>
-            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Connect a cloud provider (OpenAI, Anthropic, DeepSeek, OpenRouter, etc.).</div>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Connect an API provider, browser account, or custom endpoint.</div>
             <div class="adm-add-section">
               <div class="admin-model-form">
                 <div class="admin-model-form-row">
@@ -2414,6 +2418,25 @@
                 <div id="adm-deviceAuthStatus" class="adm-ep-inline-msg" style="min-height:0;margin-top:0;"></div>
               </div>
             </div>
+            <div id="mimo-provider-directory" class="adm-add-section" style="margin-top:16px;">
+              <div class="adm-ep-section-head" style="display:flex;align-items:center;gap:8px;">
+                <span>Provider accounts</span>
+                <span style="flex:1"></span>
+                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search…" aria-label="Search API providers" autocomplete="off" style="font-size:11px;padding:2px 6px;width:120px;">
+                <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
+              </div>
+              <div class="admin-toggle-sub" style="margin:6px 0 10px;">Use browser login or an API key. Connected models appear under Added Models → API.</div>
+              <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
+              <div id="mimo-provider-flow"></div>
+              <div id="mimo-provider-list"></div>
+            </div>
+
+            <div id="model-share-received" class="adm-add-section" style="margin-top:16px;">
+              <div class="adm-ep-section-head">Shared with you</div>
+              <div class="admin-toggle-sub" style="margin:6px 0 10px;">Models a trusted Open Clank user offered to your account. Add only the ones you want.</div>
+              <div id="model-share-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
+              <div id="model-share-list"></div>
+            </div>
           </div>
 
         </div>
@@ -2430,7 +2453,7 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Clear offline <span id="adm-epOfflineCount" style="opacity:0.6;margin-left:2px;"></span>
               </button>
             </h2>
-            <div class="admin-toggle-sub" style="margin-bottom:12px">All providers in one place. Direct endpoints you've added plus cloud providers available through Open Clank agent.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:12px">Your connected local and API models.</div>
             <div class="adm-ep-section">
               <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
@@ -2442,20 +2465,14 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
               </div>
               <div id="adm-epList-api"><div class="admin-empty">No API endpoints yet.</div></div>
-            </div>
-            <div class="adm-ep-section" style="margin-top:18px;">
-              <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Cloud providers
-                <span style="flex:1"></span>
-                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search…" autocomplete="off" style="font-size:11px;padding:2px 6px;width:120px;">
-                <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
+              <div id="mimo-connected-providers-section" style="margin-top:10px;">
+                <div id="mimo-connected-provider-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
+                <div id="mimo-connected-provider-flow"></div>
+                <div id="mimo-connected-provider-list"></div>
               </div>
-              <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
-              <div id="mimo-provider-flow"></div>
-              <div id="mimo-provider-list"></div>
             </div>
           </div>
-          <div id="mimo-providers-section" class="admin-only" style="display:none">
+          <div id="mimo-permission-grants-root" class="admin-only" style="display:none">
             <div id="mimo-permission-grants-section" class="admin-card" style="margin-top:12px">
               <h2>Persistent permissions</h2>
               <div class="admin-toggle-sub">Owner/session/workspace-scoped agent grants. One-time approvals are never stored.</div>
@@ -2705,7 +2722,7 @@
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/compare/index.js"></script>
-<script type="module" src="/static/js/theme.js?v=20260723gui1"></script>
+<script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js"></script>
 <script type="module" src="/static/js/admin.js"></script>

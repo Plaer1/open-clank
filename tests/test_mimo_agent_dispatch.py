@@ -4,24 +4,23 @@ import uuid
 
 import pytest
 
+import core.database as cdb
 from core.database import ModelEndpoint
-from src import endpoint_resolver
 from src.endpoint_resolver import (
     build_chat_url,
+    direct_runtime_provider_id,
     endpoint_id_for_chat_url,
     normalize_base,
     resolve_model_target,
 )
 
-# Write through the SAME session binding the resolver reads. Another test
-# module (test_manage_tasks_owner_scope) rebinds core.database.SessionLocal
-# to a temp DB at import time; endpoint_resolver captured the original at
-# ITS import, so fixtures must use the resolver's binding or rows land in
-# a database the code under test never sees.
-SessionLocal = endpoint_resolver.SessionLocal
 from src.model_dispatch import AgentRunRequest, mimo_agent_target, run_agent
 from src.model_capabilities import set_declared
-from src.openclank.mimo_supervisor import ENDPOINT_PROVIDER_PREFIX, SupervisorAdmissionError
+from src.openclank.mimo_supervisor import SupervisorAdmissionError
+
+
+def SessionLocal():
+    return cdb.SessionLocal()
 
 
 class _Worker:
@@ -45,11 +44,7 @@ class _Pool:
 
 
 @pytest.fixture
-def endpoint(monkeypatch):
-    # A legacy owner-scope module rebinds core.database.SessionLocal at import
-    # time. Keep dispatch and endpoint_resolver on the same canonical DB for
-    # this test, then let monkeypatch restore the suite's prior binding.
-    monkeypatch.setattr("core.database.SessionLocal", SessionLocal)
+def endpoint():
     ep_id = f"disp-{uuid.uuid4().hex[:8]}"
     db = SessionLocal()
     try:
@@ -92,7 +87,7 @@ def test_reverse_url_lookup(endpoint):
 
 
 async def test_rewrite_hit_returns_acp_target(endpoint):
-    mimo_model = f"{ENDPOINT_PROVIDER_PREFIX}{endpoint}/glm-5.2"
+    mimo_model = f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
     pool = _Pool(_Worker([mimo_model, "xiaomi/mimo-auto"]))
     rewritten = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
     assert rewritten is not None
@@ -103,11 +98,55 @@ async def test_rewrite_hit_returns_acp_target(endpoint):
 async def test_unrelated_native_catalog_entries_do_not_block_rewrite(endpoint):
     pool = _Pool(_Worker(["xiaomi/mimo-auto"]))
     rewritten = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
-    assert rewritten.model_id == f"{ENDPOINT_PROVIDER_PREFIX}{endpoint}/glm-5.2"
+    assert rewritten.model_id == f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
+
+
+async def test_public_mimo_auto_routes_to_private_runtime_identity():
+    class Bridge:
+        def __init__(self):
+            self.models = []
+
+        async def run_turn(self, *_args, model=None, **_kwargs):
+            self.models.append(model)
+            yield "data: [DONE]\n\n"
+
+    class Lease:
+        generation = 1
+        fingerprint = "test-fingerprint"
+        projection_pending = False
+
+        def __init__(self):
+            self.worker = _Worker(["mimo/mimo-auto"])
+            self.worker.bridge = Bridge()
+
+        async def release(self, *, successful_terminal=False):
+            return None
+
+    lease = Lease()
+    admitted = []
+
+    class Pool:
+        async def admit_agent(self, owner, provider_id, model_id):
+            admitted.append((owner, provider_id, model_id))
+            return lease
+
+    request = AgentRunRequest(
+        target=resolve_model_target("mimo://acp", "xiaomi/mimo-auto"),
+        messages=[{"role": "user", "content": "test"}],
+        session_id="public-mimo-auto",
+        owner="alice",
+        supervisor=Pool(),
+    )
+
+    events = [event async for event in run_agent(request)]
+
+    assert events[-1] == "data: [DONE]\n\n"
+    assert admitted == [("alice", "mimo", "mimo-auto")]
+    assert lease.worker.bridge.models == ["mimo/mimo-auto"]
 
 
 async def test_missing_endpoint_identity_fails_closed(endpoint):
-    pool = _Pool(_Worker([f"{ENDPOINT_PROVIDER_PREFIX}{endpoint}/glm-5.2"]))
+    pool = _Pool(_Worker([f"{direct_runtime_provider_id(endpoint)}/glm-5.2"]))
     target = resolve_model_target("https://unregistered.example.test/v1/chat/completions", "glm-5.2")
     with pytest.raises(SupervisorAdmissionError, match="persisted endpoint identity"):
         await mimo_agent_target(target, owner="", supervisor=pool)
@@ -122,7 +161,7 @@ async def test_no_supervisor_fails_and_acp_target_is_stable(monkeypatch, endpoin
 
 
 async def test_removed_kill_switch_cannot_restore_legacy_agent(monkeypatch, endpoint):
-    mimo_model = f"{ENDPOINT_PROVIDER_PREFIX}{endpoint}/glm-5.2"
+    mimo_model = f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
     pool = _Pool(_Worker([mimo_model]))
     monkeypatch.setattr(
         "src.settings.get_setting",

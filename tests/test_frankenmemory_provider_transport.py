@@ -83,6 +83,71 @@ async def test_failure_logs_are_never_empty(tmp_path, caplog):
     assert str(raised.value).strip()
 
 
+async def test_capture_passes_explicit_review_only_mode(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+    calls = []
+
+    async def fake_call_tool(name, args):
+        calls.append((name, args))
+        return {"record_ids": ["candidate_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    result = await provider.capture(
+        "My name is Alice",
+        "Nice to meet you.",
+        owner="alice",
+        session_id="ses-review",
+        capture_mode="review_only",
+    )
+
+    assert result == {"record_ids": ["candidate_1"]}
+    assert calls == [
+        (
+            "capture",
+            {
+                "user_text": "My name is Alice",
+                "assistant_text": "Nice to meet you.",
+                "capture_mode": "review_only",
+                "workspace_id": provider._workspace_id,
+                "workspace_path": provider._workspace_id,
+                "owner": "alice",
+                "source": "odysseus",
+                "session_id": "ses-review",
+                "session_key": "ses-review",
+            },
+        )
+    ]
+
+
+async def test_remember_never_reports_a_raw_capture_as_saved(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+
+    async def fake_call_tool(_name, _args):
+        return {"record_ids": ["raw_1", "candidate_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    with pytest.raises(RuntimeError, match="did not admit"):
+        await provider.remember("short fact", owner="alice")
+
+
+async def test_remember_reports_agent_provenance(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+
+    async def fake_call_tool(_name, _args):
+        return {"record_ids": ["m_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    record = await provider.remember(
+        "Agent-discovered fact",
+        owner="alice",
+        source="ai_agent",
+    )
+    assert record.source_type == "ai"
+
+
 @needs_fm
 async def test_recall_round_trip_returns_seeded_hits(tmp_path):
     """E0.1b: fm-mcp recall must return structured memories the provider can

@@ -53,6 +53,10 @@ def endpoint_db(monkeypatch):
     monkeypatch.setattr(model_routes, "_save_settings", lambda _settings: None)
     monkeypatch.setattr(prefs_routes, "_load_for_user", lambda _owner: {})
     monkeypatch.setattr(prefs_routes, "_save_for_user", lambda _owner, _prefs: None)
+    monkeypatch.setattr(
+        "src.url_security.validate_public_http_url",
+        lambda url: url,
+    )
     monkeypatch.setattr(database, "SessionLocal", session_factory)
     monkeypatch.setattr(src_database, "SessionLocal", session_factory)
     monkeypatch.setattr(src_database, "ModelEndpoint", ModelEndpoint)
@@ -255,11 +259,18 @@ def test_agent_endpoint_tool_is_owner_scoped(endpoint_db):
     ))
     assert denied["exit_code"] == 1
 
+    alice_revision = model_routes.model_catalogue_revision("alice")
+    bob_revision = model_routes.model_catalogue_revision("bob")
     added = asyncio.run(do_manage_endpoints(
         '{"action":"add","name":"Alice second","base_url":"https://second.invalid/v1"}',
         owner="alice",
     ))
     assert added["exit_code"] == 0
+    assert (
+        model_routes.model_catalogue_revision("alice")[1]
+        == alice_revision[1] + 1
+    )
+    assert model_routes.model_catalogue_revision("bob") == bob_revision
     repeated = asyncio.run(do_manage_endpoints(
         '{"action":"add","name":"Duplicate spelling","base_url":"HTTPS://SECOND.invalid:443/v1/"}',
         owner="alice",
@@ -356,6 +367,50 @@ def test_legacy_endpoint_and_provider_auth_are_claimed_before_backfill(tmp_path,
         ).fetchone() == ("e", "legacy-ep")
     finally:
         conn.close()
+
+
+def test_session_endpoint_migration_canonicalizes_legacy_mimo_ids(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "app.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE model_endpoints (
+                id TEXT PRIMARY KEY, base_url TEXT, owner TEXT, is_enabled INTEGER
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, endpoint_url TEXT, endpoint_id TEXT, owner TEXT
+            );
+            INSERT INTO sessions VALUES
+                ('legacy', 'mimo://acp', 'mimo', 'e'),
+                ('provider', 'mimo://acp', 'mimo:xiaomi', 'e'),
+                ('missing-id', 'mimo://acp', NULL, 'e');
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(database, "DATABASE_URL", f"sqlite:///{db_path}")
+
+    database._migrate_add_session_endpoint_id_column()
+    database._migrate_add_session_endpoint_id_column()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = dict(conn.execute(
+            "SELECT id, endpoint_id FROM sessions ORDER BY id"
+        ).fetchall())
+    finally:
+        conn.close()
+    assert rows == {
+        "legacy": "mimo:auto",
+        "missing-id": "mimo:auto",
+        "provider": "mimo:xiaomi",
+    }
 
 
 def test_auth_disabled_migration_preserves_ownerless_model_catalogue(tmp_path, monkeypatch):

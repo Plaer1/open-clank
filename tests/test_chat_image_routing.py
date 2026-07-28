@@ -7,6 +7,8 @@ for mod_name in ["src.endpoint_resolver", "src.database", "core.database"]:
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from tests.helpers.import_state import clear_fake_endpoint_resolver_modules
 
 clear_fake_endpoint_resolver_modules("routes.chat_routes")
@@ -62,6 +64,30 @@ def test_image_model_prefix_routes_to_image_generation_without_endpoint_lookup(m
     monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
 
     assert chat_routes._is_image_generation_session(_session(model="dall-e-3"))
+
+
+@pytest.mark.parametrize("endpoint_id", ["mimo:auto", "mimo:xiaomi"])
+def test_available_native_connection_is_not_cleared_as_orphan(
+    monkeypatch,
+    endpoint_id,
+):
+    def fail_if_called():
+        raise AssertionError("available native connections do not query endpoints")
+
+    monkeypatch.setattr(
+        chat_routes,
+        "_native_connection_is_available",
+        lambda candidate, owner: candidate == endpoint_id,
+    )
+    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
+    session = _session(
+        model="xiaomi/mimo-v2.5-pro",
+        endpoint_url="mimo://acp",
+        endpoint_id=endpoint_id,
+    )
+
+    assert chat_routes._clear_orphaned_session_endpoint(session, "alice") is False
+    assert chat_routes._is_image_generation_session(session, "alice") is False
 
 
 def test_image_endpoint_does_not_catch_text_model_on_different_path(monkeypatch):

@@ -12,6 +12,9 @@ cache from the DB, where the rows are already gone, and the token is rejected.
 import asyncio
 import types
 
+import pytest
+
+import routes.prefs_routes as prefs_routes
 from routes.auth_routes import setup_auth_routes, DeleteUserRequest
 
 
@@ -47,6 +50,11 @@ def _auth_manager_raising():
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_prefs(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(tmp_path / "user_prefs.json"))
+
+
 def test_successful_delete_invalidates_cache():
     invalidations = []
     router = setup_auth_routes(_auth_manager(delete_result=True))
@@ -54,6 +62,36 @@ def test_successful_delete_invalidates_cache():
     result = asyncio.run(handler(DeleteUserRequest(username="bob"), _fake_request(invalidations)))
     assert result == {"ok": True}
     assert invalidations == [True], "successful delete must flag the token cache stale"
+
+
+def test_delete_drains_provider_login_before_auth_mutation(monkeypatch):
+    import routes.mimo_provider_routes as provider_routes
+
+    events = []
+
+    async def drain(_supervisor, owner):
+        events.append(("drain", owner))
+
+    manager = _auth_manager(delete_result=True)
+
+    def delete(username, actor):
+        events.append(("delete", username, actor))
+        return True
+
+    manager.delete_user = delete
+    monkeypatch.setattr(provider_routes, "purge_owner_provider_flows", drain)
+    result = asyncio.run(
+        _handler(setup_auth_routes(manager))(
+            DeleteUserRequest(username="bob"),
+            _fake_request([]),
+        )
+    )
+
+    assert result == {"ok": True}
+    assert events[:2] == [
+        ("drain", "bob"),
+        ("delete", "bob", "admin"),
+    ]
 
 
 def test_refused_delete_does_not_invalidate_cache():
@@ -69,8 +107,16 @@ def test_refused_delete_does_not_invalidate_cache():
     assert invalidations == [], "a refused delete must not touch the token cache"
 
 
-def test_delete_exception_invalidates_cache_for_partial_token_purge():
+def test_delete_exception_invalidates_cache_for_partial_token_purge(monkeypatch):
+    import routes.model_routes as model_routes
+
     invalidations = []
+    model_invalidations = []
+    monkeypatch.setattr(
+        model_routes,
+        "invalidate_model_catalogue_revision",
+        model_invalidations.append,
+    )
     router = setup_auth_routes(_auth_manager_raising())
     handler = _handler(router)
     try:
@@ -80,3 +126,38 @@ def test_delete_exception_invalidates_cache_for_partial_token_purge():
         raised = True
     assert raised, "delete_user exception should still propagate"
     assert invalidations == [True], "partial token purge must dirty the bearer cache"
+    assert model_invalidations == ["bob"]
+
+
+def test_successful_delete_removes_only_target_user_prefs():
+    prefs_routes._save({
+        "_users": {
+            "bob": {"default_endpoint_id": "old-provider"},
+            "alice": {"default_endpoint_id": "alice-provider"},
+        }
+    })
+    router = setup_auth_routes(_auth_manager(delete_result=True))
+    result = asyncio.run(
+        _handler(router)(
+            DeleteUserRequest(username="bob"),
+            _fake_request([]),
+        )
+    )
+    assert result == {"ok": True}
+    assert prefs_routes._load() == {
+        "_users": {"alice": {"default_endpoint_id": "alice-provider"}}
+    }
+
+
+def test_refused_delete_restores_target_user_prefs():
+    original = {"_users": {"bob": {"default_endpoint_id": "old-provider"}}}
+    prefs_routes._save(original)
+    router = setup_auth_routes(_auth_manager(delete_result=False))
+    with pytest.raises(Exception):
+        asyncio.run(
+            _handler(router)(
+                DeleteUserRequest(username="bob"),
+                _fake_request([]),
+            )
+        )
+    assert prefs_routes._load() == original

@@ -26,7 +26,12 @@ from src.settings import (
     DEFAULT_SETTINGS,
     PER_USER_MODEL_SETTING_KEYS,
 )
-from routes.prefs_routes import _load_for_user, _save_for_user
+from routes.prefs_routes import (
+    _load as _load_prefs,
+    _load_for_user,
+    _save as _save_prefs,
+    _save_for_user,
+)
 from src.integrations import (
     load_integrations,
     add_integration,
@@ -110,6 +115,57 @@ def _settings_for_user(settings: dict, user: str) -> dict:
     for key in PER_USER_MODEL_SETTING_KEYS:
         scoped[key] = prefs[key] if key in prefs else DEFAULT_SETTINGS[key]
     return scoped
+
+
+def _detach_user_prefs(username: str):
+    """Remove one account's JSON prefs, returning a rollback snapshot."""
+    owner = str(username or "").strip().lower()
+    prefs = _load_prefs()
+    users = prefs.get("_users") if isinstance(prefs, dict) else None
+    if not isinstance(users, dict):
+        return None
+    key = next(
+        (stored for stored in users if str(stored).strip().lower() == owner),
+        None,
+    )
+    if key is None:
+        return None
+    snapshot = (str(key), users.pop(key))
+    _save_prefs(prefs)
+    return snapshot
+
+
+def _restore_user_prefs(snapshot) -> None:
+    if snapshot is None:
+        return
+    key, value = snapshot
+    prefs = _load_prefs()
+    users = prefs.setdefault("_users", {})
+    users.setdefault(key, value)
+    _save_prefs(prefs)
+
+
+def _invalidate_model_catalogue_owners(*owners: str) -> None:
+    """Evict owner-scoped model catalogues before account lifecycle changes."""
+    try:
+        from routes.model_routes import invalidate_model_catalogue_revision
+
+        for owner in {
+            str(value or "").strip().lower()
+            for value in owners
+            if str(value or "").strip()
+        }:
+            invalidate_model_catalogue_revision(owner)
+    except Exception as exc:
+        logger.warning("Could not invalidate owner model catalogue: %s", exc)
+
+
+async def _drain_owner_provider_flows(request: Request, owner: str) -> None:
+    """Fence native-provider login tasks before an account ownership mutation."""
+    from routes.mimo_provider_routes import purge_owner_provider_flows
+
+    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+    await purge_owner_provider_flows(supervisor, owner)
 
 
 class LoginRequest(BaseModel):
@@ -469,6 +525,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(404, "User not found")
         if new_username in auth_manager.users:
             raise HTTPException(409, "Username already taken")
+        await _drain_owner_provider_flows(request, old_username)
+        # Do this before the first mutation. A later partial failure or rollback
+        # must not leave either ownership key serving a pre-rename catalogue.
+        _invalidate_model_catalogue_owners(old_username, new_username)
         copal_bridge = _copal_lifecycle_bridge(request)
         old_copal_owner = copal_owner_for_user(old_username)
         new_copal_owner = copal_owner_for_user(new_username)
@@ -556,6 +616,16 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                         .filter(func.lower(model.owner) == old_username)
                         .update({"owner": new_username}, synchronize_session=False)
                     )
+                from core.database import ModelShareSubscription
+
+                (
+                    db.query(ModelShareSubscription)
+                    .filter(func.lower(ModelShareSubscription.subscriber) == old_username)
+                    .update(
+                        {"subscriber": new_username},
+                        synchronize_session=False,
+                    )
+                )
                 db.commit()
             except Exception:
                 db.rollback()
@@ -804,6 +874,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
         memory_provider = getattr(request.app.state, "memory_provider", None)
         target_owner = (body.username or "").strip().lower()
+        await _drain_owner_provider_flows(request, target_owner)
+        # Deleting then recreating the same username must not revive its old
+        # 30-second endpoint catalogue, even if deletion later fails partway.
+        _invalidate_model_catalogue_owners(target_owner)
         tombstone_owner = f"deleted:{uuid.uuid4().hex}"
         memory_tombstoned = False
         if memory_provider:
@@ -814,8 +888,19 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 raise HTTPException(503, f"Cannot snapshot user memory for deletion: {exc}") from exc
 
         try:
+            prefs_snapshot = _detach_user_prefs(target_owner)
+        except Exception as exc:
+            if memory_tombstoned:
+                await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
+            raise HTTPException(503, f"Cannot remove user preferences: {exc}") from exc
+
+        try:
             ok = auth_manager.delete_user(body.username, user)
         except Exception:
+            try:
+                _restore_user_prefs(prefs_snapshot)
+            except Exception:
+                logger.exception("Failed to restore user prefs after user-delete failure")
             if memory_tombstoned:
                 try:
                     await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
@@ -827,6 +912,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             _invalidate_api_token_cache()
             raise
         if not ok:
+            try:
+                _restore_user_prefs(prefs_snapshot)
+            except Exception:
+                logger.exception("Failed to restore user prefs after rejected user delete")
             if memory_tombstoned:
                 await memory_provider.rename_owner(target_owner, owner=tombstone_owner)
             raise HTTPException(400, "Cannot delete user")

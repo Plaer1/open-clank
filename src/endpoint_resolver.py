@@ -16,6 +16,14 @@ from src.llm_core import _detect_provider, _host_match, _ollama_api_root
 
 logger = logging.getLogger(__name__)
 
+DIRECT_ENDPOINT_PROVIDER_PREFIX = "ody-"
+_MODEL_TARGET_ENDPOINT_ID = "__open_clank_endpoint_id__"
+
+
+def direct_runtime_provider_id(endpoint_id: str) -> str:
+    """Return the collision-proof MiMo provider ID for a direct endpoint."""
+    return f"{DIRECT_ENDPOINT_PROVIDER_PREFIX}{str(endpoint_id).strip()}"
+
 
 @dataclass(frozen=True)
 class ResolvedModelTarget:
@@ -55,6 +63,10 @@ def resolve_model_target(
     """Resolve a wire endpoint into the only transport types callers may dispatch."""
     url = (endpoint_url or "").strip()
     model_id = (model or "").strip()
+    wire_headers = dict(headers or {})
+    carried_endpoint_id = str(
+        wire_headers.pop(_MODEL_TARGET_ENDPOINT_ID, "") or ""
+    ).strip()
     if not url:
         raise ValueError("No model endpoint is configured")
     if not model_id:
@@ -74,7 +86,7 @@ def resolve_model_target(
             "auxiliary": True,
             "vision": None,
         }
-        resolved_endpoint_id = endpoint_id or "mimo"
+        resolved_endpoint_id = endpoint_id or carried_endpoint_id or "mimo"
         resolved_provider_id = provider_id or "mimo"
     elif scheme in {"http", "https"}:
         transport = "http"
@@ -85,7 +97,7 @@ def resolve_model_target(
             "auxiliary": True,
             "vision": None,
         }
-        resolved_endpoint_id = endpoint_id
+        resolved_endpoint_id = endpoint_id or carried_endpoint_id or None
         resolved_provider_id = provider_id or _detect_provider(url)
     else:
         raise ValueError(f"Unsupported model transport scheme: {scheme or '(missing)'}")
@@ -98,7 +110,7 @@ def resolve_model_target(
         endpoint_id=resolved_endpoint_id,
         provider_id=resolved_provider_id,
         variant_id=variant_id,
-        headers=dict(headers or {}),
+        headers=wire_headers,
         capabilities=defaults,
         owner_eligible=True,
         supports_stream=defaults.get("stream") is True,
@@ -124,27 +136,44 @@ def _first_chat_model(models) -> Optional[str]:
     return (models[0] if models else None)
 
 
+def normalize_model_list(raw: Any) -> list[str]:
+    """Normalize current JSON arrays and legacy comma-separated model lists."""
+    if not raw:
+        return []
+    models = raw
+    if isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return []
+        try:
+            models = json.loads(value)
+        except (TypeError, ValueError):
+            models = value.split(",")
+    if isinstance(models, str):
+        models = models.split(",")
+    if not isinstance(models, (list, tuple)):
+        return []
+    normalized = []
+    seen = set()
+    for model in models:
+        if not isinstance(model, str):
+            continue
+        model_id = model.strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        normalized.append(model_id)
+    return normalized
+
+
 def _endpoint_cached_models(ep) -> list:
     """Return cached model ids from the current or legacy endpoint field."""
     raw = getattr(ep, "cached_models", None) or getattr(ep, "models", None)
-    if not raw:
-        return []
-    try:
-        models = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        return []
-    return models if isinstance(models, list) else []
+    return normalize_model_list(raw)
 
 
 def _endpoint_pinned_models(ep) -> list:
-    raw = getattr(ep, "pinned_models", None)
-    if not raw:
-        return []
-    try:
-        models = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        return []
-    return models if isinstance(models, list) else []
+    return normalize_model_list(getattr(ep, "pinned_models", None))
 
 
 def _is_mlx_deepseek_v4_repo_id(model_id: str) -> bool:
@@ -165,14 +194,7 @@ def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids) -> list:
 
 def _endpoint_hidden_models(ep) -> set:
     """Model ids the admin disabled on this endpoint (the UI's hidden list)."""
-    raw = getattr(ep, "hidden_models", None)
-    if not raw:
-        return set()
-    try:
-        hidden = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        return set()
-    return set(hidden) if isinstance(hidden, list) else set()
+    return set(normalize_model_list(getattr(ep, "hidden_models", None)))
 
 
 def _endpoint_enabled_models(ep) -> list:
@@ -228,7 +250,7 @@ def _resolve_mimo_model(
         if isinstance(item, dict) and item.get("modelId")
     ]
     provider_prefix = endpoint_id.split(":", 1)[1] if ":" in endpoint_id else ""
-    if provider_prefix:
+    if provider_prefix and provider_prefix != "auto":
         available = [
             model_id for model_id in available
             if model_id.split("/", 1)[0] == provider_prefix
@@ -539,6 +561,30 @@ def resolve_endpoint(
     if not ep_id:
         return fallback_url, fallback_model, fallback_headers
 
+    from src.model_shares import (
+        resolve_shared_model_access,
+        share_id_from_endpoint,
+    )
+
+    if share_id_from_endpoint(ep_id) is not None:
+        from core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            access = resolve_shared_model_access(
+                db,
+                actor_owner=owner or "",
+                endpoint_id=ep_id,
+                model_id=model or None,
+            )
+            if access is None:
+                return fallback_url, fallback_model, fallback_headers
+            return "mimo://acp", access.model_id, {
+                _MODEL_TARGET_ENDPOINT_ID: ep_id,
+            }
+        finally:
+            db.close()
+
     if ep_id == "mimo" or ep_id.startswith("mimo:"):
         selected = _resolve_mimo_model(ep_id, model or fallback_model, owner)
         if not selected:
@@ -626,6 +672,29 @@ def resolve_endpoint_by_id(
     """
     if not ep_id:
         return None
+    from src.model_shares import (
+        resolve_shared_model_access,
+        share_id_from_endpoint,
+    )
+
+    if share_id_from_endpoint(ep_id) is not None:
+        from core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            access = resolve_shared_model_access(
+                db,
+                actor_owner=owner or "",
+                endpoint_id=ep_id,
+                model_id=model or None,
+            )
+            if access is None:
+                return None
+            return "mimo://acp", access.model_id, {
+                _MODEL_TARGET_ENDPOINT_ID: ep_id,
+            }
+        finally:
+            db.close()
     if ep_id == "mimo" or ep_id.startswith("mimo:"):
         selected = _resolve_mimo_model(ep_id, model, owner)
         if not selected:

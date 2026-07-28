@@ -1,6 +1,6 @@
 import os
 
-from src.builtin_mcp import builtin_python_env
+from src.builtin_mcp import _BUILTIN_SERVERS, builtin_python_env
 
 
 def test_builtin_python_env_preserves_existing_pythonpath(monkeypatch):
@@ -20,3 +20,7 @@ def test_builtin_python_env_uses_app_root_without_existing_pythonpath(monkeypatc
     monkeypatch.delenv("PYTHONPATH", raising=False)
 
     assert builtin_python_env("/srv/odysseus") == {"PYTHONPATH": "/srv/odysseus"}
+
+
+def test_memory_is_not_started_as_a_parallel_builtin_provider():
+    assert "memory" not in _BUILTIN_SERVERS

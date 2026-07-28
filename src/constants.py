@@ -7,35 +7,47 @@ from src.runtime_paths import get_app_root, get_default_data_dir
 APP_VERSION = "1.0.1"
 
 # ---------------------------------------------------------------------------
-# OPENTHESIUS_DEBUG — master debug bit
+# OPEN_CLANK_DEBUG — master debug bit
 # ---------------------------------------------------------------------------
-# Set to "1" or "true" in .env to enable debug pipelines throughout thesius.
+# Set to "1" or "true" in .env to enable Open Clank debug pipelines.
 # Individual debug systems should gate on this flag (e.g. extra logging,
 # timing instrumentation, verbose error dumps). Check via is_openthesius_debug().
 def is_openthesius_debug() -> bool:
-    v = os.environ.get("OPENTHESIUS_DEBUG", "")
+    v = (
+        os.environ.get("OPEN_CLANK_DEBUG")
+        or os.environ.get("OPENTHESIUS_DEBUG")
+        or ""
+    )
     return v.lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
-# THESIUS_AGENT_HOME — per-agent process isolation (Phase 4)
+# OPEN_CLANK_AGENT_HOME — per-agent process isolation
 # ---------------------------------------------------------------------------
 # When set, derive Open Clank's data root plus compatibility variables,
 # and FM_DB_PATH so each agent process gets its own data/config under its
 # agent home. Explicit overrides in the environment take precedence.
-_THESIUS_AGENT_HOME = os.environ.get("THESIUS_AGENT_HOME")
+_LEGACY_AGENT_HOME = os.environ.get("THESIUS_AGENT_HOME")
+_OPEN_CLANK_AGENT_HOME = (
+    os.environ.get("OPEN_CLANK_AGENT_HOME")
+    or _LEGACY_AGENT_HOME
+)
 
 # Snapshot the ORIGINAL default data dir BEFORE we possibly override
 # OPEN_CLANK_DATA_DIR. This lets AUTH_FILE stay pinned to the global
 # location even when data lives under the agent home.
 _ORIGINAL_DEFAULT_DATA_DIR = get_default_data_dir()
 
-if _THESIUS_AGENT_HOME:
-    _h = _THESIUS_AGENT_HOME
+if _OPEN_CLANK_AGENT_HOME:
+    _h = _OPEN_CLANK_AGENT_HOME
     if "OPEN_CLANK_DATA_DIR" not in os.environ and "ODYSSEUS_DATA_DIR" not in os.environ:
         os.environ["OPEN_CLANK_DATA_DIR"] = os.path.join(_h, "data")
-    if "OPENTHESIUS_GLOBAL_CWD" not in os.environ:
-        os.environ["OPENTHESIUS_GLOBAL_CWD"] = _h
-    if "MIMOCODE_HOME" not in os.environ:
+    if "OPEN_CLANK_GLOBAL_CWD" not in os.environ:
+        os.environ["OPEN_CLANK_GLOBAL_CWD"] = (
+            os.environ.get("OPENTHESIUS_GLOBAL_CWD") or _h
+        )
+    # Compatibility only for operators still using the legacy switch. New
+    # Open Clank workers set their private bundled-runtime home themselves.
+    if _LEGACY_AGENT_HOME and "MIMOCODE_HOME" not in os.environ:
         os.environ["MIMOCODE_HOME"] = os.path.join(_h, ".mimocode")
     if "FM_DB_PATH" not in os.environ:
         os.environ["FM_DB_PATH"] = os.path.join(_h, "data", "frankenmemory.db")
@@ -71,9 +83,9 @@ RUNBOOK_DIR = os.path.join(PERSONAL_DIR, "runbook")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 FEATURES_FILE = os.path.join(DATA_DIR, "features.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-# Auth stays global even when THESIUS_AGENT_HOME is set — one user, one auth.
+# Auth stays global even when OPEN_CLANK_AGENT_HOME is set — one user, one auth.
 AUTH_FILE = os.path.join(
-    _ORIGINAL_DEFAULT_DATA_DIR if _THESIUS_AGENT_HOME else DATA_DIR,
+    _ORIGINAL_DEFAULT_DATA_DIR if _OPEN_CLANK_AGENT_HOME else DATA_DIR,
     "auth.json",
 )
 USER_PREFS_FILE = os.path.join(DATA_DIR, "user_prefs.json")

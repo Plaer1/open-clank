@@ -105,6 +105,10 @@ def test_chip_semantics():
 
 def test_brain_markup_carries_trust_panel_and_filters():
     html = (_REPO / "static" / "index.html").read_text()
+    assert 'id="memory-mode-select"' in html
+    assert 'value="automatic"' in html
+    assert 'value="manual"' in html
+    assert 'value="off"' in html
     assert 'id="memory-trust-auto-toggle"' in html
     assert 'id="memory-trust-kinds"' in html
     assert 'id="memory-filter-kind"' in html
@@ -121,6 +125,8 @@ def test_brain_markup_carries_trust_panel_and_filters():
 
 def test_memory_js_wires_prefs_and_chips():
     source = (_REPO / "static" / "js" / "memory.js").read_text()
+    assert "syncMemoryMode()" in source
+    assert "/api/prefs/memory_mode" in source
     assert "memory_trust_auto" in source
     assert "memory_trust_auto_kinds" in source
     assert "memoryChips(" in source

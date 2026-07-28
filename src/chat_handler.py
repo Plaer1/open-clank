@@ -351,24 +351,31 @@ class ChatHandler:
         *,
         owner: Optional[str] = None,
         incognito: bool = False,
+        no_memory: bool = False,
     ) -> Optional[str]:
         """Process inline memory commands. Returns response string or None."""
         is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(
             message
         )
         if is_memory_cmd and memory_text:
+            if no_memory:
+                return "Memory is disabled for this turn."
             if incognito:
                 return "Memory is disabled in incognito mode."
 
-            # Memory gate: refuse direct writes in off/manual modes.
-            from src.memory_gate import write_allowed
+            # Memory gate: "off" is a hard stop. In manual mode, explicit
+            # remember commands still enter the same candidate review queue as
+            # automatic capture instead of bypassing review or being discarded.
+            from src.memory_gate import memory_mode, write_allowed
             from routes.prefs_routes import _load_for_user
             _prefs = _load_for_user(owner) or {}
+            _mode = memory_mode(_prefs)
             _ok, _reason = write_allowed(_prefs)
-            if not _ok:
+            provider = self.chat_processor.memory_provider
+            manual_review = _mode == "manual" and provider is not None
+            if not _ok and not manual_review:
                 return _reason
 
-            provider = self.chat_processor.memory_provider
             try:
                 if provider:
                     records = []
@@ -390,6 +397,9 @@ class ChatHandler:
                             owner=owner,
                             session_id=getattr(session, "id", None),
                             source="user_created",
+                            capture_mode=(
+                                "review_only" if manual_review else "manual"
+                            ),
                         )
                 else:
                     mem = self.memory_manager.load(owner=owner)
@@ -409,7 +419,11 @@ class ChatHandler:
             response = (
                 f"Memory already exists: {memory_text}"
                 if duplicate
-                else f"Saved to memory: {memory_text}"
+                else (
+                    f"Sent to memory review: {memory_text}"
+                    if manual_review
+                    else f"Saved to memory: {memory_text}"
+                )
             )
             session.add_message(
                 ChatMessage("assistant", response)

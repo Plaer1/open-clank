@@ -15,6 +15,18 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("offers supported device login instead of an unproven public redirect", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    expect(hooks.auth!.methods).toHaveLength(2)
+    expect(hooks.auth!.methods[0].label).toBe("ChatGPT Pro/Plus (browser device login)")
+    expect(hooks.auth!.methods[0].type).toBe("oauth")
+    expect(hooks.auth!.methods[1].type).toBe("api")
+    const source = await Bun.file(new URL("../../src/plugin/codex.ts", import.meta.url)).text()
+    expect(source).not.toContain("createServer")
+    expect(source).not.toContain("http://localhost")
+    expect(source).not.toContain("xdg-open")
+  })
+
   test("applies Codex request shaping to an endpoint-projected provider", async () => {
     const hooks = await CodexAuthPlugin({} as never)
     const input = {

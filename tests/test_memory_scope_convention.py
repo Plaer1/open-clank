@@ -15,7 +15,7 @@ import pytest
 
 import mcp_servers.memory_server as memory_server
 from src.frankenmemory_provider import FrankenmemoryProvider
-from src.memory_scope import CHAT_WORKSPACE, chat_workspace
+from src.memory_scope import CHAT_WORKSPACE, chat_workspace, memory_owner
 from src.openclank.acp_bridge import frankenmemory_mcp_descriptor
 
 FM_BIN = os.path.join(
@@ -38,6 +38,12 @@ def _descriptor_env(descriptor):
 
 def test_chat_workspace_defaults_to_engine_global():
     assert chat_workspace() == CHAT_WORKSPACE == "global"
+
+
+def test_anonymous_memory_owner_is_stable_local():
+    assert memory_owner(None) == "local"
+    assert memory_owner("") == "local"
+    assert memory_owner(" alice ") == "alice"
 
 
 def test_chat_workspace_env_override(monkeypatch):
@@ -70,9 +76,9 @@ def test_fm_descriptor_explicit_workspace_honored(monkeypatch):
     assert _descriptor_env(descriptor)["FM_WORKSPACE_ID"] == "repo-x"
 
 
-def test_fm_descriptor_still_requires_owner():
-    with pytest.raises(ValueError):
-        frankenmemory_mcp_descriptor(session_id="s1")
+def test_fm_descriptor_maps_anonymous_install_to_local_owner():
+    descriptor = frankenmemory_mcp_descriptor(session_id="s1")
+    assert _descriptor_env(descriptor)["FM_OWNER"] == "local"
 
 
 def test_memory_server_workspace_fallback_is_canonical():

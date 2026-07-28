@@ -61,12 +61,16 @@ export class Authorization extends Schema.Class<Authorization>("ProviderAuthAuth
 export const AuthorizeInput = Schema.Struct({
   method: Schema.Number.annotate({ description: "Auth method index" }),
   inputs: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({ description: "Prompt inputs" }),
+  flowID: Schema.optional(Schema.String).annotate({ description: "Caller-owned authorization flow ID" }),
+  redirectURI: Schema.optional(Schema.String).annotate({ description: "Public OAuth callback URI" }),
+  state: Schema.optional(Schema.String).annotate({ description: "Caller-owned OAuth state" }),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type AuthorizeInput = Schema.Schema.Type<typeof AuthorizeInput>
 
 export const CallbackInput = Schema.Struct({
   method: Schema.Number.annotate({ description: "Auth method index" }),
   code: Schema.optional(Schema.String).annotate({ description: "OAuth authorization code" }),
+  flowID: Schema.optional(Schema.String).annotate({ description: "Caller-owned authorization flow ID" }),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type CallbackInput = Schema.Schema.Type<typeof CallbackInput>
 
@@ -95,6 +99,53 @@ export type Error =
   | InstanceType<typeof ValidationFailed>
 
 type Hook = NonNullable<Hooks["auth"]>
+const OPENCLANK_FLOW_INPUT = "__openclank_flow_id"
+const OPENCLANK_REDIRECT_INPUT = "__openclank_redirect_uri"
+const OPENCLANK_STATE_INPUT = "__openclank_state"
+const OAUTH_FLOW_TTL_MS = 10 * 60 * 1000
+
+type PendingOAuth = {
+  providerID: ProviderID
+  result: AuthOAuthResult
+  expiresAt: number
+  running: boolean
+  cancelled: boolean
+}
+
+type AuthWriter = Pick<Auth.Interface, "get" | "set" | "remove">
+
+function sameAuth(left: Auth.Info | undefined, right: Auth.Info): boolean {
+  return left !== undefined && JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * Commit one flow-produced credential with a cancellation fence on both sides
+ * of the write. If cancellation lands while the filesystem write is pending,
+ * restore the exact prior credential (or remove the newly-created entry).
+ *
+ * The final `invalid()` check and return have no async boundary between them,
+ * so a successful return cannot race a later cancel inside this process.
+ */
+export const commitFlowAuth = Effect.fn("ProviderAuth.commitFlowAuth")(function* (
+  auth: AuthWriter,
+  providerID: string,
+  next: Auth.Info,
+  invalid: () => boolean,
+) {
+  const previous = yield* auth.get(providerID)
+  if (invalid()) return false
+
+  yield* auth.set(providerID, next)
+  if (!invalid()) return true
+
+  const current = yield* auth.get(providerID)
+  // Do not clobber a newer, independent credential update that won the race.
+  if (sameAuth(current, next)) {
+    if (previous) yield* auth.set(providerID, previous)
+    else yield* auth.remove(providerID)
+  }
+  return false
+})
 
 export interface Interface {
   readonly methods: () => Effect.Effect<Methods>
@@ -104,11 +155,12 @@ export interface Interface {
     } & AuthorizeInput,
   ) => Effect.Effect<Authorization | undefined, Error>
   readonly callback: (input: { providerID: ProviderID } & CallbackInput) => Effect.Effect<void, Error>
+  readonly cancel: (input: { providerID: ProviderID; flowID: string }) => Effect.Effect<void>
 }
 
 interface State {
   hooks: Record<ProviderID, Hook>
-  pending: Map<ProviderID, AuthOAuthResult>
+  pending: Map<string, PendingOAuth>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ProviderAuth") {}
@@ -129,7 +181,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
                 : Result.failVoid,
             ),
           ),
-          pending: new Map<ProviderID, AuthOAuthResult>(),
+          pending: new Map<string, PendingOAuth>(),
         }
       }),
     )
@@ -181,8 +233,27 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         }
       }
 
-      const result = yield* Effect.promise(() => method.authorize(input.inputs))
-      pending.set(input.providerID, result)
+      const hookInputs = { ...(input.inputs ?? {}) }
+      if (input.flowID) hookInputs[OPENCLANK_FLOW_INPUT] = input.flowID
+      if (input.redirectURI) hookInputs[OPENCLANK_REDIRECT_INPUT] = input.redirectURI
+      if (input.state) hookInputs[OPENCLANK_STATE_INPUT] = input.state
+      const result = yield* Effect.promise(() => method.authorize(hookInputs))
+      const now = Date.now()
+      for (const [key, entry] of pending) {
+        if (entry.expiresAt <= now) pending.delete(key)
+      }
+      const flowID = input.flowID
+      const pendingKey = flowID || input.providerID
+      if (flowID && pending.has(pendingKey)) {
+        return yield* Effect.fail(new ValidationFailed({ field: "flowID", message: "Login flow already exists" }))
+      }
+      pending.set(pendingKey, {
+        providerID: input.providerID,
+        result,
+        expiresAt: now + OAUTH_FLOW_TTL_MS,
+        running: false,
+        cancelled: false,
+      })
       return {
         url: result.url,
         method: result.method,
@@ -192,40 +263,78 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
 
     const callback = Effect.fn("ProviderAuth.callback")(function* (input: { providerID: ProviderID } & CallbackInput) {
       const pending = (yield* InstanceState.get(state)).pending
-      const match = pending.get(input.providerID)
-      if (!match) {
+      const pendingKey = input.flowID || input.providerID
+      const entry = pending.get(pendingKey)
+      if (
+        !entry ||
+        entry.providerID !== input.providerID ||
+        entry.expiresAt <= Date.now() ||
+        entry.running ||
+        entry.cancelled
+      ) {
+        pending.delete(pendingKey)
         return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
       }
+      const match = entry.result
       if (match.method === "code" && !input.code) {
         return yield* Effect.fail(new OauthCodeMissing({ providerID: input.providerID }))
       }
 
+      entry.running = true
       const result = yield* Effect.promise(() =>
         match.method === "code" ? match.callback(input.code!) : match.callback(input.code),
       )
-      if (!result || result.type !== "success") return yield* Effect.fail(new OauthCallbackFailed({}))
+      if (entry.cancelled || entry.expiresAt <= Date.now()) {
+        pending.delete(pendingKey)
+        return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+      }
+      if (!result || result.type !== "success") {
+        pending.delete(pendingKey)
+        return yield* Effect.fail(new OauthCallbackFailed({}))
+      }
 
+      let nextAuth: Auth.Info | undefined
       if ("key" in result) {
-        yield* auth.set(input.providerID, {
+        nextAuth = {
           type: "api",
           key: result.key,
           ...("metadata" in result && result.metadata ? { metadata: result.metadata } : {}),
-        })
-      }
-
-      if ("refresh" in result) {
+        }
+      } else if ("refresh" in result) {
         const { type: _, provider: __, refresh, access, expires, ...extra } = result
-        yield* auth.set(input.providerID, {
+        nextAuth = {
           type: "oauth",
           access,
           refresh,
           expires,
           ...extra,
-        })
+        }
+      }
+      if (nextAuth) {
+        const committed = yield* commitFlowAuth(
+          auth,
+          input.providerID,
+          nextAuth,
+          () => entry.cancelled || entry.expiresAt <= Date.now(),
+        )
+        if (!committed) {
+          pending.delete(pendingKey)
+          return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+        }
+      }
+      pending.delete(pendingKey)
+    })
+
+    const cancel = Effect.fn("ProviderAuth.cancel")(function* (input: { providerID: ProviderID; flowID: string }) {
+      const pending = (yield* InstanceState.get(state)).pending
+      const entry = pending.get(input.flowID)
+      if (entry?.providerID === input.providerID) {
+        entry.cancelled = true
+        pending.delete(input.flowID)
       }
     })
 
-    return Service.of({ methods, authorize, callback })
+    return Service.of({ methods, authorize, callback, cancel })
   }),
 )
 

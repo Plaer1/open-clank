@@ -202,12 +202,12 @@ async def extract_and_upsert(
     # need a node to land on. Turns with edges but no entities still work:
     # edge endpoints auto-create nodes fm-side.
     anchor = entities[0] if entities else (edges[0]["src"] if edges else None)
-    from src.memory_scope import chat_workspace
+    from src.memory_scope import chat_workspace, memory_owner
 
     await memory_provider._call_tool(
         "graph_upsert",
         {
-            "owner": owner or "",
+            "owner": memory_owner(owner),
             "workspace_id": chat_workspace(),
             "nodes": entities,
             "edges": edges,
@@ -226,12 +226,17 @@ async def capture_turn_and_enrich(
     endpoint_url: str,
     model: str,
     headers: Optional[dict],
+    capture_mode: str = "candidate",
 ) -> None:
     """The full per-turn pipeline mimo's capture.ts used to run child-side:
     candidate capture, then graph enrichment when the capture was accepted.
     Extraction failures never touch the captured record."""
     result = await memory_provider.capture(
-        user_text, assistant_text, owner=owner, session_id=session_id,
+        user_text,
+        assistant_text,
+        owner=owner,
+        session_id=session_id,
+        capture_mode=capture_mode,
     )
     accepted = any(str(rid).startswith("m_") for rid in (result.get("record_ids") or []))
     if not accepted:

@@ -183,6 +183,39 @@ def test_rename_leaves_other_sessions_untouched(rename_endpoint):
     assert sess_other.owner == "carol", "unrelated session owner was modified"
 
 
+def test_rename_drains_provider_login_before_auth_mutation(
+    rename_endpoint,
+    monkeypatch,
+):
+    import routes.mimo_provider_routes as provider_routes
+
+    endpoint, am, tmp_path = rename_endpoint
+    events = []
+
+    async def drain(_supervisor, owner):
+        events.append(("drain", owner))
+
+    def rename(old, new, actor):
+        events.append(("rename", old, new, actor))
+        return True
+
+    monkeypatch.setattr(provider_routes, "purge_owner_provider_flows", drain)
+    am.rename_user.side_effect = rename
+
+    asyncio.run(
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path),
+        )
+    )
+
+    assert events[:2] == [
+        ("drain", "alice"),
+        ("rename", "alice", "alice2", "admin"),
+    ]
+
+
 def test_rename_no_session_manager_does_not_crash(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
     # app.state without a session_manager must not raise.

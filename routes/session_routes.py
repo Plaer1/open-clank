@@ -37,7 +37,9 @@ def _public_model(name: str, model: str) -> str:
     costs the sidebar nothing. See issue #1285."""
     if (name or "").startswith(COMPARE_SESSION_PREFIX):
         return ""
-    return model
+    from src.openclank.mimo_projection import public_native_model_id
+
+    return public_native_model_id(model)
 
 
 def _content_to_text(content) -> str:
@@ -180,6 +182,71 @@ def _reject_raw_endpoint_url_for_non_admin(
     # endpoint validation have already happened.
     if user and not _current_user_is_admin(request, user):
         raise HTTPException(403, "Choose a registered model endpoint")
+
+
+async def _native_connection_models(
+    request: Request,
+    owner: str | None,
+    endpoint_id: str | None,
+) -> tuple[str | None, list[str]]:
+    from routes.model_routes import (
+        mimo_connection_model_ids,
+        normalize_mimo_connection_id,
+    )
+
+    connection_id = normalize_mimo_connection_id(endpoint_id)
+    if connection_id is None:
+        return None, []
+    supervisor = getattr(request.app.state, "mimo_supervisor", None)
+    if supervisor is None:
+        return connection_id, []
+    models = mimo_connection_model_ids(supervisor, owner, connection_id)
+    if models:
+        return connection_id, models
+    starter = getattr(supervisor, "for_owner", None)
+    if callable(starter):
+        try:
+            worker = await starter(owner)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        models = mimo_connection_model_ids(worker, owner, connection_id)
+    return connection_id, models
+
+
+def _shared_connection_access(
+    owner: str | None,
+    endpoint_id: str | None,
+    model_id: str | None,
+):
+    from src.model_shares import (
+        resolve_shared_model_access,
+        share_id_from_endpoint,
+    )
+
+    if share_id_from_endpoint(endpoint_id) is None:
+        return None
+    db = SessionLocal()
+    try:
+        return resolve_shared_model_access(
+            db,
+            actor_owner=owner or "",
+            endpoint_id=endpoint_id,
+            model_id=model_id,
+        )
+    finally:
+        db.close()
+
+
+def _validate_direct_endpoint_model(endpoint, model: str | None) -> None:
+    if not model:
+        return
+    from routes.model_routes import _endpoint_visible_model_ids
+
+    if model not in _endpoint_visible_model_ids(endpoint):
+        raise HTTPException(
+            400,
+            f"Model {model!r} is not available on this endpoint. Pick from /api/models.",
+        )
 
 
 def _persist_session_headers(session_id: str, headers: dict | None) -> None:
@@ -372,23 +439,44 @@ def setup_session_routes(
         endpoint_api_key = ""
         endpoint_base_url = ""
         _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
-        if endpoint_id.strip() == "mimo":
-            # Virtual endpoint: models served by the mimo agent brain over
-            # ACP, not an HTTP endpoint row. Validate against mimo's own
-            # catalog and skip the /v1/models probe entirely.
-            _sup = getattr(request.app.state, "mimo_supervisor", None)
-            _catalog = _sup.available_models(owner=user) if _sup else []
-            if not _catalog:
-                raise HTTPException(503, "mimo is not running (no model catalog)")
-            _ids = [m.get("modelId", "") for m in _catalog]
-            if not model:
-                raise HTTPException(400, "model is required for the mimo endpoint")
-            if model not in _ids:
-                raise HTTPException(400, f"Model not in mimo catalog ({len(_ids)} models). Pick from /api/models.")
+        from src.model_shares import share_id_from_endpoint
+
+        shared_access = _shared_connection_access(user, endpoint_id, model)
+        if share_id_from_endpoint(endpoint_id) is not None and shared_access is None:
+            raise HTTPException(404, "Shared model is unavailable or not enabled")
+        if shared_access is not None:
             endpoint_url = "mimo://acp"
-            endpoint_id = "mimo"
+            endpoint_id = f"shared:{shared_access.share_id}"
+            model = shared_access.model_id
             skip_val = True
-        if endpoint_id and endpoint_id.strip():
+            native_connection, native_models = None, []
+        else:
+            native_connection, native_models = await _native_connection_models(
+                request,
+                user,
+                endpoint_id,
+            )
+        if shared_access is None and native_connection:
+            if not native_models:
+                raise HTTPException(
+                    503,
+                    "Open Clank agent has no models for this connection",
+                )
+            if not model:
+                raise HTTPException(400, "model is required for the native connection")
+            # Normalize the legacy short form to Open Clank's public provider
+            # identity.  The private runtime alias is translated at dispatch.
+            if model in ("mimo-auto",):
+                model = "xiaomi/mimo-auto"
+            if model not in native_models:
+                raise HTTPException(
+                    400,
+                    f"Model not in connection catalog ({len(native_models)} models). Pick from /api/models.",
+                )
+            endpoint_url = "mimo://acp"
+            endpoint_id = native_connection
+            skip_val = True
+        elif shared_access is None and endpoint_id and endpoint_id.strip():
             from core.database import ModelEndpoint
             from src.auth_helpers import owner_filter
             from src.endpoint_resolver import build_chat_url, normalize_base
@@ -402,6 +490,7 @@ def setup_session_routes(
                 endpoint_row = q.first()
                 if not endpoint_row:
                     raise HTTPException(400, "Model endpoint no longer exists")
+                _validate_direct_endpoint_model(endpoint_row, model)
                 endpoint_base_url = endpoint_row.base_url or ""
                 endpoint_api_key = endpoint_row.api_key or ""
                 endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
@@ -528,6 +617,8 @@ def setup_session_routes(
             id=sid,
             name=session.name,
             model=model_to_use,
+            endpoint_url=endpoint_url or "",
+            endpoint_id=endpoint_id.strip() or None,
             rag=False if is_incognito else (str(rag).lower() == "true" if rag else False),
             archived=False
         )    
@@ -565,18 +656,36 @@ def setup_session_routes(
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
             endpoint_api_key = ""
             endpoint_base_url = ""
-            if endpoint_id == "mimo":
-                # Virtual endpoint served by the mimo agent brain over ACP —
-                # no ModelEndpoint row. Validate against mimo's catalog.
-                _sup = getattr(request.app.state, "mimo_supervisor", None)
-                _catalog = _sup.available_models(owner=user) if _sup else []
-                if not _catalog:
-                    raise HTTPException(503, "mimo is not running (no model catalog)")
-                if model not in [m.get("modelId", "") for m in _catalog]:
-                    raise HTTPException(400, f"Model not in mimo catalog ({len(_catalog)} models). Pick from /api/models.")
+            from src.model_shares import share_id_from_endpoint
+
+            shared_access = _shared_connection_access(user, endpoint_id, model)
+            if share_id_from_endpoint(endpoint_id) is not None and shared_access is None:
+                raise HTTPException(404, "Shared model is unavailable or not enabled")
+            if shared_access is not None:
                 endpoint_url = "mimo://acp"
-                endpoint_id = "mimo"
-            elif endpoint_id:
+                endpoint_id = f"shared:{shared_access.share_id}"
+                model = shared_access.model_id
+                native_connection, native_models = None, []
+            else:
+                native_connection, native_models = await _native_connection_models(
+                    request,
+                    user,
+                    endpoint_id,
+                )
+            if shared_access is None and native_connection:
+                if not native_models:
+                    raise HTTPException(
+                        503,
+                        "Open Clank agent has no models for this connection",
+                    )
+                if model not in native_models:
+                    raise HTTPException(
+                        400,
+                        f"Model not in connection catalog ({len(native_models)} models). Pick from /api/models.",
+                    )
+                endpoint_url = "mimo://acp"
+                endpoint_id = native_connection
+            elif shared_access is None and endpoint_id:
                 from core.database import ModelEndpoint
                 from src.auth_helpers import owner_filter
                 from src.endpoint_resolver import build_chat_url, normalize_base
@@ -590,6 +699,7 @@ def setup_session_routes(
                     ep = q.first()
                     if not ep:
                         raise HTTPException(400, "Model endpoint no longer exists")
+                    _validate_direct_endpoint_model(ep, model)
                     endpoint_base_url = ep.base_url or ""
                     endpoint_api_key = ep.api_key or ""
                     endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
@@ -603,15 +713,12 @@ def setup_session_routes(
             if (privileges or {}).get("block_all_models") or (restricted and model not in allowed):
                 raise HTTPException(403, f"Your account is not allowed to use model {model!r}")
             await _prepare_context_mutation(request, sid)
-            session.model = model
-            session.endpoint_url = endpoint_url
-            session.endpoint_id = endpoint_id or None
             # Update auth headers from the endpoint's stored API key
             if endpoint_api_key:
                 from src.endpoint_resolver import build_headers
-                session.headers = build_headers(endpoint_api_key, endpoint_base_url)
+                next_headers = build_headers(endpoint_api_key, endpoint_base_url)
             else:
-                session.headers = {}
+                next_headers = {}
             # Persist to DB
             db = SessionLocal()
             try:
@@ -620,11 +727,17 @@ def setup_session_routes(
                     db_session.model = model
                     db_session.endpoint_url = endpoint_url
                     db_session.endpoint_id = endpoint_id or None
-                    db_session.headers = session.headers or {}
+                    db_session.headers = next_headers
                     db_session.updated_at = utcnow_naive()
                     db.commit()
             finally:
                 db.close()
+            # Publish the new in-memory route only after persistence succeeds.
+            # A failed commit must leave the active session on its old route.
+            session.model = model
+            session.endpoint_url = endpoint_url
+            session.endpoint_id = endpoint_id or None
+            session.headers = next_headers
             result["model"] = model
             result["endpoint_url"] = endpoint_url
             result["endpoint_id"] = endpoint_id or None

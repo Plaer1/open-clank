@@ -17,8 +17,14 @@ canonical value applies.
 import os
 
 CHAT_WORKSPACE = "global"
+LOCAL_MEMORY_OWNER = "local"
 
 
 def chat_workspace() -> str:
     """Workspace id that every conversational-memory write must carry."""
     return os.environ.get("FM_WORKSPACE_ID", "").strip() or CHAT_WORKSPACE
+
+
+def memory_owner(owner: object = None) -> str:
+    """Return the durable owner used when authentication has no username."""
+    return str(owner or "").strip() or LOCAL_MEMORY_OWNER

@@ -12,13 +12,19 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
-import { catalogEntries, modelChoiceKey, resolveStoredModelChoices } from './modelCatalog.js';
+import {
+  catalogEntries,
+  modelChoiceKey,
+  modelStateKey,
+  resolveStoredModelChoices,
+} from './modelCatalog.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
 let _lastFetchTime = 0;
 let _fetchInflight = null;
 let _fetchSeq = 0;
+let _authListenerBound = false;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
 const COLLAPSE_KEY = 'odysseus-models-collapsed';
 const FAVORITES_KEY = 'odysseus-model-favorites';
@@ -27,22 +33,33 @@ const SORT_KEY = 'odysseus-model-sort';
 
 export function init(apiBase) {
   API_BASE = apiBase;
+  if (!_authListenerBound) {
+    _authListenerBound = true;
+    document.addEventListener('openclank:auth-user-ready', () => {
+      refreshModels(true).catch(() => {});
+    });
+    // The auth probe can finish before this module binds its listener on a
+    // fast local load. bindModelStateOwner leaves this replayable marker.
+    if (globalThis.__openClankAuthenticatedUser) {
+      refreshModels(true).catch(() => {});
+    }
+  }
 }
 
 // ── Collapse state persistence ──
 function _loadCollapsed() {
-  return Storage.getJSON(COLLAPSE_KEY, {});
+  return Storage.getJSON(modelStateKey(COLLAPSE_KEY), {});
 }
 function _saveCollapsed(state) {
-  Storage.setJSON(COLLAPSE_KEY, state);
+  Storage.setJSON(modelStateKey(COLLAPSE_KEY), state);
 }
 
 // ── Favorites persistence ──
 function _loadFavorites() {
-  return Storage.getJSON(FAVORITES_KEY, []);
+  return Storage.getJSON(modelStateKey(FAVORITES_KEY), []);
 }
 function _saveFavorites(list) {
-  Storage.setJSON(FAVORITES_KEY, list);
+  Storage.setJSON(modelStateKey(FAVORITES_KEY), list);
 }
 function _isFavorite(mid, endpointId, url) {
   return _loadFavorites().includes(modelChoiceKey(mid, endpointId, url));
@@ -63,20 +80,20 @@ function _toggleFavorite(mid, endpointId, url) {
 
 // ── Usage tracking ──
 function _loadUsage() {
-  return Storage.getJSON(USAGE_KEY, {});
+  return Storage.getJSON(modelStateKey(USAGE_KEY), {});
 }
 function _trackUsage(mid) {
   const usage = _loadUsage();
   if (!usage[mid]) usage[mid] = { count: 0, last: 0 };
   usage[mid].count++;
   usage[mid].last = Date.now();
-  Storage.setJSON(USAGE_KEY, usage);
+  Storage.setJSON(modelStateKey(USAGE_KEY), usage);
 }
 function _getSortMode() {
-  return Storage.get(SORT_KEY, '');
+  return Storage.get(modelStateKey(SORT_KEY), '');
 }
 function _setSortMode(mode) {
-  Storage.set(SORT_KEY, mode);
+  Storage.set(modelStateKey(SORT_KEY), mode);
 }
 
 /**
@@ -182,14 +199,16 @@ export async function refreshModels(force = false) {
   if (box) box.innerHTML = '';
   if (needsFetch) {
     let _loadingSpinner = null;
+    let request = _fetchInflight;
+    let fetchError = null;
     if (box) {
       _loadingSpinner = spinnerModule.create('', 'right', 'wave');
       box.appendChild(_loadingSpinner.createElement());
       _loadingSpinner.start();
     }
     try {
-      if (force) _fetchInflight = null;
-      if (!_fetchInflight) {
+      if (force) request = null;
+      if (!request) {
         // Pass ?refresh=true on forced refreshes so the BACKEND's 30s
         // per-user cache also gets bypassed. Without this, `force=true`
         // only clears the frontend cache and the same stale list comes
@@ -198,27 +217,40 @@ export async function refreshModels(force = false) {
         // even though the endpoint is in the DB and online.)
         const _seq = ++_fetchSeq;
         const _url = `${API_BASE}/api/models` + (force ? '?refresh=true' : '?background=false');
-        _fetchInflight = fetch(_url, { credentials: 'same-origin' })
-          .then(async (res) => {
+        request = {
+          seq: _seq,
+          promise: fetch(_url, { credentials: 'same-origin' }).then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            return { data, seq: _seq };
-          })
-          .finally(() => { _fetchInflight = null; });
+            return res.json();
+          }),
+        };
+        _fetchInflight = request;
       }
-      const { data, seq } = await _fetchInflight;
-      if (seq < _fetchSeq) return;
+      const data = await request.promise;
+      if (request.seq !== _fetchSeq) return;
       _lastFetchTime = Date.now();
       _cachedItems = data.items || [];
     } catch (e) {
+      if (request && request.seq !== _fetchSeq) return;
+      fetchError = e;
       console.error(e);
-      if (box) box.textContent = '(scan failed)';
-      return;
+      if (!_cachedItems.length) {
+        if (box) box.textContent = '(scan failed)';
+        return;
+      }
     } finally {
+      if (_fetchInflight === request) _fetchInflight = null;
       try { _loadingSpinner && _loadingSpinner.stop && _loadingSpinner.stop(); } catch (_) {}
-      if (box) box.innerHTML = '';
+      if (box && request && request.seq === _fetchSeq && (!fetchError || _cachedItems.length)) {
+        box.innerHTML = '';
+      }
     }
   }
+  try {
+    document.dispatchEvent(new CustomEvent('openclank:model-catalog-updated', {
+      detail: { items: _cachedItems },
+    }));
+  } catch (_) {}
   if (!box) return;
   try {
 
@@ -478,7 +510,7 @@ export async function refreshModels(force = false) {
 
     // Restore saved drag order for flat list before enabling drag-sort
     if (!needsGrouping) {
-      const savedModelOrder = Storage.getJSON('models-order', []);
+      const savedModelOrder = Storage.getJSON(modelStateKey('models-order'), []);
       if (savedModelOrder.length) {
         const rowMap = new Map();
         const rows = Array.from(box.querySelectorAll('.models-row'));
@@ -508,7 +540,7 @@ export async function refreshModels(force = false) {
         // Flat list — sort the whole #models container
         dragSortModule.enable('models', '.models-row', {
           handleSelector: '.item-drag-handle',
-          storageKey: 'models-order',
+          storageKey: modelStateKey('models-order'),
         });
       } else {
         // Grouped — enable sort within each group container

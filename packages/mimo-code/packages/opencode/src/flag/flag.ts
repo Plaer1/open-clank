@@ -1,4 +1,34 @@
 import { Config } from "effect"
+import { closeSync, readFileSync } from "node:fs"
+
+export function consumeInheritedServerPassword(fdValue?: string): string | undefined {
+  const envName = "OPEN_CLANK_WORKER_AUTH_FD"
+  const configured = fdValue !== undefined || Object.prototype.hasOwnProperty.call(process.env, envName)
+  const rawFD = fdValue ?? process.env[envName]
+  delete process.env["OPEN_CLANK_WORKER_AUTH_FD"]
+  if (!configured) return undefined
+  if (!rawFD || !/^\d+$/.test(rawFD)) {
+    throw new Error("Invalid Open Clank worker-auth descriptor")
+  }
+  const fd = Number(rawFD)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new Error("Invalid Open Clank worker-auth descriptor")
+  }
+  let password: string
+  try {
+    password = readFileSync(fd, "utf8")
+  } catch {
+    throw new Error("Unable to read Open Clank worker-auth descriptor")
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {}
+  }
+  if (password.length === 0 || password.length > 1024) {
+    throw new Error("Invalid Open Clank worker-auth secret")
+  }
+  return password
+}
 
 function truthy(key: string) {
   const value = process.env[key]?.toLowerCase()
@@ -40,6 +70,8 @@ const MIMOCODE_DISABLE_EXTERNAL_SKILLS = truthy("MIMOCODE_DISABLE_EXTERNAL_SKILL
 const MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS =
   MIMOCODE_DISABLE_EXTERNAL_SKILLS || MIMOCODE_DISABLE_CLAUDE_CODE || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS")
 const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
+const MIMOCODE_SERVER_PASSWORD =
+  consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
 
 export const Flag = {
   OTEL_EXPORTER_OTLP_ENDPOINT: process.env["OTEL_EXPORTER_OTLP_ENDPOINT"],
@@ -135,7 +167,7 @@ export const Flag = {
   // the working directory. Use to avoid touching git in restricted/sandboxed
   // environments or where git startup probing is undesirable.
   MIMOCODE_DISABLE_GIT: truthy("MIMOCODE_DISABLE_GIT"),
-  MIMOCODE_SERVER_PASSWORD: process.env["MIMOCODE_SERVER_PASSWORD"],
+  MIMOCODE_SERVER_PASSWORD,
   MIMOCODE_SERVER_USERNAME: process.env["MIMOCODE_SERVER_USERNAME"],
   MIMOCODE_ENABLE_QUESTION_TOOL: truthy("MIMOCODE_ENABLE_QUESTION_TOOL"),
 

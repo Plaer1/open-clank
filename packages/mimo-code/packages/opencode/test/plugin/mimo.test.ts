@@ -80,7 +80,7 @@ describe("MimoAuthPlugin", () => {
     test("has one login method", async () => {
       const hooks = await MimoAuthPlugin(fakeInput)
       expect(hooks.auth!.methods).toHaveLength(1)
-      expect(hooks.auth!.methods[0].label).toBe("浏览器登录")
+      expect(hooks.auth!.methods[0].label).toBe("Browser login (paste code)")
       expect(hooks.auth!.methods[0].type).toBe("oauth")
     })
   })
@@ -113,12 +113,20 @@ describe("MimoAuthPlugin", () => {
       await result.callback("invalid").catch(() => {})
     })
 
-    test("returns method auto", async () => {
+    test("returns paste-code completion", async () => {
       const hooks = await MimoAuthPlugin(fakeInput)
       const method = hooks.auth!.methods[0]
       const result = (await method.authorize!()) as any
-      expect(result.method).toBe("auto")
+      expect(result.method).toBe("code")
       await result.callback("invalid").catch(() => {})
+    })
+
+    test("has no localhost listener or server-side browser launch", async () => {
+      const source = await Bun.file(new URL("../../src/plugin/mimo.ts", import.meta.url)).text()
+      expect(source).not.toContain("createServer")
+      expect(source).not.toContain("xdg-open")
+      expect(source).not.toContain("openBrowser")
+      expect(source).not.toContain("http://localhost")
     })
 
     test("pk is valid base64url-encoded SPKI DER (44 bytes)", async () => {

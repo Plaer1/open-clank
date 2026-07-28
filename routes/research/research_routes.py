@@ -13,10 +13,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from core.middleware import INTERNAL_TOOL_USER
+from core.middleware import INTERNAL_TOOL_OWNER_HEADER, INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
+from routes.model_routes import normalize_mimo_connection_id
 from src.constants import DEEP_RESEARCH_DIR
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
@@ -495,7 +496,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         from src.auth_helpers import require_privilege
         user = require_privilege(request, "can_use_research")
         if user == INTERNAL_TOOL_USER:
-            tool_owner = (request.headers.get("X-Open Clank-Owner") or "").strip()
+            tool_owner = (request.headers.get(INTERNAL_TOOL_OWNER_HEADER) or "").strip()
             if tool_owner and tool_owner not in RESERVED_USERNAMES:
                 auth_mgr = getattr(request.app.state, "auth_manager", None)
                 if auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
@@ -511,10 +512,15 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         session_id = f"rp-{uuid.uuid4().hex[:12]}"
 
         if body.endpoint_id:
-            if body.endpoint_id == "mimo":
+            native_connection = normalize_mimo_connection_id(body.endpoint_id)
+            if native_connection:
                 from src.endpoint_resolver import resolve_endpoint_by_id
 
-                resolved = resolve_endpoint_by_id("mimo", body.model, owner=user)
+                resolved = resolve_endpoint_by_id(
+                    native_connection,
+                    body.model,
+                    owner=user,
+                )
                 if not resolved:
                     raise HTTPException(400, "Open Clank agent model is unavailable")
                 auth_manager = getattr(request.app.state, "auth_manager", None)

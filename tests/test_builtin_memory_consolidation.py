@@ -92,6 +92,7 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
 async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(monkeypatch, tmp_path):
     from src import constants
     from src import endpoint_resolver
+    from src import ai_interaction
     action_consolidate_memory = _import_consolidate_action()
 
     data_dir = _write_memories(
@@ -105,6 +106,7 @@ async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(
     )
     monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", lambda *args, **kwargs: ("", "", {}))
+    monkeypatch.setattr(ai_interaction, "_memory_provider", None)
 
     message, ok = await action_consolidate_memory("alice")
 

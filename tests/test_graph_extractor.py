@@ -93,8 +93,16 @@ class _Provider:
         self.capture_calls = []
         self.tool_calls = []
 
-    async def capture(self, user_text, assistant_text, *, owner=None, session_id=None):
-        self.capture_calls.append(user_text)
+    async def capture(
+        self,
+        user_text,
+        assistant_text,
+        *,
+        owner=None,
+        session_id=None,
+        capture_mode="candidate",
+    ):
+        self.capture_calls.append((user_text, capture_mode))
         return {"record_ids": self._record_ids}
 
     async def _call_tool(self, name, args):
@@ -128,7 +136,7 @@ async def test_accepted_capture_triggers_graph_upsert(monkeypatch):
         session_id="ses_g1", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
     )
-    assert provider.capture_calls == ["ada works on loom"]
+    assert provider.capture_calls == [("ada works on loom", "candidate")]
     assert len(provider.tool_calls) == 1
     name, args = provider.tool_calls[0]
     assert name == "graph_upsert"
@@ -147,7 +155,7 @@ async def test_raw_only_capture_skips_enrichment(monkeypatch):
         session_id="ses_g2", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
     )
-    assert provider.capture_calls == ["just chatter"]
+    assert provider.capture_calls == [("just chatter", "candidate")]
     assert provider.tool_calls == []
 
 
@@ -167,7 +175,7 @@ async def test_extraction_failure_never_touches_the_capture(monkeypatch):
         session_id="ses_g3", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
     )
-    assert provider.capture_calls == ["ada works on loom"]
+    assert provider.capture_calls == [("ada works on loom", "candidate")]
     assert provider.tool_calls == []
 
 

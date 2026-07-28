@@ -1644,8 +1644,17 @@ async function _cmdMemoryAdd(args, ctx) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, category: 'fact', source: 'user' })
   });
-  if (res.ok) await typewriterReply(`Memory added: ${ctx.esc(text)}`);
-  else slashReply('Failed to add memory');
+  let data = {};
+  try { data = await res.json(); } catch (_) { /* response may be empty */ }
+  if (res.ok) {
+    await typewriterReply(
+      data.pending_review
+        ? `Memory sent to review: ${ctx.esc(text)}`
+        : `Memory added: ${ctx.esc(text)}`
+    );
+  } else {
+    slashReply(ctx.esc(data.detail || 'Failed to add memory'));
+  }
   return true;
 }
 

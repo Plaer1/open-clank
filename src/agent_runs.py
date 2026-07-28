@@ -35,6 +35,7 @@ class _Run:
 
 
 _RUNS: Dict[str, _Run] = {}
+_DRAIN_TASKS: set[asyncio.Task] = set()
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -157,6 +158,8 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
     run = _Run()
     _RUNS[session_id] = run
     run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
+    _DRAIN_TASKS.add(run.task)
+    run.task.add_done_callback(_DRAIN_TASKS.discard)
     return run
 
 
@@ -218,3 +221,26 @@ def stop(session_id: str) -> bool:
         run.task.cancel()
         return True
     return False
+
+
+async def shutdown() -> None:
+    """Cancel and join every detached drain before its agent workers stop."""
+    runs = list(_RUNS.values())
+    for run in runs:
+        if run.task and not run.task.done():
+            run.task.cancel()
+    drains = list(_DRAIN_TASKS)
+    if drains:
+        await asyncio.gather(*drains, return_exceptions=True)
+        _DRAIN_TASKS.difference_update(drains)
+
+    evictions = {
+        run.evict_task
+        for run in runs
+        if run.evict_task and not run.evict_task.done()
+    }
+    for task in evictions:
+        task.cancel()
+    if evictions:
+        await asyncio.gather(*evictions, return_exceptions=True)
+    _RUNS.clear()

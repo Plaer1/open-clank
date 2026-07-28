@@ -35,21 +35,24 @@ export const Info = z.object({
 })
 export type Info = z.infer<typeof Info>
 
-// A1.3: direct usage file write — mimo and odysseus share the filesystem.
-// This writes to the same _usage.json sidecar that odysseus reads.
+// Direct usage file write — the bundled runtime and Open Clank share this
+// explicitly injected filesystem root.
 // Best-effort, fail-open. JSON is not safe for concurrent writes, but
 // the worst case is a lost increment (not corruption).
-const _ODYSSEUS_SKILLS_DIR = (): string | null => {
+const _OPEN_CLANK_SKILLS_DIR = (): string | null => {
   // Read from config.skills.paths[0] if set (injected via MIMOCODE_CONFIG_CONTENT)
-  // Fallback: check ODYSSEUS_DATA_DIR env var
-  const envDir = typeof process !== "undefined" ? process.env.ODYSSEUS_DATA_DIR : undefined
+  // Fallback: use the Open Clank data root (legacy name remains readable).
+  const envDir =
+    typeof process !== "undefined"
+      ? process.env.OPEN_CLANK_DATA_DIR ?? process.env.ODYSSEUS_DATA_DIR
+      : undefined
   if (envDir) return envDir + "/skills"
   return null
 }
 
 export async function _writeUsage(skillName: string): Promise<void> {
   try {
-    const dir = _ODYSSEUS_SKILLS_DIR()
+    const dir = _OPEN_CLANK_SKILLS_DIR()
     if (!dir) return
     const usageFile = dir + "/_usage.json"
     const fs = await import("fs/promises")

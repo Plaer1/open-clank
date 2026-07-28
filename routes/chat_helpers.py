@@ -756,8 +756,18 @@ async def build_chat_context(
     )
     casual_low_signal = _is_casual_low_signal(message)
 
-    # Memory enabled?
-    mem_enabled = not incognito and not no_memory and uprefs.get("memory_enabled", True)
+    # Memory enabled? The legacy boolean and the three-state mode are both
+    # read gates. "Off" must suppress recall/context injection as well as
+    # post-turn capture; otherwise the UI says memory is off while old
+    # memories are still silently fed to Chat.
+    from src.memory_gate import memory_mode
+
+    mem_enabled = (
+        not incognito
+        and not no_memory
+        and uprefs.get("memory_enabled", True)
+        and memory_mode(uprefs) != "off"
+    )
     # Skills injection respects its own enable toggle (mirrors memory_enabled).
     # When off, the "Available skills" index is not added to the prompt.
     skills_enabled = not incognito and uprefs.get("skills_enabled", True)
@@ -1248,6 +1258,7 @@ def run_post_response_tasks(
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
     memory_provider=None,
+    no_memory: bool = False,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1279,10 +1290,12 @@ def run_post_response_tasks(
         # follows on the task endpoint.
         if (
             allow_background_extraction
+            and not no_memory
             and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode)
             and (message or full_response)
         ):
             from services.memory.graph_extractor import capture_turn_and_enrich
+            from src.memory_gate import memory_mode
             from src.task_endpoint import resolve_task_endpoint
             g_url, g_model, g_headers = resolve_task_endpoint(
                 sess.endpoint_url, sess.model, sess.headers, owner=owner,
@@ -1296,13 +1309,23 @@ def run_post_response_tasks(
                 endpoint_url=g_url,
                 model=g_model,
                 headers=g_headers,
+                capture_mode=(
+                    "review_only"
+                    if memory_mode(uprefs) == "manual"
+                    else "candidate"
+                ),
             )))
     else:
         # Native-store extraction — only every 4th message pair to avoid
         # excess LLM calls
         _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
         _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-        if allow_background_extraction and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode) and _should_extract:
+        if (
+            allow_background_extraction
+            and not no_memory
+            and capture_allowed(uprefs, incognito=incognito, compare_mode=compare_mode)
+            and _should_extract
+        ):
             from services.memory.memory_extractor import extract_and_store
             from src.task_endpoint import resolve_task_endpoint
             t_url, t_model, t_headers = resolve_task_endpoint(

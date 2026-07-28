@@ -4,6 +4,7 @@ Config stored in data/auth.json. Uses bcrypt directly.
 """
 
 import enum
+import importlib
 import json
 import os
 import secrets
@@ -324,21 +325,68 @@ class AuthManager:
                 return False
             if not self.users.get(requesting_user, {}).get("is_admin"):
                 return False
-            # Revoke API bearer tokens before removing the auth row. The bearer
-            # path authenticates from ApiToken rows and does not require the
-            # owner to still exist, so a successful delete must not leave active
-            # rows behind. If the token store is unavailable, fail closed and
-            # keep the user/session state intact so the admin can retry.
+            # Purge every provider/model identity owned by this account before
+            # removing the auth row. Otherwise deleting and recreating the same
+            # username silently resurrects its old endpoints and credentials.
+            # Keep this in one DB transaction with API-token revocation.
             try:
-                from core.database import get_db_session, ApiToken
-                with get_db_session() as db:
-                    removed_tokens = db.query(ApiToken).filter(ApiToken.owner == username).delete()
-                if removed_tokens:
+                database = importlib.import_module("core.database")
+                purge_specs = (
+                    ("ApiToken", "owner"),
+                    ("ModelEndpoint", "owner"),
+                    ("ProviderAuthSession", "owner"),
+                    ("MimoAuthStore", "owner"),
+                    ("MimoProjection", "owner"),
+                    ("MimoProjectionState", "owner_id"),
+                    ("ModelShare", "owner"),
+                    ("ModelShareSubscription", "subscriber"),
+                )
+                removed = {}
+                with database.get_db_session() as db:
+                    model_share = getattr(database, "ModelShare", None)
+                    share_subscription = getattr(
+                        database,
+                        "ModelShareSubscription",
+                        None,
+                    )
+                    if model_share is not None and share_subscription is not None:
+                        share_ids = [
+                            row.id
+                            for row in db.query(model_share).filter(
+                                model_share.owner == username
+                            ).all()
+                        ]
+                        share_grants = db.query(share_subscription).filter(
+                            (share_subscription.subscriber == username)
+                            | (
+                                share_subscription.share_id.in_(share_ids)
+                                if share_ids
+                                else False
+                            )
+                        ).delete(synchronize_session=False)
+                        removed["ModelShareSubscription"] = share_grants
+                    for model_name, owner_column in purge_specs:
+                        if model_name == "ModelShareSubscription":
+                            continue
+                        model = getattr(database, model_name, None)
+                        if model is None:
+                            continue
+                        column = getattr(model, owner_column)
+                        removed[model_name] = db.query(model).filter(
+                            column == username
+                        ).delete(synchronize_session=False)
+                if any(removed.values()):
                     logger.info(
-                        f"Revoked {removed_tokens} API token(s) owned by deleted user '{username}'"
+                        "Purged deleted user '%s' provider state: %s",
+                        username,
+                        ", ".join(
+                            f"{name}={count}" for name, count in removed.items() if count
+                        ),
                     )
             except Exception:
-                logger.warning(f"Failed to revoke API tokens for deleted user '{username}'")
+                logger.warning(
+                    "Failed to purge provider state for deleted user '%s'", username
+                )
                 return False
             del self._config["users"][username]
             self._save()

@@ -15,6 +15,7 @@ from starlette.responses import Response
 # same value from this module. Never persisted or exposed externally.
 INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
+INTERNAL_TOOL_OWNER_HEADER = "X-Open-Clank-Owner"
 # Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
 INTERNAL_TOOL_USER = "internal-tool"
 

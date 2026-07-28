@@ -1,13 +1,8 @@
 import type { Hooks, PluginInput } from "@mimo-ai/plugin"
-import { Log } from "../util"
-import { createServer } from "http"
 import crypto from "crypto"
-import { exec } from "child_process"
 import { Global } from "../global"
 import path from "path"
 import fs from "fs"
-
-const log = Log.create({ service: "plugin.mimo" })
 
 const PLATFORM_URL = process.env.MIMO_PLATFORM_URL || "https://platform.xiaomimimo.com"
 
@@ -57,21 +52,6 @@ function decrypt(privateKeyDer: Buffer, encryptedBase64: string): { sk?: string;
   return JSON.parse(decrypted.toString("utf-8"))
 }
 
-function openBrowser(url: string) {
-  if (process.env.CI || process.env.NODE_ENV === "test") return
-  const command =
-    process.platform === "darwin"
-      ? `open "${url}"`
-      : process.platform === "win32"
-        ? `start "" "${url}"`
-        : `xdg-open "${url}"`
-  exec(command, (error) => {
-    if (error) {
-      log.warn("could not open browser automatically", { error })
-    }
-  })
-}
-
 function buildAuthorizeUrl(publicKey: string, redirectUri: string): string {
   const params = new URLSearchParams({
     pk: publicKey,
@@ -105,87 +85,23 @@ export async function MimoAuthPlugin(_input: PluginInput): Promise<Hooks> {
       },
       methods: [
         {
-          label: "浏览器登录",
+          label: "Browser login (paste code)",
           type: "oauth" as const,
           authorize: async () => {
             const { publicKey, privateKeyDer } = generateKeyPair()
-
-            const server = createServer()
-            await new Promise<void>((resolve, reject) => {
-              server.listen(0, () => resolve())
-              server.on("error", reject)
-            })
-            const addr = server.address()
-            const port = typeof addr === "object" && addr ? addr.port : 0
-            log.info("mimo oauth server started", { port })
-
-            const redirectUri = `http://localhost:${port}/`
-            const authUrl = buildAuthorizeUrl(publicKey, redirectUri)
             const manualUrl = buildAuthorizeUrl(publicKey, `${PLATFORM_URL}/authorize/code/callback`)
-
-            openBrowser(authUrl)
-
-            const serverCallbackPromise = new Promise<{ sk?: string; uid: string; url?: string }>((resolve, reject) => {
-              const timeout = setTimeout(() => {
-                server.close()
-                reject(new Error("Authorization timeout"))
-              }, 5 * 60 * 1000)
-
-              server.on("request", (req, res) => {
-                const url = new URL(req.url || "/", `http://localhost`)
-                log.info("mimo oauth callback received", { path: url.pathname, query: url.search.substring(0, 100) })
-
-                const u = url.searchParams.get("u")
-
-                if (!u) {
-                  log.warn("mimo oauth callback missing u param")
-                  res.writeHead(302, { Location: `${PLATFORM_URL}/authorize/callback?status=error&message=missing_data` })
-                  res.end()
-                  reject(new Error("Missing encrypted data"))
-                  return
-                }
-
-                try {
-                  const result = decrypt(privateKeyDer, u)
-                  log.info("mimo oauth decrypt success", { uid: result.uid, url: result.url })
-                  res.writeHead(302, { Location: `${PLATFORM_URL}/authorize/callback?status=success` })
-                  res.end()
-                  clearTimeout(timeout)
-                  resolve(result)
-                } catch (err) {
-                  log.error("mimo oauth decrypt failed", { error: err })
-                  res.writeHead(302, { Location: `${PLATFORM_URL}/authorize/callback?status=error&message=decrypt_failed` })
-                  res.end()
-                  reject(new Error("Decryption failed"))
-                }
-              })
-            })
-            serverCallbackPromise.catch(() => {})
 
             return {
               url: manualUrl,
-              method: "auto" as const,
-              instructions: "在浏览器中完成授权，或粘贴 Code 完成登录。",
-              callback: async (code?: string) => {
-                if (code) {
-                  try {
-                    const result = decrypt(privateKeyDer, code.trim())
-                    server.close()
-                    const metadata: Record<string, string> = { uid: result.uid }
-                    if (result.url) metadata.base_url = result.url
-                    return { type: "success" as const, key: result.sk ?? "", metadata }
-                  } catch {
-                    return { type: "failed" as const }
-                  }
-                }
+              method: "code" as const,
+              instructions: "Finish sign-in on this device, copy the code it gives you, then paste it into Open Clank.",
+              callback: async (code: string) => {
                 try {
-                  const result = await serverCallbackPromise
-                  server.close()
+                  const result = decrypt(privateKeyDer, code.trim())
                   const metadata: Record<string, string> = { uid: result.uid }
                   if (result.url) metadata.base_url = result.url
                   return { type: "success" as const, key: result.sk ?? "", metadata }
                 } catch {
-                  server.close()
                   return { type: "failed" as const }
                 }
               },

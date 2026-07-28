@@ -8,6 +8,10 @@ the shell/file group by default and lets stream_agent_loop's owner gate decide
 who actually keeps it.
 """
 
+import sqlite3
+
+import pytest
+
 from types import SimpleNamespace
 
 from src.task_scheduler import (
@@ -16,6 +20,69 @@ from src.task_scheduler import (
     compose_task_relevant_tools,
 )
 from src.tool_index import ASSISTANT_ALWAYS_AVAILABLE
+
+
+def test_background_contract_migration_keeps_agent_connection_ids(
+    monkeypatch,
+    tmp_path,
+):
+    from core import database
+
+    path = tmp_path / "migration.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, endpoint_id TEXT);
+            CREATE TABLE model_endpoints (
+                id TEXT PRIMARY KEY,
+                base_url TEXT,
+                owner TEXT,
+                is_enabled INTEGER
+            );
+            CREATE TABLE scheduled_tasks (
+                id TEXT PRIMARY KEY,
+                owner TEXT,
+                session_id TEXT,
+                endpoint_url TEXT,
+                endpoint_id TEXT
+            );
+            CREATE TABLE crew_members (
+                id TEXT PRIMARY KEY,
+                owner TEXT,
+                session_id TEXT,
+                endpoint_url TEXT,
+                endpoint_id TEXT
+            );
+            """
+        )
+        for table in ("scheduled_tasks", "crew_members"):
+            conn.executemany(
+                f"INSERT INTO {table} "
+                "(id, owner, endpoint_url, endpoint_id) VALUES (?, ?, ?, ?)",
+                [
+                    ("native", "alice", "mimo://acp", "mimo:xiaomi"),
+                    ("shared", "alice", "mimo://acp", "shared:grant-1"),
+                    ("missing", "alice", "https://gone.test/v1", "gone"),
+                ],
+            )
+    monkeypatch.setattr(
+        database,
+        "DATABASE_URL",
+        f"sqlite:///{path}",
+    )
+
+    database._migrate_add_background_agent_contract_columns()
+
+    with sqlite3.connect(path) as conn:
+        for table in ("scheduled_tasks", "crew_members"):
+            rows = dict(conn.execute(
+                f"SELECT id, endpoint_id FROM {table}"
+            ).fetchall())
+            assert rows == {
+                "native": "mimo:xiaomi",
+                "shared": "shared:grant-1",
+                "missing": None,
+            }
 
 
 def test_assistant_always_available_lacks_shell():
@@ -81,6 +148,86 @@ def test_non_admin_owner_block_strips_shell_end_to_end():
     non_admin_schemas = (offered - set(NON_ADMIN_BLOCKED_TOOLS)) & schema_names
     assert "bash" not in non_admin_schemas
     assert "python" not in non_admin_schemas
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint_id", ["mimo:auto", "mimo:xiaomi"])
+async def test_scheduled_agent_accepts_canonical_native_connection(
+    endpoint_id,
+    monkeypatch,
+):
+    captured = {}
+
+    async def stream(target, **kwargs):
+        captured["target"] = target
+        yield 'data: {"delta":"done"}\n\ndata: [DONE]\n\n'
+
+    async def ready(_label):
+        return None
+
+    monkeypatch.setattr("src.model_dispatch.stream_agent_target", stream)
+    monkeypatch.setattr("src.interactive_gate.wait_for_interactive_quiet", ready)
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(
+        id="task-1",
+        name="Native task",
+        prompt="do it",
+        endpoint_id=endpoint_id,
+        owner="alice",
+        allowed_tools="[]",
+        max_steps=2,
+        max_tool_calls=2,
+        workspace=None,
+    )
+
+    result = await scheduler._run_agent_loop(
+        "mimo://acp",
+        "xiaomi/mimo-v2.5-pro",
+        task,
+        "task-session",
+    )
+
+    assert result == "done"
+    assert captured["target"].endpoint_id == endpoint_id
+    assert captured["target"].provider_id == "mimo"
+
+
+async def test_scheduled_agent_keeps_shared_connection_identity(monkeypatch):
+    captured = {}
+
+    async def stream(target, **kwargs):
+        captured["target"] = target
+        yield 'data: {"delta":"done"}\n\ndata: [DONE]\n\n'
+
+    async def ready(_label):
+        return None
+
+    monkeypatch.setattr("src.model_dispatch.stream_agent_target", stream)
+    monkeypatch.setattr("src.interactive_gate.wait_for_interactive_quiet", ready)
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(
+        id="task-shared",
+        name="Shared task",
+        prompt="do it",
+        endpoint_id="shared:grant-1",
+        owner="alice",
+        allowed_tools="[]",
+        max_steps=2,
+        max_tool_calls=2,
+        workspace=None,
+    )
+
+    result = await scheduler._run_agent_loop(
+        "mimo://acp",
+        "shared-model",
+        task,
+        "task-session",
+    )
+
+    assert result == "done"
+    assert captured["target"].endpoint_id == "shared:grant-1"
+    assert captured["target"].provider_id == "shared"
+    assert captured["target"].transport == "acp"
 
 
 async def test_scheduled_task_honors_global_disabled_tools(monkeypatch):

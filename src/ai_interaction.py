@@ -434,6 +434,16 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         return {"error": "Need at least 1 line: action"}
 
     action = lines[0].strip().lower()
+    from routes.prefs_routes import _load_for_user
+    from src.memory_gate import memory_mode, write_allowed
+
+    prefs = _load_for_user(owner) or {}
+    mode = memory_mode(prefs)
+
+    if action in {"edit", "delete", "resolve"}:
+        ok, reason = write_allowed(prefs)
+        if not ok:
+            return {"error": reason}
 
     # Provider path: route through the active provider
     if _memory_provider:
@@ -464,18 +474,22 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 text = _normalize_question(text)
             if not text:
                 return {"error": "Memory text cannot be empty"}
-            # Memory gate: refuse direct-to-curated writes in off/manual modes.
-            from src.memory_gate import write_allowed
-            from routes.prefs_routes import _load_for_user
-            prefs = _load_for_user(owner) or {}
-            ok, reason = write_allowed(prefs)
-            if not ok:
-                return {"error": reason}
+            if mode == "off":
+                return {"error": "Memory is off — no writes allowed."}
+            review_only = mode == "manual"
             try:
                 record = await _memory_provider.remember(
                     text, owner=owner, session_id=session_id,
                     category=category, source="ai_agent",
+                    capture_mode="review_only" if review_only else "manual",
                 )
+                if review_only:
+                    return {
+                        "action": "propose",
+                        "candidate_id": record.id,
+                        "pending_review": True,
+                        "results": f"Memory proposed for review: [{category}] {text}",
+                    }
                 return {"action": "add", "memory_id": record.id,
                         "results": f"Memory added: [{category}] {text}"}
             except Exception as e:

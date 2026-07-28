@@ -77,7 +77,7 @@ def test_record_mapping_carries_full_signal_set():
 def test_record_mapping_defaults_when_fields_absent():
     record = FrankenmemoryProvider._record({"id": "m", "content": "x"})
     assert record.kind == "fact"
-    assert record.source_type == "human"
+    assert record.source_type == "auto_extracted"
     assert record.priority is None
     assert record.trust_score is None
     assert record.tags == []

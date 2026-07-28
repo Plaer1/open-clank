@@ -33,7 +33,7 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
     try:
         async def _endpoint_changed():
             from routes.model_routes import invalidate_model_catalogue_revision
-            invalidate_model_catalogue_revision()
+            invalidate_model_catalogue_revision(owner)
             try:
                 from src.model_dispatch import get_mimo_supervisor
                 supervisor = get_mimo_supervisor()

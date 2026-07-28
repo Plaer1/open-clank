@@ -126,9 +126,13 @@ class _StubProvider:
 
     async def remember(self, text, *, owner=None, session_id=None,
                        category="fact", source="user", metadata=None,
-                       workspace_id=None):
+                       workspace_id=None, capture_mode="manual"):
         from types import SimpleNamespace
-        self.remember_calls.append({"text": text, "category": category})
+        self.remember_calls.append({
+            "text": text,
+            "category": category,
+            "capture_mode": capture_mode,
+        })
         return SimpleNamespace(id="m_new", text=text, category=category)
 
     async def resolve_id(self, display_id, *, owner=None):

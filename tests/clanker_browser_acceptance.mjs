@@ -111,6 +111,64 @@ try {
     }
     return { hash:hash>>>0, painted, width:canvas.width, height:canvas.height, motion:canvas.dataset.motion };
   })()`);
+  const canvasSafetyState = id => evaluate(`(() => {
+    const canvas=document.getElementById(${JSON.stringify(id)});
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    const ctx=canvas.getContext('2d');
+    const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;
+    let paintedPerimeter=0, maximumPerimeterAlpha=0;
+    const visit=(x,y)=>{
+      const alpha=data[(y*canvas.width+x)*4+3];
+      if (alpha) paintedPerimeter+=1;
+      maximumPerimeterAlpha=Math.max(maximumPerimeterAlpha,alpha);
+    };
+    for (let x=0; x<canvas.width; x+=1) {
+      visit(x,0);
+      if (canvas.height>1) visit(x,canvas.height-1);
+    }
+    for (let y=1; y<canvas.height-1; y+=1) {
+      visit(0,y);
+      if (canvas.width>1) visit(canvas.width-1,y);
+    }
+
+    const rect=canvas.getBoundingClientRect();
+    const inset=canvas.__backgroundSafeInset || 0;
+    const scene=canvas.__backgroundScene || {};
+    const inside=(point,pad=0)=>point
+      && point.x-pad>=inset && point.x+pad<=innerWidth-inset
+      && point.y-pad>=inset && point.y+pad<=innerHeight-inset;
+    let geometryViolations=0;
+    if (scene.nodes) geometryViolations+=scene.nodes.filter(point=>!inside(point)).length;
+    if (scene.routes) geometryViolations+=scene.routes.filter(route=>!inside({x:route.cx,y:route.cy})).length;
+    if (scene.paths) geometryViolations+=scene.paths.flatMap(path=>path.points).filter(point=>!inside(point)).length;
+    if (scene.junctions) geometryViolations+=scene.junctions.filter(point=>!inside(point)).length;
+    if (scene.snakePoints) geometryViolations+=scene.snakePoints.flat().filter(point=>!inside(point)).length;
+    if (scene.shards) geometryViolations+=scene.shards.filter(point=>!inside(point)).length;
+    if (scene.centers) geometryViolations+=scene.centers.filter(center=>!inside(center,center.radius)).length;
+    return {
+      paintedPerimeter,
+      maximumPerimeterAlpha,
+      geometryViolations,
+      safeInset:inset,
+      rect:{ x:rect.x, y:rect.y, width:rect.width, height:rect.height },
+      viewport:{ width:innerWidth, height:innerHeight, dpr:devicePixelRatio },
+      backing:{ width:canvas.width, height:canvas.height },
+    };
+  })()`);
+  const assertCanvasSafe = async (id, label = id) => {
+    const state=await canvasSafetyState(id);
+    assert(state, `${label} canvas was missing`);
+    assert.equal(state.paintedPerimeter, 0, `${label} painted ${state.paintedPerimeter} clipped perimeter pixels`);
+    assert.equal(state.maximumPerimeterAlpha, 0, `${label} left alpha ${state.maximumPerimeterAlpha} on its bitmap edge`);
+    assert.equal(state.geometryViolations, 0, `${label} authored ${state.geometryViolations} primitives outside its safe area`);
+    assert(state.safeInset >= 12, `${label} had no safe drawing gutter`);
+    assert(Math.abs(state.rect.x) < 1 && Math.abs(state.rect.y) < 1, `${label} canvas was offset from the viewport`);
+    assert(Math.abs(state.rect.width-state.viewport.width) < 1 && Math.abs(state.rect.height-state.viewport.height) < 1,
+      `${label} canvas CSS size did not match the viewport`);
+    assert.equal(state.backing.width, Math.floor(state.viewport.width*Math.min(state.viewport.dpr,2)), `${label} backing width did not match DPR`);
+    assert.equal(state.backing.height, Math.floor(state.viewport.height*Math.min(state.viewport.dpr,2)), `${label} backing height did not match DPR`);
+    return state;
+  };
   const canvasChange = (id, delay = 260) => evaluate(`(async () => {
     const canvas=document.getElementById(${JSON.stringify(id)});
     if (!canvas || !canvas.width || !canvas.height) return null;
@@ -177,7 +235,25 @@ try {
   await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, deviceScaleFactor:1, mobile:false });
   const preload = await command('Page.addScriptToEvaluateOnNewDocument', { source:`(() => {
     if (!sessionStorage.getItem('__clanker_fresh')) {
-      localStorage.removeItem('odysseus-theme');
+      localStorage.setItem('odysseus-theme', JSON.stringify({
+        name:'clanker-dark',
+        colors:{bg:'#191A1E',fg:'#FFF4D6',panel:'#25272C',border:'#555A62',red:'#5A9EF5'},
+        bgPattern:'clanker-kene-weave',
+        bgEffectColor:'#62C7E8',
+        bgEffectIntensity:0.65,
+        bgEffectSize:1,
+        bgEffectControls:{
+          'clanker-kene-weave':{
+            snakeCount:23,
+            snakeSpeed:80,
+            snakeLengthVariation:85,
+            shorterLastLonger:true,
+            shorterLifetimeScale:135,
+            longerDisappearSooner:true,
+            longerLifetimeScale:65
+          }
+        }
+      }));
       localStorage.removeItem('odysseus-custom-themes');
       sessionStorage.setItem('__clanker_fresh', '1');
     }
@@ -197,8 +273,232 @@ try {
     };
   })();` });
   await command('Page.navigate', { url:`${base}/static/index.html` });
-  await waitFor("document.readyState === 'complete' && document.querySelectorAll('#themeGrid .theme-swatch').length >= 18", 'fresh theme UI');
+  await waitFor("document.readyState === 'complete' && document.querySelectorAll('#themeGrid .theme-swatch').length >= 18 && document.getElementById('clanker-kene-weave-canvas')?.dataset.motion === 'active'", 'persisted Signal Weave startup');
+  const persistedStartup = await evaluate(`(async () => {
+    const first=document.getElementById('clanker-kene-weave-canvas');
+    const firstScene=first?.__backgroundScene;
+    const firstFrame=first?.__backgroundFrameCount || 0;
+    const configurations=new Set();
+    let stable=!!first && !!firstScene;
+    let canvasMutations=0;
+    const observer=new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of [...record.addedNodes, ...record.removedNodes]) {
+          if (node instanceof HTMLCanvasElement && node.matches('[data-background-effect-canvas]')) canvasMutations+=1;
+        }
+      }
+    });
+    observer.observe(document.body,{childList:true});
+    for (let sample=0; sample<80; sample+=1) {
+      if (sample===20) await import('/static/js/theme.js?legacy-runtime=20260723gui1');
+      const canvases=[...document.querySelectorAll('[data-background-effect-canvas]')];
+      const canvas=document.getElementById('clanker-kene-weave-canvas');
+      const styles=getComputedStyle(document.body);
+      configurations.add(JSON.stringify({
+        theme:[...document.body.classList].filter(name=>name.startsWith('theme-clanker-')),
+        pattern:[...document.body.classList].filter(name=>name.startsWith('bg-pattern-')),
+        colors:['--bg-effect-color','--clanker-gold','--clanker-lime','--clanker-pink','--clanker-coral','--clanker-lilac','--clanker-outline']
+          .map(name=>styles.getPropertyValue(name).trim()),
+        intensity:styles.getPropertyValue('--bg-effect-intensity').trim(),
+        size:getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size').trim(),
+      }));
+      stable=stable
+        && canvases.length===1
+        && canvas===first
+        && canvas?.__backgroundScene===firstScene
+        && canvas?.dataset.motion==='active';
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    observer.disconnect();
+    return {
+      stable,
+      canvasMutations,
+      configurations:configurations.size,
+      frameDelta:(first?.__backgroundFrameCount || 0)-firstFrame,
+    };
+  })()`);
+  assert.equal(persistedStartup.stable, true, 'persisted Signal Weave changed canvas, scene, class, or motion state');
+  assert.equal(persistedStartup.canvasMutations, 0, 'a second theme module remounted the running vanilla-owned canvas');
+  assert.equal(persistedStartup.configurations, 1, 'persisted Signal Weave palette or effect configuration oscillated');
+  assert(persistedStartup.frameDelta > 30, `persisted Signal Weave only advanced ${persistedStartup.frameDelta} frames`);
+  const paletteFallback = await evaluate(`(async () => {
+    const canvas=document.getElementById('clanker-kene-weave-canvas');
+    const scene=canvas?.__backgroundScene;
+    const proto=CanvasRenderingContext2D.prototype;
+    const stroke=proto.stroke, fill=proto.fill;
+    const styles=new Set();
+    proto.stroke=function(...args) {
+      if (this.canvas===canvas) styles.add(String(this.strokeStyle).toLowerCase());
+      return stroke.apply(this,args);
+    };
+    proto.fill=function(...args) {
+      if (this.canvas===canvas) styles.add(String(this.fillStyle).toLowerCase());
+      return fill.apply(this,args);
+    };
+    try {
+      document.body.classList.remove('theme-clanker-dark');
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    } finally {
+      document.body.classList.add('theme-clanker-dark');
+      proto.stroke=stroke;
+      proto.fill=fill;
+    }
+    return {
+      styles:[...styles],
+      stableScene:canvas?.__backgroundScene===scene,
+    };
+  })()`);
+  assert(paletteFallback.styles.length >= 6, `Signal Weave collapsed to ${paletteFallback.styles.join(', ')} without the body theme class`);
+  assert.equal(paletteFallback.stableScene, true, 'Signal Weave reset its scene while preserving its palette');
+  const vanillaPaletteFallback = await evaluate(`(async () => {
+    const select=document.getElementById('theme-bg-pattern-select');
+    select.value='synapse';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const canvas=document.getElementById('synapse-canvas');
+    const proto=CanvasRenderingContext2D.prototype;
+    const stroke=proto.stroke, fill=proto.fill;
+    const styles=new Set();
+    proto.stroke=function(...args) {
+      if (this.canvas===canvas && typeof this.strokeStyle==='string') styles.add(this.strokeStyle.toLowerCase());
+      return stroke.apply(this,args);
+    };
+    proto.fill=function(...args) {
+      if (this.canvas===canvas && typeof this.fillStyle==='string') styles.add(this.fillStyle.toLowerCase());
+      return fill.apply(this,args);
+    };
+    try {
+      document.body.classList.remove('theme-clanker-dark');
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    } finally {
+      document.body.classList.add('theme-clanker-dark');
+      proto.stroke=stroke;
+      proto.fill=fill;
+    }
+    return [...styles];
+  })()`);
+  assert(vanillaPaletteFallback.length >= 6, `Synapse collapsed to ${vanillaPaletteFallback.join(', ')} without the body theme class`);
+
+  await evaluate("localStorage.removeItem('odysseus-theme')");
+  await reloadAndWait("document.readyState === 'complete' && document.querySelectorAll('#themeGrid .theme-swatch').length >= 18 && document.getElementById('clanker-routefield-canvas')?.dataset.motion === 'active'", 'fresh theme UI');
   await waitFor("document.getElementById('clanker-routefield-canvas')?.dataset.motion === 'active'", 'active Clanker route field');
+  const themeModuleLoads = await evaluate(`performance.getEntriesByType('resource')
+    .map(entry => new URL(entry.name))
+    .filter(url => url.pathname === '/static/js/theme.js')
+    .map(url => url.pathname + url.search)`);
+  assert.deepEqual(themeModuleLoads, ['/static/js/theme.js'], 'theme runtime loaded under multiple module URLs');
+  const startupCanvases = await evaluate(`[...document.querySelectorAll('[data-background-effect-canvas]')].map(canvas => canvas.id)`);
+  assert.deepEqual(startupCanvases, ['clanker-routefield-canvas'], 'cold start mounted more than one background scene');
+  const vanillaPresentation = await evaluate(`(async () => {
+    const canvas=document.getElementById('clanker-routefield-canvas');
+    const proto=CanvasRenderingContext2D.prototype;
+    const clearRect=proto.clearRect;
+    const drawImage=proto.drawImage;
+    const fillRect=proto.fillRect;
+    const fill=proto.fill;
+    const stroke=proto.stroke;
+    let visibleClears=0;
+    let copiedFrames=0;
+    const compositeModes=new Set();
+    const recordMode=context => {
+      if (context.canvas===canvas) compositeModes.add(context.globalCompositeOperation);
+    };
+    proto.clearRect=function(...args) {
+      if (this.canvas===canvas) {
+        visibleClears+=1;
+        recordMode(this);
+      }
+      return clearRect.apply(this,args);
+    };
+    proto.drawImage=function(...args) {
+      if (this.canvas===canvas) {
+        copiedFrames+=1;
+        recordMode(this);
+      }
+      return drawImage.apply(this,args);
+    };
+    proto.fillRect=function(...args) {
+      recordMode(this);
+      return fillRect.apply(this,args);
+    };
+    proto.fill=function(...args) {
+      recordMode(this);
+      return fill.apply(this,args);
+    };
+    proto.stroke=function(...args) {
+      recordMode(this);
+      return stroke.apply(this,args);
+    };
+    try { await new Promise(resolve=>setTimeout(resolve,260)); }
+    finally {
+      proto.clearRect=clearRect;
+      proto.drawImage=drawImage;
+      proto.fillRect=fillRect;
+      proto.fill=fill;
+      proto.stroke=stroke;
+    }
+    return {
+      visibleClears,
+      copiedFrames,
+      compositeModes:[...compositeModes],
+    };
+  })()`);
+  assert(vanillaPresentation.visibleClears >= 10, `only ${vanillaPresentation.visibleClears} vanilla-style frames were painted`);
+  assert.equal(vanillaPresentation.copiedFrames, 0, 'custom animation copied a second full-size canvas each frame');
+  assert.deepEqual(vanillaPresentation.compositeModes, ['source-over'], 'custom animation used a non-vanilla compositing mode');
+  const staleOwnerRecovery = await evaluate(`(async () => {
+    const original=document.getElementById('clanker-routefield-canvas');
+    original.dataset.backgroundRuntime='legacy-runtime';
+    document.getElementById('theme-bg-pattern-select').dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const replacement=document.getElementById('clanker-routefield-canvas');
+    return {
+      originalConnected:original.isConnected,
+      replaced:replacement!==original,
+      runtime:replacement?.dataset.backgroundRuntime || '',
+    };
+  })()`);
+  assert.equal(staleOwnerRecovery.originalConnected, false, 'stale background owner stayed connected');
+  assert.equal(staleOwnerRecovery.replaced, true, 'current runtime did not replace the stale canvas owner');
+  assert.notEqual(staleOwnerRecovery.runtime, 'legacy-runtime', 'replacement kept the stale runtime identity');
+  const duplicateRecovery = await evaluate(`(async () => {
+    const original=document.getElementById('clanker-routefield-canvas');
+    const duplicate=document.createElement('canvas');
+    duplicate.id='stale-background-canvas';
+    duplicate.dataset.backgroundEffectCanvas='true';
+    document.body.prepend(duplicate);
+    document.getElementById('theme-bg-pattern-select').dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    return {
+      originalConnected:original.isConnected,
+      duplicateConnected:duplicate.isConnected,
+      active:[...document.querySelectorAll('[data-background-effect-canvas]')].map(canvas=>canvas.id),
+    };
+  })()`);
+  assert.equal(duplicateRecovery.originalConnected, false);
+  assert.equal(duplicateRecovery.duplicateConnected, false);
+  assert.deepEqual(duplicateRecovery.active, ['clanker-routefield-canvas']);
+  const teardown = await evaluate(`(async () => {
+    const select=document.getElementById('theme-bg-pattern-select');
+    const oldCanvas=document.getElementById('clanker-routefield-canvas');
+    const oldFrameCount=oldCanvas.__backgroundFrameCount;
+    select.value='clanker-radar';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>setTimeout(resolve,80));
+    const result={
+      oldConnected:oldCanvas.isConnected,
+      oldFrameDelta:oldCanvas.__backgroundFrameCount-oldFrameCount,
+      active:[...document.querySelectorAll('[data-background-effect-canvas]')].map(canvas=>canvas.id),
+    };
+    select.value='clanker-routefield';
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    return result;
+  })()`);
+  assert.equal(teardown.oldConnected, false);
+  assert.equal(teardown.oldFrameDelta, 0, 'detached background canvas kept painting');
+  assert.deepEqual(teardown.active, ['clanker-radar-canvas']);
+  await waitFor("document.getElementById('clanker-routefield-canvas')?.dataset.motion === 'active'", 'restored route field');
 
   const dark = await evaluate(`(async () => {
     await document.fonts.load("16px 'Liga Comic Mono'");
@@ -244,6 +544,7 @@ try {
   assert(routeCadence.median < 24, `route field median frame interval was ${routeCadence.median.toFixed(1)}ms`);
   assert(await canvasSceneStable('clanker-routefield-canvas'), 'route field rebuilt its scene without a viewport change');
   assert(await canvasPatternStable('clanker-routefield-canvas'), 'route field rebuilt its scene for an unchanged pattern');
+  const routeSafety = await assertCanvasSafe('clanker-routefield-canvas', 'route field');
   await screenshot('clanker-dark-page');
   await screenshot('clanker-dark', 'popup');
 
@@ -262,7 +563,8 @@ try {
     assert(frameA?.painted > 0, `${pattern} did not paint`);
     assert(frameA.painted >= minimumPainted, `${pattern} only painted ${frameA.painted} sampled pixels`);
     assert.notEqual(frameA.hash, frameB?.hash, `${pattern} did not animate`);
-    patternResults[pattern] = { frameA, frameB };
+    const safety = await assertCanvasSafe(canvasId, pattern);
+    patternResults[pattern] = { frameA, frameB, safety };
     await screenshot(screenshotName);
   }
 
@@ -379,6 +681,15 @@ try {
   assert.equal(effectControlResults.controls['clanker-emoji-drift'].middleIntensity, 80);
   assert.equal(effectControlResults.controls['clanker-emoji-drift'].totalQuantity, 120);
   assert.equal(effectControlResults.controls['clanker-emoji-drift'].glowLikelihood, 45);
+  const extremeSafety = {};
+  for (const [pattern, canvasId] of [
+    ['clanker-gem-drift', 'clanker-gem-drift-canvas'],
+    ['clanker-emoji-drift', 'clanker-emoji-drift-canvas'],
+  ]) {
+    await evaluate(`(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value=${JSON.stringify(pattern)}; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+    await waitFor(`document.getElementById(${JSON.stringify(canvasId)})?.dataset.motion === 'active'`, `${pattern} extreme safety`);
+    extremeSafety[pattern] = await assertCanvasSafe(canvasId, `${pattern} extreme controls`);
+  }
   await evaluate("(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value='clanker-kene-weave'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
   await waitFor("document.getElementById('clanker-kene-weave-canvas')?.dataset.motion === 'active'", 'Signal Weave control screenshot');
   await evaluate("(() => { document.getElementById('theme-modal')?.classList.remove('hidden'); document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')?.click(); document.getElementById('theme-bg-effect-controls')?.scrollIntoView({block:'center'}); })()");
@@ -575,9 +886,42 @@ try {
     assert.equal(frame?.width, 390, `${pattern} mobile width`);
     assert.equal(frame?.height, 844, `${pattern} mobile height`);
     assert(frame.painted > 0, `${pattern} mobile canvas was blank`);
-    mobilePatternResults[pattern] = frame;
+    const safety = await assertCanvasSafe(canvasId, `${pattern} mobile`);
+    mobilePatternResults[pattern] = { frame, safety };
     await screenshot(`${pattern}-mobile`);
   }
+
+  await evaluate("(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value='clanker-routefield'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
+  await waitFor("document.getElementById('clanker-routefield-canvas')?.dataset.motion === 'active'", 'route field before live DPR resize');
+  const beforeDprResize = await evaluate(`(() => {
+    const canvas=document.getElementById('clanker-routefield-canvas');
+    globalThis.__clankerResizeProbe={ canvas, scene:canvas?.__backgroundScene };
+    return { resizeCount:canvas?.__backgroundResizeCount || 0 };
+  })()`);
+  await command('Emulation.setDeviceMetricsOverride', { width:412, height:915, deviceScaleFactor:2, mobile:true });
+  await waitFor("innerWidth === 412 && document.getElementById('clanker-routefield-canvas')?.width === 824 && document.getElementById('clanker-routefield-canvas')?.height === 1830", 'live DPR resize');
+  const dprResize = await evaluate(`(() => {
+    const canvas=document.getElementById('clanker-routefield-canvas');
+    return {
+      sameCanvas:canvas===globalThis.__clankerResizeProbe?.canvas,
+      sceneChanged:canvas?.__backgroundScene!==globalThis.__clankerResizeProbe?.scene,
+      resizeCount:canvas?.__backgroundResizeCount || 0,
+    };
+  })()`);
+  const dprResizeIdentity = await evaluate(`(() => {
+    const canvas=document.getElementById('clanker-routefield-canvas');
+    return {
+      canvasId:canvas?.id,
+      width:canvas?.width,
+      height:canvas?.height,
+      resizeCount:canvas?.__backgroundResizeCount || 0,
+    };
+  })()`);
+  assert.equal(dprResizeIdentity.canvasId, 'clanker-routefield-canvas');
+  assert.equal(dprResize.sameCanvas, true, 'live viewport change remounted the running canvas');
+  assert.equal(dprResize.sceneChanged, true, 'live viewport change reused stale scene geometry');
+  assert(dprResizeIdentity.resizeCount > beforeDprResize.resizeCount, 'live viewport change did not run the shared resize lifecycle');
+  const dprSafety = await assertCanvasSafe('clanker-routefield-canvas', 'route field DPR 2 resize');
 
   await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, deviceScaleFactor:1, mobile:false });
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
@@ -607,7 +951,7 @@ try {
   assert(mobileLogin.overflow <= 0); assert(mobileLogin.left >= 0); assert(mobileLogin.right <= mobileLogin.viewport);
   await screenshot('clanker-login-mobile');
   assert.deepEqual(exceptions, []);
-  process.stdout.write(`${JSON.stringify({ dark, routeStability, routeCadence, patternResults, effectControlResults, transitionMatrix, effectMotionResults, light, original, fontViews, migration, reducedResults, mobile, mobilePatternResults, login, mobileLogin, screenshots:outputDir }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ dark, routeStability, routeCadence, routeSafety, vanillaPresentation, patternResults, effectControlResults, extremeSafety, transitionMatrix, effectMotionResults, light, original, fontViews, migration, reducedResults, mobile, mobilePatternResults, dprResize, dprResizeIdentity, dprSafety, login, mobileLogin, screenshots:outputDir }, null, 2)}\n`);
 } finally {
   if (socket) socket.close();
   chromium.kill('SIGTERM');

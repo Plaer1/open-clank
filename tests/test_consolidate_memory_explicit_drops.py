@@ -28,11 +28,13 @@ class _FakeMM:
 
 
 def test_omitted_memory_survives_only_explicit_drop(monkeypatch):
+    import src.ai_interaction
     import src.memory
     import src.llm_core
     import src.task_endpoint
 
     _FakeMM.saved = None
+    monkeypatch.setattr(src.ai_interaction, "_memory_provider", None)
     monkeypatch.setattr(src.memory, "MemoryManager", _FakeMM)
     monkeypatch.setattr(
         src.task_endpoint, "resolve_task_candidates",

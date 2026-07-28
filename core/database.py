@@ -685,6 +685,45 @@ class MimoAuthStore(TimestampMixin, Base):
     payload = Column(EncryptedText, nullable=True)  # JSON auth store contents
 
 
+class ModelShare(TimestampMixin, Base):
+    """One exact model route an owner has deliberately published."""
+
+    __tablename__ = "model_shares"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    source_kind = Column(String, nullable=False)  # endpoint | native
+    source_id = Column(String, nullable=False)
+    model_id = Column(String, nullable=False)
+    active = Column(Boolean, nullable=False, default=True)
+    revision = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        Index(
+            "uq_model_shares_active_route",
+            "owner",
+            "source_kind",
+            "source_id",
+            "model_id",
+            unique=True,
+        ),
+    )
+
+
+class ModelShareSubscription(TimestampMixin, Base):
+    """One owner grant plus the named recipient's explicit opt-in."""
+
+    __tablename__ = "model_share_subscriptions"
+
+    share_id = Column(
+        String,
+        ForeignKey("model_shares.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    subscriber = Column(String, primary_key=True, index=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+
+
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
     __tablename__ = "mcp_servers"
@@ -1377,6 +1416,66 @@ def _migrate_add_pinned_models_column():
         except Exception:
             pass
 
+
+def _migrate_model_endpoint_model_lists() -> int:
+    """Rewrite legacy comma-separated model fields as canonical JSON arrays."""
+    import json
+
+    from src.endpoint_resolver import normalize_model_list
+
+    db_path = _sqlite_db_path(make_url(DATABASE_URL))
+    if db_path is None or not os.path.exists(db_path):
+        return 0
+    conn = None
+    changed_rows = 0
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(model_endpoints)")
+        }
+        fields = [
+            field
+            for field in ("cached_models", "pinned_models", "hidden_models")
+            if field in columns
+        ]
+        if "id" not in columns or not fields:
+            return 0
+        selected = ", ".join(["id", *fields])
+        for row in conn.execute(f"SELECT {selected} FROM model_endpoints").fetchall():
+            updates = {}
+            for field, raw in zip(fields, row[1:]):
+                if raw is None or not str(raw).strip():
+                    continue
+                canonical = json.dumps(
+                    normalize_model_list(raw),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if raw != canonical:
+                    updates[field] = canonical
+            if not updates:
+                continue
+            assignments = ", ".join(f"{field} = ?" for field in updates)
+            conn.execute(
+                f"UPDATE model_endpoints SET {assignments} WHERE id = ?",
+                [*updates.values(), row[0]],
+            )
+            changed_rows += 1
+        conn.commit()
+        if changed_rows:
+            logger.info(
+                "Migrated %d endpoint model-list row(s) to canonical JSON",
+                changed_rows,
+            )
+        return changed_rows
+    except Exception as exc:
+        logger.warning("endpoint model-list migration failed: %s", exc)
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _migrate_add_notes_sort_order():
     """Add sort_order, image_url, repeat columns to notes if they don't exist."""
     import sqlite3
@@ -1519,6 +1618,10 @@ def _migrate_add_session_endpoint_id_column():
         if "endpoint_id" not in columns:
             conn.execute("ALTER TABLE sessions ADD COLUMN endpoint_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_sessions_endpoint_id ON sessions(endpoint_id)")
+        conn.execute(
+            "UPDATE sessions SET endpoint_id = 'mimo:auto' "
+            "WHERE endpoint_id = 'mimo'"
+        )
 
         def _base(value: str) -> str:
             value = (value or "").strip().rstrip("/")
@@ -1532,7 +1635,9 @@ def _migrate_add_session_endpoint_id_column():
         ).fetchall()
         conn.execute(
             "UPDATE sessions SET endpoint_id = NULL "
-            "WHERE endpoint_id IS NOT NULL AND endpoint_id != 'mimo' "
+            "WHERE endpoint_id IS NOT NULL "
+            "AND endpoint_id NOT LIKE 'mimo:%' "
+            "AND endpoint_id NOT LIKE 'shared:%' "
             "AND NOT EXISTS (SELECT 1 FROM model_endpoints ep "
             "WHERE ep.id = sessions.endpoint_id AND ep.is_enabled = 1 "
             "AND ep.owner = sessions.owner)"
@@ -1543,7 +1648,10 @@ def _migrate_add_session_endpoint_id_column():
         for session in sessions:
             url = (session["endpoint_url"] or "").strip()
             if url.rstrip("/") == "mimo://acp":
-                conn.execute("UPDATE sessions SET endpoint_id = 'mimo' WHERE id = ?", (session["id"],))
+                conn.execute(
+                    "UPDATE sessions SET endpoint_id = 'mimo:auto' WHERE id = ?",
+                    (session["id"],),
+                )
                 continue
             normalized = _base(url)
             matches = [
@@ -1617,7 +1725,10 @@ def _migrate_add_background_agent_contract_columns():
         for table in ("scheduled_tasks", "crew_members"):
             conn.execute(
                 f"UPDATE {table} SET endpoint_id = NULL "
-                "WHERE endpoint_id IS NOT NULL AND endpoint_id != 'mimo' "
+                "WHERE endpoint_id IS NOT NULL "
+                "AND endpoint_id != 'mimo' "
+                "AND endpoint_id NOT LIKE 'mimo:%' "
+                "AND endpoint_id NOT LIKE 'shared:%' "
                 "AND NOT EXISTS (SELECT 1 FROM model_endpoints ep "
                 f"WHERE ep.id = {table}.endpoint_id AND ep.is_enabled = 1 "
                 f"AND ep.owner = {table}.owner)"
@@ -2446,6 +2557,7 @@ def init_db():
     _migrate_add_hidden_models_column()
     _migrate_add_cached_models_column()
     _migrate_add_pinned_models_column()
+    _migrate_model_endpoint_model_lists()
     _migrate_add_notes_sort_order()
     _migrate_add_model_type_column()
     _migrate_add_model_endpoint_refresh_columns()

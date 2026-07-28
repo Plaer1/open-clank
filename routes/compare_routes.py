@@ -13,7 +13,10 @@ import logging
 from core.database import Comparison, SessionLocal
 from core.session_manager import SessionManager
 from src.auth_helpers import get_current_user
-from routes.session_routes import _reject_raw_endpoint_url_for_non_admin
+from routes.session_routes import (
+    _native_connection_models,
+    _reject_raw_endpoint_url_for_non_admin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,16 +133,18 @@ def setup_compare_routes(session_manager: SessionManager):
                 # raw-URL callers that don't send an id.
                 eid = endpoint_id.strip() if isinstance(endpoint_id, str) else ""
                 if eid:
-                    if eid == "mimo":
-                        supervisor = getattr(request.app.state, "mimo_supervisor", None)
-                        if not supervisor or not supervisor.is_alive(owner=user):
-                            raise HTTPException(503, "Open Clank agent ACP is unavailable")
-                        available = {
-                            item.get("modelId")
-                            for item in supervisor.available_models(owner=user)
-                            if item.get("modelId")
-                        }
-                        if available and model not in available:
+                    native_connection, native_models = await _native_connection_models(
+                        request,
+                        user,
+                        eid,
+                    )
+                    if native_connection:
+                        if not native_models:
+                            raise HTTPException(
+                                503,
+                                "Open Clank agent ACP is unavailable",
+                            )
+                        if model not in native_models:
                             raise HTTPException(400, f"Open Clank agent model {model!r} is unavailable")
                         auth_manager = getattr(request.app.state, "auth_manager", None)
                         get_privileges = getattr(auth_manager, "get_privileges", None)
@@ -148,7 +153,13 @@ def setup_compare_routes(session_manager: SessionManager):
                         restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
                         if (privileges or {}).get("block_all_models") or (restricted and model not in allowed):
                             raise HTTPException(403, f"Your account is not allowed to use model {model!r}")
-                        resolved.append((sid, model, "mimo://acp", None, "mimo"))
+                        resolved.append((
+                            sid,
+                            model,
+                            "mimo://acp",
+                            None,
+                            native_connection,
+                        ))
                         continue
                     ep = _owned_endpoint_by_id(db, eid, user)
                     if ep is None:

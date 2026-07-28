@@ -53,7 +53,15 @@ class _CaptureProvider:
     def __init__(self):
         self.calls = []
 
-    def capture(self, user_text, assistant_text, *, owner=None, session_id=None):
+    def capture(
+        self,
+        user_text,
+        assistant_text,
+        *,
+        owner=None,
+        session_id=None,
+        capture_mode="candidate",
+    ):
         async def _run():
             self.calls.append(
                 {
@@ -61,6 +69,7 @@ class _CaptureProvider:
                     "assistant_text": assistant_text,
                     "owner": owner,
                     "session_id": session_id,
+                    "capture_mode": capture_mode,
                 }
             )
             return {"record_ids": ["r1"]}
@@ -93,17 +102,21 @@ def _sess():
 
 
 def _run(chat_helpers, provider, *, incognito=False, compare_mode=False,
-         auto_memory=True, allow=True):
+         auto_memory=True, memory_mode=None, allow=True, no_memory=False):
+    prefs = {"auto_memory": auto_memory, "auto_skills": False}
+    if memory_mode is not None:
+        prefs["memory_mode"] = memory_mode
     chat_helpers.run_post_response_tasks(
         _sess(), SimpleNamespace(save_sessions=lambda: None), "sess-cap",
         "what is the observatory code?", "It is 7741.", None,
-        {"auto_memory": auto_memory, "auto_skills": False},
+        prefs,
         memory_manager=MagicMock(), memory_vector=MagicMock(),
         webhook_manager=None,
         incognito=incognito, compare_mode=compare_mode,
         owner="alice",
         allow_background_extraction=allow,
         memory_provider=provider,
+        no_memory=no_memory,
     )
 
 
@@ -135,6 +148,7 @@ async def test_direct_endpoint_turn_captures_via_provider(harness):
     assert call["assistant_text"] == "It is 7741."
     assert call["owner"] == "alice"
     assert call["session_id"] == "sess-cap"
+    assert call["capture_mode"] == "candidate"
     assert calls["legacy"] == 0
 
 
@@ -161,6 +175,24 @@ async def test_incognito_and_compare_never_capture(harness):
 
     assert provider.calls == []
     assert calls["legacy"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_memory_turn_never_captures(harness):
+    chat_helpers, _ = harness
+    provider = _CaptureProvider()
+    _run(chat_helpers, provider, no_memory=True)
+    await asyncio.sleep(0.05)
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_mode_stages_review_only_candidate(harness):
+    chat_helpers, _ = harness
+    provider = _CaptureProvider()
+    _run(chat_helpers, provider, memory_mode="manual")
+    await asyncio.sleep(0.05)
+    assert provider.calls[0]["capture_mode"] == "review_only"
 
 
 @pytest.mark.asyncio

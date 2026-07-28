@@ -26,7 +26,7 @@ import { InstanceState } from "@/effect"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { isRecord } from "@/util/record"
 import { withStatics } from "@/util/schema"
-import { closeSync, readFileSync } from "node:fs"
+import { closeSync, readSync } from "node:fs"
 
 import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
@@ -39,25 +39,93 @@ const BUILTIN_TIERS = new Set(["ultra", "standard", "lite"])
 // F41: warn once per (providerID, modelID) when limit.context falls back to default
 const warnedContextDefaults = new Set<string>()
 
-export function consumeInheritedProviderCredentials(fdValue?: string): Record<string, string> {
-  const rawFD = fdValue ?? process.env["MIMOCODE_PROVIDER_AUTH_FD"]
-  delete process.env["MIMOCODE_PROVIDER_AUTH_FD"]
-  if (!rawFD || !/^\d+$/.test(rawFD)) return {}
-  const fd = Number(rawFD)
-  if (fd < 3) return {}
-  try {
-    const parsed = JSON.parse(readFileSync(fd, "utf8"))
-    if (!isRecord(parsed)) return {}
-    return Object.fromEntries(
-      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""),
+export const MAX_INHERITED_PROVIDER_AUTH_BYTES = 4 * 1024 * 1024
+
+class ProviderCredentialHandoffError extends Error {}
+
+function readInheritedProviderCredentials(fd: number): string {
+  const chunks: Buffer[] = []
+  let total = 0
+  while (true) {
+    const chunk = Buffer.allocUnsafe(
+      Math.min(64 * 1024, MAX_INHERITED_PROVIDER_AUTH_BYTES - total + 1),
     )
-  } catch {
-    return {}
+    const count = readSync(fd, chunk, 0, chunk.length, null)
+    if (count === 0) break
+    total += count
+    if (total > MAX_INHERITED_PROVIDER_AUTH_BYTES) {
+      throw new ProviderCredentialHandoffError(
+        "Inherited provider credential payload is too large",
+      )
+    }
+    chunks.push(chunk.subarray(0, count))
+  }
+  if (total === 0) {
+    throw new ProviderCredentialHandoffError(
+      "Inherited provider credential payload is empty",
+    )
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total))
+}
+
+export function consumeInheritedProviderCredentials(fdValue?: string): Record<string, string> {
+  const envName = "MIMOCODE_PROVIDER_AUTH_FD"
+  const configured = fdValue !== undefined || Object.prototype.hasOwnProperty.call(process.env, envName)
+  const rawFD = fdValue ?? process.env[envName]
+  delete process.env[envName]
+  if (!configured) return {}
+  if (!rawFD || !/^\d+$/.test(rawFD)) {
+    throw new ProviderCredentialHandoffError(
+      "Invalid inherited provider credential descriptor",
+    )
+  }
+  const fd = Number(rawFD)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new ProviderCredentialHandoffError(
+      "Invalid inherited provider credential descriptor",
+    )
+  }
+  let payload: string
+  try {
+    payload = readInheritedProviderCredentials(fd)
+  } catch (error) {
+    if (error instanceof ProviderCredentialHandoffError) throw error
+    throw new ProviderCredentialHandoffError(
+      "Unable to read inherited provider credential descriptor",
+    )
   } finally {
     try {
       closeSync(fd)
     } catch {}
   }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(payload)
+  } catch {
+    throw new ProviderCredentialHandoffError(
+      "Invalid inherited provider credential payload",
+    )
+  }
+  if (!isRecord(parsed)) {
+    throw new ProviderCredentialHandoffError(
+      "Invalid inherited provider credential payload",
+    )
+  }
+  const entries = Object.entries(parsed)
+  if (
+    entries.length === 0 ||
+    entries.some(([providerID, credential]) =>
+      providerID.length === 0 ||
+      typeof credential !== "string" ||
+      credential.length === 0
+    )
+  ) {
+    throw new ProviderCredentialHandoffError(
+      "Invalid inherited provider credential payload",
+    )
+  }
+  return Object.fromEntries(entries) as Record<string, string>
 }
 
 const inheritedProviderCredentials = consumeInheritedProviderCredentials()

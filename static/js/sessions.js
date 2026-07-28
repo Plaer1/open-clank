@@ -1625,7 +1625,13 @@ export async function loadSessions() {
       const res = await fetch(`${API_BASE}/api/sessions`);
       fetched = await res.json();
     }
+    const activeIncognito = _isIncognitoSession(currentSessionId)
+      ? sessions.find(s => s.id === currentSessionId)
+      : null;
     sessions = _normalizeSessionsList(fetched);
+    if (activeIncognito && !sessions.some(s => s.id === activeIncognito.id)) {
+      sessions.unshift(activeIncognito);
+    }
     renderSessionList();
 
     const sessionsSection = uiModule.el('sessions-section');
@@ -1708,7 +1714,7 @@ export async function loadSessions() {
             if (emptyDefault) {
               targetId = emptyDefault.id;
             } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
               // On mobile, hide sidebar so user lands directly in chat
               if (window.innerWidth < 768) {
                 const sb = document.getElementById('sidebar');
@@ -1732,6 +1738,7 @@ export async function loadSessions() {
       const s = sessions.find(x => x.id === targetId);
       const metaEl = document.getElementById('current-meta');
       if (metaEl && s) metaEl.textContent = s.name;
+      updateModelPicker();
     }
 
     // No session selected — still enable input so slash commands (e.g. /setup) work
@@ -1752,7 +1759,7 @@ export async function loadSessions() {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
           if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
@@ -2097,7 +2104,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
 // Pending session — stored locally until the first message is sent
 let _pendingChat = null; // { url, modelId, endpointId }
 
-export function createDirectChat(url, modelId, endpointId) {
+export function createDirectChat(url, modelId, endpointId, source = 'manual') {
   _sessionNavToken++;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
@@ -2111,7 +2118,7 @@ export function createDirectChat(url, modelId, endpointId) {
   }
 
   // Don't hit the API — just store the model info and prepare the UI
-  _pendingChat = { url, modelId, endpointId };
+  _pendingChat = { url, modelId, endpointId, source };
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
   currentSessionId = null;
@@ -2183,6 +2190,8 @@ export async function materializePendingSession() {
   try {
     res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
   } catch (e) {
+    if (!_pendingChat) _pendingChat = pending;
+    updateModelPicker();
     uiModule.showError('Failed to reach backend: ' + e);
     return false;
   }
@@ -2195,6 +2204,8 @@ export async function materializePendingSession() {
   }
 
   if (!res.ok) {
+    if (!_pendingChat) _pendingChat = pending;
+    updateModelPicker();
     uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
     return false;
   }
@@ -2208,9 +2219,21 @@ export async function materializePendingSession() {
     try { window.documentModule.clearSelection(); } catch {}
   }
   currentSessionId = payload.id;
+  const createdSession = {
+    ...payload,
+    id: payload.id,
+    model: payload.model || pending.modelId || '',
+    endpoint_url: payload.endpoint_url || pending.url || '',
+    endpoint_id: payload.endpoint_id || pending.endpointId || null,
+    archived: !!payload.archived,
+  };
+  const createdIndex = sessions.findIndex(s => s.id === payload.id);
+  if (createdIndex >= 0) sessions[createdIndex] = createdSession;
+  else sessions.unshift(createdSession);
   document.dispatchEvent(new CustomEvent('odysseus:session-selected', { detail: { sessionId: payload.id } }));
   Storage.set('lastSessionId', payload.id);
   history.replaceState(null, '', '#' + payload.id);
+  updateModelPicker();
 
   // Reload the sidebar in the background. Awaiting this used to block the first
   // prompt in a new/pending chat behind startup fetches and slow /api/sessions
@@ -2222,6 +2245,10 @@ export async function materializePendingSession() {
 
 export function hasPendingChat() { return !!_pendingChat; }
 export function getPendingChat() { return _pendingChat; }
+export function clearPendingChat() {
+  _pendingChat = null;
+  updateModelPicker();
+}
 // Getters for external access
 export function getCurrentSessionId() {
   return currentSessionId;
@@ -2234,7 +2261,8 @@ export function getSessions() {
 export function getCurrentModel() {
   const sess = sessions.find(x => x.id === currentSessionId);
   if (sess && sess.model) return sess.model;
-  // Pending session not yet materialized — read from model picker label
+  if (_pendingChat && _pendingChat.modelId) return _pendingChat.modelId;
+  // Last-resort compatibility for special views that only paint the label.
   const label = document.getElementById('model-picker-label');
   return label ? label.textContent.trim() : null;
 }
@@ -3471,6 +3499,7 @@ const sessionModule = {
   materializePendingSession,
   hasPendingChat,
   getPendingChat,
+  clearPendingChat,
   getCurrentSessionId,
   getSessions,
   getCurrentModel,

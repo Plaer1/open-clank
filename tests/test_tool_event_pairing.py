@@ -128,6 +128,26 @@ def test_resume_reader_shows_live_tool_activity():
     assert "setInterval" not in reader, "the feed must not leak timers"
 
 
+def test_resume_reader_surfaces_interactive_events_like_live_stream():
+    """Page-refresh replay must restore the same question and permission cards
+    that the foreground reader renders when their SSE events arrive live."""
+    chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+    resume_at = chat.index("export async function resumeStream")
+    reader = chat[resume_at:resume_at + 9000]
+    ask_at = reader.index("json.type === 'ask_user'")
+    permission_at = reader.index("json.type === 'permission_request'", ask_at)
+    tool_at = reader.index("json.type === 'tool_start'", permission_at)
+    ask = reader[ask_at:permission_at]
+    permission = reader[permission_at:tool_at]
+
+    assert "_storeSessionState('question', sessionId, question)" in ask
+    assert "spinner.destroy()" in ask
+    assert "chatRenderer.renderAskUserCard(json.data || {})" in ask
+    assert "_storeSessionState('permission', sessionId, json.data || {})" in permission
+    assert "spinner.destroy()" in permission
+    assert "chatRenderer.renderPermissionCard(json.data || {}, sessionId)" in permission
+
+
 def test_chat_js_sweeps_stranded_running_cards_at_stream_end():
     chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
     finally_at = chat.index("} finally {", chat.index("agent-thread-node running"))

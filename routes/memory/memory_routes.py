@@ -147,12 +147,16 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if not text:
             raise HTTPException(400, "empty memory")
 
-        # Memory gate: refuse direct-to-curated writes in off/manual modes.
-        from src.memory_gate import write_allowed
+        # Memory gate: "off" is a hard stop. Review-first mode stages the
+        # proposed memory in Candidates rather than turning the Add button into
+        # a dead end or sneaking it directly into Curated.
+        from src.memory_gate import memory_mode, write_allowed
         from routes.prefs_routes import _load_for_user
         _prefs = _load_for_user(user) or {}
+        _mode = memory_mode(_prefs)
         _ok, _reason = write_allowed(_prefs)
-        if not _ok:
+        manual_review = _mode == "manual"
+        if not _ok and not manual_review:
             raise HTTPException(403, _reason)
 
         try:
@@ -175,13 +179,25 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 text, owner=user, session_id=memory_data.session_id,
                 category=memory_data.category, source=memory_data.source,
                 workspace_id=memory_data.workspace_id,
+                capture_mode=("review_only" if manual_review else "manual"),
             )
-            try:
-                from src.event_bus import fire_event
-                fire_event("memory_added", user)
-            except Exception:
-                logger.debug("memory_added event dispatch failed", exc_info=True)
-            return {"ok": True, "memory_id": record.id, "message": "Memory added via provider"}
+            if not manual_review:
+                try:
+                    from src.event_bus import fire_event
+                    fire_event("memory_added", user)
+                except Exception:
+                    logger.debug("memory_added event dispatch failed", exc_info=True)
+            return {
+                "ok": True,
+                "memory_id": record.id,
+                "candidate_id": record.id if manual_review else None,
+                "pending_review": manual_review,
+                "message": (
+                    "Memory sent to review"
+                    if manual_review
+                    else "Memory added via provider"
+                ),
+            }
         except Exception as e:
             logger.warning("Provider add failed: %s", e)
             raise HTTPException(503, "Active memory provider is unavailable")
@@ -328,9 +344,9 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if not workspace_id:
             raise HTTPException(400, "workspace_id is required")
         reason = str(body.get("reason") or ("approved_by_user" if accept else "rejected_by_user")).strip()[:500]
-        owner = _owner(request)
-        if owner is None:
-            owner = str(body.get("owner") or "legacy").strip()
+        from src.memory_scope import memory_owner
+
+        owner = memory_owner(_owner(request))
         try:
             result = await memory_provider.review_candidate(
                 candidate_id,

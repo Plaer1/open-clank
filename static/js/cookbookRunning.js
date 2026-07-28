@@ -526,37 +526,21 @@ async function _removeEndpointByUrl(baseUrl) {
   } catch {}
 }
 
-function _refreshModelsAfterEndpointChange() {
+async function _refreshModelsAfterEndpointChange() {
   const pickerLabel = document.getElementById('model-picker-label');
   if (pickerLabel) {
     pickerLabel.dataset.prevHtml = pickerLabel.innerHTML;
     pickerLabel.innerHTML = '<span style="opacity:0.4;">refreshing…</span>';
   }
-  if (window.modelsModule && window.modelsModule.refreshModels) {
-    window.modelsModule.refreshModels(false);
-  }
-  setTimeout(() => {
-    if (!window.sessionModule) return;
-    const currentModel = window.sessionModule.getCurrentModel ? window.sessionModule.getCurrentModel() : null;
-    if (currentModel) {
-      const items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-      const allModels = [];
-      items.forEach(item => {
-        if (item.offline) return;
-        (item.models || []).concat(item.models_extra || []).forEach(m => allModels.push({ mid: m, url: item.url, endpointId: item.endpoint_id }));
-      });
-      const stillExists = allModels.some(m => m.mid === currentModel);
-      if (!stillExists && allModels.length > 0) {
-        const fallback = allModels[0];
-        if (window.sessionModule.createDirectChat) {
-          window.sessionModule.createDirectChat(fallback.url, fallback.mid, fallback.endpointId);
-        }
-      }
+  try {
+    if (window.modelsModule && window.modelsModule.refreshModels) {
+      await window.modelsModule.refreshModels(true);
     }
-    if (window.sessionModule.updateModelPicker) {
+  } finally {
+    if (window.sessionModule && window.sessionModule.updateModelPicker) {
       window.sessionModule.updateModelPicker();
     }
-  }, 1500);
+  }
 }
 
 function _appendCookbookEndpointScope(fd, remoteHost) {

@@ -11,6 +11,7 @@ import { catalogEntries } from './modelCatalog.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import mimoProviders from './mimoProviders.js';
+import modelSharing from './modelSharing.js';
 
 let initialized = false;
 let modalEl = null;
@@ -34,8 +35,8 @@ function safeRasterDataUrl(raw) {
 
 /* ── Tab switching ── */
 const SETTINGS_OWNERSHIP = Object.freeze({
-  services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Open Clank model catalogue' },
-  'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Open Clank model catalogue' },
+  services: { scope: 'per-user', api: '/api/model-endpoints', consumer: 'your Open Clank model catalogue' },
+  'added-models': { scope: 'per-user', api: '/api/model-endpoints', consumer: 'your Open Clank model catalogue' },
   // The Persona card inside this panel is per-user too, served by
   // /api/presets/default-persona (chat default, assistant, reminder voice,
   // background work — one synced record, ruling R13).
@@ -51,7 +52,8 @@ const SETTINGS_OWNERSHIP = Object.freeze({
   users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
   system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
 });
-const ADMIN_MODULE_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system']);
+const MODEL_MANAGEMENT_TABS = new Set(['services', 'added-models']);
+const ADMIN_MODULE_TABS = new Set(['integrations', 'tools', 'users', 'system']);
 const ADMIN_ONLY_TABS = new Set(
   Object.entries(SETTINGS_OWNERSHIP)
     .filter(([, item]) => item.scope === 'global-admin' || item.admin)
@@ -109,9 +111,13 @@ function initTabs() {
       // they flip toggles instead of having to close + reopen the modal.
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
+      if (MODEL_MANAGEMENT_TABS.has(tab)) window.adminModule?._initModelData?.();
       if (tab === 'appearance') syncCopalNotesSettings();
       if (tab === 'ai') { refreshAiModelEndpoints(); loadDefaultPersonaPanel(); }
-      if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
+      if (MODEL_MANAGEMENT_TABS.has(tab)) {
+        mimoProviders.load();
+        modelSharing.load();
+      }
       if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
     });
   });
@@ -2614,7 +2620,7 @@ function initAccount() {
       try { await checkedFetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
       // SECURITY: wipe unscoped client-side state on logout so the next user
       // doesn't inherit the previous account's session id, last-used model,
-      // draft chat input, or cached lists. Owner-namespaced Copal preferences
+      // draft chat input, or cached lists. Owner-namespaced browser preferences
       // remain available when their account signs in again.
       // Keep "odysseus-last-user" so the login form remembers the username
       // (if "Remember me" was on). Without this the chat composer pre-loaded
@@ -2625,8 +2631,8 @@ function initAccount() {
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
-          if (k && !_keepKeys.has(k) && !scopedCopalState) _toRemove.push(k);
+          const scopedOwnerState = k?.includes(':scope:');
+          if (k && !_keepKeys.has(k) && !scopedOwnerState) _toRemove.push(k);
         }
         _toRemove.forEach(k => localStorage.removeItem(k));
         sessionStorage.clear();
@@ -2651,6 +2657,13 @@ function initAll() {
     onCatalogChanged: async () => {
       if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
       await refreshAiModelEndpoints();
+    },
+  });
+  modelSharing.init({
+    onCatalogChanged: async () => {
+      if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+      await refreshAiModelEndpoints();
+      window.sessionModule?.updateModelPicker?.();
     },
   });
   initDrag();
@@ -6108,8 +6121,12 @@ export function open(tab) {
   }
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
+  if (MODEL_MANAGEMENT_TABS.has(activeTab)) window.adminModule?._initModelData?.();
   if (activeTab === 'ai') refreshAiModelEndpoints();
-  if (activeTab === 'added-models' && window._isAdmin) mimoProviders.load();
+  if (MODEL_MANAGEMENT_TABS.has(activeTab)) {
+    mimoProviders.load();
+    modelSharing.load();
+  }
   if (activeTab === 'added-models' && window._isAdmin) loadPermissionGrants();
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();

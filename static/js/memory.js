@@ -216,7 +216,7 @@ async function syncToggles() {
   // toggling it did nothing, so skills stayed on). Now it actually gates skill
   // injection (see chat_helpers.py: uprefs.skills_enabled).
   await syncPrefToggle('skills-enabled-header-toggle', 'skills_enabled', 'Skills enabled', 'Skills disabled', false);
-  await syncPrefToggle('auto-memory-toggle', 'auto_memory', 'Auto-extract memories enabled', 'Auto-extract memories disabled', false);
+  await syncMemoryMode();
   await syncPrefToggle('memory-trust-auto-toggle', 'memory_trust_auto', 'Auto-captured memories can be trusted (per kind below)', 'Auto-captured memories stay behind the firewall', false);
   await _wireTrustKindSwitches();
   await syncPrefToggle('auto-skills-toggle', 'auto_skills', 'Auto-extract skills enabled', 'Auto-extract skills disabled', false);
@@ -447,6 +447,58 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
       }
     });
   }
+}
+
+async function syncMemoryMode() {
+  const select = document.getElementById('memory-mode-select');
+  const help = document.getElementById('memory-mode-help');
+  if (!select) return;
+  const copy = {
+    automatic: 'Capture useful memories automatically. Agent saves are admitted immediately.',
+    manual: 'Capture and Agent saves wait in Candidates until you approve them.',
+    off: 'Do not capture, inject, recall, or let the Agent change memories.',
+  };
+  try {
+    const res = await fetch(`${window.location.origin}/api/prefs/memory_mode`);
+    if (res.ok) {
+      const data = await res.json();
+      if (Object.hasOwn(copy, data.value)) {
+        select.value = data.value;
+      } else {
+        const legacy = await fetch(`${window.location.origin}/api/prefs/auto_memory`);
+        const legacyData = legacy.ok ? await legacy.json() : {};
+        select.value = legacyData.value === false ? 'off' : 'automatic';
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load memory mode:', e);
+  }
+  if (help) help.textContent = copy[select.value];
+  if (!select.dataset.bound) {
+    select.dataset.bound = '1';
+    select.addEventListener('change', async () => {
+      const previous = Object.hasOwn(copy, select.dataset.saved)
+        ? select.dataset.saved
+        : 'automatic';
+      try {
+        const res = await fetch(`${window.location.origin}/api/prefs/memory_mode`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: select.value }),
+        });
+        if (!res.ok) throw new Error(`PUT memory_mode returned ${res.status}`);
+        select.dataset.saved = select.value;
+        if (help) help.textContent = copy[select.value];
+        showToast(`Memory mode: ${select.options[select.selectedIndex].text}`);
+      } catch (e) {
+        console.error('Failed to save memory mode:', e);
+        select.value = previous;
+        if (help) help.textContent = copy[select.value];
+        showError('Failed to save preference');
+      }
+    });
+  }
+  select.dataset.saved = select.value;
 }
 
 async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true) {
@@ -943,6 +995,8 @@ const graphState = {
   offsetX: 0,
   offsetY: 0,
   wired: false,
+  loadId: 0,
+  nextTagFilter: null,
   totals: { nodes: 0, edges: 0 },
 };
 
@@ -953,25 +1007,36 @@ async function _graphApi(params) {
   return response.json();
 }
 
-export async function loadMemoryGraph() {
+export async function loadMemoryGraph({ tagFilter = null } = {}) {
   const canvas = document.getElementById('memory-graph-canvas');
   if (!canvas) return;
   _wireGraphCanvas(canvas);
+  const loadId = ++graphState.loadId;
   try {
     const overview = await _graphApi({ op: 'overview', limit: 120 });
+    // A slower, older tab load must not overwrite a newer filtered load.
+    if (loadId !== graphState.loadId) return;
     graphState.nodes = overview.nodes || [];
     graphState.edges = overview.edges || [];
     graphState.totals = { nodes: overview.node_total || 0, edges: overview.edge_total || 0 };
     graphState.selected = null;
-    graphState.tagFilter = null;
+    graphState.tagFilter = typeof tagFilter === 'string' && tagFilter ? tagFilter : null;
+    _resetGraphViewport();
     _relayoutGraph(canvas);
     _renderGraphTags();
     _renderGraphCounts();
     _renderGraphDetail(null);
   } catch (error) {
+    if (loadId !== graphState.loadId) return;
     const detail = document.getElementById('memory-graph-detail');
     if (detail) detail.textContent = 'Graph unavailable — is the frankenmemory provider running?';
   }
+}
+
+function _resetGraphViewport() {
+  graphState.scale = 1;
+  graphState.offsetX = 0;
+  graphState.offsetY = 0;
 }
 
 function _relayoutGraph(canvas) {
@@ -1000,6 +1065,23 @@ function _drawGraph(canvas) {
   const colors = _graphColors();
   ctx.save();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!graphState.nodes.length) {
+    ctx.fillStyle = colors.fg;
+    ctx.globalAlpha = 0.75;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '600 13px sans-serif';
+    ctx.fillText('No saved memories here yet', canvas.width / 2, canvas.height / 2 - 10);
+    ctx.globalAlpha = 0.55;
+    ctx.font = '11px sans-serif';
+    ctx.fillText(
+      'Save or approve a memory and it will appear here.',
+      canvas.width / 2,
+      canvas.height / 2 + 14,
+    );
+    ctx.restore();
+    return;
+  }
   ctx.translate(graphState.offsetX, graphState.offsetY);
   ctx.scale(graphState.scale, graphState.scale);
 
@@ -1188,7 +1270,10 @@ function _renderGraphDetail(nodeId) {
   const detail = document.getElementById('memory-graph-detail');
   if (!detail) return;
   if (!nodeId) {
-    detail.innerHTML = '<span class="admin-toggle-sub" style="margin:0">Click a node to explore. Click again to expand its neighborhood. Shift-click a second node to trace the paths between them.</span>';
+    const message = graphState.nodes.length
+      ? 'Click a node to explore. Click again to expand its neighborhood. Shift-click a second node to trace the paths between them.'
+      : 'No saved memories are available in this scope yet.';
+    detail.innerHTML = `<span class="admin-toggle-sub" style="margin:0">${message}</span>`;
     return;
   }
   const node = graphState.nodes.find((n) => n.id === nodeId);
@@ -1281,11 +1366,10 @@ export async function loadDigestPreview() {
         chip.textContent = `${cluster.label} (${cluster.size})`;
         chip.title = 'Open in the graph';
         chip.addEventListener('click', () => {
+          // The graph tab lazy-loads its overview. Carry the requested cluster
+          // through that async load instead of filtering the stale canvas first.
+          graphState.nextTagFilter = cluster.label;
           document.querySelector('.memory-tab[data-memory-tab="graph"]')?.click();
-          graphState.tagFilter = cluster.label;
-          _renderGraphTags();
-          const canvas = document.getElementById('memory-graph-canvas');
-          if (canvas) _drawGraph(canvas);
         });
         clustersEl.appendChild(chip);
       }
@@ -1902,9 +1986,10 @@ export async function addNewMemory() {
     });
 
     if (response.ok) {
+      const result = await response.json();
       input.value = '';
       await loadMemories();
-      showToast('Memory added');
+      showToast(result.pending_review ? 'Sent to Candidates for review' : 'Memory added');
     } else {
       const errorData = await response.json();
       console.error('Server error details:', errorData);
@@ -1912,7 +1997,7 @@ export async function addNewMemory() {
     }
   } catch (error) {
     console.error('Error adding memory:', error);
-    showError('Failed to add memory');
+    showError(error.message || 'Failed to add memory');
   }
 }
 
@@ -2038,14 +2123,21 @@ export async function extractMemory(sessionId) {
       btn.className = 'memory-item-btn save';
       btn.textContent = 'save';
       btn.addEventListener('click', async () => {
-        await fetch(`${window.location.origin}/api/memory/add`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: s })
-        });
-        btn.disabled = true;
-        btn.textContent = 'saved';
-        showToast('Saved to memory');
+        try {
+          const response = await fetch(`${window.location.origin}/api/memory/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: s })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || 'Failed to save memory');
+          btn.disabled = true;
+          btn.textContent = result.pending_review ? 'in review' : 'saved';
+          showToast(result.pending_review ? 'Sent to Candidates for review' : 'Saved to memory');
+        } catch (error) {
+          console.error('Failed to save suggested memory:', error);
+          showError(error.message || 'Failed to save memory');
+        }
       });
       div.appendChild(txt);
       div.appendChild(btn);
@@ -2163,14 +2255,18 @@ async function handleImportFile(file) {
       saveAllBtn.textContent = 'save all';
       saveAllBtn.addEventListener('click', async () => {
         let saved = 0;
+        let pending = 0;
         for (const s of reviewItems) {
           if (!s.active || !s.text) continue;
           try {
-            await fetch(`${window.location.origin}/api/memory/add`, {
+            const response = await fetch(`${window.location.origin}/api/memory/add`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ text: s.text, category: s.category })
             });
+            const result = await response.json();
+            if (!response.ok) continue;
+            if (result.pending_review) pending++;
             saved++;
           } catch (e) { /* skip */ }
         }
@@ -2179,7 +2275,11 @@ async function handleImportFile(file) {
         if (memList) memList.classList.remove('hidden');
         await loadMemories();
         document.querySelector('.memory-tab[data-memory-tab="browse"]')?.click();
-        showToast(`Saved ${saved} memories`);
+        showToast(
+          pending
+            ? `Sent ${pending} ${pending === 1 ? 'memory' : 'memories'} to review`
+            : `Saved ${saved} memories`
+        );
       });
       headerActions.appendChild(saveAllBtn);
       headerActions.appendChild(backBtn);
@@ -2208,17 +2308,24 @@ async function handleImportFile(file) {
         btn.className = 'memory-item-btn save';
         btn.textContent = 'save';
         btn.addEventListener('click', async () => {
-          await fetch(`${window.location.origin}/api/memory/add`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: item.text, category: item.category })
-          });
-          item.active = false;
-          div.remove();
-          updateHeaderTitle();
-          btn.disabled = true;
-          btn.textContent = 'saved';
-          showToast('Saved to memory');
+          try {
+            const response = await fetch(`${window.location.origin}/api/memory/add`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: item.text, category: item.category })
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.detail || 'Failed to save memory');
+            item.active = false;
+            div.remove();
+            updateHeaderTitle();
+            btn.disabled = true;
+            btn.textContent = result.pending_review ? 'in review' : 'saved';
+            showToast(result.pending_review ? 'Sent to Candidates for review' : 'Saved to memory');
+          } catch (error) {
+            console.error('Failed to save imported memory:', error);
+            showError(error.message || 'Failed to save memory');
+          }
         });
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'memory-item-btn delete';
@@ -2275,7 +2382,11 @@ document.addEventListener('DOMContentLoaded', () => {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
       }
       if (target === 'inspect') loadMemoryInspect();
-      if (target === 'graph') loadMemoryGraph();
+      if (target === 'graph') {
+        const tagFilter = graphState.nextTagFilter;
+        graphState.nextTagFilter = null;
+        loadMemoryGraph({ tagFilter });
+      }
       if (target === 'digest') loadDigestPreview();
     });
   });

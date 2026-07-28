@@ -71,7 +71,8 @@ def _find_npx() -> str:
 # duplicating into the native path right now.
 _BUILTIN_SERVERS = {
     "image_gen":  ("mcp_servers/image_gen_server.py",  "Built-in: Image Generation"),
-    "memory":     ("mcp_servers/memory_server.py",     "Built-in: Memory"),
+    # Memory is owner-scoped through the active provider / Agent ACP bridge.
+    # Starting memory_server.py here creates a second, unscoped provider path.
     "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
 }

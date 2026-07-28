@@ -13,7 +13,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional
 
-from src.memory_scope import chat_workspace
+from src.memory_scope import chat_workspace, memory_owner
 from src.openclank.acp_client import ACPClient, RPCError, TransportError
 from src.openclank.permission_grants import derive_pattern
 
@@ -35,27 +35,63 @@ _LIFETOOLS_SERVER = Path(__file__).resolve().parent / "lifetools_server.py"
 _FM_MCP_COMMAND = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
 
 
+def frankenmemory_child_env(*, command: str | None = None) -> dict[str, str]:
+    """Project only Frankenmemory runtime configuration into child processes."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if value
+        and (
+            name in {"FM_DB_PATH", "FM_DB_ID"}
+            or name.startswith("FM_EMBED_")
+        )
+    }
+    db_path = env.get("FM_DB_PATH")
+    if db_path and not os.path.isabs(db_path):
+        raise ValueError("FM_DB_PATH must be absolute")
+
+    resolved_command = (
+        command
+        if command is not None
+        else os.environ.get("FM_MCP_COMMAND") or _FM_MCP_COMMAND
+    )
+    if resolved_command:
+        env["FM_MCP_COMMAND"] = resolved_command
+    return env
+
+
 def lifetools_mcp_descriptor(
     owner: str = "",
     session_id: str = "",
     workspace: str = "",
+    memory_enabled: bool = True,
 ) -> dict:
     """Build the MCP server descriptor for the life-tools bridge.
 
     Returns a dict matching the ACP McpServerStdio shape:
     {name, command, args, env:[{name,value}]}
     """
+    owner = memory_owner(owner)
     scope = hashlib.sha256(
         f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
     ).hexdigest()[:12]
+    child_env = {
+        "OWNER": owner,
+        "SESSION_ID": session_id,
+        "WORKSPACE": workspace,
+        "FM_SCOPE_AUTHORITY": "trusted-caller",
+        "FM_OWNER": owner,
+        "FM_WORKSPACE_ID": chat_workspace(),
+        "FM_MEMORY_ENABLED": "1" if memory_enabled else "0",
+        **frankenmemory_child_env(command=_FM_MCP_COMMAND),
+    }
     return {
         "name": f"lifetools_{scope}",
         "command": sys.executable,
         "args": [str(_LIFETOOLS_SERVER)],
         "env": [
-            {"name": "OWNER", "value": owner},
-            {"name": "SESSION_ID", "value": session_id},
-            {"name": "WORKSPACE", "value": workspace},
+            {"name": name, "value": value}
+            for name, value in child_env.items()
         ],
     }
 
@@ -73,25 +109,18 @@ def frankenmemory_mcp_descriptor(
     workspace defaults to the canonical chat workspace; pass one only for a
     genuinely workspace-scoped session (never a filesystem path for chat).
     """
-    owner = owner.strip()
+    owner = memory_owner(owner)
     workspace = workspace.strip() or chat_workspace()
-    if not owner:
-        raise ValueError("frankenmemory MCP sessions require an authenticated owner")
-    env_entries = [
-        {"name": "FM_WORKSPACE_ID", "value": workspace},
-        {"name": "FM_OWNER", "value": owner},
-        {"name": "FM_SESSION_ID", "value": session_id},
-    ]
-    # Phase 5: pass FM_DB_PATH explicitly so the bridged MCP server
-    # converges on the same db even if the env gets stripped by a proxy.
-    db_path = os.environ.get("FM_DB_PATH")
-    if db_path:
-        if not os.path.isabs(db_path):
-            raise ValueError("FM_DB_PATH must be absolute")
-        env_entries.append({"name": "FM_DB_PATH", "value": db_path})
-    db_id = os.environ.get("FM_DB_ID")
-    if db_id:
-        env_entries.append({"name": "FM_DB_ID", "value": db_id})
+    child_env = {
+        "FM_WORKSPACE_ID": workspace,
+        "FM_OWNER": owner,
+        "FM_SESSION_ID": session_id,
+        # This server is attached only so MiMo can register the scoped internal
+        # provider. Its model-visible tools are denied separately, and fm-mcp
+        # uses this marker as defense in depth for privileged/internal calls.
+        "FM_AGENT_BRIDGE": "1",
+        **frankenmemory_child_env(command=_FM_MCP_COMMAND),
+    }
 
     scope = hashlib.sha256(
         f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
@@ -100,7 +129,10 @@ def frankenmemory_mcp_descriptor(
         "name": f"frankenmemory_{scope}",
         "command": _FM_MCP_COMMAND,
         "args": [],
-        "env": env_entries,
+        "env": [
+            {"name": name, "value": value}
+            for name, value in child_env.items()
+        ],
     }
 
 
@@ -307,10 +339,11 @@ class ACPBridge:
         # state is gone (e.g. created before the MIMOCODE_HOME isolation).
         # Persisted so the remap survives server restarts.
         self._session_map_path = session_map_path or (
-            Path(os.environ.get(
-                "ODYSSEUS_DATA_DIR",
-                str(Path(__file__).resolve().parents[2] / "data"),
-            )) / "mimocode" / "session-map.json"
+            Path(
+                os.environ.get("OPEN_CLANK_DATA_DIR")
+                or os.environ.get("ODYSSEUS_DATA_DIR")
+                or str(Path(__file__).resolve().parents[2] / "data")
+            ) / "runtime" / "agent-engine" / "session-map.json"
         )
         try:
             self._session_map: Dict[str, str] = json.loads(self._session_map_path.read_text())
@@ -556,11 +589,9 @@ class ACPBridge:
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
                 workspace=target_cwd,
+                memory_enabled=with_memory,
             ),
-        ] + ([frankenmemory_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
-                session_id=odysseus_session,
-            )] if with_memory else []) + list(extra_mcp_servers or [])) if with_agent_tools else []
+        ] + list(extra_mcp_servers or [])) if with_agent_tools else []
         result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
         session_id = result["sessionId"]
         self._capture_handshake(session_id, result)
@@ -581,6 +612,7 @@ class ACPBridge:
         cwd: Optional[str] = None,
         owner: Optional[str] = None,
         extra_mcp_servers: Optional[list[dict]] = None,
+        with_memory: bool = True,
     ) -> str:
         """Load the mimo session into the ACP agent's memory.
 
@@ -598,6 +630,7 @@ class ACPBridge:
                 owner=owner,
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
+                with_memory=with_memory,
             )
             self._session_map[odysseus_session] = new_id
             self._bind_canonical_session(
@@ -616,10 +649,7 @@ class ACPBridge:
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
                 workspace=cwd or self._cwd,
-            ),
-            frankenmemory_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
-                session_id=odysseus_session,
+                memory_enabled=with_memory,
             ),
             *(extra_mcp_servers or []),
         ]
@@ -638,6 +668,7 @@ class ACPBridge:
                 owner=owner,
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
+                with_memory=with_memory,
             )
             self._session_map[odysseus_session] = new_id
             self._bind_canonical_session(
@@ -668,20 +699,24 @@ class ACPBridge:
 
         return target
 
-    async def resume_session(self, odysseus_session: str, mimo_session_id: str) -> None:
+    async def resume_session(
+        self,
+        odysseus_session: str,
+        mimo_session_id: str,
+        *,
+        with_memory: bool = True,
+    ) -> None:
         """Re-establish a session after a crash/restart.
 
         odysseus_session IS the mimo session id. Re-attaches the standard
-        MCP servers (lifetools + frankenmemory) so the session has tools.
+        life-tools server so the session has tools and a memory scope carrier.
         """
         mcp_servers = [
             lifetools_mcp_descriptor(
                 owner=self._owner,
                 session_id=odysseus_session,
                 workspace=self._cwd,
-            ),
-            frankenmemory_mcp_descriptor(
-                owner=self._owner,
+                memory_enabled=with_memory,
             ),
         ]
         await self._client.resume_session(mimo_session_id, self._cwd, mcp_servers=mcp_servers)
@@ -758,6 +793,7 @@ class ACPBridge:
         *,
         owner: Optional[str],
         incognito: bool,
+        memory_read_allowed: bool = True,
     ) -> list:
         """Memory injection for one mimo turn: returns (messages, trusted_block).
 
@@ -769,7 +805,7 @@ class ACPBridge:
         demoted to synthetic prompt text. If the Open Clank preface already
         produced a trusted block, that exact text is reused (no second
         digest fetch, no drift). Fail-open: no digest, no blocks."""
-        if incognito or self._memory_provider is None:
+        if incognito or not memory_read_allowed or self._memory_provider is None:
             return messages, ""
         if not hasattr(self._memory_provider, "digest"):
             return messages, ""
@@ -829,6 +865,7 @@ class ACPBridge:
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
         incognito = bool(envelope.get("incognito"))
         auxiliary = envelope.get("lane") == "auxiliary"
+        memory_read_allowed = bool(envelope.get("memory_read_allowed", True))
         extra_mcp_servers, mcp_disabled = odysseus_mcp_descriptors(
             is_admin=bool(envelope.get("is_admin")) and not incognito
         )
@@ -856,6 +893,7 @@ class ACPBridge:
                 cwd=cwd,
                 owner=owner,
                 extra_mcp_servers=extra_mcp_servers,
+                with_memory=memory_read_allowed,
             )
             self._session_context.setdefault(mimo_session, {}).update({
                 "workspace": cwd or self._cwd,
@@ -959,7 +997,10 @@ class ACPBridge:
 
         # Build the prompt parts from odysseus messages
         messages, trusted_block = await self._maybe_inject_digest(
-            messages, owner=owner, incognito=incognito or auxiliary
+            messages,
+            owner=owner,
+            incognito=incognito or auxiliary,
+            memory_read_allowed=memory_read_allowed,
         )
         if trusted_block:
             # T6: endorsed guidance rides the persona seam to TRUE system
@@ -1509,7 +1550,8 @@ _MIMO_TOOL_ALIASES = {
     "write_file": {"write", "edit", "apply_patch", "patch"},
     "web_search": {"websearch", "web_search"},
     "web_fetch": {"webfetch", "web_fetch"},
-    "manage_memory": {"memory", "frankenmemory_*"},
+    "manage_memory": {"memory"},
+    "recall_memory": {"memory"},
 }
 
 
@@ -1517,10 +1559,14 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
     if envelope.get("lane") == "auxiliary":
         return {"*": False}
     allowed = envelope.get("allowed_tools")
-    policy: dict[str, bool] = {"*": False} if allowed is not None else {}
+    policy: dict[str, bool] = {"frankenmemory_*": False}
+    if allowed is not None:
+        policy["*"] = False
     for raw_name in allowed or []:
         name = str(raw_name)
         normalized = name.replace("mcp__", "").replace(":", "_")
+        if normalized.startswith("frankenmemory_"):
+            continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {normalized}):
             policy[alias] = True
         policy[f"lifetools_*_{normalized}"] = True
@@ -1533,10 +1579,14 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
         policy[f"lifetools_*_{normalized}"] = False
     for raw_name in envelope.get("forced_tools") or []:
         name = str(raw_name)
+        normalized = name.replace("mcp__", "").replace(":", "_")
+        if normalized.startswith("frankenmemory_"):
+            continue
         if allowed is not None and name not in allowed:
             continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {name}):
             policy.setdefault(alias, True)
+    policy["frankenmemory_*"] = False
     return policy
 
 

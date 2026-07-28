@@ -131,6 +131,8 @@ class SessionResponse(BaseModel):
     id: str = Field(..., description="Session ID")
     name: str = Field(..., description="Session name")
     model: str = Field(..., description="Model being used")
+    endpoint_url: str = Field(default="", description="Canonical model endpoint URL")
+    endpoint_id: Optional[str] = Field(default=None, description="Canonical model endpoint ID")
     rag: bool = Field(default=False, description="RAG enabled")
     archived: bool = Field(default=False, description="Whether session is archived")
 

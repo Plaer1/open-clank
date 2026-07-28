@@ -83,7 +83,11 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         # Provider path: use the active store, not the legacy JSON file.
         from src.ai_interaction import _memory_provider
-        if _memory_provider and getattr(_memory_provider, "provider_id", "native") != "native":
+        if (
+            (owner or "").strip()
+            and _memory_provider
+            and getattr(_memory_provider, "provider_id", "native") != "native"
+        ):
             from src.task_endpoint import resolve_task_candidates
             from services.memory.memory_extractor import audit_provider_memories
 
@@ -2555,12 +2559,16 @@ async def action_cookbook_serve(
     import time as _time
     import httpx
     from pathlib import Path
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+    from core.middleware import (
+        INTERNAL_TOOL_HEADER,
+        INTERNAL_TOOL_OWNER_HEADER,
+        INTERNAL_TOOL_TOKEN,
+    )
     from core.atomic_io import atomic_write_json
 
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     if owner:
-        headers["X-Open Clank-Owner"] = owner
+        headers[INTERNAL_TOOL_OWNER_HEADER] = owner
     try:
         cfg = json.loads(command or "{}")
     except Exception:

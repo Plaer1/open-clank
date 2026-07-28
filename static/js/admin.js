@@ -1,13 +1,14 @@
-// static/js/admin.js — Admin panel module (ES6)
-// Admin-only: users, endpoints, MCP, RAG, embeddings, tokens, webhooks, features
+// static/js/admin.js — Server administration and account-owned model endpoints
 
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { providerLogo, providerLogoFromUrl, spriteLogo } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
+import modelSharing from './modelSharing.js';
 
 let initialized = false;
+let modelManagementInitialized = false;
 let modalEl = null;
 // When the user adds an endpoint, store its id so the next render of
 // the endpoints list can flash a glow on that row. Cleared once the
@@ -431,7 +432,7 @@ async function _refreshAfterEndpointChange(deletedEndpointId) {
     const sm = window.sessionModule;
     const pending = sm && sm.getPendingChat ? sm.getPendingChat() : null;
     if (deletedEndpointId && pending && String(pending.endpointId || '') === String(deletedEndpointId)) {
-      if (sm.setPendingChat) sm.setPendingChat(null);
+      if (sm.clearPendingChat) sm.clearPendingChat();
     }
   } catch (_) {}
   try {
@@ -477,6 +478,7 @@ async function loadEndpoints() {
   // Fallback to the legacy single list if the split containers don't exist
   // (older HTML or third-party embedding).
   const listLegacy = el('adm-epList');
+  await modelSharing.load();
   // Refresh model picker so new endpoints show up in chat
   if (window.modelsModule && window.modelsModule.refreshModels) {
     window.modelsModule.refreshModels(true);
@@ -499,6 +501,9 @@ async function loadEndpoints() {
     if (res.ok) {
       try { data = await res.json(); } catch { data = []; }
     }
+    if (Array.isArray(data)) {
+      data = data.filter(ep => !ep.selector_only);
+    }
     if (!Array.isArray(data) || data.length === 0) {
       const empty = '<div class="admin-empty">None</div>';
       if (listLocal) listLocal.innerHTML = empty;
@@ -508,13 +513,14 @@ async function loadEndpoints() {
     }
     const rowHtml = data.map(ep => {
       const readOnly = !!ep.read_only;
+      const shared = !!ep.shared;
       const epModels = Array.isArray(ep.models) ? ep.models : [];
       const visibleCount = epModels.length;
       const totalCount = visibleCount + (ep.hidden_count || 0);
       // `ep.models` is the *visible* set — when every model is hidden it's
       // empty, but we still need to render the expand panel so the user can
       // un-hide them. Gate on the total instead.
-      const hasModels = ep.online && totalCount > 0;
+      const hasModels = ep.is_enabled && ep.online && totalCount > 0;
       const statusBadge = ep.status === 'empty'
         ? '<span class="admin-badge">no models</span>'
         : ep.online
@@ -526,6 +532,11 @@ async function loadEndpoints() {
       const keyLabel = ep.has_key
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
         : '';
+      const endpointDetail = shared
+        ? `Shared by ${esc(ep.shared_by || 'another user')}`
+        : readOnly
+          ? 'Managed by Open Clank'
+          : esc(ep.base_url);
       const catalogProbe = ep.catalog_probe || {};
       const probeLabels = {
         auth_missing: 'catalog needs credentials',
@@ -557,12 +568,12 @@ async function loadEndpoints() {
               ${ep.provider_row
                 ? `<button class="admin-btn-delete" data-adm-disconnect-provider="${esc(ep.provider_row)}" data-adm-provider-name="${esc(ep.name)}">Disconnect</button>`
                 : (readOnly
-                  ? '<button class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>'
+                  ? (shared ? '' : '<button class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>')
                   : `<button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button><button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>`)}
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
             </div>
           </div>
-          <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
+          <div class="admin-ep-detail">${endpointDetail}${!readOnly && category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });
@@ -573,8 +584,10 @@ async function loadEndpoints() {
       if (!container) return;
       const section = container.closest('.adm-ep-section');
       if (!indices.length) {
-        if (section) section.style.display = 'none';
-        container.innerHTML = '';
+        if (section && container !== listApi) section.style.display = 'none';
+        container.innerHTML = container === listApi
+          ? '<div class="admin-empty">No direct API endpoints.</div>'
+          : '';
         return;
       }
       if (section) section.style.display = '';
@@ -604,8 +617,8 @@ async function loadEndpoints() {
     queryAll('[data-adm-open-mimo-providers]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        document.querySelector('[data-settings-tab="added-models"]')?.click();
-        document.getElementById('mimo-providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.querySelector('[data-settings-tab="services"]')?.click();
+        document.getElementById('mimo-provider-directory')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     });
     queryAll('[data-adm-disconnect-provider]').forEach(btn => {
@@ -721,11 +734,15 @@ async function loadEndpoints() {
             const sortedModels = sortModelObjects(models);
             const warningHtml = warning ? `<div class="admin-error" style="font-size:11px;margin:6px 0;">${esc(warning)}</div>` : '';
             if (readOnly) {
-              panel.innerHTML = `<div class="mcp-tools-header"><span>Models</span><span class="mcp-tools-count">${sortedModels.length} available</span></div>${warningHtml}<div class="mcp-tools-list">${sortedModels.map(m => `<div class="adm-model-row" title="${esc(m.id)}"><span>${esc(m.display)}</span></div>`).join('')}</div><button type="button" class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>`;
+              const providerAction = endpoint.shared
+                ? ''
+                : '<button type="button" class="admin-btn-sm" data-adm-open-mimo-providers>Connect providers</button>';
+              panel.innerHTML = `<div class="mcp-tools-header"><span>Models</span><span class="mcp-tools-count">${sortedModels.length} available</span></div>${warningHtml}<div class="mcp-tools-list">${sortedModels.map(m => `<div data-ep-model-row data-share-model-id="${esc(m.id)}" class="adm-model-cap-row"><div class="adm-model-row" title="${esc(m.id)}"><span>${esc(m.display)}</span></div></div>`).join('')}</div>${providerAction}`;
+              if (!endpoint.shared) modelSharing.mountOwnerControls(panel, epId);
               panel.querySelector('[data-adm-open-mimo-providers]')?.addEventListener('click', (event) => {
                 event.stopPropagation();
-                document.querySelector('[data-settings-tab="added-models"]')?.click();
-                document.getElementById('mimo-providers-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                document.querySelector('[data-settings-tab="services"]')?.click();
+                document.getElementById('mimo-provider-directory')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
               });
               return;
             }
@@ -779,7 +796,7 @@ async function loadEndpoints() {
                 <a href="#" data-ep-select-none="${epId}">None</a>
               </span>
             </div>${warningHtml}${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
-              `<div data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-cap-row">
+              `<div data-ep-model-row data-share-model-id="${esc(m.id)}" data-share-disabled="${m.is_hidden ? 'true' : 'false'}" data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-cap-row">
                 <label title="${esc(m.id)}" class="adm-model-row">
                   <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
                   <span class="adm-check-dot" aria-hidden="true"></span>
@@ -832,7 +849,24 @@ async function loadEndpoints() {
                 }
               });
             });
+            modelSharing.mountOwnerControls(panel, epId);
           };
+          if (readOnly) {
+            const nativeModels = Array.isArray(endpoint.catalog) && endpoint.catalog.length
+              ? endpoint.catalog.map(item => ({
+                  id: item.model_id,
+                  display: item.display_name || item.model_id,
+                  is_hidden: !!item.hidden,
+                }))
+              : (Array.isArray(endpoint.models) ? endpoint.models : []).map(modelId => ({
+                  id: modelId,
+                  display: modelId.split('/').slice(1).join('/') || modelId,
+                  is_hidden: false,
+                }));
+            _stopSpin();
+            renderModels(nativeModels);
+            return;
+          }
           try {
             const res = await checkedFetch(`/api/model-endpoints/${epId}/models`, { credentials: 'same-origin' });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3201,10 +3235,17 @@ function initStackHealth() {
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
+function initModelManagement() {
+  if (modelManagementInitialized) return;
+  modalEl ||= el('settings-modal');
+  initEndpointForm();
+  modelManagementInitialized = true;
+}
+
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initModelManagement, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initStackHealth,
     () => settingsModule.initIntegrations()
   ];
@@ -3233,8 +3274,12 @@ export function _initData() {
   else refreshAll();
 }
 
+export function _initModelData() {
+  initModelManagement();
+  loadEndpoints();
+}
+
 export function open(tab) {
-  _initData();
   settingsModule.open(tab || 'services');
 }
 
@@ -3243,5 +3288,12 @@ export function close() {
   settingsModule.close();
 }
 
-const adminModule = { open, close, _initData, get _initialized() { return initialized; } };
+const adminModule = {
+  open,
+  close,
+  _initData,
+  _initModelData,
+  get _initialized() { return initialized; },
+  get _modelInitialized() { return modelManagementInitialized; },
+};
 export default adminModule;

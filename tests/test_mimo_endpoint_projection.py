@@ -10,10 +10,13 @@ import pytest
 
 import core.database as cdb
 from core.database import ModelEndpoint
+from src.endpoint_resolver import build_chat_url, normalize_base, resolve_model_target
+from src.model_dispatch import mimo_agent_target
 from src.openclank.mimo_supervisor import (
     ENDPOINT_PROVIDER_PREFIX,
     _endpoint_registry_providers,
 )
+from src.openclank.mimo_projection import build_projection_snapshot
 
 
 def SessionLocal():
@@ -80,6 +83,78 @@ def test_enabled_endpoint_projects_with_models_and_credential(endpoint_factory):
     assert credentials[provider_id] == "sk-test-key"
     # The key must never appear anywhere in the config content itself.
     assert "sk-test-key" not in json.dumps(config)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "native_provider_id"),
+    [
+        ("https://api.deepseek.com/v1", "deepseek"),
+        ("https://api.xiaomimimo.com/v1", "xiaomi"),
+        ("https://token-plan-sgp.xiaomimimo.com/v1", "xiaomi"),
+    ],
+)
+def test_direct_vendor_endpoint_never_reuses_native_provider_id(
+    endpoint_factory, base_url, native_provider_id,
+):
+    ep_id = endpoint_factory(base_url=base_url)
+    config, credentials = _endpoint_registry_providers("")
+    provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"
+    assert provider_id in config["provider"]
+    assert native_provider_id not in config["provider"]
+    assert credentials[provider_id] == "sk-test-key"
+
+
+def test_same_vendor_endpoints_keep_distinct_runtime_ids_and_credentials(endpoint_factory):
+    first = endpoint_factory(
+        base_url="https://api.deepseek.com/v1",
+        api_key="sk-first",
+        cached_models="deepseek-chat, deepseek-reasoner",
+    )
+    second = endpoint_factory(
+        base_url="https://api.deepseek.com/v1",
+        api_key="sk-second",
+        cached_models=json.dumps(["deepseek-chat"]),
+    )
+    config, credentials = _endpoint_registry_providers("")
+    first_id = f"{ENDPOINT_PROVIDER_PREFIX}{first}"
+    second_id = f"{ENDPOINT_PROVIDER_PREFIX}{second}"
+    assert set(config["provider"][first_id]["models"]) == {
+        "deepseek-chat",
+        "deepseek-reasoner",
+    }
+    assert set(config["provider"][second_id]["models"]) == {"deepseek-chat"}
+    assert credentials[first_id] == "sk-first"
+    assert credentials[second_id] == "sk-second"
+
+
+def test_projection_snapshot_preserves_direct_source_endpoint(endpoint_factory):
+    ep_id = endpoint_factory(base_url="https://api.xiaomimimo.com/v1")
+    snapshot = build_projection_snapshot("")
+    provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"
+    assert snapshot.source_endpoints[provider_id] == ep_id
+    assert snapshot.run_closure(provider_id, "glm-5.2") is not None
+
+
+@pytest.mark.parametrize(
+    ("base_url", "model_id"),
+    [
+        ("https://api.deepseek.com/v1", "deepseek-chat"),
+        ("https://api.xiaomimimo.com/v1", "mimo-v2.5-pro"),
+    ],
+)
+async def test_vendor_agent_target_exists_in_projection(
+    endpoint_factory, base_url, model_id,
+):
+    ep_id = endpoint_factory(base_url=base_url, cached_models=json.dumps([model_id]))
+    config, _ = _endpoint_registry_providers("")
+    target = resolve_model_target(
+        build_chat_url(normalize_base(base_url)),
+        model_id,
+        endpoint_id=ep_id,
+    )
+    agent_target = await mimo_agent_target(target, owner="", supervisor=object())
+    assert agent_target.provider_id in config["provider"]
+    assert model_id in config["provider"][agent_target.provider_id]["models"]
 
 
 def test_chatgpt_subscription_projects_responses_adapter_and_scoped_headers(

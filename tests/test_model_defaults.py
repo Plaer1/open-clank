@@ -16,12 +16,21 @@ with preserve_import_state("core.database", "src.database", "routes.model_routes
 
 class _FakeEndpoint:
     """Minimal fake endpoint for testing"""
-    def __init__(self, id, base_url, is_enabled=True, owner=None):
+    def __init__(
+        self,
+        id,
+        base_url,
+        is_enabled=True,
+        owner=None,
+        name=None,
+        cached_models=None,
+    ):
         self.id = id
+        self.name = name or id
         self.base_url = base_url
         self.is_enabled = is_enabled
         self.owner = owner
-        self.cached_models = None
+        self.cached_models = cached_models
         self.hidden_models = None
         self.pinned_models = None
 
@@ -43,18 +52,17 @@ class _FakeQuery:
 
     def first(self):
         """Return first endpoint respecting owner filter"""
-        if not self._endpoints:
-            return None
+        matches = self.all()
+        return matches[0] if matches else None
 
+    def all(self):
         if self._user:
-            for ep in self._endpoints:
-                ep_owner = getattr(ep, 'owner', None)
-                if ep_owner == self._user:
-                    return ep
-                if self._include_shared and ep_owner is None:
-                    return ep
-            return None
-        return self._endpoints[0]
+            return [
+                ep for ep in self._endpoints
+                if getattr(ep, "owner", None) == self._user
+                or (self._include_shared and getattr(ep, "owner", None) is None)
+            ]
+        return list(self._endpoints)
 
 
 def _make_db_session(endpoints, user=None):
@@ -134,7 +142,7 @@ def _run_get_default_chat_test(monkeypatch, share_defaults_enabled, second_endpo
 
 ### Test Functions
 
-def test_get_default_chat_user_no_prefs_share_disabled_uses_first_owned_endpoint(monkeypatch):
+def test_get_default_chat_user_no_prefs_share_disabled_uses_stable_owned_endpoint(monkeypatch):
     """
     Without shared defaults, a user may still fall back to the first endpoint
     in their own catalogue. The global model string is not inherited.
@@ -142,7 +150,7 @@ def test_get_default_chat_user_no_prefs_share_disabled_uses_first_owned_endpoint
 
     test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=False)
 
-    assert test_data["endpoint_id"] == "global-ep-123"
+    assert test_data["endpoint_id"] == "fallback-ep"
     assert test_data["model"] == "", "Should not inherit the global model"
 
 
@@ -154,8 +162,7 @@ def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults_f
 
     test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=True)
 
-    assert test_data["model"] == "qwen-3.6", \
-        "model should be resolved from global default_model"
+    assert test_data["model"] == "qwen-3.6"
 
     assert test_data["endpoint_id"] == "global-ep-123", \
         "Should get global endpoint_id"
@@ -168,8 +175,7 @@ def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults(m
 
     test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=True, second_endpoint_only=True)
 
-    assert test_data["model"] == "qwen-3.6", \
-        "model should be resolved from global default_model"
+    assert test_data["model"] == "fallback-model"
 
     assert test_data["endpoint_id"] == "fallback-ep", \
         "Should get global endpoint_id"
@@ -182,6 +188,12 @@ def test_get_default_chat_mimo_stale_model_falls_back_to_chat_base_model(monkeyp
         "default_endpoint_id": "mimo",
         "default_model": "xiaomi/mimo-v2.5-pro-ultraspeed",  # no longer exists
     })
+    monkeypatch.setattr("routes.prefs_routes._load_for_user", lambda _user: {})
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi", "deepseek"},
+    )
 
     supervisor = MagicMock()
     supervisor.available_models = lambda owner=None: [
@@ -202,7 +214,7 @@ def test_get_default_chat_mimo_stale_model_falls_back_to_chat_base_model(monkeyp
 
     result = get_default_chat(request)
 
-    assert result["endpoint_id"] == "mimo"
+    assert result["endpoint_id"] == "mimo:auto"
     assert result["endpoint_url"] == "mimo://acp"
     assert result["model"] == "deepseek/deepseek-v4-flash", \
         "should pick the first chat-capable BASE model from the filtered catalog"
@@ -213,6 +225,12 @@ def test_get_default_chat_mimo_valid_model_kept(monkeypatch):
         "default_endpoint_id": "mimo",
         "default_model": "xiaomi/mimo-v2.5-pro",
     })
+    monkeypatch.setattr("routes.prefs_routes._load_for_user", lambda _user: {})
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi", "deepseek"},
+    )
 
     supervisor = MagicMock()
     supervisor.available_models = lambda owner=None: [
@@ -241,7 +259,7 @@ def test_get_default_chat_mimo_unconfigured_prefers_auto(monkeypatch):
         "default_endpoint_id": "mimo",
         "default_model": "",
     })
-    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
 
     supervisor = MagicMock()
     supervisor.available_models = lambda owner=None: [
@@ -271,7 +289,7 @@ def test_get_default_chat_provider_scoped_mimo_endpoint(monkeypatch):
         "default_endpoint_id": "mimo:xiaomi",
         "default_model": "",
     })
-    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
 
     supervisor = MagicMock()
     supervisor.available_models = lambda owner=None: [
@@ -294,3 +312,94 @@ def test_get_default_chat_provider_scoped_mimo_endpoint(monkeypatch):
     assert result["endpoint_id"] == "mimo:xiaomi"
     assert result["endpoint_url"] == "mimo://acp"
     assert result["model"] == "xiaomi/mimo-auto"
+
+
+def test_get_default_chat_wakes_cold_owner_worker(monkeypatch):
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {})
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user: {
+        "default_endpoint_id": "mimo:xiaomi",
+        "default_model": "xiaomi/mimo-v2.5-pro",
+    })
+    monkeypatch.setattr(model_routes, "_covered_direct_models", lambda *a, **k: {})
+    monkeypatch.setattr(
+        model_routes,
+        "_connected_mimo_provider_ids",
+        lambda owner: {"xiaomi"},
+    )
+    monkeypatch.setattr(
+        model_routes,
+        "SessionLocal",
+        lambda: _make_db_session([], user="allie"),
+    )
+
+    worker = SimpleNamespace(
+        available_models=lambda: [{"modelId": "xiaomi/mimo-v2.5-pro"}],
+    )
+
+    class ColdPool:
+        def __init__(self):
+            self.started = []
+            self.worker = None
+
+        def available_models(self, owner=None):
+            return self.worker.available_models() if self.worker else []
+
+        async def for_owner(self, owner):
+            self.started.append(owner)
+            self.worker = worker
+            return worker
+
+    supervisor = ColdPool()
+    auth_manager = SimpleNamespace(
+        is_admin=lambda user: False,
+        get_privileges=lambda user: {},
+    )
+    request = _make_request(user="allie", auth_manager=auth_manager)
+    request.app.state.mimo_supervisor = supervisor
+    route = _get_default_chat_route(
+        model_routes.setup_model_routes(model_discovery=None)
+    )
+
+    result = route(request)
+
+    assert supervisor.started == ["allie"]
+    assert result == {
+        "endpoint_id": "mimo:xiaomi",
+        "endpoint_url": "mimo://acp",
+        "model": "xiaomi/mimo-v2.5-pro",
+    }
+
+
+def test_global_default_resolves_against_callers_owned_connection(monkeypatch):
+    global_settings = {
+        "default_endpoint_id": "e-zai",
+        "default_model": "glm-4.5",
+        "share_defaults_with_users": True,
+    }
+    sam_endpoint = _FakeEndpoint(
+        id="sam-zai",
+        name="Sam Z.AI",
+        base_url="https://api.z.ai/api/coding/paas/v4",
+        owner="sam",
+        cached_models='["glm-4.5"]',
+    )
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: global_settings)
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user: {})
+    monkeypatch.setattr(
+        model_routes,
+        "SessionLocal",
+        lambda: _make_db_session([sam_endpoint], user="sam"),
+    )
+    auth_manager = SimpleNamespace(
+        is_admin=lambda user: False,
+        get_privileges=lambda user: {},
+    )
+    route = _get_default_chat_route(
+        model_routes.setup_model_routes(model_discovery=None)
+    )
+
+    result = route(_make_request(user="sam", auth_manager=auth_manager))
+
+    assert result["endpoint_id"] == "sam-zai"
+    assert result["endpoint_id"] != "e-zai"
+    assert result["model"] == "glm-4.5"

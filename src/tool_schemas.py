@@ -429,16 +429,17 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_memory",
-            "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
+            "description": "Manage the user's persistent memory system: list, add, edit, delete, search, or resolve an open question. To close a question after finding its answer, add the answering memory first, then resolve the question with answer_memory_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "add", "edit", "delete", "search"],
+                    "action": {"type": "string", "enum": ["list", "add", "edit", "delete", "search", "resolve"],
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
-                    "memory_id": {"type": "string", "description": "Memory ID (for edit/delete)"},
-                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference"],
-                                 "description": "Memory category (for add/list filter)"}
+                    "memory_id": {"type": "string", "description": "Memory ID (for edit/delete), or the open-question ID (for resolve)"},
+                    "answer_memory_id": {"type": "string", "description": "Memory ID that answers the question (optional for resolve, but preferred for provenance)"},
+                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "unknown", "question"],
+                                 "description": "Memory category (for add/list filter). unknown/question creates an open question."}
                 },
                 "required": ["action"]
             }
@@ -1485,6 +1486,12 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = "list"
             if args.get("category"):
                 content += "\n" + args["category"]
+        elif action == "resolve":
+            memory_id = args.get("memory_id") or args.get("question_memory_id") or ""
+            content = "resolve\n" + str(memory_id)
+            answer_memory_id = args.get("answer_memory_id") or args.get("resolved_by") or ""
+            if answer_memory_id:
+                content += "\n" + str(answer_memory_id)
         else:
             content = action
     elif tool_type == "list_models":

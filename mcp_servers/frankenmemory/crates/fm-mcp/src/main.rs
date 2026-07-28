@@ -27,6 +27,22 @@ struct FrankenmemoryServer {
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
+fn reject_agent_bridge_internal_tool(tool: &str) -> Result<(), rmcp::ErrorData> {
+    let agent_bridge = std::env::var("FM_AGENT_BRIDGE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    });
+    if agent_bridge {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("{tool} is not available through an Agent memory bridge"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn request_scope(
     owner: Option<String>,
     workspace_id: Option<String>,
@@ -107,6 +123,8 @@ struct CaptureParams {
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
+    source_type: Option<String>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
@@ -116,7 +134,7 @@ struct CaptureParams {
     user_text: Option<String>,
     #[serde(default)]
     assistant_text: Option<String>,
-    /// raw_only | candidate | manual
+    /// raw_only | candidate | review_only | manual
     #[serde(default)]
     capture_mode: Option<String>,
     #[serde(default)]
@@ -392,7 +410,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "capture",
-        description = "Capture one complete conversation turn. Automatic callers use user_text+assistant_text with capture_mode=raw_only, owner, workspace_id, source_event_id, and source_message_ids. Deliberate remember operations use capture_mode=manual."
+        description = "Capture one complete conversation turn. Automatic callers use user_text+assistant_text with capture_mode=raw_only, candidate, or review_only plus owner/workspace provenance. review_only always leaves eligible content pending for human approval. Deliberate remember operations use capture_mode=manual."
     )]
     async fn capture(
         &self,
@@ -418,9 +436,12 @@ impl FrankenmemoryServer {
                 "candidate".into()
             }
         });
-        if !matches!(capture_mode.as_str(), "raw_only" | "candidate" | "manual") {
+        if !matches!(
+            capture_mode.as_str(),
+            "raw_only" | "candidate" | "review_only" | "manual"
+        ) {
             return Err(rmcp::ErrorData::invalid_params(
-                "capture_mode must be raw_only|candidate|manual",
+                "capture_mode must be raw_only|candidate|review_only|manual",
                 None,
             ));
         }
@@ -439,6 +460,9 @@ impl FrankenmemoryServer {
         };
         if let Some(object) = metadata.as_object_mut() {
             object.insert("capture_mode".into(), capture_mode.into());
+            if let Some(source_type) = params.source_type {
+                object.insert("source_type".into(), source_type.into());
+            }
             if let Some(category) = params.category.as_deref() {
                 object.insert("category".into(), category.into());
             }
@@ -510,6 +534,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<CandidateReviewParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("review_candidate")?;
         let scope = request_scope(Some(params.owner), Some(params.workspace_id), false)?;
         let curated_id = self
             .provider
@@ -535,6 +560,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<IngestAuthoredParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("ingest_authored")?;
         let scope = request_scope(params.owner, params.workspace_id, true)?;
         let sections: Vec<(String, String)> = params
             .sections
@@ -582,6 +608,9 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<MemoryQualityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.rebuild_graph_fts.unwrap_or(false) {
+            reject_agent_bridge_internal_tool("memory_quality rebuild")?;
+        }
         let result = if params.rebuild_graph_fts.unwrap_or(false) {
             self.provider.rebuild_graph_cue_fts()
         } else {
@@ -601,6 +630,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<OwnerLifecycleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("owner_lifecycle")?;
         let scope = request_scope(params.owner, params.workspace_id, false)?;
         let result = match params.action.as_str() {
             "stats" => self.graph_store.owner_counts(&scope.owner),
@@ -654,6 +684,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<QuarantineMigrationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("quarantine_legacy_state")?;
         let result = self
             .provider
             .quarantine_legacy_state(
@@ -911,6 +942,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<GraphUpsertParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("graph_upsert")?;
         let scope = request_scope(params.owner, params.workspace_id, false)?;
         let input = fm_core::graph::GraphUpsertInput {
             nodes: params.nodes,
@@ -1079,6 +1111,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<CodeIndexParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("code_index")?;
         let scope = request_scope(params.owner, params.workspace_id, false)?;
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let ierr = |m: String| rmcp::ErrorData::internal_error(m, None);
@@ -1154,6 +1187,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<GroomParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("groom")?;
         let scope = request_scope(params.owner, params.workspace_id, true)?;
         let op = match params.op.as_str() {
             "decay" => GroomOp::Decay,

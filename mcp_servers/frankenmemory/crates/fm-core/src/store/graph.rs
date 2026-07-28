@@ -6,6 +6,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::cue::rake_cues;
 use crate::graph::*;
 use crate::store::sqlite::SqliteStore;
 
@@ -66,6 +67,378 @@ fn upsert_node_inner(
         ],
     )?;
     Ok(id)
+}
+
+const CURATED_PROJECTION_KIND: &str = "memory";
+const CURATED_PROJECTION_LAYER: &str = "episodic";
+const CURATED_PROJECTION_CATEGORY_KIND: &str = "category";
+const CURATED_PROJECTION_CATEGORY_EDGE: &str = "is";
+const CURATED_PROJECTION_CUE_SOURCE: &str = "rake_fallback";
+const CURATED_PROJECTION_MAX_CUES: usize = 8;
+
+fn curated_projection_label(content: &str) -> String {
+    let label = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.chars().count() <= 120 {
+        return label;
+    }
+    format!("{}…", label.chars().take(119).collect::<String>())
+}
+
+fn curated_projection_category_label(category: &str) -> String {
+    format!("{} memories", category.replace('_', " "))
+}
+
+fn curated_projection_node_ids(
+    conn: &Connection,
+    curated_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM graph_nodes
+         WHERE ref_table = 'curated' AND ref_id = ?1
+           AND kind = ?2 AND layer = ?3 AND name = ?1",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                curated_id,
+                CURATED_PROJECTION_KIND,
+                CURATED_PROJECTION_LAYER
+            ],
+            |row| row.get(0),
+        )?
+        .collect();
+    rows
+}
+
+fn curated_projection_category_ids(
+    conn: &Connection,
+    memory_node_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT n.id
+         FROM graph_edges e
+         JOIN graph_nodes n ON n.id = e.dst_id
+         WHERE e.src_id = ?1 AND e.tag = ?2
+           AND e.fact_id IS NULL AND e.trust = 0
+           AND n.kind = ?3",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                memory_node_id,
+                CURATED_PROJECTION_CATEGORY_EDGE,
+                CURATED_PROJECTION_CATEGORY_KIND
+            ],
+            |row| row.get(0),
+        )?
+        .collect();
+    rows
+}
+
+fn prune_curated_projection_categories_inner(
+    conn: &Connection,
+    category_ids: &[String],
+) -> rusqlite::Result<usize> {
+    let mut pruned = 0;
+    for category_id in category_ids {
+        let category = conn
+            .query_row(
+                "SELECT name, label, owner, workspace_id
+                 FROM graph_nodes
+                 WHERE id = ?1 AND kind = ?2 AND layer = 'semantic'
+                   AND trust = 0 AND ref_table IS NULL AND ref_id IS NULL",
+                params![category_id, CURATED_PROJECTION_CATEGORY_KIND],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((name, label, owner, workspace_id)) = category else {
+            continue;
+        };
+        let Ok(scope) = GraphScope::new(owner, workspace_id) else {
+            continue;
+        };
+        if scope.node_id(CURATED_PROJECTION_CATEGORY_KIND, &name) != *category_id
+            || label.as_deref() != Some(curated_projection_category_label(&name).as_str())
+        {
+            continue;
+        }
+        pruned += conn.execute(
+            "DELETE FROM graph_nodes
+             WHERE id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM graph_edges
+                   WHERE src_id = ?1 OR dst_id = ?1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM graph_cues WHERE node_id = ?1
+               )",
+            params![category_id],
+        )?;
+    }
+    Ok(pruned)
+}
+
+fn delete_curated_projection_node_inner(conn: &Connection, node_id: &str) -> rusqlite::Result<()> {
+    let category_ids = curated_projection_category_ids(conn, node_id)?;
+    let _ = conn.execute(
+        "DELETE FROM facts_fts WHERE rowid IN (
+             SELECT f.rowid FROM facts f
+             JOIN graph_edges e ON e.fact_id = f.id
+             WHERE e.src_id = ?1 OR e.dst_id = ?1
+         )",
+        params![node_id],
+    );
+    conn.execute(
+        "DELETE FROM facts WHERE id IN (
+             SELECT fact_id FROM graph_edges
+             WHERE (src_id = ?1 OR dst_id = ?1) AND fact_id IS NOT NULL
+         )",
+        params![node_id],
+    )?;
+    conn.execute(
+        "DELETE FROM graph_edges WHERE src_id = ?1 OR dst_id = ?1",
+        params![node_id],
+    )?;
+    conn.execute(
+        "DELETE FROM graph_cues WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    let _ = conn.execute(
+        "DELETE FROM graph_cues_fts WHERE node_id = ?1",
+        params![node_id],
+    );
+    conn.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])?;
+    prune_curated_projection_categories_inner(conn, &category_ids)?;
+    Ok(())
+}
+
+pub(super) fn delete_curated_projection_inner(
+    conn: &Connection,
+    curated_id: &str,
+) -> rusqlite::Result<usize> {
+    let node_ids = curated_projection_node_ids(conn, curated_id)?;
+    for node_id in &node_ids {
+        delete_curated_projection_node_inner(conn, node_id)?;
+    }
+    Ok(node_ids.len())
+}
+
+pub(super) fn sync_curated_projection_inner(
+    conn: &Connection,
+    curated_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT content, kind, metadata, owner, workspace_id, updated_at
+             FROM curated
+             WHERE id = ?1 AND archived = 0
+               AND owner IS NOT NULL AND trim(owner) <> ''
+               AND trim(workspace_id) <> ''",
+            params![curated_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((content, curated_kind, metadata, owner, workspace_id, updated_at)) = row else {
+        delete_curated_projection_inner(conn, curated_id)?;
+        return Ok(None);
+    };
+    let curated_category = serde_json::from_str::<serde_json::Value>(&metadata)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("category")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|category| !category.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or(curated_kind);
+
+    let scope = GraphScope::new(owner, workspace_id).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let label = curated_projection_label(&content);
+    let node_id = upsert_node_inner(
+        conn,
+        &scope,
+        CURATED_PROJECTION_KIND,
+        curated_id,
+        Some(&label),
+        CURATED_PROJECTION_LAYER,
+        0,
+        &updated_at,
+    )?;
+    conn.execute(
+        "UPDATE graph_nodes
+         SET ref_table = 'curated', ref_id = ?2, label = ?3, layer = ?4
+         WHERE id = ?1 AND owner = ?5 AND workspace_id = ?6",
+        params![
+            node_id,
+            curated_id,
+            label,
+            CURATED_PROJECTION_LAYER,
+            scope.owner,
+            scope.workspace_id
+        ],
+    )?;
+    for old_node_id in curated_projection_node_ids(conn, curated_id)?
+        .into_iter()
+        .filter(|old_node_id| old_node_id != &node_id)
+    {
+        delete_curated_projection_node_inner(conn, &old_node_id)?;
+    }
+
+    let old_category_ids = curated_projection_category_ids(conn, &node_id)?;
+    let category_label = curated_projection_category_label(&curated_category);
+    let category_id = scope.node_id(CURATED_PROJECTION_CATEGORY_KIND, &curated_category);
+    let category_exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM graph_nodes WHERE id = ?1)",
+        params![category_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let category_id = upsert_node_inner(
+        conn,
+        &scope,
+        CURATED_PROJECTION_CATEGORY_KIND,
+        &curated_category,
+        (!category_exists).then_some(category_label.as_str()),
+        "semantic",
+        0,
+        &updated_at,
+    )?;
+    conn.execute(
+        "DELETE FROM graph_edges
+         WHERE src_id = ?1 AND tag = ?2
+           AND fact_id IS NULL AND trust = 0
+           AND dst_id IN (
+               SELECT id FROM graph_nodes
+               WHERE kind = ?3
+           )",
+        params![
+            node_id,
+            CURATED_PROJECTION_CATEGORY_EDGE,
+            CURATED_PROJECTION_CATEGORY_KIND
+        ],
+    )?;
+    let edge_id = uuid::Uuid::new_v5(
+        &FM_GRAPH_NAMESPACE,
+        format!(
+            "edge:{node_id}:{}:{category_id}",
+            CURATED_PROJECTION_CATEGORY_EDGE
+        )
+        .as_bytes(),
+    )
+    .to_string();
+    conn.execute(
+        "INSERT INTO graph_edges
+         (id, src_id, tag, dst_id, fact_id, trust, created_at, last_seen,
+          owner, workspace_id, status)
+         VALUES (?1, ?2, ?3, ?4, NULL, 0, ?5, ?5, ?6, ?7, 'active')
+         ON CONFLICT(src_id, tag, dst_id) DO UPDATE SET
+           last_seen = excluded.last_seen, status = 'active'",
+        params![
+            edge_id,
+            node_id,
+            CURATED_PROJECTION_CATEGORY_EDGE,
+            category_id,
+            updated_at,
+            scope.owner,
+            scope.workspace_id
+        ],
+    )?;
+    prune_curated_projection_categories_inner(conn, &old_category_ids)?;
+
+    // Replace only deterministic fallback cues. LLM-extracted cues on graph
+    // overlay nodes remain independent and untouched.
+    conn.execute(
+        "DELETE FROM graph_cues
+         WHERE node_id = ?1 AND source = ?2",
+        params![node_id, CURATED_PROJECTION_CUE_SOURCE],
+    )?;
+    let mut cues = rake_cues(&content, CURATED_PROJECTION_MAX_CUES);
+    if cues.is_empty() {
+        let fallback = norm_name(&label);
+        if fallback.len() > 2 {
+            cues.push(fallback);
+        }
+    }
+    for cue in cues {
+        let cue = norm_name(&cue);
+        if cue.is_empty() {
+            continue;
+        }
+        conn.execute(
+            "INSERT INTO graph_cues
+             (cue, node_id, source, created_at, owner, workspace_id, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')
+             ON CONFLICT(cue, node_id) DO UPDATE SET status = 'active'",
+            params![
+                cue,
+                node_id,
+                CURATED_PROJECTION_CUE_SOURCE,
+                updated_at,
+                scope.owner,
+                scope.workspace_id
+            ],
+        )?;
+    }
+    Ok(Some(node_id))
+}
+
+pub(super) fn backfill_curated_projections_inner(conn: &Connection) -> rusqlite::Result<usize> {
+    let curated_ids: Vec<String> = {
+        let mut statement = conn.prepare(
+            "SELECT id FROM curated
+             WHERE archived = 0
+               AND owner IS NOT NULL AND trim(owner) <> ''
+               AND trim(workspace_id) <> ''",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    for curated_id in &curated_ids {
+        sync_curated_projection_inner(conn, curated_id)?;
+    }
+
+    let stale_node_ids: Vec<String> = {
+        let mut statement = conn.prepare(
+            "SELECT n.id FROM graph_nodes n
+             WHERE n.ref_table = 'curated' AND n.ref_id IS NOT NULL
+               AND n.kind = ?1 AND n.layer = ?2 AND n.name = n.ref_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM curated c
+                   WHERE c.id = n.ref_id AND c.archived = 0
+                     AND c.owner = n.owner AND c.workspace_id = n.workspace_id
+               )",
+        )?;
+        let rows = statement
+            .query_map(
+                params![CURATED_PROJECTION_KIND, CURATED_PROJECTION_LAYER],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    for node_id in stale_node_ids {
+        delete_curated_projection_node_inner(conn, &node_id)?;
+    }
+    Ok(curated_ids.len())
 }
 
 impl SqliteStore {

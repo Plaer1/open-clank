@@ -569,8 +569,8 @@
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const key = localStorage.key(i);
-          const scopedCopalState = key?.startsWith('odysseus-') && key.includes(':scope:');
-          if (key && !_keepKeys.has(key) && !scopedCopalState) _toRemove.push(key);
+          const scopedOwnerState = key?.includes(':scope:');
+          if (key && !_keepKeys.has(key) && !scopedOwnerState) _toRemove.push(key);
         }
         _toRemove.forEach(key => localStorage.removeItem(key));
         sessionStorage.clear();
@@ -696,6 +696,7 @@ if (window.visualViewport) {
 try {
   const tm = await import('/static/js/theme.js');
   const pattern = window.__loginBgPattern;
+  if (tm.applyThemeIdentity) tm.applyThemeIdentity('clanker-dark');
   if (pattern && tm.applyBgPattern) tm.applyBgPattern(pattern);
 } catch (e) {
   console.error('[login-bg] failed:', e);

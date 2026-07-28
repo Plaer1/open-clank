@@ -2,6 +2,7 @@
 // ES6 module — extracted from index.html inline scripts
 
 import Storage from './storage.js';
+import { bindModelStateOwner } from './modelCatalog.js';
 
 function clearFreshComposerRestore() {
   const msgInput = document.getElementById('message');
@@ -24,7 +25,7 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
 // user is different from the one whose state is cached in this browser,
 // wipe unscoped localStorage + sessionStorage so the new account doesn't
 // inherit the previous user's last session id, last-used model, draft chat
-// input, or cached lists. Already namespaced Copal preferences are retained
+// input, or cached lists. Already namespaced owner preferences are retained
 // for their owning account. The settings-tab Logout button already wipes on
 // explicit logout; this catches the cases where a different user signs
 // in without the previous one logging out cleanly.
@@ -37,19 +38,23 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
     if (!liveUser) return;
     const KEY = 'odysseus-auth-user';
     const cachedUser = localStorage.getItem(KEY);
+    bindModelStateOwner(liveUser, cachedUser || '');
     if (cachedUser && cachedUser !== liveUser) {
       const _keepKeys = new Set(['odysseus-last-user', KEY]);
       const toRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
-        if (k && !_keepKeys.has(k) && !scopedCopalState) toRemove.push(k);
+        const scopedOwnerState = k?.includes(':scope:');
+        if (k && !_keepKeys.has(k) && !scopedOwnerState) toRemove.push(k);
       }
       toRemove.forEach(k => localStorage.removeItem(k));
       sessionStorage.clear();
       clearFreshComposerRestore();
     }
     localStorage.setItem(KEY, liveUser);
+    document.dispatchEvent(new CustomEvent('openclank:auth-user-ready', {
+      detail: { username: liveUser },
+    }));
     // Apply per-user privilege gates to the UI. The backend enforces these
     // independently — this is purely cosmetic / "don't dangle controls the
     // user can't actually use." Privileges come from /api/auth/status; admins

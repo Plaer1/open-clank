@@ -14897,6 +14897,56 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   max-width: 105px;
   font: inherit;
 }
+.model-share-control {
+  justify-content: flex-end;
+}
+.model-share-users-button {
+  font-size: 10px;
+  font-weight: normal;
+  padding: 2px 6px;
+}
+.model-share-users {
+  margin: 0 6px 5px 26px;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.model-share-user-option {
+  padding: 3px 2px !important;
+  font-size: 10px;
+}
+.model-share-offer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.model-share-offer + .model-share-offer {
+  margin-top: 7px;
+}
+.model-share-offer-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.model-share-offer-copy strong,
+.model-share-offer-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-share-offer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 11px;
+}
 /* Dot-style toggle (mirrors .note-check-dot) for the Add Models row,
    replacing the native checkbox while keeping it for click handling. */
 .adm-cb-hidden {

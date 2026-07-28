@@ -51,6 +51,7 @@ import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict
 
 from contextlib import asynccontextmanager
@@ -67,7 +68,12 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    INTERNAL_TOOL_HEADER,
+    INTERNAL_TOOL_OWNER_HEADER,
+    SecurityHeadersMiddleware,
+    is_cors_preflight,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -139,8 +145,8 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
-        "X-Open Clank-Internal-Token",
-        "X-Open Clank-Owner",
+        INTERNAL_TOOL_HEADER,
+        INTERNAL_TOOL_OWNER_HEADER,
         "X-Requested-With",
         "X-TZ-Offset",
     ],
@@ -381,10 +387,10 @@ if AUTH_ENABLED:
                 _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
                 if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
                     # Impersonation: when the agent's loopback call sets
-                    # X-Open Clank-Owner, attribute the request to that user only
+                    # X-Open-Clank-Owner, attribute the request to that user only
                     # if they exist. Authorization checks remain separate; this
                     # is just owner attribution for notes/calendar/etc.
-                    _impersonate = (request.headers.get("X-Open Clank-Owner") or "").strip()
+                    _impersonate = (request.headers.get(INTERNAL_TOOL_OWNER_HEADER) or "").strip()
                     _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
                     if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
                         request.state.current_user = _impersonate
@@ -1355,27 +1361,43 @@ async def _startup_event():
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
 
-    # ── openthesius mimo supervisor (non-critical) ──
-    if os.environ.get("OPENTHESIUS_DRIVE", "mimo") == "mimo":
+    # ── Open Clank bundled-agent supervisor (non-critical) ──
+    _agent_drive = (
+        os.environ.get("OPEN_CLANK_AGENT_DRIVE")
+        or os.environ.get("OPENTHESIUS_DRIVE")
+        or "mimo"
+    )
+    if _agent_drive == "mimo":
         async def _startup_mimo():
             try:
                 import sys as _sys
-                _openthesius_src = os.environ.get("OPENTHESIUS_SRC", "/home/e/sauce/ai/openclanker/src")
-                if _openthesius_src not in _sys.path:
-                    _sys.path.insert(0, _openthesius_src)
+                _agent_src = (
+                    os.environ.get("OPEN_CLANK_AGENT_SRC")
+                    or os.environ.get("OPENTHESIUS_SRC")
+                    or str(Path(__file__).resolve().parent / "src")
+                )
+                if _agent_src not in _sys.path:
+                    _sys.path.insert(0, _agent_src)
                 # Phase 5: ensure fm-mcp binary exists before supervisor starts
                 from src.openclank.fmmcp_builder import ensure_fmmcp_built
                 await ensure_fmmcp_built()
 
                 from src.openclank.mimo_supervisor import MimoSupervisorPool
 
-                # Parse OPENTHESIUS_SAFE_DIRS (colon-separated, ~ expanded)
-                _raw = os.environ.get("OPENTHESIUS_SAFE_DIRS", "")
+                # Parse OPEN_CLANK_SAFE_DIRS (colon-separated, ~ expanded).
+                _raw = (
+                    os.environ.get("OPEN_CLANK_SAFE_DIRS")
+                    or os.environ.get("OPENTHESIUS_SAFE_DIRS")
+                    or ""
+                )
                 _safe_dirs = [os.path.expanduser(d.strip()) for d in _raw.split(":") if d.strip()] if _raw else []
 
-                # Phase 4: if THESIUS_AGENT_HOME is set, auto-include the agent
+                # If OPEN_CLANK_AGENT_HOME is set, auto-include the agent
                 # home in safe dirs so the agent can read/write its own files.
-                _agent_home = os.environ.get("THESIUS_AGENT_HOME")
+                _agent_home = (
+                    os.environ.get("OPEN_CLANK_AGENT_HOME")
+                    or os.environ.get("THESIUS_AGENT_HOME")
+                )
                 if _agent_home:
                     _agent_home = os.path.expanduser(_agent_home)
                     if _agent_home not in _safe_dirs:
@@ -1415,6 +1437,7 @@ async def _startup_event():
                     initial_owner=_initial_owner,
                     host_provider_owner=_host_provider_owner,
                 )
+                _reap_orphaned_mimo_workers()
                 await _sup.start()
                 app.state.mimo_supervisor = _sup
                 task_scheduler._mimo_supervisor = _sup
@@ -1484,6 +1507,105 @@ def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
             pass
 
 
+def _is_orphaned_open_clank_agent_worker(
+    cmd: str,
+    ppid: int,
+    me: int,
+    parent_cmd: str | None,
+) -> bool:
+    """Return whether this is an orphaned bundled Open Clank agent worker.
+
+    Match both the repository-owned binary and its ``acp`` command. Personal
+    ``mimo serve`` processes on the same PC are outside Open Clank's lifecycle
+    and must never be touched.
+    """
+    bundled_binary = str((Path(__file__).resolve().parent / "bin" / "mimo").resolve())
+    argv = cmd.split()
+    if len(argv) < 2 or argv[0] != bundled_binary or argv[1] != "acp":
+        return False
+    if ppid == me:
+        return False
+    if parent_cmd is not None and "app.py" in parent_cmd:
+        return False
+    return True
+
+
+def _reap_orphaned_mimo_workers() -> None:
+    """Startup sweep: stop bundled agent workers orphaned by a prior run.
+
+    Sibling to the generation-dir sweep in ``MimoSupervisorPool.start()``. The
+    shutdown reap (``_reap_orphaned_children``) only catches children still
+    parented to this process; procs reparented to a subreaper when the previous
+    run was SIGKILL'd/OOM'd survive restarts and leak ~50 MB each. Safe because
+    this runs before the supervisor spawns its own children, and a concurrent
+    app.py's direct children are spared by ``_is_orphaned_mimo_worker``.
+    """
+    import signal as _signal
+    import time as _time
+
+    if not sys.platform.startswith("linux"):
+        return
+
+    me = os.getpid()
+    victims: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                tail = fh.read().rsplit(")", 1)[1].split()
+            state, ppid = tail[0], int(tail[1])
+            if state == "Z":
+                continue
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace")
+        except (OSError, ValueError, IndexError):
+            continue
+        try:
+            with open(f"/proc/{ppid}/cmdline", "rb") as fh:
+                parent_cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace")
+        except OSError:
+            parent_cmd = None  # parent gone => reparented orphan
+        if _is_orphaned_open_clank_agent_worker(cmd, ppid, me, parent_cmd):
+            victims.append(pid)
+    if not victims:
+        return
+
+    def _alive(p: int) -> bool:
+        try:
+            with open(f"/proc/{p}/stat") as fh:
+                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    logger.warning(
+        "reaping %d orphaned Open Clank agent worker(s) at startup: %s",
+        len(victims),
+        victims,
+    )
+    for pid in victims:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        if not any(_alive(p) for p in victims):
+            break
+        _time.sleep(0.2)
+    for pid in victims:
+        if _alive(pid):
+            try:
+                os.kill(pid, _signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 async def _shutdown_event():
     shutdown_started = time.monotonic()
     logger.info("Application shutting down...")
@@ -1501,6 +1623,10 @@ async def _shutdown_event():
         finally:
             from src.model_dispatch import set_mimo_supervisor
             set_mimo_supervisor(None)
+
+    async def _stop_agent_runs():
+        from src import agent_runs
+        await agent_runs.shutdown()
 
     async def _cancel_startup_tasks():
         startup_tasks = list(getattr(app.state, "_startup_tasks", []))
@@ -1524,11 +1650,12 @@ async def _shutdown_event():
         if callable(shutdown):
             await shutdown()
 
+    await _run_shutdown_phase("startup_tasks", _cancel_startup_tasks, timeout=2.0)
+    await _run_shutdown_phase("agent_runs", _stop_agent_runs, timeout=2.0)
+    await _run_shutdown_phase("task_scheduler", task_scheduler.stop, timeout=2.0)
     await _run_shutdown_phase("copal_bridge", _stop_copal, timeout=2.0)
     await _run_shutdown_phase("mimo_supervisor", _stop_mimo, timeout=7.0)
-    await _run_shutdown_phase("startup_tasks", _cancel_startup_tasks, timeout=2.0)
     await _run_shutdown_phase("upload_cleanup", _cancel_upload_cleanup, timeout=2.0)
-    await _run_shutdown_phase("task_scheduler", task_scheduler.stop, timeout=2.0)
     await _run_shutdown_phase("webhooks", webhook_manager.close, timeout=2.0)
     await _run_shutdown_phase("memory_provider", _stop_memory_provider, timeout=5.0)
     await _run_shutdown_phase("mcp_servers", mcp_manager.disconnect_all, timeout=6.0)
@@ -1549,4 +1676,4 @@ if __name__ == "__main__":
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info", timeout_graceful_shutdown=10)

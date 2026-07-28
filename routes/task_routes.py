@@ -20,6 +20,7 @@ from src.task_action_policy import (
     owner_has_admin_task_privileges,
 )
 from src.task_scheduler import compute_next_run, HOUSEKEEPING_DEFAULTS
+from routes.model_routes import is_mimo_connection_id
 from routes.prefs_routes import _load_for_user, _save_for_user
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,14 @@ def _maybe_cascade_calendar_event(task) -> None:
         return
 
     import httpx
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+    from core.middleware import (
+        INTERNAL_TOOL_HEADER,
+        INTERNAL_TOOL_OWNER_HEADER,
+        INTERNAL_TOOL_TOKEN,
+    )
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     if task.owner:
-        headers["X-Open Clank-Owner"] = task.owner
+        headers[INTERNAL_TOOL_OWNER_HEADER] = task.owner
 
     # Strategy 1: explicit UID marker in prompt.
     event_uid = ""
@@ -298,7 +303,12 @@ def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
     except Exception:
         pass
 
-    if endpoint_id == "mimo":
+    from src.model_shares import share_id_from_endpoint
+
+    if (
+        is_mimo_connection_id(endpoint_id)
+        or share_id_from_endpoint(endpoint_id) is not None
+    ):
         return "mimo://acp"
     try:
         from core.database import ModelEndpoint
@@ -344,15 +354,41 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             else getattr(current, "endpoint_url", None)
         )
         if endpoint_id:
-            query = db.query(ModelEndpoint).filter(
-                ModelEndpoint.id == endpoint_id,
-                ModelEndpoint.is_enabled == True,  # noqa: E712
+            from routes.model_routes import is_mimo_connection_id
+            from src.model_shares import (
+                resolve_shared_model_access,
+                share_id_from_endpoint,
             )
-            query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
-            endpoint = query.first()
-            if endpoint is None:
-                raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
-            endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
+
+            if is_mimo_connection_id(endpoint_id):
+                endpoint_url = "mimo://acp"
+            elif share_id_from_endpoint(endpoint_id) is not None:
+                selected_model = (
+                    req.model
+                    if "model" in getattr(req, "model_fields_set", set())
+                    else getattr(current, "model", None)
+                )
+                if resolve_shared_model_access(
+                    db,
+                    actor_owner=owner or "",
+                    endpoint_id=endpoint_id,
+                    model_id=selected_model or None,
+                ) is None:
+                    raise HTTPException(
+                        400,
+                        "Shared model is unavailable or not enabled",
+                    )
+                endpoint_url = "mimo://acp"
+            else:
+                query = db.query(ModelEndpoint).filter(
+                    ModelEndpoint.id == endpoint_id,
+                    ModelEndpoint.is_enabled == True,  # noqa: E712
+                )
+                query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
+                endpoint = query.first()
+                if endpoint is None:
+                    raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
+                endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
         elif endpoint_url:
             raise HTTPException(400, "Headless Agent tasks require endpoint_id, not a raw endpoint URL")
 

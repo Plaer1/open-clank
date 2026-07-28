@@ -26,10 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 def _internal_headers(owner: str | None = None) -> dict:
-    from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
+    from core.middleware import (
+        INTERNAL_TOOL_HEADER,
+        INTERNAL_TOOL_OWNER_HEADER,
+        INTERNAL_TOOL_TOKEN,
+    )
     headers = {INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}
     if owner:
-        headers["X-Open Clank-Owner"] = owner
+        headers[INTERNAL_TOOL_OWNER_HEADER] = owner
     return headers
 
 

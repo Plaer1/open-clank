@@ -23,6 +23,7 @@ from src.auth_helpers import get_current_user
 from src.constants import DATA_DIR
 from core.atomic_io import atomic_write_json
 from core.middleware import require_admin
+from routes.model_routes import is_mimo_connection_id
 
 logger = logging.getLogger(__name__)
 _SKILL_JOB_STATE_PATH = Path(DATA_DIR) / "skill-audit-jobs.json"
@@ -578,7 +579,11 @@ async def _run_skill_test_job(
         target = resolve_model_target(
             url, model, headers,
             endpoint_id=endpoint_id,
-            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}" if endpoint_id else None),
+            provider_id=(
+                "mimo"
+                if is_mimo_connection_id(endpoint_id)
+                else f"ody-{endpoint_id}" if endpoint_id else None
+            ),
             lifecycle="ephemeral",
         )
         with tempfile.TemporaryDirectory(prefix="openclank-skill-test-") as workspace:
@@ -906,7 +911,11 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
         target = resolve_model_target(
             url, model, headers,
             endpoint_id=endpoint_id,
-            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}"),
+            provider_id=(
+                "mimo"
+                if is_mimo_connection_id(endpoint_id)
+                else f"ody-{endpoint_id}"
+            ),
             lifecycle="ephemeral",
         )
         with tempfile.TemporaryDirectory(prefix="openclank-skill-audit-") as workspace:

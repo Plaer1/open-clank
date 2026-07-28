@@ -53,6 +53,16 @@ export const ProviderApi = HttpApi.make("provider")
             description: "Handle the OAuth callback from a provider after user authorization.",
           }),
         ),
+        HttpApiEndpoint.delete("cancel", `${root}/:providerID/oauth/:flowID`, {
+          params: { providerID: ProviderID, flowID: Schema.String },
+          success: Schema.Boolean,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "provider.oauth.cancel",
+            summary: "Cancel OAuth authorization",
+            description: "Cancel one pending provider authorization flow.",
+          }),
+        ),
       )
       .annotateMerge(
         OpenApi.annotations({
@@ -112,6 +122,9 @@ export const providerHandlers = Layer.unwrap(
           providerID: ctx.params.providerID,
           method: ctx.payload.method,
           inputs: ctx.payload.inputs,
+          flowID: ctx.payload.flowID,
+          redirectURI: ctx.payload.redirectURI,
+          state: ctx.payload.state,
         })
         .pipe(Effect.catch(() => Effect.fail(new HttpApiError.BadRequest({}))))
       if (!result) return yield* new HttpApiError.BadRequest({})
@@ -127,13 +140,26 @@ export const providerHandlers = Layer.unwrap(
           providerID: ctx.params.providerID,
           method: ctx.payload.method,
           code: ctx.payload.code,
+          flowID: ctx.payload.flowID,
         })
         .pipe(Effect.catch(() => Effect.fail(new HttpApiError.BadRequest({}))))
       return true
     })
 
+    const cancel = Effect.fn("ProviderHttpApi.cancel")(function* (ctx: {
+      params: { providerID: ProviderID; flowID: string }
+    }) {
+      yield* svc.cancel(ctx.params)
+      return true
+    })
+
     return HttpApiBuilder.group(ProviderApi, "provider", (handlers) =>
-      handlers.handle("list", list).handle("auth", auth).handle("authorize", authorize).handle("callback", callback),
+      handlers
+        .handle("list", list)
+        .handle("auth", auth)
+        .handle("authorize", authorize)
+        .handle("callback", callback)
+        .handle("cancel", cancel),
     )
   }),
 ).pipe(

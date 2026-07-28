@@ -497,11 +497,19 @@ def test_empty_or_missing_history():
     assert _session_is_research_spinoff(SimpleNamespace()) is False
 
 
-async def _build_context_owner_probe(monkeypatch, request_state):
+async def _build_context_owner_probe(
+    monkeypatch,
+    request_state,
+    *,
+    prefs=None,
+    incognito=True,
+    message="hello",
+):
     captured = {
         "prefs_owner": None,
         "preface_owner": None,
         "compact_owner": None,
+        "preface_use_memory": None,
     }
 
     async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
@@ -526,10 +534,15 @@ async def _build_context_owner_probe(monkeypatch, request_state):
 
     def fake_load_prefs(owner):
         captured["prefs_owner"] = owner
-        return {"memory_enabled": True, "skills_enabled": True}
+        return dict(
+            prefs
+            if prefs is not None
+            else {"memory_enabled": True, "skills_enabled": True}
+        )
 
     def fake_build_context_preface(**kwargs):
         captured["preface_owner"] = kwargs["owner"]
+        captured["preface_use_memory"] = kwargs["use_memory"]
         return [], [], []
 
     async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
@@ -569,9 +582,9 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         request=request,
         chat_handler=SimpleNamespace(),
         chat_processor=SimpleNamespace(build_context_preface=fake_build_context_preface),
-        message="hello",
+        message=message,
         session_id="session-1",
-        incognito=True,
+        incognito=incognito,
     )
 
     return ctx, captured
@@ -593,6 +606,7 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         "prefs_owner": "alice",
         "preface_owner": "alice",
         "compact_owner": "alice",
+        "preface_use_memory": False,
     }
 
 
@@ -611,4 +625,33 @@ async def test_build_chat_context_keeps_cookie_user_owner_scope(monkeypatch):
         "prefs_owner": "bob",
         "preface_owner": "bob",
         "compact_owner": "bob",
+        "preface_use_memory": False,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (("automatic", True), ("manual", True), ("off", False)),
+)
+async def test_build_chat_context_respects_memory_mode_read_gate(
+    monkeypatch,
+    mode,
+    expected,
+):
+    _ctx, captured = await _build_context_owner_probe(
+        monkeypatch,
+        {
+            "api_token": False,
+            "current_user": "alice",
+        },
+        prefs={
+            "memory_enabled": True,
+            "skills_enabled": True,
+            "memory_mode": mode,
+        },
+        incognito=False,
+        message="Please use my saved project details to plan the next milestone.",
+    )
+
+    assert captured["preface_use_memory"] is expected

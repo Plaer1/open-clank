@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -23,8 +24,17 @@ from urllib.parse import quote
 
 import httpx
 
+from src.endpoint_resolver import (
+    DIRECT_ENDPOINT_PROVIDER_PREFIX,
+    direct_runtime_provider_id,
+)
 from src.openclank.acp_client import ACPClient, TransportError
-from src.openclank.acp_bridge import ACPBridge, PermissionHandler, register_client_callbacks
+from src.openclank.acp_bridge import (
+    ACPBridge,
+    PermissionHandler,
+    frankenmemory_child_env,
+    register_client_callbacks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +42,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MIMO_BIN = REPO_ROOT / "bin" / "mimo"
 
 # Open Clank skill root — where SkillsManager stores SKILL.md files.
-# mimo's discoverSkills scans cfg.skills.paths for **/SKILL.md.
-_ODYSSEUS_ROOT = REPO_ROOT
-_ODYSSEUS_SKILLS_DIR = os.getenv(
-    "OPEN_CLANK_DATA_DIR",
-    os.getenv("ODYSSEUS_DATA_DIR", str(_ODYSSEUS_ROOT / "data")),
-) + "/skills"
+# The bundled runtime's discoverSkills scans cfg.skills.paths for **/SKILL.md.
+_OPEN_CLANK_DATA_DIR = (
+    os.getenv("OPEN_CLANK_DATA_DIR")
+    or os.getenv("ODYSSEUS_DATA_DIR")
+    or str(REPO_ROOT / "data")
+)
+_OPEN_CLANK_SKILLS_DIR = str(Path(_OPEN_CLANK_DATA_DIR) / "skills")
 
 # Restart backoff
 # Strips ANSI color/style sequences from mimo's stderr log lines.
@@ -48,7 +59,11 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # single read (asyncio's default is 64 KiB — a live worker-killer).
 ACP_STDOUT_LIMIT = 32 * 1024 * 1024
 
-_READINESS_BUDGET = float(os.environ.get("ODYSSEUS_MIMO_READINESS_BUDGET", "30"))
+_READINESS_BUDGET = float(
+    os.environ.get("OPEN_CLANK_AGENT_READINESS_BUDGET")
+    or os.environ.get("ODYSSEUS_MIMO_READINESS_BUDGET")
+    or "30"
+)
 _RESTART_DELAY_INITIAL = 0.25
 _RESTART_DELAY_MAX = 5.0
 _RESTART_DELAY_MULTIPLIER = 2.0
@@ -64,10 +79,13 @@ def _pick_small_model(providers: dict) -> str | None:
     unset, its picker grabbed xiaomi's TTS voicedesign model from our injected
     list and every title call 400'd ("system role is not allowed for TTS
     model"). We injected the list, so we pin a sane default. Override with
-    ODYSSEUS_SMALL_MODEL (the injected env config is merged last in mimo's
-    chain, so a file-level small_model would not win against it).
+    OPEN_CLANK_SMALL_MODEL (the injected env config is merged last in the
+    bundled runtime's chain, so a file-level small_model would not win).
     """
-    override = os.environ.get("ODYSSEUS_SMALL_MODEL")
+    override = (
+        os.environ.get("OPEN_CLANK_SMALL_MODEL")
+        or os.environ.get("ODYSSEUS_SMALL_MODEL")
+    )
     if override:
         return override
     for pid, cfg in providers.items():
@@ -118,38 +136,36 @@ def migrate_agent_runtime_root(data_dir: Path, *, rollback: bool = False) -> Pat
 
 
 def _mimo_child_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("MIMOCODE_PROVIDER_AUTH_FD", None)
-    for env_name in list(env):
-        if any(marker in env_name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
-            env.pop(env_name, None)
+    """Build from an allowlist so host credentials/config never leak by name."""
+    allowed = {
+        "COLORTERM",
+        "LANG",
+        "LANGUAGE",
+        "NODE_EXTRA_CA_CERTS",
+        "PATH",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TZ",
+    }
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in allowed or name.startswith("LC_")
+    }
+    env.update(frankenmemory_child_env())
     return env
 
 
-ENDPOINT_PROVIDER_PREFIX = "ody-"
-
-# When an Odysseus endpoint covers a MiMo built-in provider (same API host),
-# inject it under MiMo's own provider ID so MiMo routes to it correctly.
-# Without this, MiMo uses its built-in (no key) instead of the Odysseus
-# endpoint (with key).
-_HOSTNAME_TO_MIMO_PROVIDER = {
-    "api.xiaomimimo.com": "xiaomi",
-    "token-plan-sgp.xiaomimimo.com": "xiaomi",
-    "api.deepseek.com": "deepseek",
-}
+ENDPOINT_PROVIDER_PREFIX = DIRECT_ENDPOINT_PROVIDER_PREFIX
 
 
-def _mimo_provider_id_for_url(base_url: str) -> str | None:
-    """Return the MiMo built-in provider ID if this URL covers one."""
-    try:
-        from urllib.parse import urlparse
-        hostname = urlparse(base_url).hostname or ""
-        return _HOSTNAME_TO_MIMO_PROVIDER.get(hostname)
-    except Exception:
-        return None
-
-
-def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]:
+def _endpoint_registry_providers(
+    owner: str = "",
+    *,
+    shared_access=None,
+) -> tuple[dict, dict[str, str]]:
     """Project Open Clank's ModelEndpoint registry into mimo providers.
 
     Every enabled OpenAI-compatible endpoint becomes a provider named
@@ -172,6 +188,7 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
             resolve_endpoint_runtime,
         )
         from src.chatgpt_subscription import is_chatgpt_subscription_base
+        from src.model_shares import shared_runtime_provider_id, source_endpoint_for_access
     except Exception as exc:  # pragma: no cover - import cycle guard
         logger.warning("endpoint projection unavailable: %s", exc)
         return {}, {}
@@ -184,22 +201,44 @@ def _endpoint_registry_providers(owner: str = "") -> tuple[dict, dict[str, str]]
         query = owner_filter(
             query, ModelEndpoint, owner or "", include_shared=False
         )
-        rows = query.all()
-        for ep in rows:
+        if shared_access is None:
+            registrations = [
+                (
+                    ep,
+                    direct_runtime_provider_id(ep.id),
+                    _endpoint_enabled_models(ep),
+                    owner or None,
+                )
+                for ep in query.all()
+            ]
+        else:
+            endpoint = source_endpoint_for_access(db, shared_access)
+            registrations = (
+                [(
+                    endpoint,
+                    shared_runtime_provider_id(shared_access.share_id),
+                    [shared_access.model_id],
+                    shared_access.credential_owner,
+                )]
+                if endpoint is not None
+                else []
+            )
+        for ep, provider_id, model_ids, credential_owner in registrations:
             if (getattr(ep, "model_type", None) or "llm") != "llm":
                 continue
             try:
-                base, api_key = resolve_endpoint_runtime(ep, owner=owner or None)
+                base, api_key = resolve_endpoint_runtime(
+                    ep,
+                    owner=credential_owner,
+                )
             except Exception as exc:
                 logger.warning("endpoint %s credential resolution failed: %s", ep.id, exc)
                 continue
             base = normalize_base(base or "")
             if not base.startswith(("http://", "https://")):
                 continue
-            model_ids = _endpoint_enabled_models(ep)
             if not model_ids:
                 continue
-            provider_id = _mimo_provider_id_for_url(base) or f"{ENDPOINT_PROVIDER_PREFIX}{ep.id}"
             is_chatgpt_subscription = is_chatgpt_subscription_base(base)
             adapter = (
                 "@ai-sdk/openai"
@@ -286,9 +325,9 @@ def _loopback_port(explicit: str | None = None) -> int:
         try:
             port = int(explicit)
         except ValueError as exc:
-            raise ValueError("ODYSSEUS_MIMO_PORT must be an integer") from exc
+            raise ValueError("OPEN_CLANK_AGENT_PORT must be an integer") from exc
         if not 1 <= port <= 65535:
-            raise ValueError("ODYSSEUS_MIMO_PORT must be between 1 and 65535")
+            raise ValueError("OPEN_CLANK_AGENT_PORT must be between 1 and 65535")
         return port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -314,6 +353,7 @@ class MimoSupervisor:
         projection_snapshot=None,
         projection_generation: int = 0,
         crash_callback=None,
+        credential_sources: dict[str, str] | None = None,
     ) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -334,12 +374,31 @@ class MimoSupervisor:
         self._crash_callback = crash_callback
         self._provider_apis: dict[str, str] = {}
         self._mimocode_home: str | None = None
+        # None = this account's personal auth store. A dict (including empty)
+        # = a dedicated trusted-share worker with only those provider sources.
+        self._credential_sources = (
+            None
+            if credential_sources is None
+            else dict(credential_sources)
+        )
+        self._auth_seed_payload: dict = {}
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Open Clank can expose a narrow provider-auth adapter without launching
         # a second `mimo serve` process. Keep it stable across child restarts.
         self._http_port = _loopback_port(
-            None if partitioned else os.environ.get("ODYSSEUS_MIMO_PORT")
+            None
+            if partitioned
+            else (
+                os.environ.get("OPEN_CLANK_AGENT_PORT")
+                or os.environ.get("ODYSSEUS_MIMO_PORT")
+            )
         )
+        # Loopback is not an authorization boundary: another local process could
+        # otherwise reach this owner's provider and session APIs. Keep a unique
+        # credential in this supervisor only; callers receive an authenticated
+        # client, never the raw secret.
+        self.__http_username = "open-clank"
+        self.__http_password = secrets.token_urlsafe(48)
         # The live handler (caller-supplied or auto-built); chat_routes uses
         # this to resolve permission prompts from the UI.
         self.permission_handler = permission_handler
@@ -364,49 +423,77 @@ class MimoSupervisor:
         # (thesius-provider, mimo-capture, bridged-tool) share one db
         # because they all fork from this inherited env.
         env = _mimo_child_environment()
+        http_auth_fd: int | None = None
         provider_auth_fd: int | None = None
         # Server directory-containment check (middleware.ts:24-29): when no
         # server password is set, the server requires requested directories to
         # be within its CWD. Change the child's CWD to /home/e so all user
         # workspaces (~/sauce, ~/entities, ~/open-clank) are reachable.
-        # Also set MIMOCODE_HOME if THESIUS_AGENT_HOME is configured (Phase 4).
-        if os.path.isdir(_ODYSSEUS_SKILLS_DIR) and not self._partitioned:
+        if os.path.isdir(_OPEN_CLANK_SKILLS_DIR) and not self._partitioned:
             skills_config = json.dumps({
-                "skills": {"paths": [_ODYSSEUS_SKILLS_DIR]},
+                "skills": {"paths": [_OPEN_CLANK_SKILLS_DIR]},
                 "memory": {"provider": "frankenmemory"},
             })
             env["MIMOCODE_CONFIG_CONTENT"] = skills_config
-            # A1.3: also expose the data dir so mimo's usage writer can find _usage.json
-            env["ODYSSEUS_DATA_DIR"] = str(Path(_ODYSSEUS_SKILLS_DIR).parent)
-            logger.info("injected Open Clank skills path: %s", _ODYSSEUS_SKILLS_DIR)
+            child_data_dir = str(Path(_OPEN_CLANK_SKILLS_DIR).parent)
+            env["OPEN_CLANK_DATA_DIR"] = child_data_dir
+            # Compatibility for the bundled runtime until all older builds
+            # consume OPEN_CLANK_DATA_DIR.
+            env["ODYSSEUS_DATA_DIR"] = child_data_dir
+            logger.info("injected Open Clank skills path: %s", _OPEN_CLANK_SKILLS_DIR)
         else:
-            logger.warning("Open Clank skills dir not found: %s", _ODYSSEUS_SKILLS_DIR)
+            logger.warning("Open Clank skills dir not found: %s", _OPEN_CLANK_SKILLS_DIR)
 
         # The embedded mimo must NEVER share state with a personal mimocode
         # install: under XDG defaults it reads ~/.config/mimocode (the user's
         # model defaults + provider config) and writes sessions/auth/logs into
         # ~/.local/share/mimocode — both directions of that are wrong. Always
-        # set MIMOCODE_HOME (redirects config/data/state/cache wholesale) to
-        # Open Clank's own data dir. Precedence: explicit MIMOCODE_HOME env >
-        # THESIUS_AGENT_HOME (Phase 4 agent home) > internal runtime default.
+        # set MIMOCODE_HOME (the bundled-runtime boundary) to Open Clank's own
+        # data dir. Host MIMOCODE_HOME is intentionally ignored. Precedence:
+        # OPEN_CLANK_AGENT_HOME > legacy THESIUS_AGENT_HOME > internal default.
         # Config + auth in that home are hand-managed (e's ruling 2026-07-09:
         # no automatic copying of credential files — boot once, edit config).
         if self._runtime_home is not None:
-            self._runtime_home.mkdir(parents=True, exist_ok=True)
+            self._runtime_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._runtime_home.chmod(0o700)
             private_home = self._runtime_home / "home"
-            private_home.mkdir(parents=True, exist_ok=True)
+            private_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+            private_home.chmod(0o700)
+            private_tmp = private_home / "tmp"
+            private_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+            private_tmp.chmod(0o700)
             env["MIMOCODE_HOME"] = str(self._runtime_home / "mimocode")
             env["HOME"] = str(private_home)
             env["USERPROFILE"] = str(private_home)
-            env["ODYSSEUS_DATA_DIR"] = str(self._runtime_home / "odysseus")
+            env["TMPDIR"] = str(private_tmp)
+            # Pin EVERY XDG authority to the per-owner home. MIMOCODE_HOME + HOME
+            # are not enough: mimo's XDG fallback can resolve to the real uid's
+            # home via getpwuid (ignoring $HOME) and read the host mimo install's
+            # ~/.config/mimocode (provider config) and ~/.local/share/mimocode
+            # (auth) — bleeding the host's providers into this owner's runtime.
+            # Open Clank's mimo uses Open Clank dirs only, never mimocode dirs.
+            env["XDG_CONFIG_HOME"] = str(private_home / ".config")
+            env["XDG_DATA_HOME"] = str(private_home / ".local" / "share")
+            env["XDG_STATE_HOME"] = str(private_home / ".local" / "state")
+            env["XDG_CACHE_HOME"] = str(private_home / ".cache")
+            child_data_dir = str(self._runtime_home / "open-clank")
+            env["OPEN_CLANK_DATA_DIR"] = child_data_dir
+            env["ODYSSEUS_DATA_DIR"] = child_data_dir
             env["MIMOCODE_CONFIG_CONTENT"] = json.dumps({
                 "memory": {"provider": "frankenmemory"},
                 "skills": {"paths": []},
             })
         elif "MIMOCODE_HOME" not in env:
-            _agent_home = os.environ.get("THESIUS_AGENT_HOME")
+            _agent_home = (
+                os.environ.get("OPEN_CLANK_AGENT_HOME")
+                or os.environ.get("THESIUS_AGENT_HOME")
+            )
             if _agent_home:
-                env["MIMOCODE_HOME"] = os.path.join(os.path.expanduser(_agent_home), ".mimocode")
+                env["MIMOCODE_HOME"] = os.path.join(
+                    os.path.expanduser(_agent_home),
+                    "runtime",
+                    "agent-engine",
+                )
             else:
                 _data_dir = (
                     os.environ.get("OPEN_CLANK_DATA_DIR")
@@ -414,6 +501,13 @@ class MimoSupervisor:
                     or str(REPO_ROOT / "data")
                 )
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "runtime", "agent-engine")
+        # Open Clank supplies provider credentials, configuration, skills, and
+        # account identity explicitly. Never let the embedded runtime discover
+        # a personal install's environment, project config, or external skills.
+        env["MIMOCODE_DISABLE_PROVIDER_ENV"] = "1"
+        env["MIMOCODE_DISABLE_PROJECT_CONFIG"] = "1"
+        env["MIMOCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+        env["MIMOCODE_DISABLE_CLAUDE_CODE"] = "1"
         self._mimocode_home = env["MIMOCODE_HOME"]
         self._reconcile_auth_store()
         snapshot = self.projection_snapshot
@@ -452,10 +546,17 @@ class MimoSupervisor:
                 self._owner,
                 ", ".join(sorted(merged_providers)),
             )
+        elif snapshot.small_model:
+            config_content = json.loads(
+                env.get("MIMOCODE_CONFIG_CONTENT", "{}")
+            )
+            config_content.setdefault("small_model", snapshot.small_model)
+            env["MIMOCODE_CONFIG_CONTENT"] = json.dumps(config_content)
         env["MIMOCODE_ENABLE_QUESTION_TOOL"] = "1"
         logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
         try:
+            http_auth_fd = self._configure_internal_http_auth(env)
             spawn_options = {
                 "stdin": asyncio.subprocess.PIPE,
                 "stdout": asyncio.subprocess.PIPE,
@@ -475,8 +576,11 @@ class MimoSupervisor:
                 # Shutdown is owned by stop(): stdin EOF, then kill.
                 "start_new_session": True,
             }
-            if provider_auth_fd is not None:
-                spawn_options["pass_fds"] = (provider_auth_fd,)
+            inherited_fds = tuple(
+                fd for fd in (http_auth_fd, provider_auth_fd) if fd is not None
+            )
+            if inherited_fds:
+                spawn_options["pass_fds"] = inherited_fds
             self._proc = await asyncio.create_subprocess_exec(
                 # --print-logs mirrors mimo's own log stream to stderr, which
                 # _drain_stderr folds into the host log — ONE log to read
@@ -491,6 +595,8 @@ class MimoSupervisor:
             # untracked child before spawning a second one.
             raise RuntimeError("async subprocess support is required for mimo ACP") from exc
         finally:
+            if http_auth_fd is not None:
+                os.close(http_auth_fd)
             if provider_auth_fd is not None:
                 os.close(provider_auth_fd)
 
@@ -537,9 +643,17 @@ class MimoSupervisor:
             raise
 
         # Create the bridge (B2: owner flows through for lifetools MCP context)
-        configured_cwd = Path(os.environ.get("OPENTHESIUS_GLOBAL_CWD", str(REPO_ROOT))).expanduser()
+        configured_cwd = Path(
+            os.environ.get("OPEN_CLANK_GLOBAL_CWD")
+            or os.environ.get("OPENTHESIUS_GLOBAL_CWD")
+            or str(REPO_ROOT)
+        ).expanduser()
         if not configured_cwd.is_dir():
-            logger.warning("configured OPENTHESIUS_GLOBAL_CWD is missing: %s; using %s", configured_cwd, REPO_ROOT)
+            logger.warning(
+                "configured OPEN_CLANK_GLOBAL_CWD is missing: %s; using %s",
+                configured_cwd,
+                REPO_ROOT,
+            )
             configured_cwd = REPO_ROOT
         self._bridge = ACPBridge(
             self._client,
@@ -638,6 +752,9 @@ class MimoSupervisor:
         if self._client:
             await self._client.close()
 
+        # The process may have refreshed an OAuth token immediately before it
+        # died. The cache is still readable even when the child is gone.
+        self.sync_auth_to_db()
         await self._teardown_child()
 
         if self._crash_callback:
@@ -655,15 +772,10 @@ class MimoSupervisor:
         if not self._bridge:
             return
         sessions = self._bridge.mapped_sessions()
-        try:
-            from src.openclank.transcript_projection import list_projections
-
-            for row in list_projections(owner=self._owner or None):
-                sessions.setdefault(
-                    row["odysseus_session_id"], row["mimo_session_id"]
-                )
-        except Exception as exc:
-            logger.debug("projection table unavailable during cleanup: %s", exc)
+        # A recipient can have a personal worker plus multiple trusted-share
+        # workers. Transcript rows are owner-scoped, not partition-scoped, so
+        # sweeping every row for this owner here lets one worker delete another
+        # worker's live projection. Only this worker's persisted map is safe.
         for session_id, mimo_session_id in sessions.items():
             try:
                 await self.delete_session(
@@ -729,6 +841,8 @@ class MimoSupervisor:
             await self._client.close()
 
         if self._proc is None:
+            self.sync_auth_to_db()
+            await self._teardown_child()
             return
 
         proc = self._proc
@@ -736,6 +850,8 @@ class MimoSupervisor:
 
         if proc.returncode is not None:
             logger.info("mimo child already exited (code %d)", proc.returncode)
+            self.sync_auth_to_db()
+            await self._teardown_child()
             return
 
         logger.info("stopping mimo child (pid %d)", proc.pid)
@@ -786,32 +902,109 @@ class MimoSupervisor:
         path = self._auth_file()
         if path is None:
             return
-        try:
-            stored, stored_at = _load_stored_auth(self._owner)
-        except Exception as exc:
-            logger.warning("provider credential store unavailable: %s", exc)
-            return
+        file_payload: dict | None = None
         file_text: str | None = None
         file_at = 0.0
         try:
             if path.is_file():
                 file_text = path.read_text(encoding="utf-8")
-                json.loads(file_text)
+                value = json.loads(file_text)
+                file_payload = value if isinstance(value, dict) else None
                 file_at = path.stat().st_mtime
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("unreadable runtime auth store %s: %s", path, exc)
-            file_text = None
+            file_payload = None
         try:
-            if file_text and (stored is None or file_at > stored_at):
-                if file_text != stored:
-                    _store_auth(self._owner, file_text)
-                    logger.info("provider credentials mirrored to app.db for owner %r", self._owner)
-            elif stored and stored != file_text:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(stored)
-                logger.info("provider credentials restored from app.db for owner %r", self._owner)
+            sources = self._credential_sources
+            if sources is None:
+                if file_payload is not None and self._auth_seed_payload:
+                    from core.database import SessionLocal
+                    from src.model_shares import merge_runtime_auth_changes
+
+                    db = SessionLocal()
+                    try:
+                        merge_runtime_auth_changes(
+                            db,
+                            payload=file_payload,
+                            baseline=self._auth_seed_payload,
+                            provider_sources={
+                                provider_id: self._owner
+                                for provider_id in (
+                                    set(file_payload)
+                                    | set(self._auth_seed_payload)
+                                )
+                            },
+                            file_updated_at=file_at,
+                        )
+                    finally:
+                        db.close()
+                stored, stored_at = _load_stored_auth(self._owner)
+                if (
+                    file_payload is not None
+                    and (stored is None or file_at > stored_at)
+                ):
+                    if file_text != stored:
+                        _store_auth(self._owner, file_text or "{}")
+                    effective = file_payload
+                    text = file_text or "{}"
+                elif stored:
+                    parsed = json.loads(stored)
+                    effective = parsed if isinstance(parsed, dict) else {}
+                    text = stored
+                else:
+                    effective = {}
+                    text = "{}"
+            else:
+                from core.database import SessionLocal
+                from src.model_shares import (
+                    merge_runtime_auth_changes,
+                    own_native_auth,
+                )
+
+                db = SessionLocal()
+                try:
+                    if file_payload is not None:
+                        merge_runtime_auth_changes(
+                            db,
+                            payload=file_payload,
+                            baseline=self._auth_seed_payload,
+                            provider_sources=sources,
+                            file_updated_at=file_at,
+                        )
+                    effective = {
+                        provider_id: credential
+                        for provider_id, source_owner in sources.items()
+                        for credential in [
+                            own_native_auth(db, source_owner).get(provider_id)
+                        ]
+                        if credential is not None
+                    }
+                finally:
+                    db.close()
+                text = json.dumps(
+                    effective,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            if self._runtime_home is not None and sources is not None:
+                manifest = self._runtime_home / "shared-native-auth-sources.json"
+                manifest_fd = os.open(
+                    manifest,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                with os.fdopen(manifest_fd, "w", encoding="utf-8") as fh:
+                    json.dump(sources, fh, sort_keys=True)
+            self._auth_seed_payload = json.loads(text)
+            logger.info(
+                "provider credentials restored for owner %r (%d trusted share source(s))",
+                self._owner,
+                len(sources or {}),
+            )
         except Exception as exc:
             logger.warning("provider credential reconcile failed: %s", exc)
 
@@ -821,11 +1014,40 @@ class MimoSupervisor:
         if path is None or not path.is_file():
             return
         try:
-            file_text = path.read_text(encoding="utf-8")
-            json.loads(file_text)
-            stored, _ = _load_stored_auth(self._owner)
-            if file_text != stored:
-                _store_auth(self._owner, file_text)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("provider credential store is not an object")
+            if (
+                self._credential_sources is None
+                and not self._auth_seed_payload
+            ):
+                text = json.dumps(payload)
+                _store_auth(self._owner, text)
+                self._auth_seed_payload = json.loads(text)
+                return
+            from core.database import SessionLocal
+            from src.model_shares import merge_runtime_auth_changes
+
+            sources = self._credential_sources
+            if sources is None:
+                sources = {
+                    provider_id: self._owner
+                    for provider_id in (
+                        set(payload) | set(self._auth_seed_payload)
+                    )
+                }
+            db = SessionLocal()
+            try:
+                merge_runtime_auth_changes(
+                    db,
+                    payload=payload,
+                    baseline=self._auth_seed_payload,
+                    provider_sources=sources,
+                    file_updated_at=path.stat().st_mtime,
+                )
+            finally:
+                db.close()
+            self._auth_seed_payload = json.loads(json.dumps(payload))
         except Exception as exc:
             logger.warning("provider credential mirror failed: %s", exc)
 
@@ -907,12 +1129,7 @@ class MimoSupervisor:
                 await self._client.release_session(mimo_session)
             except Exception as exc:
                 logger.warning("failed to release Open Clank agent session MCP clients %s: %s", mimo_session, exc)
-        async with httpx.AsyncClient(
-            base_url=self.http_base_url,
-            follow_redirects=False,
-            timeout=10.0,
-            trust_env=False,
-        ) as client:
+        async with self.internal_http_client(timeout=10.0) as client:
             response = await client.delete(f"/session/{quote(mimo_session, safe='')}")
         if response.status_code != 404:
             response.raise_for_status()
@@ -940,6 +1157,31 @@ class MimoSupervisor:
     @property
     def http_base_url(self) -> str:
         return f"http://127.0.0.1:{self._http_port}"
+
+    def _configure_internal_http_auth(self, env: dict[str, str]) -> int:
+        read_fd, write_fd = os.pipe()
+        payload = self.__http_password.encode("utf-8")
+        try:
+            if os.write(write_fd, payload) != len(payload):
+                raise RuntimeError("incomplete Open Clank worker-auth handoff")
+        except Exception:
+            os.close(read_fd)
+            raise
+        finally:
+            os.close(write_fd)
+        env["MIMOCODE_SERVER_USERNAME"] = self.__http_username
+        env["OPEN_CLANK_WORKER_AUTH_FD"] = str(read_fd)
+        return read_fd
+
+    def internal_http_client(self, *, timeout: float = 20.0) -> httpx.AsyncClient:
+        """Return a locked-down client for this worker's loopback HTTP API."""
+        return httpx.AsyncClient(
+            base_url=self.http_base_url,
+            auth=httpx.BasicAuth(self.__http_username, self.__http_password),
+            follow_redirects=False,
+            timeout=timeout,
+            trust_env=False,
+        )
 
 
 class SupervisorAdmissionError(RuntimeError):
@@ -988,15 +1230,25 @@ class _OwnerLifecycle:
     drain_events: dict[object, asyncio.Event] = field(default_factory=dict)
     breaker_open_until: dict[str, float] = field(default_factory=dict)
     last_failure: str | None = None
+    credential_owner: str | None = None
 
 
 class AgentWorkerLease:
     """One generation-fenced Agent admission; release is idempotent."""
 
-    def __init__(self, pool, owner: str, worker, *, projection_pending: bool = False):
+    def __init__(
+        self,
+        pool,
+        owner: str,
+        worker,
+        *,
+        owner_epoch: int,
+        projection_pending: bool = False,
+    ):
         self._pool = pool
         self.owner = owner
         self.worker = worker
+        self._owner_epoch = owner_epoch
         self.projection_pending = projection_pending
         self.generation = getattr(worker, "installed_generation", 0)
         self.fingerprint = getattr(worker, "installed_fingerprint", "")
@@ -1006,7 +1258,12 @@ class AgentWorkerLease:
         if self._released:
             return
         self._released = True
-        await self._pool._release_lease(self.owner, self.worker, successful_terminal)
+        await self._pool._release_lease(
+            self.owner,
+            self.worker,
+            successful_terminal,
+            self._owner_epoch,
+        )
 
     async def __aenter__(self):
         return self
@@ -1038,9 +1295,13 @@ class MimoSupervisorPool:
         self._initial_owner = self._key(initial_owner) if initial_owner else ""
         self._host_provider_owner = self._key(host_provider_owner) if host_provider_owner else ""
         self._workers: dict[str, MimoSupervisor] = {}
+        self._share_workers: dict[str, MimoSupervisor] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._states: dict[str, _OwnerLifecycle] = {}
         self._background_tasks: set[asyncio.Task] = set()
+        self._background_task_owners: dict[asyncio.Task, str] = {}
+        self._owner_lifecycle_epochs: dict[str, int] = {}
+        self._owner_lifecycle_blocked: set[str] = set()
         self._readiness_budget = max(0.0, float(readiness_budget))
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
@@ -1061,10 +1322,37 @@ class MimoSupervisorPool:
         return self._owners_root / digest
 
     def _owner_lock(self, owner: str) -> asyncio.Lock:
-        return self._locks.setdefault(owner, asyncio.Lock())
+        lock = self._locks.get(owner)
+        if lock is not None:
+            try:
+                lock._get_loop()
+            except RuntimeError:
+                # Lock was created in a previous event loop (e.g. after
+                # process restart).  Replace with a fresh one for the
+                # current loop so _ensure_worker doesn't crash.
+                self._locks.pop(owner, None)
+                lock = None
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[owner] = lock
+        return lock
 
     def _owner_state(self, owner: str) -> _OwnerLifecycle:
         return self._states.setdefault(owner, _OwnerLifecycle())
+
+    def _owner_lifecycle_epoch(self, owner: str) -> int:
+        return self._owner_lifecycle_epochs.get(owner, 0)
+
+    def _assert_owner_lifecycle(self, owner: str, epoch: int) -> None:
+        if (
+            owner in self._owner_lifecycle_blocked
+            or self._owner_lifecycle_epoch(owner) != epoch
+        ):
+            raise SupervisorAdmissionError(
+                "SUPERVISOR_UNAVAILABLE",
+                "Open Clank account runtime is changing ownership",
+                phase="identity",
+            )
 
     def _new_worker(self, owner: str, snapshot, generation: int, fence: str) -> MimoSupervisor:
         runtime_home = None
@@ -1082,12 +1370,69 @@ class MimoSupervisorPool:
             crash_callback=self._worker_crashed,
         )
 
-    async def _start_campaign(self, owner: str, snapshot, generation: int, fence: str):
+    @staticmethod
+    def _share_partition(actor_owner: str, share_id: str) -> str:
+        return f"@share:{actor_owner}:{share_id}"
+
+    def _new_shared_worker(
+        self,
+        partition: str,
+        access,
+        snapshot,
+        generation: int,
+        fence: str,
+    ) -> MimoSupervisor:
+        runtime_home = (
+            self._runtime_home(partition)
+            / "generations"
+            / f"{generation}-{fence}"
+        )
+        credential_sources = {}
+        if access.source_kind == "native":
+            from src.model_shares import native_provider_id
+
+            credential_sources[native_provider_id(access.model_id)] = (
+                access.credential_owner
+            )
+        worker = MimoSupervisor(
+            owner=access.actor_owner,
+            memory_provider=self._memory_provider,
+            safe_dirs=self._safe_dirs,
+            runtime_home=runtime_home,
+            partitioned=True,
+            grant_store=self._grant_store,
+            projection_snapshot=snapshot,
+            projection_generation=generation,
+            crash_callback=lambda worker, returncode: (
+                self._shared_worker_crashed(
+                    partition,
+                    worker,
+                    returncode,
+                )
+            ),
+            credential_sources=credential_sources,
+        )
+        worker._shared_credential_owner = self._key(access.credential_owner)
+        return worker
+
+    async def _start_campaign(
+        self,
+        owner: str,
+        snapshot,
+        generation: int,
+        fence: str,
+        *,
+        worker_factory=None,
+    ):
         deadline = self._clock() + self._readiness_budget
         delay = _RESTART_DELAY_INITIAL
         last_error: Exception | None = None
         while True:
-            candidate = self._new_worker(owner, snapshot, generation, fence)
+            candidate = (
+                worker_factory()
+                if worker_factory is not None
+                else self._new_worker(owner, snapshot, generation, fence)
+            )
             try:
                 await candidate.start()
                 candidate.installed_fingerprint = snapshot.fingerprint
@@ -1117,8 +1462,11 @@ class MimoSupervisorPool:
             safe_additive_delta,
         )
 
+        epoch = self._owner_lifecycle_epoch(owner)
+        self._assert_owner_lifecycle(owner, epoch)
         lock = self._owner_lock(owner)
         async with lock:
+            self._assert_owner_lifecycle(owner, epoch)
             # Coalesce drift until the candidate is built from the newest
             # committed snapshot immediately before publication.
             while True:
@@ -1152,6 +1500,7 @@ class MimoSupervisorPool:
                 try:
                     candidate = await self._start_campaign(owner, snapshot, generation, fence)
                 except SupervisorAdmissionError as exc:
+                    self._assert_owner_lifecycle(owner, epoch)
                     state.breaker_open_until[snapshot.fingerprint] = now + self._readiness_budget
                     state.last_failure = exc.code
                     state.status = "open"
@@ -1167,6 +1516,11 @@ class MimoSupervisorPool:
                         await old.stop()
                     raise
 
+                try:
+                    self._assert_owner_lifecycle(owner, epoch)
+                except SupervisorAdmissionError:
+                    await candidate.stop()
+                    raise
                 current = build_projection_snapshot(owner)
                 current_state = reconcile_projection(current, materializing=True)
                 if current.fingerprint != snapshot.fingerprint:
@@ -1187,17 +1541,28 @@ class MimoSupervisorPool:
                 )
                 if old is not None and old is not candidate:
                     if old_snapshot is not None and safe_additive_delta(old_snapshot, current):
-                        self._schedule_background(self._retire_when_drained(owner, old))
+                        self._schedule_background(
+                            self._retire_when_drained(owner, old),
+                            owner=owner,
+                        )
                     else:
                         await old.stop()
                 return candidate
 
-    def _schedule_background(self, coroutine) -> None:
+    def _schedule_background(self, coroutine, *, owner: str = "") -> None:
         task = asyncio.create_task(coroutine)
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        self._background_task_owners[task] = self._key(owner)
+
+        def _discard(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            self._background_task_owners.pop(done, None)
+
+        task.add_done_callback(_discard)
 
     async def start(self) -> None:
+        self._recover_generation_auth_caches()
+        self._reclaim_retired_generations()
         if not self._auth_enabled:
             await self.for_owner("")
             return
@@ -1231,10 +1596,13 @@ class MimoSupervisorPool:
             )
         if not self._auth_enabled:
             key = ""
+        epoch = self._owner_lifecycle_epoch(key)
+        self._assert_owner_lifecycle(key, epoch)
         pending = False
         try:
             worker = await self._ensure_worker(key)
         except SupervisorAdmissionError:
+            self._assert_owner_lifecycle(key, epoch)
             desired = build_projection_snapshot(key)
             state = self._owner_state(key)
             old = state.active
@@ -1249,6 +1617,7 @@ class MimoSupervisorPool:
             pending = True
 
         async with self._owner_lock(key):
+            self._assert_owner_lifecycle(key, epoch)
             snapshot = getattr(worker, "projection_snapshot", None)
             if snapshot is None or snapshot.run_closure(provider_id, model_id) is None:
                 raise SupervisorAdmissionError(
@@ -1271,11 +1640,161 @@ class MimoSupervisorPool:
             state = self._owner_state(key)
             state.in_flight[worker] = state.in_flight.get(worker, 0) + 1
             state.drain_events.setdefault(worker, asyncio.Event()).clear()
-        return AgentWorkerLease(self, key, worker, projection_pending=pending)
+            lease = AgentWorkerLease(
+                self,
+                key,
+                worker,
+                owner_epoch=epoch,
+                projection_pending=pending,
+            )
+        return lease
 
-    async def _release_lease(self, owner: str, worker, successful_terminal: bool) -> None:
+    async def admit_shared_agent(
+        self,
+        access,
+        provider_id: str,
+        model_id: str,
+    ) -> AgentWorkerLease:
+        """Acquire one full-capability worker partition for one trusted route."""
+        from src.model_shares import resolve_shared_model_access, shared_endpoint_id
+        from src.openclank.mimo_projection import build_shared_projection_snapshot
+
+        actor = self._key(access.actor_owner)
+        credential_owner = self._key(access.credential_owner)
+        partition = self._share_partition(actor, access.share_id)
+        actor_epoch = self._owner_lifecycle_epoch(actor)
+        source_epoch = self._owner_lifecycle_epoch(credential_owner)
+        partition_epoch = self._owner_lifecycle_epoch(partition)
+        self._assert_owner_lifecycle(actor, actor_epoch)
+        self._assert_owner_lifecycle(credential_owner, source_epoch)
+        self._assert_owner_lifecycle(partition, partition_epoch)
+        lock = self._owner_lock(partition)
+        async with lock:
+            self._assert_owner_lifecycle(actor, actor_epoch)
+            self._assert_owner_lifecycle(credential_owner, source_epoch)
+            self._assert_owner_lifecycle(partition, partition_epoch)
+            # Re-resolve under the admission lock so a revoked or retargeted
+            # grant cannot reuse a cached worker.
+            from core.database import SessionLocal
+
+            db = SessionLocal()
+            try:
+                current_access = resolve_shared_model_access(
+                    db,
+                    actor_owner=actor,
+                    endpoint_id=shared_endpoint_id(access.share_id),
+                    model_id=access.model_id,
+                )
+            finally:
+                db.close()
+            if current_access is None:
+                raise SupervisorAdmissionError(
+                    "SHARED_MODEL_REVOKED",
+                    "This shared model is no longer connected to your account",
+                    phase="routing",
+                    retryable=False,
+                    status=403,
+                )
+            credential_owner = self._key(current_access.credential_owner)
+            source_epoch = self._owner_lifecycle_epoch(credential_owner)
+            self._assert_owner_lifecycle(credential_owner, source_epoch)
+            snapshot = build_shared_projection_snapshot(current_access)
+            if snapshot.run_closure(provider_id, model_id) is None:
+                raise SupervisorAdmissionError(
+                    "SHARED_MODEL_SOURCE_UNAVAILABLE",
+                    "The account behind this shared model is disconnected",
+                    phase="routing",
+                    retryable=False,
+                    status=410,
+                )
+            state = self._owner_state(partition)
+            state.credential_owner = credential_owner
+            worker = state.active
+            if not (
+                worker is not None
+                and worker.is_alive()
+                and worker.installed_fingerprint == snapshot.fingerprint
+            ):
+                old = worker if worker is not None and worker.is_alive() else None
+                generation = (
+                    state.generation
+                    if state.snapshot is not None
+                    and getattr(state.snapshot, "fingerprint", None)
+                    == snapshot.fingerprint
+                    else state.generation + 1
+                )
+                generation = max(1, generation)
+                fence = uuid.uuid4().hex[:12]
+                factory = lambda: self._new_shared_worker(
+                    partition,
+                    current_access,
+                    snapshot,
+                    generation,
+                    fence,
+                )
+                worker = await self._start_campaign(
+                    partition,
+                    snapshot,
+                    generation,
+                    fence,
+                    worker_factory=factory,
+                )
+                try:
+                    self._assert_owner_lifecycle(actor, actor_epoch)
+                    self._assert_owner_lifecycle(credential_owner, source_epoch)
+                    self._assert_owner_lifecycle(partition, partition_epoch)
+                except SupervisorAdmissionError:
+                    await worker.stop()
+                    raise
+                worker.installed_fingerprint = snapshot.fingerprint
+                worker.installed_generation = generation
+                state.active = worker
+                state.snapshot = snapshot
+                state.generation = generation
+                state.status = "ready"
+                self._share_workers[partition] = worker
+                if old is not None and old is not worker:
+                    self._schedule_background(
+                        self._retire_when_drained(partition, old),
+                        owner=partition,
+                    )
+
+            qualified_model = f"{provider_id}/{model_id}"
+            available = {
+                str(item.get("modelId"))
+                for item in worker.available_models()
+                if item.get("modelId")
+            }
+            if qualified_model not in available:
+                raise SupervisorAdmissionError(
+                    "MODEL_NOT_PROJECTED",
+                    f"Shared model {qualified_model} was not advertised",
+                    phase="catalog",
+                    retryable=False,
+                )
+            state.in_flight[worker] = state.in_flight.get(worker, 0) + 1
+            state.drain_events.setdefault(worker, asyncio.Event()).clear()
+            lease = AgentWorkerLease(
+                self,
+                partition,
+                worker,
+                owner_epoch=partition_epoch,
+            )
+        return lease
+
+    async def _release_lease(
+        self,
+        owner: str,
+        worker,
+        successful_terminal: bool,
+        owner_epoch: int,
+    ) -> None:
         async with self._owner_lock(owner):
-            state = self._owner_state(owner)
+            if self._owner_lifecycle_epoch(owner) != owner_epoch:
+                return
+            state = self._states.get(owner)
+            if state is None:
+                return
             remaining = max(0, state.in_flight.get(worker, 0) - 1)
             state.in_flight[worker] = remaining
             if remaining == 0:
@@ -1285,22 +1804,275 @@ class MimoSupervisorPool:
 
     async def _retire_when_drained(self, owner: str, worker) -> None:
         async with self._owner_lock(owner):
-            state = self._owner_state(owner)
+            state = self._states.get(owner)
+            if state is None:
+                await worker.stop()
+                self._reclaim_generation_dir(owner, worker)
+                return
             event = state.drain_events.setdefault(worker, asyncio.Event())
             if state.in_flight.get(worker, 0) == 0:
                 event.set()
         await event.wait()
         await worker.stop()
+        self._reclaim_generation_dir(owner, worker)
+
+    def _reclaim_generation_dir(self, owner: str, worker) -> None:
+        """Remove one retired worker's generation dir; never the active worker's.
+
+        Pre-fix, every projection change orphaned a ``generations/<n>-<fence>``
+        tree (each carrying its own mimocode/odysseus auth caches), which
+        accumulated hundreds of MB per churning owner. The retire path stopped
+        the process but left the dir on disk; this reclaims it.
+        """
+        raw = getattr(worker, "_runtime_home", None)
+        if not raw:
+            return
+        try:
+            path = Path(raw).resolve()
+            owners_root = self._owners_root.resolve()
+            if owners_root not in path.parents:
+                return  # outside our managed tree — refuse to touch it
+            state = self._states.get(owner)
+            active = state.active if state is not None else None
+            active_home = getattr(active, "_runtime_home", None) if active else None
+            if active_home is not None and Path(active_home).resolve() == path:
+                return  # never reclaim the live worker's dir
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception as exc:
+            logger.warning("generation dir reclaim failed (%s): %s", owner, exc)
+
+    def _reclaim_retired_generations(self) -> None:
+        """Startup sweep: drop generation dirs not matching each owner's current
+        DB generation. The live worker always carries the DB generation number,
+        so keeping every dir whose number equals the active generation preserves
+        the live dir (and any duplicate-fence siblings) while reclaiming the
+        backlog the pre-fix retire path leaked. Idempotent and safe any time."""
+        if not self._owners_root.exists():
+            return
+        active: dict[str, int] = {}
+        try:
+            from core.database import MimoProjectionState, SessionLocal
+            db = SessionLocal()
+            try:
+                rows = db.query(MimoProjectionState).all()
+                active = {
+                    hashlib.sha256(self._key(r.owner_id).encode("utf-8")).hexdigest(): int(r.generation)
+                    for r in rows
+                }
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("generation reclaim skipped (projection state unreadable): %s", exc)
+            return
+        reclaimed = 0
+        for owner_dir in self._owners_root.iterdir():
+            gens_root = owner_dir / "generations"
+            if not gens_root.is_dir():
+                continue
+            keep = active.get(owner_dir.name)
+            if keep is None:
+                # Trusted-share workers are lazy derived partitions and do not
+                # own a MimoProjectionState row. Startup already recovered any
+                # refreshed native credential above, so every manifest-marked
+                # share generation is retired now.
+                for gen_dir in gens_root.iterdir():
+                    if (
+                        gen_dir.is_dir()
+                        and (gen_dir / "shared-native-auth-sources.json").is_file()
+                    ):
+                        shutil.rmtree(gen_dir, ignore_errors=True)
+                        reclaimed += 1
+                continue
+            for gen_dir in gens_root.iterdir():
+                if not gen_dir.is_dir():
+                    continue
+                try:
+                    num = int(gen_dir.name.split("-", 1)[0])
+                except ValueError:
+                    continue
+                if num != keep:
+                    shutil.rmtree(gen_dir, ignore_errors=True)
+                    reclaimed += 1
+        if reclaimed:
+            logger.info("reclaimed %d retired agent-runtime generation dirs", reclaimed)
+
+    def _recover_generation_auth_caches(self) -> None:
+        """Mirror the newest valid stopped-worker auth cache before cleanup."""
+        if not self._owners_root.exists():
+            return
+        try:
+            from core.database import MimoAuthStore, MimoProjectionState, SessionLocal
+            from src.model_shares import persist_shared_native_auth
+
+            db = SessionLocal()
+            try:
+                for state in db.query(MimoProjectionState).all():
+                    owner = self._key(state.owner_id)
+                    owner_root = self._runtime_home(owner).resolve()
+                    generations = owner_root / "generations"
+                    if not generations.is_dir():
+                        continue
+                    stored = db.query(MimoAuthStore).filter(
+                        MimoAuthStore.owner == owner
+                    ).first()
+                    stored_at = (
+                        stored.updated_at.replace(tzinfo=timezone.utc).timestamp()
+                        if stored is not None and stored.updated_at is not None
+                        else 0.0
+                    )
+                    candidates = sorted(
+                        generations.glob("*/mimocode/data/auth.json"),
+                        key=lambda path: path.stat().st_mtime,
+                        reverse=True,
+                    )
+                    for auth_path in candidates:
+                        resolved = auth_path.resolve()
+                        if owner_root not in resolved.parents:
+                            continue
+                        if auth_path.stat().st_mtime <= stored_at:
+                            break
+                        if auth_path.stat().st_size > 4 * 1024 * 1024:
+                            continue
+                        try:
+                            payload = json.loads(
+                                auth_path.read_text(encoding="utf-8")
+                            )
+                            if not isinstance(payload, dict):
+                                continue
+                            generation_root = auth_path.parents[2]
+                            manifest = (
+                                generation_root
+                                / "shared-native-auth-sources.json"
+                            )
+                            sources = {}
+                            dedicated = manifest.is_file()
+                            if manifest.is_file():
+                                raw_sources = json.loads(
+                                    manifest.read_text(encoding="utf-8")
+                                )
+                                if isinstance(raw_sources, dict):
+                                    sources = {
+                                        str(provider): self._key(source_owner)
+                                        for provider, source_owner
+                                        in raw_sources.items()
+                                        if str(provider).strip()
+                                        and self._key(source_owner)
+                                    }
+                            if dedicated:
+                                persist_shared_native_auth(
+                                    db,
+                                    payload=payload,
+                                    shared_sources=sources,
+                                )
+                            else:
+                                row = db.query(MimoAuthStore).filter(
+                                    MimoAuthStore.owner == owner
+                                ).first()
+                                text = json.dumps(
+                                    payload,
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                                if row is None:
+                                    db.add(MimoAuthStore(
+                                        owner=owner,
+                                        payload=text,
+                                    ))
+                                else:
+                                    row.payload = text
+                            db.commit()
+                            logger.info(
+                                "recovered provider credentials from stopped "
+                                "agent generation for owner %r",
+                                owner,
+                            )
+                            break
+                        except (OSError, ValueError, TypeError):
+                            continue
+                owners_root = self._owners_root.resolve()
+                for manifest in self._owners_root.glob(
+                    "*/generations/*/shared-native-auth-sources.json"
+                ):
+                    try:
+                        resolved_manifest = manifest.resolve()
+                        if owners_root not in resolved_manifest.parents:
+                            continue
+                        auth_path = manifest.parent / "mimocode" / "data" / "auth.json"
+                        if (
+                            not auth_path.is_file()
+                            or auth_path.stat().st_size > 4 * 1024 * 1024
+                        ):
+                            continue
+                        raw_sources = json.loads(
+                            manifest.read_text(encoding="utf-8")
+                        )
+                        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+                        if not isinstance(raw_sources, dict) or not isinstance(payload, dict):
+                            continue
+                        file_at = auth_path.stat().st_mtime
+                        fresh_sources = {}
+                        for provider_id, source_owner in raw_sources.items():
+                            provider_id = str(provider_id or "").strip()
+                            source_owner = self._key(source_owner)
+                            if not provider_id or provider_id not in payload:
+                                continue
+                            row = db.query(MimoAuthStore).filter(
+                                MimoAuthStore.owner == source_owner
+                            ).first()
+                            updated = getattr(row, "updated_at", None) if row else None
+                            stored_at = (
+                                updated.replace(tzinfo=timezone.utc).timestamp()
+                                if updated is not None
+                                else 0.0
+                            )
+                            if file_at > stored_at:
+                                fresh_sources[provider_id] = source_owner
+                        if not fresh_sources:
+                            continue
+                        persist_shared_native_auth(
+                            db,
+                            payload=payload,
+                            shared_sources=fresh_sources,
+                        )
+                        db.commit()
+                        logger.info(
+                            "recovered provider credentials from stopped "
+                            "trusted-share generation",
+                        )
+                    except (OSError, ValueError, TypeError):
+                        continue
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("generation auth recovery skipped: %s", exc)
 
     async def _worker_crashed(self, worker, returncode=None) -> None:
         owner = self._key(getattr(worker, "_owner", ""))
         async with self._owner_lock(owner):
-            state = self._owner_state(owner)
+            state = self._states.get(owner)
+            if state is None:
+                return
             if state.active is worker:
                 state.active = None
                 state.status = "restarting"
                 state.last_failure = "IN_FLIGHT_INTERRUPTED"
                 self._workers.pop(owner, None)
+
+    async def _shared_worker_crashed(
+        self,
+        partition: str,
+        worker,
+        returncode=None,
+    ) -> None:
+        async with self._owner_lock(partition):
+            state = self._states.get(partition)
+            if state is None:
+                return
+            if state.active is worker:
+                state.active = None
+                state.status = "stopped"
+                state.last_failure = "IN_FLIGHT_INTERRUPTED"
+                self._share_workers.pop(partition, None)
 
     def worker_for_owner(self, owner: str | None) -> MimoSupervisor | None:
         key = self._key(owner) if self._auth_enabled else ""
@@ -1337,10 +2109,88 @@ class MimoSupervisorPool:
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
         return await (await self.for_owner(owner)).refresh_model_catalog()
 
-    async def negotiate_session(self, session_id: str, *, owner: str, cwd: str | None = None) -> dict:
-        return await (await self.for_owner(owner)).negotiate_session(
-            session_id, owner=owner, cwd=cwd
+    async def _session_control_worker(
+        self,
+        session_id: str,
+        *,
+        owner: str,
+    ) -> tuple[MimoSupervisor, AgentWorkerLease | None]:
+        """Route session controls through the same personal/share partition as turns."""
+        from core.database import Session as DbSession, SessionLocal
+        from src.model_shares import (
+            resolve_shared_model_access,
+            runtime_model_for_access,
+            share_id_from_endpoint,
         )
+
+        owner_key = self._key(owner)
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if row is None or share_id_from_endpoint(row.endpoint_id) is None:
+                return await self.for_owner(owner_key), None
+            if self._key(row.owner) != owner_key:
+                raise SupervisorAdmissionError(
+                    "SHARED_MODEL_REVOKED",
+                    "This shared model is no longer connected to your account",
+                    phase="routing",
+                    retryable=False,
+                    status=403,
+                )
+            access = resolve_shared_model_access(
+                db,
+                actor_owner=owner_key,
+                endpoint_id=row.endpoint_id,
+                model_id=row.model,
+            )
+            runtime_model = (
+                runtime_model_for_access(db, access)
+                if access is not None
+                else None
+            )
+        finally:
+            db.close()
+        if access is None or runtime_model is None:
+            raise SupervisorAdmissionError(
+                "SHARED_MODEL_REVOKED",
+                "This shared model is no longer connected to your account",
+                phase="routing",
+                retryable=False,
+                status=403,
+            )
+        provider_id, separator, model_id = runtime_model.partition("/")
+        if not separator:
+            raise SupervisorAdmissionError(
+                "SHARED_MODEL_SOURCE_UNAVAILABLE",
+                "The account behind this shared model is disconnected",
+                phase="routing",
+                retryable=False,
+                status=410,
+            )
+        lease = await self.admit_shared_agent(
+            access,
+            provider_id,
+            model_id,
+        )
+        return lease.worker, lease
+
+    async def negotiate_session(self, session_id: str, *, owner: str, cwd: str | None = None) -> dict:
+        worker, lease = await self._session_control_worker(
+            session_id,
+            owner=owner,
+        )
+        successful = False
+        try:
+            result = await worker.negotiate_session(
+                session_id,
+                owner=owner,
+                cwd=cwd,
+            )
+            successful = True
+            return result
+        finally:
+            if lease is not None:
+                await lease.release(successful_terminal=successful)
 
     async def set_session_config(
         self,
@@ -1351,9 +2201,24 @@ class MimoSupervisorPool:
         owner: str,
         cwd: str | None = None,
     ) -> dict:
-        return await (await self.for_owner(owner)).set_session_config(
-            session_id, config_id, value, owner=owner, cwd=cwd
+        worker, lease = await self._session_control_worker(
+            session_id,
+            owner=owner,
         )
+        successful = False
+        try:
+            result = await worker.set_session_config(
+                session_id,
+                config_id,
+                value,
+                owner=owner,
+                cwd=cwd,
+            )
+            successful = True
+            return result
+        finally:
+            if lease is not None:
+                await lease.release(successful_terminal=successful)
 
     async def delete_session(
         self,
@@ -1362,18 +2227,36 @@ class MimoSupervisorPool:
         owner: str | None = None,
         mimo_session_id: str | None = None,
     ) -> None:
-        worker = self.worker_for_owner(owner) if owner is not None else None
-        if worker is None:
-            for candidate in self._workers.values():
-                if (
-                    mimo_session_id
+        if self._auth_enabled and owner is None:
+            raise RuntimeError(
+                "authenticated Open Clank agent session deletion requires an owner"
+            )
+        owner_key = self._key(owner)
+        candidates = [
+            worker
+            for worker in [
+                *self._workers.values(),
+                *self._share_workers.values(),
+            ]
+            if not self._auth_enabled
+            or self._key(getattr(worker, "_owner", "")) == owner_key
+        ]
+        worker = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.bridge
+                and (
+                    odysseus_session in candidate.bridge.mapped_sessions()
                     or (
-                        candidate.bridge
-                        and odysseus_session in candidate.bridge.mapped_sessions()
+                        mimo_session_id is not None
+                        and mimo_session_id
+                        in candidate.bridge.mapped_sessions().values()
                     )
-                ):
-                    worker = candidate
-                    break
+                )
+            ),
+            None,
+        )
         if worker is None:
             raise RuntimeError("owner Open Clank agent runtime is unavailable")
         await worker.delete_session(
@@ -1381,22 +2264,65 @@ class MimoSupervisorPool:
         )
 
     def mapped_sessions(self, owner: str | None = None) -> dict[str, str]:
-        worker = self.worker_for_owner(owner) if owner is not None else None
-        if worker and worker.bridge:
-            return worker.bridge.mapped_sessions()
+        if self._auth_enabled and owner is None:
+            return {}
+        owner_key = self._key(owner)
         result: dict[str, str] = {}
-        for candidate in self._workers.values():
-            if candidate.bridge:
+        for candidate in [
+            *self._workers.values(),
+            *self._share_workers.values(),
+        ]:
+            if (
+                candidate.bridge
+                and (
+                    not self._auth_enabled
+                    or self._key(getattr(candidate, "_owner", "")) == owner_key
+                )
+            ):
                 result.update(candidate.bridge.mapped_sessions())
         return result
 
-    def permission_handler_for(self, owner: str | None):
-        worker = self.worker_for_owner(owner)
-        return worker.permission_handler if worker else None
+    def permission_handler_for(
+        self,
+        owner: str | None,
+        request_id: str | None = None,
+    ):
+        owner_key = self._key(owner)
+        candidates = [
+            worker
+            for worker in [
+                *self._workers.values(),
+                *self._share_workers.values(),
+            ]
+            if self._key(getattr(worker, "_owner", "")) == owner_key
+        ]
+        if request_id:
+            for worker in candidates:
+                handler = worker.permission_handler
+                if handler and request_id in handler.pending_requests:
+                    return handler
+        return candidates[0].permission_handler if candidates else None
 
-    def question_handler_for(self, owner: str | None):
-        worker = self.worker_for_owner(owner)
-        return worker.question_handler if worker else None
+    def question_handler_for(
+        self,
+        owner: str | None,
+        request_id: str | None = None,
+    ):
+        owner_key = self._key(owner)
+        candidates = [
+            worker
+            for worker in [
+                *self._workers.values(),
+                *self._share_workers.values(),
+            ]
+            if self._key(getattr(worker, "_owner", "")) == owner_key
+        ]
+        if request_id:
+            for worker in candidates:
+                handler = worker.question_handler
+                if handler and request_id in handler.pending_requests:
+                    return handler
+        return candidates[0].question_handler if candidates else None
 
     def grant_store_for(self, owner: str | None):
         return self._grant_store
@@ -1432,12 +2358,94 @@ class MimoSupervisorPool:
             if worker is not None
         }
         self._workers.clear()
+        self._share_workers.clear()
         for state in self._states.values():
             state.active = None
             state.status = "stopped"
         for task in list(self._background_tasks):
             task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
         await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
+
+    async def _quiesce_owner_locked(self, owner: str) -> None:
+        """Stop every worker/task reachable from one owner lifecycle.
+
+        The caller holds the owner lock. That lock also fences a candidate
+        campaign because `_ensure_worker` owns it from candidate creation
+        through publication.
+        """
+        state = self._states.get(owner)
+        workers = {
+            worker
+            for worker in [
+                self._workers.pop(owner, None),
+                self._share_workers.pop(owner, None),
+                state.active if state is not None else None,
+                *(state.in_flight.keys() if state is not None else ()),
+            ]
+            if worker is not None
+        }
+        tasks = [
+            task
+            for task, task_owner in list(self._background_task_owners.items())
+            if task_owner == owner and not task.done()
+        ]
+        if state is not None:
+            state.active = None
+            state.status = "stopping"
+            for event in state.drain_events.values():
+                event.set()
+            state.in_flight.clear()
+            state.drain_events.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if workers:
+            await asyncio.gather(
+                *(worker.stop() for worker in workers),
+                return_exceptions=True,
+            )
+        self._states.pop(owner, None)
+
+    def _related_share_partitions(self, owner: str) -> list[str]:
+        """Return live trusted-share partitions owned by or sourced from owner."""
+        prefix = f"@share:{owner}:"
+        partitions = {
+            partition
+            for partition in (
+                set(self._states)
+                | set(self._share_workers)
+                | set(self._background_task_owners.values())
+            )
+            if partition.startswith(prefix)
+        }
+        partitions.update(
+            partition
+            for partition, state in self._states.items()
+            if partition.startswith("@share:")
+            and state.credential_owner == owner
+        )
+        return sorted(partitions)
+
+    def _begin_owner_lifecycle(self, owner: str) -> list[str]:
+        keys = [owner, *self._related_share_partitions(owner)]
+        for key in keys:
+            self._owner_lifecycle_blocked.add(key)
+            self._owner_lifecycle_epochs[key] = (
+                self._owner_lifecycle_epoch(key) + 1
+            )
+        return keys
+
+    async def _quiesce_owner_lifecycle(self, keys: list[str]) -> None:
+        for key in keys:
+            async with self._owner_lock(key):
+                await self._quiesce_owner_locked(key)
+            if key.startswith("@share:"):
+                path = self._runtime_home(key)
+                if path.exists():
+                    shutil.rmtree(path)
 
     async def refresh_endpoint_projection(self) -> None:
         """Eager convergence hint; admission-time reconciliation is authoritative."""
@@ -1452,58 +2460,101 @@ class MimoSupervisorPool:
             if isinstance(result, BaseException):
                 logger.warning("Open Clank agent reprojection pending for owner %r: %s", owner, result)
 
+    async def revoke_shared_access(
+        self,
+        actor_owner: str,
+        share_id: str,
+    ) -> None:
+        """Stop and remove one recipient-owned trusted-share partition."""
+        partition = self._share_partition(self._key(actor_owner), share_id)
+        self._owner_lifecycle_blocked.add(partition)
+        self._owner_lifecycle_epochs[partition] = (
+            self._owner_lifecycle_epoch(partition) + 1
+        )
+        try:
+            async with self._owner_lock(partition):
+                await self._quiesce_owner_locked(partition)
+            path = self._runtime_home(partition)
+            if path.exists():
+                shutil.rmtree(path)
+        finally:
+            self._owner_lifecycle_blocked.discard(partition)
+
     async def rename_owner(self, old_owner: str, new_owner: str) -> None:
         old_key = self._key(old_owner)
         new_key = self._key(new_owner)
-        worker = self._workers.pop(old_key, None)
-        if worker:
-            await worker.stop()
-        self._states.pop(old_key, None)
-        self._locks.pop(old_key, None)
-        self._grant_store.rename_owner(old_key, new_key)
-        old_path = self._runtime_home(old_key)
-        new_path = self._runtime_home(new_key)
-        if old_path.exists():
-            if new_path.exists():
-                raise RuntimeError("target Open Clank agent owner partition already exists")
-            new_path.parent.mkdir(parents=True, exist_ok=True)
-            old_path.rename(new_path)
-        if self._initial_owner == old_key:
-            self._initial_owner = new_key
-        if self._host_provider_owner == old_key:
-            self._host_provider_owner = new_key
+        if old_key == new_key:
+            return
+        lifecycle_keys = self._begin_owner_lifecycle(old_key)
         try:
-            from core.database import SessionLocal, MimoAuthStore
-            db = SessionLocal()
-            try:
-                row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == old_key).first()
-                if row is not None:
-                    db.query(MimoAuthStore).filter(MimoAuthStore.owner == new_key).delete()
-                    row.owner = new_key
-                    db.commit()
-            finally:
-                db.close()
-        except Exception as exc:
-            logger.warning("provider credential rename failed: %s", exc)
+            await self._quiesce_owner_lifecycle(lifecycle_keys)
+            async with self._owner_lock(old_key):
+                self._grant_store.rename_owner(old_key, new_key)
+                old_path = self._runtime_home(old_key)
+                new_path = self._runtime_home(new_key)
+                if old_path.exists():
+                    if new_path.exists():
+                        raise RuntimeError("target Open Clank agent owner partition already exists")
+                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_path.rename(new_path)
+                if self._initial_owner == old_key:
+                    self._initial_owner = new_key
+                if self._host_provider_owner == old_key:
+                    self._host_provider_owner = new_key
+                try:
+                    from core.database import MimoAuthStore, MimoProjectionState, SessionLocal
+                    db = SessionLocal()
+                    try:
+                        row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == old_key).first()
+                        if row is not None:
+                            db.query(MimoAuthStore).filter(MimoAuthStore.owner == new_key).delete()
+                            row.owner = new_key
+                        projection = (
+                            db.query(MimoProjectionState)
+                            .filter(MimoProjectionState.owner_id == old_key)
+                            .first()
+                        )
+                        if projection is not None:
+                            (
+                                db.query(MimoProjectionState)
+                                .filter(MimoProjectionState.owner_id == new_key)
+                                .delete()
+                            )
+                            projection.owner_id = new_key
+                        db.commit()
+                    finally:
+                        db.close()
+                except Exception as exc:
+                    logger.warning("provider credential rename failed: %s", exc)
+        finally:
+            for key in lifecycle_keys:
+                self._owner_lifecycle_blocked.discard(key)
 
     async def purge_owner(self, owner: str) -> None:
         key = self._key(owner)
-        worker = self._workers.pop(key, None)
-        if worker:
-            await worker.stop()
-        self._states.pop(key, None)
-        self._locks.pop(key, None)
-        self._grant_store.purge_owner(key)
-        path = self._runtime_home(key)
-        if path.exists():
-            shutil.rmtree(path)
+        lifecycle_keys = self._begin_owner_lifecycle(key)
         try:
-            from core.database import SessionLocal, MimoAuthStore
-            db = SessionLocal()
-            try:
-                db.query(MimoAuthStore).filter(MimoAuthStore.owner == key).delete()
-                db.commit()
-            finally:
-                db.close()
-        except Exception as exc:
-            logger.warning("provider credential purge failed: %s", exc)
+            await self._quiesce_owner_lifecycle(lifecycle_keys)
+            async with self._owner_lock(key):
+                self._grant_store.purge_owner(key)
+                path = self._runtime_home(key)
+                if path.exists():
+                    shutil.rmtree(path)
+                try:
+                    from core.database import MimoAuthStore, MimoProjectionState, SessionLocal
+                    db = SessionLocal()
+                    try:
+                        db.query(MimoAuthStore).filter(MimoAuthStore.owner == key).delete()
+                        (
+                            db.query(MimoProjectionState)
+                            .filter(MimoProjectionState.owner_id == key)
+                            .delete()
+                        )
+                        db.commit()
+                    finally:
+                        db.close()
+                except Exception as exc:
+                    logger.warning("provider credential purge failed: %s", exc)
+        finally:
+            for lifecycle_key in lifecycle_keys:
+                self._owner_lifecycle_blocked.discard(lifecycle_key)

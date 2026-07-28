@@ -1493,7 +1493,7 @@ function _openDetail(img) {
         uiModule.showError && uiModule.showError('Pick a chat model first');
         return;
       }
-      sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+      sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
       closeGallery();
       const res = await fetch(img.url, { credentials: 'same-origin' });
       if (!res.ok) throw new Error('image fetch ' + res.status);

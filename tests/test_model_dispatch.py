@@ -302,10 +302,13 @@ def test_mimo_tool_policy_applies_chat_incognito_and_aliases():
 
     # Tool-free behavior is structural: auxiliary turns and a user's explicit
     # Tools-off preference both get a full deny.
-    assert _mimo_tool_policy({"mode": "chat"}) == {}
-    assert _mimo_tool_policy({"incognito": True}) == {}
+    assert _mimo_tool_policy({"mode": "chat"}) == {"frankenmemory_*": False}
+    assert _mimo_tool_policy({"incognito": True}) == {"frankenmemory_*": False}
     assert _mimo_tool_policy({"lane": "auxiliary", "incognito": True}) == {"*": False}
-    assert _mimo_tool_policy({"lane": "agent", "allowed_tools": []}) == {"*": False}
+    assert _mimo_tool_policy({"lane": "agent", "allowed_tools": []}) == {
+        "*": False,
+        "frankenmemory_*": False,
+    }
     policy = _mimo_tool_policy({
         "mode": "agent",
         "disabled_tools": ["write_file", "manage_memory"],
@@ -518,14 +521,27 @@ def test_host_provider_owner_requires_unique_or_explicit_admin():
     assert _select_host_provider_owner(["Alice"], "Mallory") == ""
 
 
-def test_mimo_child_environment_strips_provider_credentials(monkeypatch):
+def test_mimo_child_environment_strips_provider_credentials(monkeypatch, tmp_path):
     from src.openclank.mimo_supervisor import _mimo_child_environment
 
+    db_path = str(tmp_path / "frankenmemory.db")
     monkeypatch.setenv("XIAOMI_API_KEY", "xiaomi-sentinel")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-sentinel")
     monkeypatch.setenv("FM_TEST_DEEPSEEK_API_KEY", "duplicate-sentinel")
     monkeypatch.setenv("MIMOCODE_PROVIDER_AUTH_FD", "99")
     monkeypatch.setenv("SAFE_SETTING", "kept")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/host/aws")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/host/google.json")
+    monkeypatch.setenv("KUBECONFIG", "/host/kube")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setenv("FM_DB_PATH", db_path)
+    monkeypatch.setenv("FM_DB_ID", "db-test")
+    monkeypatch.setenv("FM_MCP_COMMAND", "/opt/fm-mcp")
+    monkeypatch.setenv("FM_EMBED_API_BASE", "https://embed.example/v1")
+    monkeypatch.setenv("FM_EMBED_API_KEY", "embed-secret")
+    monkeypatch.setenv("FM_EMBED_MODEL", "embedding-model")
+    monkeypatch.setenv("FM_EMBED_DIMENSIONS", "3072")
+    monkeypatch.setenv("FM_EMBED_TIMEOUT_MS", "45000")
 
     child_env = _mimo_child_environment()
 
@@ -533,7 +549,33 @@ def test_mimo_child_environment_strips_provider_credentials(monkeypatch):
     assert "DEEPSEEK_API_KEY" not in child_env
     assert "FM_TEST_DEEPSEEK_API_KEY" not in child_env
     assert "MIMOCODE_PROVIDER_AUTH_FD" not in child_env
-    assert child_env["SAFE_SETTING"] == "kept"
+    assert "AWS_SHARED_CREDENTIALS_FILE" not in child_env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in child_env
+    assert "KUBECONFIG" not in child_env
+    assert "SAFE_SETTING" not in child_env
+    assert child_env["PATH"] == "/safe/bin"
+    assert {
+        name: child_env[name]
+        for name in (
+            "FM_DB_PATH",
+            "FM_DB_ID",
+            "FM_MCP_COMMAND",
+            "FM_EMBED_API_BASE",
+            "FM_EMBED_API_KEY",
+            "FM_EMBED_MODEL",
+            "FM_EMBED_DIMENSIONS",
+            "FM_EMBED_TIMEOUT_MS",
+        )
+    } == {
+        "FM_DB_PATH": db_path,
+        "FM_DB_ID": "db-test",
+        "FM_MCP_COMMAND": "/opt/fm-mcp",
+        "FM_EMBED_API_BASE": "https://embed.example/v1",
+        "FM_EMBED_API_KEY": "embed-secret",
+        "FM_EMBED_MODEL": "embedding-model",
+        "FM_EMBED_DIMENSIONS": "3072",
+        "FM_EMBED_TIMEOUT_MS": "45000",
+    }
 
 
 def test_lifetools_descriptor_uses_running_python():
@@ -908,9 +950,9 @@ class _HandshakeClient:
 
     async def new_session(self, _cwd, mcp_servers=None):
         names = {server["name"] for server in mcp_servers}
-        assert len(names) == 2
+        assert len(names) == 1
         assert any(name.startswith("lifetools_") for name in names)
-        assert any(name.startswith("frankenmemory_") for name in names)
+        assert not any(name.startswith("frankenmemory_") for name in names)
         return {
             "sessionId": "ses-control-plane",
             "models": {

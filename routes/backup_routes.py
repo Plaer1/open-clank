@@ -43,10 +43,21 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
 
     @router.get("/api/export")
     async def export_data(request: Request):
-        """Export all user data as a downloadable JSON file."""
+        """Export settings plus the owner's curated memories as JSON.
+
+        Raw turns, pending/rejected candidates, quarantine, and independent
+        graph overlays are engine data and are not represented by this
+        portable account export.
+        """
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("OPEN_CLANK_MEMORY_OWNER") or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        from src.memory_scope import memory_owner as resolve_memory_owner
+
+        memory_owner = resolve_memory_owner(
+            user
+            or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
+            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
+        )
 
         # Memories (filtered by owner when auth is enabled)
         memories = []
@@ -60,6 +71,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                 "text": record.text,
                 "category": record.category,
                 "source": record.source,
+                "source_type": record.source_type,
                 "owner": record.owner,
                 "session_id": record.session_id,
                 "pinned": record.pinned,
@@ -103,6 +115,8 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             "manifest": {
                 "owner": memory_owner,
                 "memory_authority": memory_authority,
+                "memory_tiers": ["curated"],
+                "memory_graph_included": False,
                 "memory_count": len(memories),
                 "memory_sha256": hashlib.sha256(
                     json.dumps(memories, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -129,7 +143,13 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         """Import user data from a previously exported JSON file. Merges with existing data."""
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("OPEN_CLANK_MEMORY_OWNER") or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        from src.memory_scope import memory_owner as resolve_memory_owner
+
+        memory_owner = resolve_memory_owner(
+            user
+            or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
+            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
+        )
         try:
             body = await request.json()
         except Exception:
@@ -177,6 +197,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     session_id=mem.get("session_id"),
                     category=mem.get("category") or "fact",
                     source=mem.get("source") or "backup_restore",
+                    source_type=mem.get("source_type"),
                     metadata=metadata,
                 )
                 if mem.get("pinned"):

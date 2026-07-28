@@ -109,3 +109,43 @@ def test_memory_js_wires_graph_and_digest():
     assert "digest-preview" in source
     for external in ("d3js.org", "cdn.jsdelivr", "unpkg.com"):
         assert external not in source, "canvas must stay self-contained (T4)"
+
+
+def test_graph_load_resets_stale_view_and_renders_an_honest_empty_state():
+    source = (_REPO / "static" / "js" / "memory.js").read_text()
+    load = source[source.index("export async function loadMemoryGraph"):source.index(
+        "function _relayoutGraph"
+    )]
+    draw = source[source.index("function _drawGraph"):source.index(
+        "function _toGraphCoords"
+    )]
+    detail = source[source.index("function _renderGraphDetail"):source.index(
+        "function _renderGraphTags"
+    )]
+
+    assert "_resetGraphViewport();" in load
+    assert "graphState.scale = 1;" in load
+    assert "graphState.offsetX = 0;" in load
+    assert "graphState.offsetY = 0;" in load
+    assert "if (!graphState.nodes.length)" in draw
+    assert "No saved memories here yet" in draw
+    assert "Save or approve a memory and it will appear here." in draw
+    assert "No saved memories are available in this scope yet." in detail
+
+
+def test_digest_cluster_filter_is_applied_after_the_async_overview_load():
+    source = (_REPO / "static" / "js" / "memory.js").read_text()
+    load = source[source.index("export async function loadMemoryGraph"):source.index(
+        "function _resetGraphViewport"
+    )]
+    digest = source[source.index("export async function loadDigestPreview"):source.index(
+        "// ---- Details drawer"
+    )]
+    tabs_start = source.index("// Memory modal tabs")
+    tabs = source[tabs_start:source.index("const sortSelect", tabs_start)]
+
+    assert "graphState.tagFilter = typeof tagFilter" in load
+    assert "graphState.nextTagFilter = cluster.label;" in digest
+    assert "graphState.tagFilter = cluster.label;" not in digest
+    assert "const tagFilter = graphState.nextTagFilter;" in tabs
+    assert "loadMemoryGraph({ tagFilter });" in tabs

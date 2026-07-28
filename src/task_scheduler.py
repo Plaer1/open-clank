@@ -1973,8 +1973,13 @@ class TaskScheduler:
         endpoint_id = str(getattr(task, "endpoint_id", "") or "").strip()
         if not endpoint_id:
             raise RuntimeError("UNREGISTERED_ENDPOINT: scheduled task has no endpoint_id")
+        from routes.model_routes import is_mimo_connection_id
+        from src.model_shares import share_id_from_endpoint
+
+        native_connection = is_mimo_connection_id(endpoint_id)
+        shared_connection = share_id_from_endpoint(endpoint_id) is not None
         headers = {}
-        if endpoint_id != "mimo":
+        if not native_connection and not shared_connection:
             from core.database import SessionLocal, ModelEndpoint
             from src.auth_helpers import owner_filter
             from src.endpoint_resolver import build_chat_url, build_headers, resolve_endpoint_runtime
@@ -2024,7 +2029,13 @@ class TaskScheduler:
             model,
             headers,
             endpoint_id=endpoint_id,
-            provider_id=("mimo" if endpoint_id == "mimo" else f"ody-{endpoint_id}"),
+            provider_id=(
+                "mimo"
+                if native_connection
+                else "shared"
+                if shared_connection
+                else f"ody-{endpoint_id}"
+            ),
             lifecycle="ephemeral",
         )
         async for event_str in stream_agent_target(
@@ -2133,7 +2144,8 @@ class TaskScheduler:
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
 
-        if endpoint_id == "mimo":
+        from routes.model_routes import is_mimo_connection_id
+        if is_mimo_connection_id(endpoint_id):
             endpoint_url = "mimo://acp"
         else:
             from core.database import ModelEndpoint

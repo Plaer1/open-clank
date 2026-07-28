@@ -11,6 +11,28 @@ from core.database import MimoProjectionState, SessionLocal, utcnow_naive
 from src.secret_storage import keyed_digest
 
 
+_RUNTIME_TO_PUBLIC_MODEL = {
+    # ``mimo`` is the bundled runtime's private ID for Xiaomi's anonymous
+    # MiMo Auto route.  It is not a second provider or a second model family.
+    "mimo/mimo-auto": "xiaomi/mimo-auto",
+}
+_PUBLIC_TO_RUNTIME_MODEL = {
+    public: runtime for runtime, public in _RUNTIME_TO_PUBLIC_MODEL.items()
+}
+
+
+def public_native_model_id(model_id: str) -> str:
+    """Translate private bundled-runtime IDs to Open Clank catalogue IDs."""
+    value = str(model_id or "").strip()
+    return _RUNTIME_TO_PUBLIC_MODEL.get(value, value)
+
+
+def runtime_native_model_id(model_id: str) -> str:
+    """Translate an Open Clank catalogue ID for execution by the runtime."""
+    value = str(model_id or "").strip()
+    return _PUBLIC_TO_RUNTIME_MODEL.get(value, value)
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -67,6 +89,10 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
         providers.setdefault(provider_id, provider)
     for provider_id, secret in secret_values.items():
         credentials.setdefault(provider_id, secret)
+    # The bundled runtime calls Xiaomi's anonymous MiMo Auto route
+    # ``mimo/mimo-auto`` internally.  Keep that private identity at the
+    # execution boundary; Open Clank exposes it as ``xiaomi/mimo-auto``.
+    providers.setdefault("mimo", {"models": {"mimo-auto": {}}})
 
     digests = {
         provider_id: keyed_digest(secret, context=f"mimo-projection:{owner}:{provider_id}")
@@ -100,6 +126,83 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
         fingerprint=fingerprint,
         credential_digests=digests,
         source_endpoints=sources,
+        native_auth_digest=native_auth_digest,
+        credentials=credentials,
+    )
+
+
+def build_shared_projection_snapshot(access) -> ProjectionSnapshot:
+    """Build one exact trusted route for a recipient-owned worker partition."""
+    from src.model_shares import native_provider_id, source_native_auth
+    from src.openclank.mimo_supervisor import (
+        _endpoint_registry_providers,
+        _pick_small_model,
+    )
+
+    providers: dict[str, dict] = {}
+    credentials: dict[str, str] = {}
+    native_auth_digest = None
+    source_endpoints: dict[str, str] = {}
+    db = SessionLocal()
+    try:
+        if access.source_kind == "endpoint":
+            config, credentials = _endpoint_registry_providers(
+                access.actor_owner,
+                shared_access=access,
+            )
+            providers = dict(config.get("provider") or {})
+            source_endpoints = {
+                provider_id: access.source_id
+                for provider_id in providers
+            }
+        elif access.source_kind == "native":
+            auth = source_native_auth(db, access)
+            if auth is not None:
+                provider_id, credential = auth
+                native_auth_digest = keyed_digest(
+                    _canonical({provider_id: credential}),
+                    context=(
+                        f"open-clank-shared-native:{access.share_id}:"
+                        f"{access.credential_owner}"
+                    ),
+                )
+        else:
+            raise ValueError("Unsupported shared model source")
+    finally:
+        db.close()
+
+    digests = {
+        provider_id: keyed_digest(
+            secret,
+            context=f"open-clank-shared-endpoint:{access.share_id}:{provider_id}",
+        )
+        for provider_id, secret in credentials.items()
+        if provider_id in providers
+    }
+    runtime_model = runtime_native_model_id(access.model_id)
+    material = {
+        "recipient": access.actor_owner,
+        "credential_owner": access.credential_owner,
+        "share_id": access.share_id,
+        "revision": access.revision,
+        "model": runtime_model,
+        "providers": providers,
+        "credential_digests": digests,
+        "native_auth_digest": native_auth_digest,
+    }
+    return ProjectionSnapshot(
+        owner=access.actor_owner,
+        providers=providers,
+        small_model=(
+            _pick_small_model(providers)
+            if providers
+            else runtime_model
+        ),
+        fingerprint=hashlib.sha256(
+            _canonical(material).encode("utf-8")
+        ).hexdigest(),
+        credential_digests=digests,
+        source_endpoints=source_endpoints,
         native_auth_digest=native_auth_digest,
         credentials=credentials,
     )

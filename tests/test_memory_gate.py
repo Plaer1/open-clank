@@ -11,6 +11,9 @@ Exercises the three-mode policy gate (off/automatic/manual) across:
 No private memory text is printed. Uses synthetic fixtures only.
 """
 
+import ast
+from pathlib import Path
+
 import pytest
 from src.memory_gate import (
     capture_allowed,
@@ -231,16 +234,18 @@ class TestManageMemoryGateIntegration:
     """Verify the gate is wired into do_manage_memory's add action."""
 
     @pytest.mark.asyncio
-    async def test_add_refused_in_manual_mode(self):
-        """In manual mode, manage_memory add returns an error."""
-        from src.ai_interaction import do_manage_memory, set_memory_manager
-        from unittest.mock import MagicMock
+    async def test_add_is_staged_in_manual_mode(self, monkeypatch):
+        """In manual mode, Agent writes become review candidates."""
+        import src.ai_interaction as ai
+        from src.ai_interaction import do_manage_memory
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
 
         # Wire up a stub provider so the function doesn't bail early
         provider = MagicMock()
         provider.provider_id = "frankenmemory"
-        provider.list_memories = MagicMock(return_value=[])
-        set_memory_manager(MagicMock(), provider=provider)
+        provider.remember = AsyncMock(return_value=SimpleNamespace(id="candidate_review"))
+        monkeypatch.setattr(ai, "_memory_provider", provider)
 
         # Patch prefs to return manual mode
         import routes.prefs_routes as prefs_mod
@@ -248,19 +253,21 @@ class TestManageMemoryGateIntegration:
         prefs_mod._load_for_user = lambda user: {PREF_KEY: "manual"}
         try:
             result = await do_manage_memory("add\ntest memory", owner="alice")
-            assert "error" in result
-            assert "manual" in result["error"].lower()
+            assert result["pending_review"] is True
+            assert result["candidate_id"] == "candidate_review"
+            assert provider.remember.await_args.kwargs["capture_mode"] == "review_only"
         finally:
             prefs_mod._load_for_user = original
 
     @pytest.mark.asyncio
-    async def test_add_refused_in_off_mode(self):
-        from src.ai_interaction import do_manage_memory, set_memory_manager
+    async def test_add_refused_in_off_mode(self, monkeypatch):
+        import src.ai_interaction as ai
+        from src.ai_interaction import do_manage_memory
         from unittest.mock import MagicMock
 
         provider = MagicMock()
         provider.provider_id = "frankenmemory"
-        set_memory_manager(MagicMock(), provider=provider)
+        monkeypatch.setattr(ai, "_memory_provider", provider)
 
         import routes.prefs_routes as prefs_mod
         original = prefs_mod._load_for_user
@@ -271,6 +278,134 @@ class TestManageMemoryGateIntegration:
             assert "off" in result["error"].lower()
         finally:
             prefs_mod._load_for_user = original
+
+
+class TestInlineMemoryGateIntegration:
+    @staticmethod
+    def _handler(provider):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from src.chat_handler import ChatHandler
+
+        handler = ChatHandler.__new__(ChatHandler)
+        handler.memory_manager = MagicMock()
+        handler.memory_manager.process_inline_memory_command.return_value = (
+            True,
+            "the answer is synthetic",
+        )
+        handler.memory_manager.find_duplicates.return_value = []
+        handler.chat_processor = SimpleNamespace(memory_provider=provider)
+        handler.session_manager = MagicMock()
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_manual_inline_remember_enters_review(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import routes.prefs_routes as prefs_mod
+        import src.database as database
+
+        provider = MagicMock()
+        provider.list_page = AsyncMock(return_value=([], None))
+        provider.remember = AsyncMock(return_value=SimpleNamespace(id="candidate_inline"))
+        handler = self._handler(provider)
+        session = SimpleNamespace(id="session-1", add_message=MagicMock())
+
+        monkeypatch.setattr(
+            prefs_mod,
+            "_load_for_user",
+            lambda _owner: {PREF_KEY: "manual"},
+        )
+        monkeypatch.setattr(database, "update_session_last_accessed", lambda _sid: None)
+
+        response = await handler.handle_memory_command(
+            session,
+            "remember: the answer is synthetic",
+            owner="alice",
+        )
+
+        assert response == "Sent to memory review: the answer is synthetic"
+        assert provider.remember.await_args.kwargs["capture_mode"] == "review_only"
+
+    @pytest.mark.asyncio
+    async def test_off_inline_remember_does_not_touch_provider(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import routes.prefs_routes as prefs_mod
+
+        provider = MagicMock()
+        provider.list_page = AsyncMock(return_value=([], None))
+        provider.remember = AsyncMock()
+        handler = self._handler(provider)
+        session = SimpleNamespace(id="session-1", add_message=MagicMock())
+
+        monkeypatch.setattr(
+            prefs_mod,
+            "_load_for_user",
+            lambda _owner: {PREF_KEY: "off"},
+        )
+
+        response = await handler.handle_memory_command(
+            session,
+            "remember: the answer is synthetic",
+            owner="alice",
+        )
+
+        assert "off" in response.lower()
+        provider.remember.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_memory_inline_remember_rejects_before_provider_access(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import routes.prefs_routes as prefs_mod
+
+        class ForbiddenChatProcessor:
+            @property
+            def memory_provider(self):
+                raise AssertionError("memory provider must not be accessed")
+
+        handler = self._handler(None)
+        handler.chat_processor = ForbiddenChatProcessor()
+        session = SimpleNamespace(id="session-1", add_message=MagicMock())
+        monkeypatch.setattr(
+            prefs_mod,
+            "_load_for_user",
+            lambda _owner: (_ for _ in ()).throw(
+                AssertionError("memory preferences must not be loaded")
+            ),
+        )
+
+        response = await handler.handle_memory_command(
+            session,
+            "remember: the answer is synthetic",
+            owner="alice",
+            no_memory=True,
+        )
+
+        assert response == "Memory is disabled for this turn."
+        session.add_message.assert_not_called()
+
+    def test_chat_route_propagates_turn_no_memory_to_inline_handler(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
+        ).read_text(encoding="utf-8")
+        call = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "handle_memory_command"
+        )
+        keyword = next(item for item in call.keywords if item.arg == "no_memory")
+        assert isinstance(keyword.value, ast.Name)
+        assert keyword.value.id == "no_memory"
 
 
 if __name__ == "__main__":
