@@ -31,7 +31,16 @@ right sub-guide.
 
 ## Quick start
 
-Install once:
+All scripts include [PEP 723](https://peps.python.org/pep-0723/) inline metadata, so
+`uv run` resolves dependencies automatically:
+
+```bash
+uv run scripts/audit.py report.docx           # opens cleanly?
+uv run scripts/extract_text.py report.docx    # what does it actually say?
+uv run scripts/render_pdf.py report.docx      # visual sanity check
+```
+
+If you don't use `uv`, install dependencies once:
 
 ```bash
 python3 -m pip install --upgrade python-docx lxml
@@ -53,9 +62,9 @@ doc.save("report.docx")
 Run the standard QA loop:
 
 ```bash
-python scripts/audit.py report.docx           # opens cleanly?
-python scripts/extract_text.py report.docx            # what does it actually say?
-python scripts/render_pdf.py report.docx             # visual sanity check
+uv run scripts/audit.py report.docx           # opens cleanly?
+uv run scripts/extract_text.py report.docx            # what does it actually say?
+uv run scripts/render_pdf.py report.docx             # visual sanity check
 ```
 
 ## Design goals

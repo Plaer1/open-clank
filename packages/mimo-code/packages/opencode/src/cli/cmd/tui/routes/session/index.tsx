@@ -42,6 +42,7 @@ import type { GlobTool } from "@/tool/glob"
 import type { GrepTool } from "@/tool/grep"
 import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
+import type { ViewImageTool } from "@/tool/view-image"
 import type { WebFetchTool } from "@/tool/webfetch"
 import type { CodeSearchTool } from "@/tool/codesearch"
 import type { WebSearchTool } from "@/tool/websearch"
@@ -50,6 +51,7 @@ import type { TaskTool } from "@/tool/task"
 import type { QuestionTool } from "@/tool/question"
 import type { SkillTool } from "@/tool/skill"
 import type { WorkflowTool } from "@/tool/workflow"
+import type { ToolScriptTool } from "@/tool/tool-script"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "@tui/context/sdk"
 import { useCommandDialog } from "@tui/component/dialog-command"
@@ -69,7 +71,9 @@ import { Sidebar } from "./sidebar"
 import { WorkflowTree } from "@tui/component/workflow-tree"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { DialogSubagent } from "./dialog-subagent.tsx"
+import { isActorToolRunning } from "./actor-tool-state"
 import { Flag } from "@/flag/flag"
+import { parseActorNotification } from "@/inbox/render"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
 import * as Clipboard from "../../util/clipboard"
@@ -95,6 +99,13 @@ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { DialogTokenPlan } from "../../component/dialog-token-plan"
 import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
+import * as Collapse from "../../util/collapse"
+import {
+  createFreeApiSunsetSignal,
+  freeApiModelNameKey,
+  isFreeApiModel,
+  shouldBlockFreeApiRequest,
+} from "@tui/util/free-api-sunset"
 
 addDefaultParsers(parsers.parsers)
 
@@ -118,6 +129,7 @@ const context = createContext<{
   providers: () => ReadonlyMap<string, Provider>
   sync: ReturnType<typeof useSync>
   tui: ReturnType<typeof useTuiConfig>
+  freeApiSunset: () => boolean
 }>()
 
 function use() {
@@ -156,6 +168,7 @@ export function Session() {
   const kv = useKV()
   const { theme } = useTheme()
   const promptRef = usePromptRef()
+  const freeApiSunset = createFreeApiSunsetSignal()
   const session = createMemo(() => sync.session.get(route.sessionID))
   const currentAgentID = useCurrentAgentID()
   const actors = createMemo(() => sync.data.actor[route.sessionID] ?? [])
@@ -205,7 +218,7 @@ export function Session() {
     if (evt.type !== "scroll") return
     setScrolling(true)
     if (scrollHideTimer) clearTimeout(scrollHideTimer)
-    scrollHideTimer = setTimeout(() => setScrolling(false), 1000)
+    scrollHideTimer = setTimeout(() => setScrolling(false), 2500)
   }
   onCleanup(() => {
     if (scrollHideTimer) clearTimeout(scrollHideTimer)
@@ -281,6 +294,7 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
+  const scrollByAgent = new Map<string, number>()
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -342,10 +356,13 @@ export function Session() {
   })
 
   // Helper: Find next visible message boundary in direction
+  // Note: scroll.y is the scrollbox's layout Y, and child.y from getChildren()
+  // is in the same absolute coordinate space (includes scroll offset), so
+  // child.y - scroll.y gives a child's position relative to the viewport top.
   const findNextVisibleMessage = (direction: "next" | "prev"): string | null => {
     const children = scroll.getChildren()
     const messagesList = messages()
-    const scrollTop = scroll.y
+    const viewportTop = scroll.y
 
     // Get visible messages sorted by position, filtering for valid non-synthetic, non-ignored content
     // (a synthetic cron-origin text part is also visible — see the clock-row branch in UserMessage)
@@ -374,10 +391,10 @@ export function Session() {
 
     if (direction === "next") {
       // Find first message below current position
-      return visibleMessages.find((c) => c.y > scrollTop + 10)?.id ?? null
+      return visibleMessages.find((c) => c.y > viewportTop + 10)?.id ?? null
     }
     // Find last message above current position
-    return [...visibleMessages].reverse().find((c) => c.y < scrollTop - 10)?.id ?? null
+    return [...visibleMessages].reverse().find((c) => c.y < viewportTop - 10)?.id ?? null
   }
 
   // Helper: Scroll to message in direction or fallback to page scroll
@@ -569,6 +586,14 @@ export function Session() {
           })
           return
         }
+        if (shouldBlockFreeApiRequest(selectedModel)) {
+          void DialogAlert.show(
+            dialog,
+            t("tui.dialog.free_api_sunset.title"),
+            t("tui.dialog.free_api_sunset.message"),
+          )
+          return
+        }
         void sdk.client.session.summarize({
           sessionID: route.sessionID,
           modelID: selectedModel.modelID,
@@ -586,21 +611,68 @@ export function Session() {
         name: "btw",
       },
       onSelect: async (dialog) => {
-        const question = await DialogPrompt.show(dialog, "/btw", {
-          placeholder: t("tui.command.session.ask.placeholder"),
-        })
-        if (!question || !question.trim()) return
-        const res = await sdk.client.session
-          .ask({ sessionID: route.sessionID, question: question.trim() })
-          .catch((error) => {
-            toast.show({
-              message: error instanceof Error ? error.message : "Failed to ask side question",
-              variant: "error",
-            })
-            return undefined
+        const selectedModel = local.model.current()
+        if (!selectedModel) {
+          toast.show({
+            variant: "warning",
+            message: "Connect a provider to ask a side question",
+            duration: 3000,
           })
-        if (!res) return
-        await DialogAlert.show(dialog, "/btw", res.data?.answer ?? "(no answer)")
+          return
+        }
+        if (shouldBlockFreeApiRequest(selectedModel)) {
+          await DialogAlert.show(
+            dialog,
+            t("tui.dialog.free_api_sunset.title"),
+            t("tui.dialog.free_api_sunset.message"),
+          )
+          return
+        }
+        // Ask a read-only side question via fork-query. Keep the prompt dialog
+        // mounted in a busy/spinner state across the (multi-second) blocking
+        // `ask` so the user gets immediate feedback, then swap in the answer.
+        // READ-ONLY + EPHEMERAL: the answer is shown in a dismissible dialog and
+        // never injected into the conversation.
+        await DialogPrompt.ask(
+          dialog,
+          "/btw",
+          async (question, active) => {
+            if (shouldBlockFreeApiRequest(selectedModel)) {
+              if (active())
+                await DialogAlert.show(
+                  dialog,
+                  t("tui.dialog.free_api_sunset.title"),
+                  t("tui.dialog.free_api_sunset.message"),
+                )
+              return
+            }
+            const res = await sdk.client.session
+              .ask({
+                sessionID: route.sessionID,
+                question,
+                providerID: selectedModel.providerID,
+                modelID: selectedModel.modelID,
+              })
+              .catch((error) => {
+                if (active())
+                  toast.show({
+                    message: error instanceof Error ? error.message : "Failed to ask side question",
+                    variant: "error",
+                  })
+                return undefined
+              })
+            if (!active()) return
+            if (!res) {
+              dialog.clear()
+              return
+            }
+            await DialogAlert.show(dialog, "/btw", res.data?.answer ?? "(no answer)")
+          },
+          {
+            placeholder: t("tui.command.session.ask.placeholder"),
+            busyText: t("tui.command.session.ask.busy"),
+          },
+        )
       },
     },
     {
@@ -1150,7 +1222,49 @@ export function Session() {
   })
 
   // snap to bottom when session changes
-  createEffect(on(() => route.sessionID, toBottom))
+  createEffect(on(() => route.sessionID, () => { scrollByAgent.clear(); toBottom() }))
+
+  // save/restore scroll position when switching between agent views
+  createEffect(
+    on(
+      () => currentAgentID(),
+      (agentID, prevAgentID) => {
+        if (!prevAgentID) return
+        if (scroll && !scroll.isDestroyed) {
+          // Determine whether the user was in "follow bottom" (sticky scroll) mode.
+          //
+          // A pixel-based check (`scrollTop >= scrollHeight - 1`) is racy here: the
+          // SolidJS effect fires after reactive renders that may have already grown
+          // scrollHeight (e.g. new streaming content, navigation chrome), but the
+          // framework's sticky-scroll adjustment (recalculateBarProps → applyStickyStart)
+          // hasn't run yet, leaving scrollTop momentarily behind scrollHeight.
+          //
+          // Instead, read opentui's internal `_hasManualScroll` flag — the authoritative
+          // "has the user scrolled away from the sticky edge" state. It's set true only
+          // on user-initiated scroll away from the sticky position, and reset false when
+          // the user scrolls back. This is immune to content-growth timing.
+          //
+          // If the field is absent (opentui internals changed), fall back to "at bottom"
+          // (safe direction — next visit will toBottom rather than restore a stale offset).
+          const hasManualScroll = (scroll as unknown as { _hasManualScroll?: boolean })._hasManualScroll
+          if (!hasManualScroll) scrollByAgent.delete(prevAgentID)
+          else scrollByAgent.set(prevAgentID, scroll.scrollTop)
+        }
+        const saved = scrollByAgent.get(agentID)
+        if (saved !== undefined) {
+          let tries = 0
+          const restore = () => {
+            if (!scroll || scroll.isDestroyed) return
+            scroll.scrollTo(Math.min(saved, scroll.scrollHeight))
+            if (++tries < 5 && scroll.scrollTop < saved - 1) setTimeout(restore, 60)
+          }
+          setTimeout(restore, 50)
+          return
+        }
+        toBottom()
+      },
+    ),
+  )
 
   return (
     <context.Provider
@@ -1169,6 +1283,7 @@ export function Session() {
         providers,
         sync,
         tui: tuiConfig,
+        freeApiSunset,
       }}
     >
       <box flexDirection="row">
@@ -1410,6 +1525,18 @@ function UserMessage(props: {
     })[0]
   })
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
+  // Orchestrator actor-notifications arrive as a synthetic user text part whose
+  // text is the pre-rendered <actor-notification> wrapper (inbox/render.ts).
+  // Detect + parse it into a compact status card instead of showing raw XML.
+  // Gated on the orchestrator flag so non-orchestrator sessions are untouched.
+  const actorNotification = createMemo(() => {
+    if (!Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR) return undefined
+    return props.parts.flatMap((x) => {
+      if (x.type !== "text" || !x.synthetic) return []
+      const parsed = parseActorNotification(x.text)
+      return parsed ? [parsed] : []
+    })[0]
+  })
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
   const queued = createMemo(() => props.pending && props.message.id > props.pending)
@@ -1448,7 +1575,36 @@ function UserMessage(props: {
           )
         }}
       </Show>
-      <Show when={text()}>
+      <Show when={actorNotification()}>
+        {(note) => {
+          // Map each status to an icon + theme color. Mirrors the cronFire
+          // badge styling so orchestrator notifications read as first-class
+          // structured rows rather than raw <actor-notification> XML.
+          const style = createMemo(() => {
+            const s = note().status
+            if (s === "completed") return { icon: "✓", fg: theme.success, label: "completed" }
+            if (s === "failed") return { icon: "✗", fg: theme.error, label: "failed" }
+            if (s === "stalled") return { icon: "⏳", fg: theme.warning, label: "stalled" }
+            if (s === "ended") return { icon: "⊙", fg: theme.textMuted, label: "ended" }
+            return { icon: "⊜", fg: theme.textMuted, label: "cancelled" }
+          })
+          return (
+            <box id={props.message.id} marginTop={props.index === 0 ? 0 : 1} paddingLeft={2} flexDirection="row" gap={1}>
+              <text fg={theme.textMuted}>
+                <span style={{ bg: theme.backgroundElement, fg: style().fg, bold: true }}>
+                  {" "}
+                  {style().icon} sub-session {style().label}{" "}
+                </span>
+                <span style={{ fg: theme.text }}> {note().description}</span>
+                <Show when={note().summary}>
+                  <span style={{ fg: theme.textMuted }}> — {note().summary}</span>
+                </Show>
+              </text>
+            </box>
+          )
+        }}
+      </Show>
+      <Show when={text() && !actorNotification()}>
         <box
           id={props.message.id}
           border={["left"]}
@@ -1524,13 +1680,29 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const [copyHover, setCopyHover] = createSignal(false)
   const messages = createMemo(() => sync.data.message[props.message.sessionID]?.[props.message.agentID ?? "main"] ?? [])
   const model = createMemo(() =>
-    props.message.modelID === "mimo-auto"
-      ? t("tui.model.mimo_auto.name")
+    isFreeApiModel({ providerID: props.message.providerID, modelID: props.message.modelID })
+      ? t(freeApiModelNameKey(ctx.freeApiSunset()))
       : Model.name(ctx.providers(), props.message.providerID, props.message.modelID),
   )
 
   const final = createMemo(() => {
     return props.message.finish && props.message.finish !== "tool-calls"
+  })
+
+  // The completion footer (▣ Agent · model · duration) must render exactly once
+  // per turn. A turn can produce several assistant messages: mid-loop ones finish
+  // with "tool-calls", the closing one finishes with "stop". In Orchestrator mode
+  // the turn characteristically ends on a "tool-calls" message (spawning
+  // subagents / handing off) that trails the final "stop" message — so `props.last`
+  // and `final()` land on two different messages and BOTH draw a footer (the stop
+  // one with a duration, the trailing tool-calls one without). Suppress the footer
+  // for a trailing message that already finished with "tool-calls"; still show it
+  // while a last message is streaming (finish undefined) or for the final/aborted
+  // message, which preserves non-orchestrator behavior.
+  const showFooter = createMemo(() => {
+    if (props.message.error?.name === "MessageAbortedError") return true
+    if (final()) return true
+    return props.last && props.message.finish !== "tool-calls"
   })
 
   const duration = createMemo(() => {
@@ -1614,7 +1786,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         <ErrorBlock error={props.message.error!} />
       </Show>
       <Switch>
-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
+        <Match when={showFooter()}>
           <box paddingLeft={3} flexDirection="row" justifyContent="space-between" marginTop={1}>
             <text>
               <span
@@ -1679,9 +1851,34 @@ const PART_MAPPING = {
 
 type MessageError = NonNullable<AssistantMessage["error"]>
 
+// Classify a terminal assistant error so the render layer can present it as a
+// structured, visually-distinct card (distinct label + color) rather than
+// dumping a raw provider blob into the transcript. A rate-limit gets its own
+// kind so the header reads "Rate limited" instead of a generic error. See T30.
+function errorKind(error: MessageError): "rate-limit" | "error" {
+  if (error.name === "APIError") {
+    const data = error.data as { statusCode?: number; responseBody?: string; message?: string }
+    if (
+      data.statusCode === 429 ||
+      SessionRetry.isRateLimitMessage(data.message ?? "") ||
+      (typeof data.responseBody === "string" && SessionRetry.isRateLimitMessage(data.responseBody))
+    ) {
+      return "rate-limit"
+    }
+  }
+  return "error"
+}
+
 function errorBody(error: MessageError): string {
   if (error.name === "MessageOutputLengthError") return "Output length limit reached"
-  return (error.data as { message?: string }).message ?? "Unknown error"
+  const message = (error.data as { message?: string }).message ?? "Unknown error"
+  // A 429 that reaches a TERMINAL assistant error (retries exhausted, or a shape
+  // retryable() didn't classify) would otherwise dump the raw provider blob here.
+  // Present a clean rate-limit message instead of leaking JSON/HTML. See T18/T30.
+  if (errorKind(error) === "rate-limit") {
+    return "The provider is rate limiting. Please wait a moment and try again."
+  }
+  return message
 }
 
 function errorMeta(error: MessageError): string | undefined {
@@ -1698,20 +1895,39 @@ function errorMeta(error: MessageError): string | undefined {
 
 function ErrorBlock(props: { error: MessageError }) {
   const { theme } = useTheme()
+  const kind = createMemo(() => errorKind(props.error))
+  const color = createMemo(() => (kind() === "rate-limit" ? theme.warning : theme.error))
+  const label = createMemo(() => (kind() === "rate-limit" ? "Rate limited" : "Error"))
   const meta = createMemo(() => errorMeta(props.error))
+  // Render as a structured, visually-distinct card (left border + panel bg),
+  // consistent with the workflow/permission cards, so a terminal error never
+  // looks like raw text pasted into the transcript. See T30.
   return (
-    <box flexDirection="column" paddingLeft={3} marginTop={1}>
-      <text fg={theme.error} wrapMode="word">
-        <span style={{ fg: theme.error }}>✗  </span>
-        {errorBody(props.error)}
-      </text>
-      <Show when={meta()}>
-        <box paddingLeft={3}>
-          <text fg={theme.textMuted} wrapMode="word">
-            {meta()}
-          </text>
-        </box>
-      </Show>
+    <box
+      flexDirection="column"
+      border={["left"]}
+      customBorderChars={SplitBorder.customBorderChars}
+      borderColor={color()}
+      backgroundColor={theme.backgroundPanel}
+      paddingTop={1}
+      paddingBottom={1}
+      paddingLeft={2}
+      marginTop={1}
+      gap={1}
+    >
+      <box flexDirection="row" gap={1} paddingLeft={3}>
+        <text fg={color()} attributes={TextAttributes.BOLD}>
+          ✗ {label()}
+        </text>
+        <Show when={meta()}>
+          <text fg={theme.textMuted}>· {meta()}</text>
+        </Show>
+      </box>
+      <box paddingLeft={3}>
+        <text fg={theme.text} wrapMode="word">
+          {errorBody(props.error)}
+        </text>
+      </box>
     </box>
   )
 }
@@ -1929,6 +2145,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "read"}>
           <Read {...toolprops} />
         </Match>
+        <Match when={props.part.tool === "view_image"}>
+          <ViewImage {...toolprops} />
+        </Match>
         <Match when={props.part.tool === "grep"}>
           <Grep {...toolprops} />
         </Match>
@@ -1964,6 +2183,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         </Match>
         <Match when={props.part.tool === "workflow"}>
           <Workflow {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "exec"}>
+          <ToolScript {...toolprops} />
         </Match>
         <Match when={props.part.tool === "plan_exit"}>
           <PlanExit {...toolprops} />
@@ -2061,6 +2283,108 @@ function WorkItemTask(props: ToolProps<typeof TaskTool>) {
     <InlineTool icon="#" pending="Updating tasks..." complete={true} part={props.part}>
       task {summary()}
     </InlineTool>
+  )
+}
+
+// Renderer for the `exec` batch-orchestration tool. Collapsed view is a compact
+// BlockTool: summary title (spinner + live aggregated call counts published
+// through ctx.metadata) plus the last few sub-calls — one bordered clickable
+// unit, visible while running and kept after completion. Clicking swaps to the
+// full BlockTool with code, result, logs and trace. Before any sub-call lands
+// it stays a one-line InlineTool.
+function ToolScript(props: ToolProps<typeof ToolScriptTool>) {
+  const { theme } = useTheme()
+  const [expanded, setExpanded] = createSignal(false)
+  const isRunning = createMemo(() => props.part.state.status === "running")
+  const meta = createMemo(() =>
+    props.part.state.status === "pending" ? ({} as Record<string, any>) : (props.part.state.metadata ?? {}),
+  )
+  const counts = createMemo(() => {
+    const c = meta().counts as Record<string, { n: number; errors: number }> | undefined
+    if (!c) return ""
+    return Object.entries(c)
+      .sort((a, b) => b[1].n - a[1].n)
+      .map(([name, v]) => `${name}×${v.n}${v.errors ? `(${v.errors}!)` : ""}`)
+      .join(" ")
+  })
+  const status = createMemo(() => meta().status as string | undefined)
+  const callCount = createMemo(() => (meta().toolCalls as number | undefined) ?? 0)
+  const failed = createMemo(() => status() !== undefined && status() !== "completed" && !isRunning())
+  const summary = createMemo(() => {
+    const c = counts()
+    const base = `${callCount()} calls${c ? ` · ${c}` : ""}`
+    if (isRunning()) return base
+    return failed() ? `${status()} · ${base}` : base
+  })
+  // Per-call trace tail published live via ctx.metadata (see publishProgress
+  // in tool-script.ts). Shown under the summary line while running AND after
+  // completion — the terminal returns re-publish it (completeToolCall replaces
+  // part metadata) so the trace doesn't vanish the moment a run finishes.
+  type RecentCall = { name: string; status: string; durationMs: number; error?: string }
+  const recent = createMemo(() => {
+    const r = meta().recent as RecentCall[] | undefined
+    return Array.isArray(r) ? r : []
+  })
+  const recentLines = createMemo(() =>
+    recent()
+      .slice(-5)
+      .map(
+        (t) =>
+          `  ${t.status === "error" ? "✗" : "✓"} ${t.name} [${t.durationMs}ms]${t.error ? ` ${t.error.slice(0, 80)}` : ""}`,
+      ),
+  )
+  // exec embeds nested tool output (a `bash` call's stdout) into <return_value>
+  // and <logs>, so escape sequences reach this renderer raw.
+  const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
+
+  return (
+    <Show
+      when={expanded()}
+      fallback={
+        // Collapsed: ONE compact BlockTool holding the summary title and the
+        // sub-call trace — a single bordered, hover-highlighted, clickable
+        // unit. An InlineTool with a loose text underneath read as two
+        // elements and the click target was easy to miss.
+        <Show
+          when={recentLines().length > 0}
+          fallback={
+            <InlineTool
+              icon="»"
+              pending="Writing script..."
+              complete={!isRunning()}
+              spinner={isRunning()}
+              part={props.part}
+              onClick={() => setExpanded(true)}
+            >
+              exec {summary()}
+            </InlineTool>
+          }
+        >
+          <BlockTool
+            title={`# exec · ${summary()}`}
+            part={props.part}
+            spinner={isRunning()}
+            onClick={() => setExpanded(true)}
+          >
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+            <text fg={theme.textMuted}>Click to expand</text>
+          </BlockTool>
+        </Show>
+      }
+    >
+      <BlockTool title={`# exec · ${summary()}`} part={props.part} onClick={() => setExpanded(false)}>
+        <box gap={1}>
+          <text fg={theme.textMuted}>{((props.input.code as string | undefined) ?? "").trim()}</text>
+          <Show when={recentLines().length > 0}>
+            <text fg={theme.textMuted}>{recentLines().join("\n")}</text>
+          </Show>
+          <Show when={output()}>
+            <text fg={failed() ? theme.error : theme.text}>{output()}</text>
+          </Show>
+          <text fg={theme.textMuted}>Click to collapse</text>
+        </box>
+      </BlockTool>
+    </Show>
   )
 }
 
@@ -2481,7 +2805,6 @@ function CollapsibleError(props: { error: string; paddingLeft?: number }) {
 
 function InlineTool(props: {
   icon: string
-  iconColor?: RGBA
   complete: any
   pending: string
   spinner?: boolean
@@ -2568,7 +2891,7 @@ function InlineTool(props: {
         <Match when={true}>
           <text paddingLeft={3} fg={fg()} attributes={denied() || recoverable() || props.dismissed ? TextAttributes.STRIKETHROUGH : undefined}>
             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
-              <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
+              {props.icon} {props.children}
             </Show>
           </text>
         </Match>
@@ -2629,27 +2952,27 @@ function BlockTool(props: {
 
 const TOOL_COLLAPSE_MAX_LINES = 3
 const TOOL_COLLAPSE_MAX_LINE_LENGTH = 120
-
-function displayLines(content: string) {
-  if (!content) return []
-  return content.replace(/\n$/, "").split("\n")
-}
+// Height budget for block-shaped tools (bash, exec) whose collapsed state still
+// shows content — collapsing caps the flood, it doesn't hide the output. Counted
+// in rendered rows, see @tui/util/collapse.
+const TOOL_BLOCK_COLLAPSE_MAX_ROWS = 10
 
 function hasLongDisplayLine(content: string) {
-  return displayLines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
+  return Collapse.lines(content).some((line) => line.length > TOOL_COLLAPSE_MAX_LINE_LENGTH)
 }
 
 function Bash(props: ToolProps<typeof BashTool>) {
   const { theme } = useTheme()
+  const ctx = use()
   const sync = useSync()
   const isRunning = createMemo(() => props.part.state.status === "running")
   const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
   const [expanded, setExpanded] = createSignal(false)
-  const lines = createMemo(() => output().split("\n"))
-  const overflow = createMemo(() => lines().length > 10)
+  const columns = createMemo(() => Collapse.columns(ctx.width))
+  const overflow = createMemo(() => Collapse.rows(output(), columns()) > TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   const limited = createMemo(() => {
-    if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+    if (expanded()) return output()
+    return Collapse.clip(output(), columns(), TOOL_BLOCK_COLLAPSE_MAX_ROWS)
   })
 
   const workdirDisplay = createMemo(() => {
@@ -2713,7 +3036,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
     if (!props.input.content) return ""
     return props.input.content
   })
-  const lineCount = createMemo(() => displayLines(code()).length)
+  const lineCount = createMemo(() => Collapse.lines(code()).length)
   const collapsed = createMemo(() => lineCount() > TOOL_COLLAPSE_MAX_LINES || hasLongDisplayLine(code()))
 
   return (
@@ -2799,6 +3122,21 @@ function Read(props: ToolProps<typeof ReadTool>) {
         )}
       </For>
     </>
+  )
+}
+
+function ViewImage(props: ToolProps<typeof ViewImageTool>) {
+  const isRunning = createMemo(() => props.part.state.status === "running")
+  return (
+    <InlineTool
+      icon="◉"
+      pending="Viewing image..."
+      complete={props.input.path}
+      spinner={isRunning()}
+      part={props.part}
+    >
+      View image {normalizePath(props.input.path!)} {input(props.input, ["path"])}
+    </InlineTool>
   )
 }
 
@@ -2912,12 +3250,11 @@ function Task(props: ToolProps<typeof ActorTool>) {
   )
 
   const isRunning = createMemo(() => {
-    if (props.part.state.status === "running") return true
-    if (props.part.state.status === "completed") {
-      const status = actorStatus()
-      return status === "running" || status === "pending"
-    }
-    return false
+    return isActorToolRunning({
+      partStatus: props.part.state.status,
+      action: inputAction(),
+      actorStatus: actorStatus(),
+    })
   })
 
   const duration = createMemo(() => {

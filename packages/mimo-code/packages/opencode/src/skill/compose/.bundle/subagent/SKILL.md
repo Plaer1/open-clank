@@ -1,6 +1,5 @@
 ---
 name: compose:subagent
-hidden: true
 description: Use when executing implementation plans with independent tasks in the current session
 ---
 
@@ -315,11 +314,11 @@ Done!
 - **compose:merge** - Complete development after all tasks
 
 **Subagents should use:**
-- **compose:tdd** - Subagents follow TDD for each task
+- **compose:tdd** - Distill TDD workflow into subagent prompts (write test first, then implement)
 
-**Important: Passing skills to subagents**
+**Subagent guidance:**
 
-Compose skills do NOT appear in subagents' `available_skills` list by default. When a subagent needs to use a compose skill, pass the relevant `<available_skills>` block (or subset) directly in the subagent's prompt so it can invoke them by name via the skill tool.
+Subagents are leaf workers that execute specific instructions. When a subagent needs to follow a compose skill's workflow (e.g., TDD), distill the relevant guidance into concrete instructions in its prompt.
 
 **Alternative workflow:**
 - **compose:execute** - Use for parallel session instead of same-session execution

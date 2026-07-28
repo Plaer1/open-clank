@@ -24,10 +24,12 @@ const EXTERNAL_DIRS = [".claude", ".agents", ".codex", ".opencode"]
 const EXTERNAL_SKILL_PATTERN = "skills/**/SKILL.md"
 const MIMOCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
 const SKILL_PATTERN = "**/SKILL.md"
+const BUILTIN_SKILL_PATTERN = "skills/*/SKILL.md"
 
 export const Info = z.object({
   name: z.string(),
   description: z.string(),
+  aliases: z.array(z.string()).optional(),
   location: z.string(),
   content: z.string(),
   hidden: z.boolean().optional(),
@@ -134,7 +136,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bundledRoo
 
   if (!md) return
 
-  const parsed = Info.pick({ name: true, description: true, hidden: true }).safeParse(md.data)
+  const parsed = Info.pick({ name: true, description: true, aliases: true, hidden: true }).safeParse(md.data)
   if (!parsed.success) return
 
   const isBundled = bundledRoots.some((root) => match.startsWith(root))
@@ -158,6 +160,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bundledRoo
   state.skills[parsed.data.name] = {
     name: parsed.data.name,
     description: parsed.data.description,
+    aliases: parsed.data.aliases,
     location: match,
     content: md.content,
     hidden: parsed.data.hidden,
@@ -212,7 +215,7 @@ const discoverSkills = Effect.fnUntraced(function* (
     )
     if (builtinSkillRoot && (yield* fsys.isDir(builtinSkillRoot))) {
       bundledRoots.push(builtinSkillRoot)
-      yield* scan(state, builtinSkillRoot, SKILL_PATTERN, { scope: "builtin" })
+      yield* scan(state, builtinSkillRoot, BUILTIN_SKILL_PATTERN, { scope: "builtin" })
       if (Flag.MIMOCODE_DISABLE_OFFICIAL_SKILLS) {
         const skillsRoot = path.join(builtinSkillRoot, "skills")
         for (const name of OFFICIAL_SKILL_NAMES) {
@@ -341,7 +344,6 @@ export const layer = Layer.effect(
     const available = Effect.fn("Skill.available")(function* (agent?: Agent.Info) {
       const s = yield* InstanceState.get(state)
       let list: Info[] = Object.values(s.skills)
-        .filter((sk) => !sk.hidden)
 
       list = list.toSorted((a, b) => a.name.localeCompare(b.name))
       if (!agent) return list

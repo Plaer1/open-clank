@@ -33,6 +33,17 @@ test("acquire returns true on fresh dir and writes lock file", async () => {
   cleanup(dir)
 })
 
+test("creates .gitignore alongside lock file in fresh directory", async () => {
+  const dir = fresh()
+  expect(await run(tryAcquireSchedulerLock({ dir }))).toBe(true)
+  const gitignore = join(dir, ".mimocode", ".gitignore")
+  expect(existsSync(gitignore)).toBe(true)
+  const content = readFileSync(gitignore, "utf-8")
+  expect(content).toContain(".cron-lock")
+  expect(content).toContain("scheduled_tasks.json")
+  cleanup(dir)
+})
+
 test("acquire is idempotent for the same process", async () => {
   const dir = fresh()
   expect(await run(tryAcquireSchedulerLock({ dir }))).toBe(true)

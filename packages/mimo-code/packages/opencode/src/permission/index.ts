@@ -138,6 +138,14 @@ export const AskInput = Schema.Struct({
   // waits (bounded) for a human/orchestrator reply. Internal to the ask call —
   // NOT persisted on the Request schema.
   forward: Schema.optional(Schema.Struct({ parentSessionID: Schema.String })),
+  // Parent-grant inheritance for ordinary (non-peer) background subagents. When
+  // present, an ask that would block is NOT auto-denied outright: it is first
+  // checked against the PARENT session's approved ruleset (published process-
+  // wide via forwardRef.parentGrants). If the parent already holds a matching
+  // grant for every pattern, the child is auto-allowed with no human round-trip;
+  // otherwise it fails closed (DeniedError) — never hangs, never blocks on a
+  // human. Distinct from `forward` (orchestrator-peer human/delegation routing).
+  inherit: Schema.optional(Schema.Struct({ parentSessionID: Schema.String })),
 })
   .annotate({ identifier: "PermissionAskInput" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
@@ -222,6 +230,13 @@ export const layer = Layer.effect(
       const { ruleset, ...request } = input
       let needsAsk = false
 
+      // Publish this session's effective grant snapshot so background children
+      // in another Instance can inherit it. Kept as two ordered phases (ruleset,
+      // then session-accumulated approvals) — NOT flattened — so the child can
+      // mirror the two-phase evaluation below: a ruleset deny wins outright, and
+      // only a non-denying ruleset lets an approved allow upgrade an ask.
+      forwardRef.setParentGrants(request.sessionID, { ruleset, approved })
+
       const forced = FORCED_ASK.has(request.permission)
 
       for (const pattern of request.patterns) {
@@ -254,6 +269,41 @@ export const layer = Layer.effect(
       if (needsAsk && s.skipAll && !forced) {
         log.info("skip-all active, auto-allowing", { permission: request.permission, patterns: request.patterns })
         return
+      }
+
+      // Parent-grant inheritance: an ordinary background subagent reuses the
+      // permissions its parent already holds. Consult the parent session's
+      // published grant snapshot; auto-allow ONLY when the parent already grants
+      // every requested pattern (same evaluate() the parent would run). Ordered
+      // AFTER the deny loop (explicit deny still wins) and forced-ask still falls
+      // through to the fail-closed/human path below. A path the parent doesn't
+      // hold isn't matched → we do NOT return here → it fails closed at the
+      // non-interactive gate. No human wait, no hang.
+      if (needsAsk && input.inherit && !forced) {
+        const parentSnapshot = forwardRef.getParentGrants(input.inherit.parentSessionID)
+        if (parentSnapshot) {
+          // Mirror the parent's own two-phase evaluation (see the deny loop
+          // above). A parent ruleset deny must win outright — an approved allow
+          // must NOT be able to out-rank it — so evaluate the ruleset ALONE for
+          // deny first, and only for a non-denying ruleset let approvals upgrade
+          // to allow. Never flatten ruleset+approved into one findLast pass:
+          // that would let a trailing approved allow beat a ruleset deny and let
+          // the child escape a permission the parent itself would refuse.
+          const allAllowed = request.patterns.every((pattern) => {
+            if (evaluate(request.permission, pattern, parentSnapshot.ruleset).action === "deny") return false
+            return (
+              evaluate(request.permission, pattern, parentSnapshot.ruleset, parentSnapshot.approved).action === "allow"
+            )
+          })
+          if (allAllowed) {
+            log.info("inheriting parent grant, auto-allowing", {
+              permission: request.permission,
+              patterns: request.patterns,
+              parentSessionID: input.inherit.parentSessionID,
+            })
+            return
+          }
+        }
       }
 
       // Non-interactive caller (system-spawned background agent): no human is
@@ -459,6 +509,16 @@ export const layer = Layer.effect(
           action: "allow",
         })
       }
+      // Refresh the parent snapshot so a background child inherits this
+      // just-approved grant on its next ask. The parent's `ruleset` isn't known
+      // here, so preserve whatever ruleset phase ask() last published and update
+      // only the approved phase (the live `approved` array already holds the
+      // just-pushed patterns). Keeping the phases separate preserves deny
+      // precedence for the child (a ruleset deny still can't be out-ranked).
+      forwardRef.setParentGrants(existing.info.sessionID, {
+        ruleset: forwardRef.getParentGrants(existing.info.sessionID)?.ruleset ?? [],
+        approved,
+      })
 
       for (const [id, item] of pending.entries()) {
         if (item.info.sessionID !== existing.info.sessionID) continue
@@ -535,6 +595,7 @@ export function merge(...rulesets: Ruleset[]): Ruleset {
 }
 
 const EDIT_TOOLS = ["edit", "write", "apply_patch", "multiedit"]
+const READ_TOOLS = ["read", "view_image"]
 
 export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
   const result = new Set<string>()
@@ -548,7 +609,8 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     const rule = ruleset.findLast(
       (r) =>
         Wildcard.match(tool, r.permission) ||
-        (EDIT_TOOLS.includes(tool) && Wildcard.match("edit", r.permission)),
+        (EDIT_TOOLS.includes(tool) && Wildcard.match("edit", r.permission)) ||
+        (READ_TOOLS.includes(tool) && Wildcard.match("read", r.permission)),
     )
     if (!rule) continue
     if (rule.pattern === "*" && rule.action === "deny") result.add(tool)

@@ -160,6 +160,13 @@ c.setFont("STSong-Light", 14)
 c.drawString(50, 700, "简体中文示例")
 ```
 
+For a **Platypus** document (the multi-page report flow above), the CID font
+must also be set on the styles, not just the canvas — otherwise `Paragraph` /
+`Table` flowables fall back to Helvetica and CJK becomes black boxes. After
+`registerFont(UnicodeCIDFont("STSong-Light"))`, set `fontName="STSong-Light"`
+on each `ParagraphStyle` carrying CJK text and add `("FONTNAME", (0,0), (-1,-1),
+"STSong-Light")` to the `TableStyle` of any table with CJK cells.
+
 ## 5. Subscripts / superscripts / inline markup
 
 Built-in Helvetica has no glyphs for Unicode subscripts (`H₂O`, `x²`). They

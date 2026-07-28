@@ -132,19 +132,58 @@ test("build agent unaffected — no hardPermission", async () => {
   })
 })
 
-test("plan_enter and plan_exit are allowed (not hidden) for all primary agents", async () => {
+test("compose:* skills are denied for build/plan, allowed for compose", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
       const agents = await load(tmp.path, (svc) => svc.list())
-      const primaryAgents = agents.filter((a) => a.mode === "primary")
-      expect(primaryAgents.length).toBeGreaterThanOrEqual(3)
-      for (const agent of primaryAgents) {
-        const disabled = Permission.disabled(["plan_enter", "plan_exit"], agent.permission)
+      for (const name of ["build", "plan"]) {
+        const agent = agents.find((a) => a.name === name)
+        expect(agent).toBeDefined()
+        expect(Permission.evaluate("skill", "compose:brainstorm", agent!.permission).action).toBe("deny")
+        expect(Permission.evaluate("skill", "compose:tdd", agent!.permission).action).toBe("deny")
+        expect(Permission.evaluate("skill", "compose:review", agent!.permission).action).toBe("deny")
+      }
+      const compose = agents.find((a) => a.name === "compose")
+      expect(compose).toBeDefined()
+      expect(Permission.evaluate("skill", "compose:brainstorm", compose!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "compose:tdd", compose!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "compose:review", compose!.permission).action).toBe("allow")
+      // Non-compose skills remain allowed for all agents
+      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe("allow")
+      expect(Permission.evaluate("skill", "effect", compose!.permission).action).toBe("allow")
+    },
+  })
+})
+
+test("plan_enter and plan_exit are allowed for build and plan agents", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const agents = await load(tmp.path, (svc) => svc.list())
+      for (const name of ["build", "plan"]) {
+        const agent = agents.find((a) => a.name === name)
+        expect(agent).toBeDefined()
+        const disabled = Permission.disabled(["plan_enter", "plan_exit"], agent!.permission)
         expect(disabled.has("plan_enter")).toBe(false)
         expect(disabled.has("plan_exit")).toBe(false)
       }
+    },
+  })
+})
+
+test("plan_enter and plan_exit are denied for compose agent", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const compose = await load(tmp.path, (svc) => svc.get("compose"))
+      expect(compose).toBeDefined()
+      const disabled = Permission.disabled(["plan_enter", "plan_exit"], compose!.permission)
+      expect(disabled.has("plan_enter")).toBe(true)
+      expect(disabled.has("plan_exit")).toBe(true)
     },
   })
 })
@@ -949,7 +988,7 @@ test("title/summary/checkpoint-writer are mode=subagent + hidden (spawnable filt
 // Regression for ses_19d1aa927: the fork agent (checkpoint-writer) inherits
 // compose's tool list verbatim (Task 2.6 removed toolAllowlist). This test
 // confirms the patch-swap in registry.ts fires correctly per model family.
-itTool.live("compose's tool list contains apply_patch on GPT-5+ but not on Claude", () =>
+itTool.live("compose's tool list swaps GPT-specific file tools", () =>
   provideTmpdirInstance((dir) =>
     Effect.gen(function* () {
       const agents = yield* Agent.Service
@@ -965,8 +1004,10 @@ itTool.live("compose's tool list contains apply_patch on GPT-5+ but not on Claud
       })
       const gptIDs = gptTools.map((t) => t.id)
       expect(gptIDs).toContain("apply_patch")
+      expect(gptIDs).toContain("view_image")
       expect(gptIDs).not.toContain("edit")
       expect(gptIDs).not.toContain("write")
+      expect(gptIDs).not.toContain("read")
 
       const claudeTools = yield* registry.tools({
         modelID: ModelID.make("claude-opus-4-7"),
@@ -976,7 +1017,9 @@ itTool.live("compose's tool list contains apply_patch on GPT-5+ but not on Claud
       const claudeIDs = claudeTools.map((t) => t.id)
       expect(claudeIDs).toContain("edit")
       expect(claudeIDs).toContain("write")
+      expect(claudeIDs).toContain("read")
       expect(claudeIDs).not.toContain("apply_patch")
+      expect(claudeIDs).not.toContain("view_image")
     }),
   ),
 )

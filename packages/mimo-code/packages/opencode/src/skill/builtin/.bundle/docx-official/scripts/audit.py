@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["python-docx>=1.0", "lxml>=4.9"]
+# ///
 """Report-style well-formedness inspection of a `.docx` file.
 
 Alternate implementation notes:
@@ -17,7 +21,7 @@ Statuses:
 Exit code is 0 if no FAIL findings, 1 otherwise. 2 for argument errors.
 
 Usage:
-    python audit.py <file.docx> [--json]
+    uv run audit.py <file.docx> [--json]
 """
 from __future__ import annotations
 

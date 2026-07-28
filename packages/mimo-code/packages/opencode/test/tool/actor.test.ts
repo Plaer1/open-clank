@@ -746,7 +746,7 @@ describe("Actor tool task_id degradation", () => {
 
         expect(result.output).toContain("not-a-task")
         expect(result.output.toLowerCase()).toContain("ad-hoc")
-        expect(result.output).toContain("Background actor started")
+        expect(result.output).toContain("Background sub-session started")
       }),
     ),
   )

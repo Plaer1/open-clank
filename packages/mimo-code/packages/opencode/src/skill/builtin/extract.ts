@@ -5,6 +5,7 @@ import { Flag } from "@/flag/flag"
 import { Path as GlobalPath } from "@/global"
 import { InstallationLocal, InstallationVersion } from "@/installation/version"
 import { Log } from "@/util"
+import { which } from "@/util/which"
 import { loadBuiltinBundle } from "./bundle.macro" with { type: "macro" }
 import { loadBuiltinBundle as loadBuiltinBundleDev } from "./bundle.macro"
 
@@ -15,6 +16,16 @@ export const OFFICIAL_SKILL_NAMES = new Set([
   "xlsx-official",
   "html-to-video-pipeline",
 ])
+
+const REQUIRED_COMMANDS = new Map([
+  ["claude-code", "claude"],
+  ["codex", "codex"],
+])
+
+export function isBuiltinSkillInstalled(name: string, resolve = which) {
+  const command = REQUIRED_COMMANDS.get(name)
+  return !command || resolve(command) !== null
+}
 
 const DOCUMENT_SKILL_TRIGGERS: Array<{
   skill: string
@@ -97,17 +108,33 @@ export const extractBuiltinBundle = Effect.fn("Skill.extractBuiltinBundle")(func
   const skillsRoot = builtinSkillRoot()
   const root = path.dirname(skillsRoot)
   const marker = path.join(root, ".extracted")
+  const enabled = new Set(
+    Object.keys(BUILTIN_BUNDLE).filter(
+      (name) =>
+        !(Flag.MIMOCODE_DISABLE_OFFICIAL_SKILLS && OFFICIAL_SKILL_NAMES.has(name)) &&
+        isBuiltinSkillInstalled(name),
+    ),
+  )
+  const markerContent = JSON.stringify({ version: InstallationVersion, skills: Array.from(enabled).toSorted() })
 
-  if (!InstallationLocal && (yield* fsys.existsSafe(marker))) return root
+  if (
+    !InstallationLocal &&
+    (yield* fsys.existsSafe(marker)) &&
+    (yield* fsys.readFileString(marker).pipe(Effect.orElseSucceed(() => ""))) === markerContent
+  )
+    return root
 
   for (const [skillName, files] of Object.entries(BUILTIN_BUNDLE)) {
-    if (Flag.MIMOCODE_DISABLE_OFFICIAL_SKILLS && OFFICIAL_SKILL_NAMES.has(skillName)) continue
     const skillDir = path.join(skillsRoot, skillName)
+    if (!enabled.has(skillName)) {
+      if (yield* fsys.existsSafe(skillDir)) yield* fsys.remove(skillDir, { recursive: true })
+      continue
+    }
     for (const [relPath, content] of Object.entries(files)) {
       yield* fsys.writeWithDirs(path.join(skillDir, relPath), content)
     }
   }
-  yield* fsys.writeWithDirs(marker, InstallationVersion)
+  yield* fsys.writeWithDirs(marker, markerContent)
   log.info("extracted builtin skills", { root })
   return root
 })

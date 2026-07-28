@@ -9,6 +9,8 @@ setDefaultTimeout(30_000)
 import { Agent } from "../../src/agent/agent"
 import { Actor } from "../../src/actor/spawn"
 import { ActorRegistry } from "../../src/actor/registry"
+import { ActorRegistryTable } from "../../src/actor/actor.sql"
+import { Database, and, eq } from "../../src/storage"
 import { Bus } from "../../src/bus"
 import { TuiEvent } from "../../src/cli/cmd/tui/event"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
@@ -16,8 +18,9 @@ import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider"
 import { Session } from "../../src/session"
 import { Worktree } from "../../src/worktree"
-import { MessageID, SessionID } from "../../src/session/schema"
-import { ModelID } from "../../src/provider/schema"
+import { Git } from "../../src/git"
+import { MessageID, SessionID, PartID } from "../../src/session/schema"
+import { ModelID, ProviderID } from "../../src/provider/schema"
 import { TaskRegistry } from "../../src/task/registry"
 import { Truncate } from "../../src/tool"
 import { SessionTool } from "../../src/tool/session"
@@ -43,6 +46,8 @@ const it = testEffect(
     Bus.defaultLayer,
     // session tool's create/cancel use Worktree.Service (worktree-per-child).
     Worktree.defaultLayer,
+    // session dashboard correlates worktrees via Git.Service (worktree list + rev-list).
+    Git.defaultLayer,
     // Actor.defaultLayer populates spawnRef.current, which the session tool's
     // create/cancel branches read via requireActor(). Without it they fail fast.
     Actor.defaultLayer,
@@ -122,6 +127,47 @@ describe("session tool", () => {
           operation: { action: "setmode", sessionID: "", mode: "build" },
         })
         expect(parsed.success).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("parameters schema accepts a send operation", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const parsed = tool.parameters.safeParse({
+          operation: { action: "send", sessionID: "ses_child", task: "relay this" },
+        })
+        expect(parsed.success).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("parameters schema rejects send with an empty task", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const parsed = tool.parameters.safeParse({
+          operation: { action: "send", sessionID: "ses_child", task: "" },
+        })
+        expect(parsed.success).toBe(false)
+      }),
+    ),
+  )
+
+  it.live("send to an unknown child returns a clear not-found message (no throw)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+        const tool = yield* (yield* SessionTool).init()
+        const result = yield* tool.execute(
+          { operation: { action: "send", sessionID: "ses_missing", task: "hello" } },
+          ctx(parent.id),
+        )
+        expect(result.title).toContain("not found")
+        expect(result.output).toContain("ses_missing")
+        expect(result.metadata.sessionID).toBe("ses_missing")
       }),
     ),
   )
@@ -303,6 +349,10 @@ describe("session tool", () => {
         const result = yield* tool.execute({ operation: { action: "list" } }, ctx(parent.id))
 
         expect(result.title).toBe("Child sessions: 2")
+        // The output now leads with a counted summary line covering all buckets.
+        expect(result.output).toContain("Child sessions: 2 total —")
+        expect(result.output).toContain("running")
+        expect(result.output).toContain("idle")
         expect(result.output).toContain(idA)
         expect(result.output).toContain(idB)
         // create overwrites spawnPeer's default `${agentType}: ${task}` title
@@ -312,6 +362,114 @@ describe("session tool", () => {
         // agent (the NL "mode") is surfaced from the actor row.
         expect(result.output).toContain("build")
         expect(result.output).toContain("compose")
+      }),
+    ),
+  )
+
+  it.live("list groups children by status with counts and excludes system subagents", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        // A running peer (freshly created → status pending/running).
+        const running = yield* tool.execute(
+          { operation: { action: "create", task: "work", mode: "build", title: "Runner" } },
+          ctx(parent.id),
+        )
+        const runningID = running.metadata.sessionID!
+
+        // An idle/finished peer: create it, then flip its actor row to a terminal
+        // idle with a success outcome so it lands in the "Finished / idle" bucket.
+        const idle = yield* tool.execute(
+          { operation: { action: "create", task: "done work", mode: "build", title: "Idler" } },
+          ctx(parent.id),
+        )
+        const idleID = idle.metadata.sessionID!
+        yield* actorReg.updateStatus(SessionID.make(idleID), idleID, { status: "idle", lastOutcome: "success" })
+
+        // A system subagent (checkpoint-writer): parented to us but must NOT appear.
+        const sub = yield* sessions.create({ title: "checkpoint-writer: T1", parentID: parent.id })
+        yield* actorReg.register({
+          sessionID: sub.id,
+          actorID: sub.id,
+          mode: "subagent",
+          agent: "checkpoint-writer",
+          description: "checkpoint",
+          contextMode: "full",
+          background: true,
+          lifecycle: "ephemeral",
+        })
+
+        const result = yield* tool.execute({ operation: { action: "list" } }, ctx(parent.id))
+
+        // Total counts only the two real peers; subagent excluded.
+        expect(result.title).toBe("Child sessions: 2")
+        expect(result.output).toContain("Child sessions: 2 total — 1 running (1 progressing, 0 stalled), 1 idle")
+
+        // Grouped section headings with per-group counts. A freshly-created peer
+        // has lastTurnTime == now, so it reads as progressing.
+        expect(result.output).toContain("In progress — progressing (running/pending, advancing) (1):")
+        expect(result.output).toContain("Finished / idle (1):")
+
+        // Both real peers appear, under their respective groups.
+        expect(result.output).toContain(runningID)
+        expect(result.output).toContain("Runner")
+        expect(result.output).toContain(idleID)
+        expect(result.output).toContain("Idler")
+
+        // The system subagent is filtered out entirely.
+        expect(result.output).not.toContain(sub.id)
+        expect(result.output).not.toContain("checkpoint-writer")
+      }),
+    ),
+  )
+
+  it.live("list excludes subagent sessions (checkpoint-writer) parented to the orchestrator", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        // A real peer child — this SHOULD appear in the listing.
+        const peer = yield* tool.execute(
+          { operation: { action: "create", task: "real work", mode: "build", title: "Peer" } },
+          ctx(parent.id),
+        )
+        const peerID = peer.metadata.sessionID!
+
+        // A subagent child: same parent linkage (checkpoint-writer / dream /
+        // distill and read-only fork children are all parented to us via the
+        // Session row), but registered as mode:"subagent" with a system agent.
+        // This must NOT appear in the orchestrator's child listing.
+        const sub = yield* sessions.create({ title: "checkpoint-writer: T1", parentID: parent.id })
+        yield* actorReg.register({
+          sessionID: sub.id,
+          actorID: sub.id,
+          mode: "subagent",
+          agent: "checkpoint-writer",
+          description: "checkpoint",
+          contextMode: "full",
+          background: true,
+          lifecycle: "ephemeral",
+        })
+
+        const result = yield* tool.execute({ operation: { action: "list" } }, ctx(parent.id))
+
+        // Only the peer is listed; the checkpoint-writer subagent is filtered.
+        expect(result.title).toBe("Child sessions: 1")
+        expect(result.output).toContain(peerID)
+        expect(result.output).toContain("Peer")
+        expect(result.output).not.toContain(sub.id)
+        expect(result.output).not.toContain("checkpoint-writer")
       }),
     ),
   )
@@ -448,6 +606,106 @@ describe("session tool", () => {
       { git: true },
     ),
   )
+
+  it.live("status reports derived liveness + turnCount + lastTurnTime for a child", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+        const created = yield* tool.execute(
+          { operation: { action: "create", task: "work", mode: "build", title: "Runner" } },
+          ctx(parent.id),
+        )
+        const childID = created.metadata.sessionID!
+
+        // A freshly-created child has a recent lastTurnTime → progressing.
+        const running = yield* tool.execute({ operation: { action: "status", sessionID: childID } }, ctx(parent.id))
+        expect(running.title).toBe(`Status ${childID}: progressing`)
+        expect(running.output).toContain("progressing")
+        expect(running.output).toContain("turnCount:")
+        expect(running.output).toContain("lastTurnTime:")
+
+        // Flip to a terminal idle+success: derived liveness surfaces the outcome.
+        yield* actorReg.updateStatus(SessionID.make(childID), childID, { status: "idle", lastOutcome: "success" })
+        const done = yield* tool.execute({ operation: { action: "status", sessionID: childID } }, ctx(parent.id))
+        expect(done.title).toBe(`Status ${childID}: success`)
+        expect(done.output).toContain("last outcome: success")
+      }),
+    ),
+  )
+
+  it.live("status on an unknown child returns a clear not-found message (no throw)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+        const tool = yield* (yield* SessionTool).init()
+        const result = yield* tool.execute(
+          { operation: { action: "status", sessionID: "ses_missing" } },
+          ctx(parent.id),
+        )
+        expect(result.title).toContain("not found")
+        expect(result.output).toContain("ses_missing")
+      }),
+    ),
+  )
+
+  it.live("list splits the In progress group into progressing vs stalled", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "Parent" })
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        // A progressing peer: freshly created, lastTurnTime == now.
+        const prog = yield* tool.execute(
+          { operation: { action: "create", task: "advancing", mode: "build", title: "Fresh" } },
+          ctx(parent.id),
+        )
+        const progID = prog.metadata.sessionID!
+
+        // A stalled peer: running, having run at least one turn, but with an old
+        // last_turn_time far past the default staleness window → deriveLiveness
+        // reports stalled. Force status running and turn_count >= 1 (a
+        // not-yet-started child with turnCount 0 is exempt from the stall path),
+        // then age its last_turn_time via a direct row update (updateTurn would
+        // bump last_turn_time to now; we need it OLD while turn_count stays put).
+        const stalled = yield* tool.execute(
+          { operation: { action: "create", task: "wedged", mode: "build", title: "Wedged" } },
+          ctx(parent.id),
+        )
+        const stalledID = stalled.metadata.sessionID!
+        yield* actorReg.updateStatus(SessionID.make(stalledID), stalledID, { status: "running" })
+        yield* Effect.sync(() =>
+          Database.use((db) =>
+            db
+              .update(ActorRegistryTable)
+              .set({ last_turn_time: Date.now() - 10 * 60_000, turn_count: 1 })
+              .where(and(eq(ActorRegistryTable.session_id, SessionID.make(stalledID)), eq(ActorRegistryTable.actor_id, stalledID)))
+              .run(),
+          ),
+        )
+
+        const result = yield* tool.execute({ operation: { action: "list" } }, ctx(parent.id))
+
+        expect(result.output).toContain("In progress — progressing (running/pending, advancing) (1):")
+        expect(result.output).toContain("In progress — stalled (running/pending, no recent turn) (1):")
+        expect(result.output).toContain("(1 progressing, 1 stalled)")
+        // Each child lands under its own group.
+        const progSection = result.output.split("In progress — progressing")[1]?.split("In progress — stalled")[0] ?? ""
+        expect(progSection).toContain(progID)
+        const stalledSection = result.output.split("In progress — stalled")[1] ?? ""
+        expect(stalledSection).toContain(stalledID)
+      }),
+    ),
+  )
 })
 
 // End-to-end proof that BOTH invocation schemas drive the tool identically:
@@ -526,6 +784,20 @@ describe("session tool dual-schema (shell + JSON) end-to-end", () => {
         expect(yield* parse("session cancel ses_xyz")).toEqual([
           { operation: { action: "cancel", sessionID: "ses_xyz" } },
         ])
+        // `send` takes a sessionID + a joined multi-word task.
+        expect(yield* parse("session send ses_child go fix the flaky test")).toEqual([
+          { operation: { action: "send", sessionID: "ses_child", task: "go fix the flaky test" } },
+        ])
+      }),
+    ),
+  )
+
+  it.live("shell form: send requires a sessionID AND a task (arity error otherwise)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const exit = yield* Effect.exit(tool.shell!.parse("session send ses_only"))
+        expect(exit._tag).toBe("Failure")
       }),
     ),
   )
@@ -542,8 +814,19 @@ describe("session tool dual-schema (shell + JSON) end-to-end", () => {
     ),
   )
 
-  it.live("shell form: create parses --mode plan", () =>
+  it.live("shell form: create parses --topic into the operation", () =>
     provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const ops = yield* tool.shell!.parse("session create fix the login flow --topic auth")
+        expect(ops[0]).toEqual({
+          operation: { action: "create", task: "fix the login flow", topic: "auth" },
+        })
+      }),
+    ),
+  )
+
+  it.live("shell form: create parses --mode plan", () =>    provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const tool = yield* (yield* SessionTool).init()
         const ops = yield* tool.shell!.parse("session create do it --mode plan")
@@ -622,6 +905,12 @@ describe("recoverSessionArgs", () => {
     })
   })
 
+  test("carries topic on a bare create", () => {
+    expect(recoverSessionArgs({ task: "x", topic: "auth" })).toEqual({
+      operation: { action: "create", task: "x", topic: "auth" },
+    })
+  })
+
   test("parses a stringified operation", () => {
     expect(recoverSessionArgs({ operation: '{"action":"list"}' })).toEqual({ operation: { action: "list" } })
   })
@@ -670,7 +959,6 @@ import { forwardRef } from "../../src/permission/permission-forward-ref"
 import { Plugin } from "../../src/plugin"
 import { Provider as ProviderSvc } from "../../src/provider"
 import { Env } from "../../src/env"
-import { ProviderID } from "../../src/provider/schema"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { LLM } from "../../src/session/llm"
@@ -684,7 +972,6 @@ import { defaultLayer as SchedulerDefaultLayer } from "../../src/cron/scheduler"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Goal } from "../../src/session/goal"
-import { TaskGateState } from "../../src/task/gate-state"
 import { SessionStatus } from "../../src/session/status"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
@@ -805,7 +1092,6 @@ function makeAskLayer() {
   const prune = SessionPrune.layer.pipe(Layer.provide(checkpoint), Layer.provideMerge(deps))
   const prompt = SessionPrompt.layer.pipe(
     Layer.provide(Goal.defaultLayer),
-    Layer.provide(TaskGateState.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(askSummary),
     Layer.provide(checkpoint),
@@ -830,6 +1116,9 @@ function makeAskLayer() {
   return Layer.mergeAll(
     TestLLMServer.layer,
     inbox,
+    // Git.Service is part of SessionTool's Deps (dashboard worktree correlation);
+    // surface it so the test body can yield* SessionTool.
+    Git.defaultLayer,
     Actor.layer.pipe(
       Layer.provideMerge(prompt),
       Layer.provideMerge(Worktree.defaultLayer),
@@ -931,5 +1220,408 @@ describe("session tool ask (fork-query) functional", () => {
       { git: true, config: askProviderCfg },
     ),
     60000,
+  )
+
+  // Regression: a PEER child (created via `session create`) persists its turns
+  // under agent_id = <its own sessionID>, NOT "main". The old forkQuery read
+  // only the "main" slice, so `ask` reported "no activity yet" for every peer
+  // child — the orchestrator's diagnostic blind spot. Here the target has real
+  // history ONLY under its own-session slice; ask must still answer from it.
+  askIt.live("ask answers from a peer child's own-session slice (no false no-activity)", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+
+        const target = yield* sessions.create({
+          title: "Peer child with history",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        // History lives under agent_id === target.id (the peer's own slice),
+        // exactly as SessionPrompt persists a peer actor's turns — the "main"
+        // slice is left empty on purpose to mirror a real peer child.
+        yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user" as const,
+          sessionID: target.id,
+          agentID: target.id,
+          time: { created: Date.now() },
+          agent: "build",
+          model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+        } as unknown as MessageV2.Info)
+
+        yield* llm.text("The child read the config and is wiring the login route.")
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+        const result = yield* tool.execute(
+          { operation: { action: "ask", session_id: target.id, question: "what did you find?" } },
+          ctx(target.id),
+        )
+
+        expect(result.title).toBe(`Asked ${target.id}`)
+        expect(result.output.length).toBeGreaterThan(0)
+        expect(result.output).not.toContain("no activity yet")
+        // A fork child was spawned to answer (the empty-history path does not).
+        const children = yield* sessions.children(target.id)
+        expect(children.length).toBe(1)
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
+
+  // T42: `session send` to a child that was JUST created (its first turn is
+  // still hanging, turnCount 0) must NOT return "not reachable"/ESRCH — the peer
+  // receiver row is registered at spawn time, so the relay enqueues immediately.
+  // This is the prerequisite for T43 (--topic reuse). Uses the full Inbox+Actor
+  // stack so the relay hits the real Inbox.send ESRCH pre-check.
+  askIt.live("session send to a just-created (never-run) child enqueues without ESRCH", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({
+          title: "T42 relay parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        // Hang so the created child's first turn never completes: the receiver
+        // row can only come from spawn-time registration, not first-turn arming.
+        yield* llm.hang
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        const created = yield* tool.execute(
+          { operation: { action: "create", task: "long running child", mode: "build", title: "Child" } },
+          ctx(parent.id),
+        )
+        const childID = created.metadata.sessionID!
+        expect(childID).toBeDefined()
+
+        // The peer receiver row exists at spawn: turnCount 0, still pending.
+        const row = yield* actorReg.get(SessionID.make(childID), childID)
+        expect(row?.mode).toBe("peer")
+        expect(row?.turnCount).toBe(0)
+
+        // Relay a task the instant after create — must succeed, not ESRCH.
+        const sent = yield* tool.execute(
+          { operation: { action: "send", sessionID: childID, task: "do this next" } },
+          ctx(parent.id),
+        )
+        expect(sent.title).toContain(`Relayed task to ${childID}`)
+        expect(sent.output).not.toContain("not reachable")
+        expect(sent.output).toContain("Enqueued the task")
+
+        yield* tool
+          .execute({ operation: { action: "cancel", sessionID: childID } }, ctx(parent.id))
+          .pipe(Effect.ignore)
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
+
+  // T43: `session create --topic X` find-or-reuse. First call with a topic
+  // spawns a standing child tagged with that topic; a SECOND call with the SAME
+  // topic must NOT spawn a new child — it relays the task into the first via the
+  // inbox enqueue+wake path (works on the idle/never-run peer thanks to T42's
+  // spawn-time receiver row). A DIFFERENT topic yields a DISTINCT child. Uses the
+  // full Inbox+Actor stack so the reuse relay hits the real Inbox.send.
+  askIt.live("session create --topic reuses one standing child for the same topic, distinct for a different one", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const actorReg = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({
+          title: "T43 topic parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        // Hang so created children never finish their first turn — they remain
+        // standing idle peers, exactly the reuse target.
+        yield* llm.hang
+
+        const info = yield* SessionTool
+        const tool = yield* info.init()
+
+        const peerCount = () =>
+          Effect.gen(function* () {
+            const kids = yield* sessions.children(parent.id)
+            const enriched = yield* Effect.forEach(kids, (child) =>
+              actorReg.get(child.id, child.id).pipe(Effect.map((a) => ({ child, actor: a }))),
+            )
+            return enriched.filter(({ actor }) => actor?.mode === "peer")
+          })
+
+        // 1st create with topic "auth" → a new tagged child.
+        const first = yield* tool.execute(
+          { operation: { action: "create", task: "fix the login flow", mode: "build", topic: "auth" } },
+          ctx(parent.id),
+        )
+        const firstID = first.metadata.sessionID!
+        expect(firstID).toBeDefined()
+        expect(first.output).toContain("Tagged with topic 'auth'")
+        // Its title carries the machine marker so reuse can find it.
+        const firstSession = yield* sessions.get(SessionID.make(firstID))
+        expect(firstSession.title).toContain("[topic:auth]")
+        expect((yield* peerCount()).length).toBe(1)
+
+        // 2nd create with the SAME topic → NO new child; relays into the first.
+        const second = yield* tool.execute(
+          { operation: { action: "create", task: "also handle logout", mode: "build", topic: "auth" } },
+          ctx(parent.id),
+        )
+        expect(second.metadata.sessionID).toBe(firstID)
+        expect(second.title).toContain("Reused topic 'auth'")
+        expect(second.output).toContain("Enqueued the task")
+        // Still exactly ONE peer child for topic "auth".
+        expect((yield* peerCount()).length).toBe(1)
+
+        // A DIFFERENT topic → a DISTINCT new child.
+        const third = yield* tool.execute(
+          { operation: { action: "create", task: "add caching layer", mode: "build", topic: "perf" } },
+          ctx(parent.id),
+        )
+        const thirdID = third.metadata.sessionID!
+        expect(thirdID).toBeDefined()
+        expect(thirdID).not.toBe(firstID)
+        expect(third.output).toContain("Tagged with topic 'perf'")
+        // Now two distinct standing peers (auth + perf).
+        expect((yield* peerCount()).length).toBe(2)
+
+        for (const cid of [firstID, thirdID])
+          yield* tool.execute({ operation: { action: "cancel", sessionID: cid } }, ctx(parent.id)).pipe(Effect.ignore)
+      }),
+      { git: true, config: askProviderCfg },
+    ),
+    60000,
+  )
+})
+
+// === T38: fan-in aggregation (session join) ===
+// Drive a GROUP of mock child peers to terminal states (mixing success / fail /
+// cancel) and assert `session join` resolves ONCE with an aggregated per-child
+// summary — and crucially does NOT resolve early while a member is still live.
+// Mock children = real sessions parented to the orchestrator + a registered peer
+// actor keyed by the child session id (the peer session_id === actor_id
+// convention). Terminal transitions go through registry.updateStatus, which
+// publishes ActorStatusChanged on the same instance Bus joinGroup subscribes to.
+const seedAssistantText = (sessionID: SessionID, actorID: string, text: string) =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const userMsg = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user" as const,
+      sessionID,
+      agentID: actorID,
+      time: { created: Date.now() },
+      agent: "build",
+      model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") },
+    })
+    const msgID = MessageID.ascending()
+    yield* sessions.updateMessage({
+      id: msgID,
+      role: "assistant" as const,
+      sessionID,
+      agentID: actorID,
+      mode: "default",
+      agent: "build",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ModelID.make("test-model"),
+      providerID: ProviderID.make("test"),
+      parentID: userMsg.id,
+      time: { created: Date.now() },
+      finish: "end_turn",
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: msgID,
+      sessionID,
+      type: "text" as const,
+      text,
+    })
+  })
+
+describe("session tool join (fan-in aggregation, T38)", () => {
+  // Register a mock child peer under `parent`, returning its child session id.
+  const mockChild = (parentID: SessionID, label: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const registry = yield* ActorRegistry.Service
+      const child = yield* sessions.create({ parentID, title: label })
+      yield* registry.register({
+        sessionID: child.id,
+        actorID: child.id,
+        mode: "peer",
+        parentActorID: "main",
+        agent: "build",
+        description: label,
+        contextMode: "none",
+        contextWatermark: undefined,
+        background: true,
+        lifecycle: "persistent",
+      })
+      yield* registry.updateStatus(child.id, child.id, { status: "running" })
+      return child.id
+    })
+
+  it.live("parameters schema accepts a join operation with multiple session ids", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const parsed = tool.parameters.safeParse({
+          operation: { action: "join", sessionIDs: ["ses_a", "ses_b"] },
+        })
+        expect(parsed.success).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("parameters schema rejects join with an empty sessionIDs array", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const tool = yield* (yield* SessionTool).init()
+        const parsed = tool.parameters.safeParse({
+          operation: { action: "join", sessionIDs: [] },
+        })
+        expect(parsed.success).toBe(false)
+      }),
+    ),
+  )
+
+  it.live(
+    "join resolves ONCE when all 3 children reach terminal (mix success/fail/cancel) and not early",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "orchestrator" })
+        const tool = yield* (yield* SessionTool).init()
+
+        const a = yield* mockChild(parent.id, "child-A")
+        const b = yield* mockChild(parent.id, "child-B")
+        const c = yield* mockChild(parent.id, "child-C")
+
+        // Seed a result body for the one that will succeed.
+        yield* seedAssistantText(a, a, "A finished the job")
+
+        // Driver: flip children terminal one at a time with gaps. The join must
+        // NOT resolve until the LAST one (c) settles at ~90ms.
+        const settledOrder: string[] = []
+        yield* Effect.forkDetach(
+          Effect.gen(function* () {
+            yield* Effect.sleep("30 millis")
+            settledOrder.push("a")
+            yield* registry.updateStatus(a, a, { status: "idle", lastOutcome: "success" })
+            yield* Effect.sleep("30 millis")
+            settledOrder.push("b")
+            yield* registry.updateStatus(b, b, { status: "idle", lastOutcome: "failure", lastError: "B blew up" })
+            yield* Effect.sleep("30 millis")
+            settledOrder.push("c")
+            yield* registry.updateStatus(c, c, { status: "idle", lastOutcome: "cancelled" })
+          }),
+        )
+
+        const before = Date.now()
+        const result = yield* tool.execute(
+          { operation: { action: "join", sessionIDs: [a, b, c], timeout_ms: 5000 } },
+          ctx(parent.id),
+        )
+        const elapsed = Date.now() - before
+
+        // Did not resolve early: all three driver steps ran before join returned.
+        expect(settledOrder).toEqual(["a", "b", "c"])
+        // And it actually waited for the last transition (~90ms), not the fast path.
+        expect(elapsed).toBeGreaterThanOrEqual(80)
+
+        expect(result.title).toContain("Joined 3 children")
+        expect(result.output).toContain("all 3 children terminal")
+        expect(result.output).toContain("1 success, 1 failed, 1 cancelled")
+        // Per-child buckets present.
+        expect(result.output).toContain(`${a} (child-A) — success`)
+        expect(result.output).toContain(`${b} (child-B) — failure: B blew up`)
+        expect(result.output).toContain(`${c} (child-C) — cancelled`)
+      }),
+    ),
+    30000,
+  )
+
+  it.live(
+    "join returns immediately (fast path) when every child is already terminal",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "orchestrator" })
+        const tool = yield* (yield* SessionTool).init()
+
+        const a = yield* mockChild(parent.id, "done-A")
+        const b = yield* mockChild(parent.id, "done-B")
+        yield* registry.updateStatus(a, a, { status: "idle", lastOutcome: "success" })
+        yield* registry.updateStatus(b, b, { status: "idle", lastOutcome: "success" })
+
+        const result = yield* tool.execute(
+          { operation: { action: "join", sessionIDs: [a, b], timeout_ms: 500 } },
+          ctx(parent.id),
+        )
+        expect(result.title).toContain("Joined 2 children")
+        expect(result.output).toContain("2 success")
+      }),
+    ),
+    30000,
+  )
+
+  it.live(
+    "join TIMES OUT (does not hang) while a child stays live, reporting a partial aggregate",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "orchestrator" })
+        const tool = yield* (yield* SessionTool).init()
+
+        const a = yield* mockChild(parent.id, "fin-A")
+        const b = yield* mockChild(parent.id, "stuck-B")
+        // Only A settles; B stays running → the barrier must NOT resolve, it times out.
+        yield* registry.updateStatus(a, a, { status: "idle", lastOutcome: "success" })
+
+        const result = yield* tool.execute(
+          { operation: { action: "join", sessionIDs: [a, b], timeout_ms: 250 } },
+          ctx(parent.id),
+        )
+        expect(result.title).toContain("timed out")
+        expect(result.output).toContain("Join TIMED OUT")
+        expect(result.output).toContain("1/2 children terminal")
+      }),
+    ),
+    30000,
+  )
+
+  it.live(
+    "join treats an unknown session id as 'unknown' and does not block on it",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({ title: "orchestrator" })
+        const tool = yield* (yield* SessionTool).init()
+
+        const a = yield* mockChild(parent.id, "real-A")
+        yield* registry.updateStatus(a, a, { status: "idle", lastOutcome: "success" })
+
+        const result = yield* tool.execute(
+          { operation: { action: "join", sessionIDs: [a, "ses_ghost"], timeout_ms: 500 } },
+          ctx(parent.id),
+        )
+        expect(result.title).toContain("Joined 2 children")
+        expect(result.output).toContain("all 2 children terminal")
+        expect(result.output).toContain("1 unknown")
+        expect(result.output).toContain("ses_ghost — unknown")
+      }),
+    ),
+    30000,
   )
 })

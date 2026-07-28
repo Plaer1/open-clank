@@ -14,14 +14,9 @@ import { RGBA } from "@opentui/core"
 import { Filesystem } from "@/util"
 import * as Model from "../util/model"
 import { useLanguage } from "@tui/context/language"
+import { createFreeApiSunsetSignal, freeApiModelNameKey, isFreeApiModel } from "@tui/util/free-api-sunset"
 
-export function parseModel(model: string) {
-  const [providerID, ...rest] = model.split("/")
-  return {
-    providerID: providerID,
-    modelID: rest.join("/"),
-  }
-}
+export { parse as parseModel } from "../util/model"
 
 export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
   name: "Local",
@@ -30,6 +25,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const sdk = useSDK()
     const toast = useToast()
     const t = useLanguage().t
+    const freeApiSunset = createFreeApiSunsetSignal()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((x) => x.id === model.providerID)
@@ -49,7 +45,34 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const visibleAgents = createMemo(() => sync.data.agent.filter((x) => !x.hidden))
       const [agentStore, setAgentStore] = createStore({
         current: undefined as string | undefined,
+        sessionHasMessages: false,
       })
+      const FREE_SWITCH_GROUP = ["build", "plan"]
+      const canSwitchTo = (target: string) => {
+        if (!agentStore.sessionHasMessages) return true
+        const current = agentStore.current
+        if (!current) return true
+        if (current === target) return true
+        const currentInGroup = FREE_SWITCH_GROUP.includes(current)
+        const targetInGroup = FREE_SWITCH_GROUP.includes(target)
+        return currentInGroup && targetInGroup
+      }
+      const switchBlockedToast = () => {
+        const current = agentStore.current ?? ""
+        if (FREE_SWITCH_GROUP.includes(current)) {
+          toast.show({
+            variant: "warning",
+            message: t("tui.agent.locked.subset", { agents: FREE_SWITCH_GROUP.join(", ") }),
+            duration: 3000,
+          })
+        } else {
+          toast.show({
+            variant: "warning",
+            message: t("tui.agent.locked", { mode: current }),
+            duration: 3000,
+          })
+        }
+      }
       const { theme } = useTheme()
       const colors = createMemo(() => [
         theme.secondary,
@@ -76,16 +99,36 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             })
           setAgentStore("current", name)
         },
+        userSwitch(name: string) {
+          if (!canSwitchTo(name)) {
+            switchBlockedToast()
+            return
+          }
+          this.set(name)
+        },
+        // bypasses the mid-session canSwitchTo lock; set() still validates the name
+        forceSwitch(name: string) {
+          this.set(name)
+        },
         move(direction: 1 | -1) {
-          batch(() => {
-            const current = this.current()
-            if (!current) return
-            let next = agents().findIndex((x) => x.name === current.name) + direction
-            if (next < 0) next = agents().length - 1
-            if (next >= agents().length) next = 0
-            const value = agents()[next]
-            setAgentStore("current", value.name)
-          })
+          const current = this.current()
+          if (!current) return
+          const list = agents()
+          const currentIdx = list.findIndex((x) => x.name === current.name)
+          for (let i = 1; i < list.length; i++) {
+            let idx = currentIdx + direction * i
+            idx = ((idx % list.length) + list.length) % list.length
+            const candidate = list[idx]
+            if (!candidate) continue
+            if (canSwitchTo(candidate.name)) {
+              setAgentStore("current", candidate.name)
+              return
+            }
+          }
+          switchBlockedToast()
+        },
+        setSessionHasMessages(value: boolean) {
+          setAgentStore("sessionHasMessages", value)
         },
         color(name: string) {
           const index = visibleAgents().findIndex((x) => x.name === name)
@@ -162,33 +205,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       const args = useArgs()
       const fallbackModel = createMemo(() => {
-        if (args.model) {
-          const { providerID, modelID } = parseModel(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
-        }
+        const initial = Model.initial(sync.data.provider, {
+          argument: args.model,
+          ready: modelStore.ready,
+          recent: modelStore.recent,
+          configured: sync.data.config.model,
+        })
+        if (initial || !modelStore.ready) return initial
 
-        if (sync.data.config.model) {
-          const { providerID, modelID } = parseModel(sync.data.config.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
-        }
-
-        for (const item of modelStore.recent) {
-          if (isModelValid(item)) {
-            return item
-          }
-        }
-
-        // No args/config/recent match: prefer the free mimo-auto channel so a
+        // No args/recent/config match: prefer the free mimo-auto channel so a
         // clean install defaults to a usable free model rather than whatever
         // provider happens to sit first (e.g. paid xiaomi/ultraspeed).
         const mimo = sync.data.provider.find((p) => p.id === "mimo")
@@ -244,8 +269,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return {
             provider: provider?.name || value.providerID,
             model:
-              value.modelID === "mimo-auto"
-                ? t("tui.model.mimo_auto.name")
+              isFreeApiModel(value)
+                ? t(freeApiModelNameKey(freeApiSunset()))
                 : Model.name(sync.data.provider, value.providerID, value.modelID),
             reasoning: info?.capabilities?.reasoning ?? false,
           }
@@ -484,12 +509,27 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
     })
 
+    // Orchestrator mode resolves (find-or-create) its single global root session
+    // on mode entry, but must NOT switch the view then. The resolved id is
+    // stashed here so the composer can submit the first message INTO it instead
+    // of creating a duplicate root. Cleared whenever we leave orchestrator mode.
+    const orchestrator = iife(() => {
+      const [sessionID, setSessionID] = createSignal<string | undefined>(undefined)
+      return {
+        sessionID,
+        setSessionID(id: string | undefined) {
+          setSessionID(id)
+        },
+      }
+    })
+
     const result = {
       model,
       agent,
       mcp,
       neverAsk,
       skipPermissions,
+      orchestrator,
     }
     return result
   },

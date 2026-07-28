@@ -2,6 +2,8 @@ import { Worktree } from "../../src/worktree"
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, expect } from "bun:test"
+import { dynamicTool, jsonSchema, type Tool as AITool } from "ai"
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { Agent as AgentSvc } from "../../src/agent/agent"
@@ -30,7 +32,6 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Goal } from "../../src/session/goal"
-import { TaskGateState } from "../../src/task/gate-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { Skill } from "../../src/skill"
@@ -56,6 +57,7 @@ import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
+import { Metrics } from "../../src/metrics"
 
 void Log.init({ print: false })
 
@@ -71,6 +73,10 @@ const summary = Layer.succeed(
 const ref = {
   providerID: ProviderID.make("test"),
   modelID: ModelID.make("test-model"),
+}
+const mcpRef = {
+  providerID: ProviderID.make("test"),
+  modelID: ModelID.make("gpt-5-test"),
 }
 
 function defer<T>() {
@@ -118,28 +124,48 @@ function errorTool(parts: MessageV2.Part[]) {
   return part?.state.status === "error" ? (part as ErrorToolPart) : undefined
 }
 
-const mcp = Layer.succeed(
-  MCP.Service,
-  MCP.Service.of({
-    status: () => Effect.succeed({}),
-    clients: () => Effect.succeed({}),
-    tools: () => Effect.succeed({}),
-    prompts: () => Effect.succeed({}),
-    resources: () => Effect.succeed({}),
-    add: () => Effect.succeed({ status: { status: "disabled" as const } }),
-    connect: () => Effect.void,
-    disconnect: () => Effect.void,
-    getPrompt: () => Effect.succeed(undefined),
-    readResource: () => Effect.succeed(undefined),
-    startAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
-    authenticate: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
-    finishAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
-    removeAuth: () => Effect.void,
-    supportsOAuth: () => Effect.succeed(false),
-    hasStoredTokens: () => Effect.succeed(false),
-    getAuthStatus: () => Effect.succeed("not_authenticated" as const),
-  }),
-)
+function wireToolName(tool: Record<string, unknown>) {
+  if (typeof tool.name === "string") return tool.name
+  if (!tool.function || typeof tool.function !== "object" || !("name" in tool.function)) return
+  return typeof tool.function.name === "string" ? tool.function.name : undefined
+}
+
+function wireToolDescription(tool: Record<string, unknown>) {
+  if (typeof tool.description === "string") return tool.description
+  if (!tool.function || typeof tool.function !== "object" || !("description" in tool.function)) return
+  return typeof tool.function.description === "string" ? tool.function.description : undefined
+}
+
+function wireTool(tools: Array<Record<string, unknown>>, name: string) {
+  return tools.find((item) => wireToolName(item) === name)
+}
+
+function mcpLayer(tools: () => Record<string, AITool> = () => ({})) {
+  return Layer.succeed(
+    MCP.Service,
+    MCP.Service.of({
+      status: () => Effect.succeed({}),
+      clients: () => Effect.succeed({}),
+      tools: () => Effect.sync(tools),
+      prompts: () => Effect.succeed({}),
+      resources: () => Effect.succeed({}),
+      add: () => Effect.succeed({ status: { status: "disabled" as const } }),
+      connect: () => Effect.void,
+      disconnect: () => Effect.void,
+      getPrompt: () => Effect.succeed(undefined),
+      readResource: () => Effect.succeed(undefined),
+      startAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+      authenticate: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+      finishAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+      removeAuth: () => Effect.void,
+      supportsOAuth: () => Effect.succeed(false),
+      hasStoredTokens: () => Effect.succeed(false),
+      getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+    }),
+  )
+}
+
+const mcp = mcpLayer()
 
 const lsp = Layer.succeed(
   LSP.Service,
@@ -164,7 +190,7 @@ const lsp = Layer.succeed(
 const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
-function makeHttp() {
+function makeHttp(mcpService = mcp) {
   const taskRegistry = ActorRegistry.defaultLayer
   const deps = Layer.mergeAll(
     Session.defaultLayer,
@@ -178,7 +204,7 @@ function makeHttp() {
     Config.defaultLayer,
     ProviderSvc.defaultLayer,
     lsp,
-    mcp,
+    mcpService,
     AppFileSystem.defaultLayer,
     status,
     taskRegistry,
@@ -234,7 +260,6 @@ function makeHttp() {
     TestLLMServer.layer,
     SessionPrompt.layer.pipe(
       Layer.provide(Goal.defaultLayer),
-      Layer.provide(TaskGateState.defaultLayer),
       Layer.provide(TaskRegistry.defaultLayer),
       Layer.provide(SchedulerDefaultLayer),
       Layer.provide(SessionRevert.defaultLayer),
@@ -257,6 +282,70 @@ function makeHttp() {
 }
 
 const it = testEffect(makeHttp())
+const mcpLegacyMetadata = { interrupted: true, output: "must not become a successful result" }
+const mcpErrorImage = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+const mcpErrorAudio = "UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA"
+const mcpErrorBinary = "AQIDBAUGBwgJ"
+const mcpErrorImageURL = `data:image/png;base64,${mcpErrorImage}`
+const mcpErrorResult: CallToolResult = {
+  content: [
+    { type: "text", text: "Message was not sent" },
+    { type: "image", data: mcpErrorImage, mimeType: "image/png" },
+    {
+      type: "resource",
+      resource: {
+        uri: "mcp://diagnostic.txt",
+        text: "Resource diagnostic",
+        mimeType: "text/plain",
+      },
+    },
+    { type: "audio", data: mcpErrorAudio, mimeType: "audio/wav" },
+    {
+      type: "resource",
+      resource: {
+        uri: "mcp://diagnostic.bin",
+        blob: mcpErrorBinary,
+      },
+    },
+  ],
+  structuredContent: { sent: false, reason: "composer rejected the request" },
+  isError: true,
+  _meta: { privateToken: "do-not-send-to-model" },
+  metadata: mcpLegacyMetadata,
+}
+const mcpSuccessResult: CallToolResult = {
+  content: [{ type: "text", text: "Window updated" }],
+  structuredContent: { changed: true, windowID: 42 },
+  _meta: { privateToken: "success-meta-is-client-only" },
+}
+const mcpIt = testEffect(
+  makeHttp(
+    mcpLayer(() => ({
+      mcp_result: dynamicTool({
+        description: "Return a standard MCP tool execution error",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            private_error_code: { type: "string", description: "Secret nested MCP error selector" },
+          },
+          additionalProperties: false,
+        }),
+        execute: async () => mcpErrorResult,
+      }),
+      mcp_success: dynamicTool({
+        description: "Return a standard structured MCP success result",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            private_window_id: { type: "number", description: "Secret nested MCP window selector" },
+          },
+          additionalProperties: false,
+        }),
+        execute: async () => mcpSuccessResult,
+      }),
+    })),
+  ),
+)
 const unix = process.platform !== "win32" ? it.live : it.live.skip
 
 // Config that registers a custom "test" provider with a "test-model" model
@@ -273,6 +362,18 @@ const cfg = {
         "test-model": {
           id: "test-model",
           name: "Test Model",
+          attachment: false,
+          reasoning: false,
+          temperature: false,
+          tool_call: true,
+          release_date: "2025-01-01",
+          limit: { context: 100000, output: 10000 },
+          cost: { input: 0, output: 0 },
+          options: {},
+        },
+        "gpt-5-test": {
+          id: "gpt-5-test",
+          name: "GPT 5 Test",
           attachment: false,
           reasoning: false,
           temperature: false,
@@ -302,6 +403,96 @@ function providerCfg(url: string) {
           ...cfg.provider.test.options,
           baseURL: url,
         },
+      },
+    },
+  }
+}
+
+function noToolProviderCfg(url: string) {
+  const config = providerCfg(url)
+  return {
+    ...config,
+    provider: {
+      ...config.provider,
+      test: {
+        ...config.provider.test,
+        models: {
+          ...config.provider.test.models,
+          "test-model": { ...config.provider.test.models["test-model"], tool_call: false },
+          "gpt-5-test": { ...config.provider.test.models["gpt-5-test"], tool_call: false },
+        },
+      },
+    },
+  }
+}
+
+function restrictedAgentProviderCfg(url: string) {
+  return {
+    ...providerCfg(url),
+    agent: {
+      restricted: {
+        mode: "primary" as const,
+        tool_allowlist: ["mcp_success"],
+      },
+    },
+  }
+}
+
+function mediaProviderCfg(url: string) {
+  const config = providerCfg(url)
+  return {
+    ...config,
+    provider: {
+      ...config.provider,
+      test: {
+        ...config.provider.test,
+        models: {
+          ...config.provider.test.models,
+          "test-model": {
+            ...config.provider.test.models["test-model"],
+            attachment: true,
+            modalities: {
+              input: ["text", "image", "audio"] as ("text" | "image" | "audio")[],
+              output: ["text"] as "text"[],
+            },
+          },
+          "gpt-5-test": {
+            ...config.provider.test.models["gpt-5-test"],
+            attachment: true,
+            modalities: {
+              input: ["text", "image", "audio"] as ("text" | "image" | "audio")[],
+              output: ["text"] as "text"[],
+            },
+          },
+        },
+      },
+    },
+  }
+}
+
+function gptProviderCfg(url: string) {
+  return {
+    checkpoint: { thresholds: [] as string[] },
+    provider: {
+      openai: {
+        name: "OpenAI",
+        env: [],
+        npm: "@ai-sdk/openai",
+        models: {
+          "gpt-5.2": {
+            id: "gpt-5.2",
+            name: "GPT 5.2",
+            attachment: false,
+            reasoning: true,
+            temperature: false,
+            tool_call: true,
+            release_date: "2025-01-01",
+            limit: { context: 100000, output: 10000 },
+            cost: { input: 0, output: 0 },
+            options: {},
+          },
+        },
+        options: { apiKey: "test-key", baseURL: url },
       },
     },
   }
@@ -410,6 +601,7 @@ it.live("loop calls LLM and returns assistant message", () =>
       yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello" }],
       })
@@ -438,6 +630,7 @@ it.live("static loop returns assistant text through local provider", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello" }],
       })
@@ -467,6 +660,7 @@ it.live("injects orchestrator system prompt for agent 'orchestrator'", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "orchestrator",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "kick things off" }],
       })
@@ -494,6 +688,7 @@ it.live("static loop consumes queued replies across turns", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello one" }],
       })
@@ -507,6 +702,7 @@ it.live("static loop consumes queued replies across turns", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello two" }],
       })
@@ -536,6 +732,7 @@ it.live("loop continues when finish is tool-calls", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello" }],
       })
@@ -552,6 +749,583 @@ it.live("loop continues when finish is tool-calls", () =>
     }),
     { git: true, config: providerCfg },
   ),
+)
+
+mcpIt.live("MCP isError becomes a tool error without losing standard result fields", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const bus = yield* Bus.Service
+      const metricSeen = defer<void>()
+      const statuses: string[] = []
+      const session = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const off = yield* bus.subscribeCallback(Metrics.ToolCall, (event) => {
+        if (event.properties.sessionID !== session.id || event.properties.tool_name !== "mcp_result") return
+        statuses.push(event.properties.tool_call_status)
+        metricSeen.resolve()
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "send the message" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "execution error" })
+      yield* llm.tool("mcp_result", {})
+      yield* llm.text("I saw that sending failed")
+
+      const result = yield* prompt.loop({ sessionID: session.id })
+      yield* Effect.promise(() => metricSeen.promise)
+      off()
+
+      const tool = (yield* MessageV2.filterCompactedEffect(session.id))
+        .flatMap((message) => message.parts)
+        .find(
+          (part): part is ErrorToolPart =>
+            part.type === "tool" && part.tool === "mcp_result" && part.state.status === "error",
+        )
+      expect(tool).toBeDefined()
+      if (!tool) return
+
+      expect(tool.state.error).toBe(
+        'Message was not sent\n\nResource diagnostic\n\nStructured content:\n{"sent":false,"reason":"composer rejected the request"}',
+      )
+      expect(tool.state.metadata?.mcp).toEqual({
+        structuredContent: mcpErrorResult.structuredContent,
+        isError: true,
+        _meta: mcpErrorResult._meta,
+        legacyMetadata: mcpLegacyMetadata,
+      })
+      expect(tool.state.attachments).toHaveLength(3)
+      expect(tool.state.attachments?.[0]).toMatchObject({
+        type: "file",
+        mime: "image/png",
+        url: mcpErrorImageURL,
+        sessionID: session.id,
+        messageID: tool.messageID,
+      })
+      expect(tool.state.attachments?.[1]).toMatchObject({
+        type: "file",
+        mime: "audio/wav",
+        url: `data:audio/wav;base64,${mcpErrorAudio}`,
+        sessionID: session.id,
+        messageID: tool.messageID,
+      })
+      expect(tool.state.attachments?.[2]).toMatchObject({
+        type: "file",
+        mime: "application/octet-stream",
+        url: `data:application/octet-stream;base64,${mcpErrorBinary}`,
+        filename: "mcp://diagnostic.bin",
+        sessionID: session.id,
+        messageID: tool.messageID,
+      })
+      expect(statuses).toEqual(["error"])
+      expect(result.parts.some((part) => part.type === "text" && part.text === "I saw that sending failed")).toBe(true)
+
+      const requests = yield* llm.inputs
+      const followup = JSON.stringify(requests[2])
+      expect(followup).toContain("Message was not sent")
+      expect(followup).toContain("Resource diagnostic")
+      expect(followup).toContain("composer rejected the request")
+      expect(followup).toContain('Tool \\"mcp_result\\" call')
+      expect(followup).toContain("failed:")
+      expect(followup).toContain("diagnostic.bin")
+      expect(followup).not.toContain("mcp://diagnostic.bin")
+      expect(followup).toContain("application/octet-stream")
+      expect(followup).not.toContain(mcpErrorBinary)
+      expect(followup).not.toContain("must not become a successful result")
+      expect(followup).not.toContain("do-not-send-to-model")
+      expect(requests[2]).toMatchObject({
+        messages: expect.arrayContaining([
+          {
+            role: "user",
+            content: expect.arrayContaining([
+              { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
+              { type: "image_url", image_url: { url: mcpErrorImageURL } },
+              { type: "input_audio", input_audio: { data: mcpErrorAudio, format: "wav" } },
+            ]),
+          },
+        ]),
+      })
+    }),
+    { git: true, config: mediaProviderCfg },
+  ),
+)
+
+mcpIt.live("MCP structuredContent is persisted and reaches the model alongside text", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const bus = yield* Bus.Service
+      const metricSeen = defer<void>()
+      const statuses: string[] = []
+      const session = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const off = yield* bus.subscribeCallback(Metrics.ToolCall, (event) => {
+        if (event.properties.sessionID !== session.id || event.properties.tool_name !== "mcp_success") return
+        statuses.push(event.properties.tool_call_status)
+        metricSeen.resolve()
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "inspect the window" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "structured success" })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.text("The window changed")
+
+      yield* prompt.loop({ sessionID: session.id })
+      yield* Effect.promise(() => metricSeen.promise)
+      off()
+
+      const tool = (yield* MessageV2.filterCompactedEffect(session.id))
+        .flatMap((message) => message.parts)
+        .find(
+          (part): part is CompletedToolPart =>
+            part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+        )
+      expect(tool).toBeDefined()
+      if (!tool) return
+
+      expect(tool.state.output).toBe(
+        'Window updated\n\nStructured content:\n{"changed":true,"windowID":42}',
+      )
+      expect(tool.state.metadata.mcp).toEqual({
+        structuredContent: mcpSuccessResult.structuredContent,
+        isError: false,
+        _meta: mcpSuccessResult._meta,
+      })
+      expect(statuses).toEqual(["success"])
+
+      const requests = yield* llm.inputs
+      const initialTools = requests[0].tools as Array<Record<string, unknown>>
+      const loadedTools = requests[1].tools as Array<Record<string, unknown>>
+      expect(initialTools.map(wireToolName)).toContain("mcp_tool_search")
+      expect(initialTools.map(wireToolName)).not.toContain("mcp_success")
+      expect(initialTools.map(wireToolName)).not.toContain("mcp_result")
+      const catalog = wireToolDescription(wireTool(initialTools, "mcp_tool_search") ?? {})
+      expect(catalog).toContain("mcp_result — Return a standard MCP tool execution error")
+      expect(catalog).toContain("mcp_success — Return a standard structured MCP success result")
+      expect(catalog).not.toContain("private_error_code")
+      expect(catalog).not.toContain("Secret nested MCP window selector")
+      expect(loadedTools.map(wireToolName)).toContain("mcp_success")
+      expect(loadedTools.map(wireToolName)).not.toContain("mcp_result")
+
+      const followup = JSON.stringify(requests[2])
+      expect(followup).toContain("Window updated")
+      expect(followup).toContain('{\\"changed\\":true,\\"windowID\\":42}')
+      expect(followup).not.toContain("success-meta-is-client-only")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("rejects an MCP call that was not loaded by search", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Inactive MCP",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "call the MCP tool directly" }],
+      })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.text("I will search first")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const part = (yield* MessageV2.filterCompactedEffect(session.id))
+        .flatMap((message) => message.parts)
+        .find(
+          (item): item is ErrorToolPart =>
+            item.type === "tool" && item.tool === "mcp_success" && item.state.status === "error",
+        )
+      expect(part?.state.error).toContain("mcp_tool_search")
+      expect(part?.state.metadata?.recoverable).toBe(true)
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.map(wireToolName)).not.toContain("mcp_success")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("resets loaded MCP tools for a new user request", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Request scoped MCP",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "inspect the window" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "structured success" })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "new request" }],
+      })
+      yield* llm.text("done again")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const requests = yield* llm.inputs
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_success")
+      expect((requests[3].tools as Array<Record<string, unknown>>).map(wireToolName)).not.toContain("mcp_success")
+      expect((requests[3].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_tool_search")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("accumulates MCP matches across searches in one user request", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Accumulated MCP" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "use two MCP capabilities" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "execution error" })
+      yield* llm.tool("mcp_tool_search", { query: "structured success" })
+      yield* llm.text("ready")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const requests = yield* llm.inputs
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_result")
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).not.toContain("mcp_success")
+      expect((requests[2].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_result")
+      expect((requests[2].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_success")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("keeps discovery reachable when permissions allow only an MCP tool", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Least privilege MCP",
+        permission: [
+          { permission: "*", pattern: "*", action: "deny" },
+          { permission: "mcp_success", pattern: "*", action: "allow" },
+        ],
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "use the permitted MCP capability" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "structured success" })
+      yield* llm.text("ready")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const requests = yield* llm.inputs
+      const initialTools = requests[0].tools as Array<Record<string, unknown>>
+      const catalog = wireToolDescription(wireTool(initialTools, "mcp_tool_search") ?? {})
+      expect(initialTools.map(wireToolName)).toContain("mcp_tool_search")
+      expect(catalog).toContain("mcp_success — Return a standard structured MCP success result")
+      expect(catalog).not.toContain("mcp_result")
+      expect(catalog).not.toContain("standard MCP tool execution error")
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).toContain("mcp_success")
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).not.toContain("mcp_result")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("searches only MCP tools allowed by the configured agent", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Agent allowlist MCP" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "restricted",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "use the allowed MCP tool" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "structured success execution error" })
+      yield* llm.text("ready")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const requests = yield* llm.inputs
+      const initialTools = requests[0].tools as Array<Record<string, unknown>>
+      const catalog = wireToolDescription(wireTool(initialTools, "mcp_tool_search") ?? {})
+      expect(initialTools.map(wireToolName)).toEqual(["mcp_tool_search"])
+      expect(catalog).toContain("mcp_success — Return a standard structured MCP success result")
+      expect(catalog).not.toContain("mcp_result")
+      expect((requests[1].tools as Array<Record<string, unknown>>).map(wireToolName)).toEqual([
+        "mcp_tool_search",
+        "mcp_success",
+      ])
+    }),
+    { git: true, config: restrictedAgentProviderCfg },
+  ),
+)
+
+mcpIt.live(
+  "uses ordinary MCP Tool Search for GPT models without exposing MCP schemas",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "GPT MCP Search" })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderID.openai, modelID: ModelID.make("gpt-5.2") },
+          noReply: true,
+          parts: [{ type: "text", text: "inspect the window" }],
+        })
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+        const catalog = wireToolDescription(wireTool(tools, "mcp_tool_search") ?? {})
+        expect(tools.map(wireToolName)).toContain("mcp_tool_search")
+        expect(tools.map(wireToolName)).not.toContain("mcp_success")
+        expect(tools.map(wireToolName)).not.toContain("mcp_result")
+        expect(catalog).toContain("mcp_success — Return a standard structured MCP success result")
+        expect(catalog).toContain("mcp_result — Return a standard MCP tool execution error")
+        expect(JSON.stringify(tools)).not.toContain("private_window_id")
+        expect(JSON.stringify(tools)).not.toContain("Secret nested MCP error selector")
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+  30_000,
+)
+
+mcpIt.live("degrades the MCP catalog to names at high context pressure", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "High pressure MCP catalog" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: `inspect available MCP tools ${"x".repeat(230_000)}` }],
+      })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      const catalog = wireToolDescription(wireTool(tools, "mcp_tool_search") ?? {})
+      expect(catalog).toContain("Available MCP tool names: mcp_result, mcp_success")
+      expect(catalog).not.toContain("Return a standard MCP tool execution error")
+      expect(catalog).not.toContain("Return a standard structured MCP success result")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("exposes MCP tools directly for non-GPT models by default", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Direct non-GPT MCP tools" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "inspect available MCP tools" }],
+      })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+      expect(tools.map(wireToolName)).toContain("mcp_result")
+      expect(tools.map(wireToolName)).toContain("mcp_success")
+      expect(
+        (yield* MessageV2.filterCompactedEffect(session.id))
+          .flatMap((message) => message.parts)
+          .some(
+            (part) =>
+              part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+          ),
+      ).toBe(true)
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("rejects direct MCP calls disabled for the request", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Request-disabled direct MCP tool" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        tools: { mcp_success: false },
+        noReply: true,
+        parts: [{ type: "text", text: "call the disabled MCP tool" }],
+      })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = ((yield* llm.inputs)[0].tools ?? []) as Array<Record<string, unknown>>
+      expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+      expect(tools.map(wireToolName)).toContain("mcp_result")
+      expect(tools.map(wireToolName)).not.toContain("mcp_success")
+      expect(
+        (yield* MessageV2.filterCompactedEffect(session.id))
+          .flatMap((message) => message.parts)
+          .some(
+            (part) => part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+          ),
+      ).toBe(false)
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("rejects direct MCP calls hidden by the agent allowlist", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "Agent-hidden direct MCP tool" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "restricted",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "call the hidden MCP tool" }],
+      })
+      yield* llm.tool("mcp_result", {})
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+      expect(tools.map(wireToolName)).not.toContain("mcp_result")
+      expect(tools.map(wireToolName)).toContain("mcp_success")
+      expect(
+        (yield* MessageV2.filterCompactedEffect(session.id))
+          .flatMap((message) => message.parts)
+          .some(
+            (part) => part.type === "tool" && part.tool === "mcp_result" && part.state.status === "error",
+          ),
+      ).toBe(true)
+    }),
+    { git: true, config: restrictedAgentProviderCfg },
+  ),
+)
+
+mcpIt.live("omits MCP discovery for models without tool calling", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "No tool calls" })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: mcpRef,
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+      expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+      expect(tools.map(wireToolName)).not.toContain("mcp_success")
+      expect(tools.map(wireToolName)).not.toContain("mcp_result")
+    }),
+    { git: true, config: noToolProviderCfg },
+  ),
+)
+
+it.live(
+  "omits MCP Tool Search when no MCP tools are available",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "No MCP" })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "hello" }],
+        })
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
+        expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  30_000,
 )
 
 it.live("glob tool keeps instance context during prompt runs", () =>
@@ -608,6 +1382,7 @@ it.live("loop continues when finish is stop but assistant has tool parts", () =>
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "hello" }],
       })
@@ -1206,7 +1981,7 @@ it.live(
         yield* llm.text("after-shell")
 
         const sh = yield* prompt
-          .shell({ sessionID: chat.id, agent: "build", command: "sleep 0.2" })
+          .shell({ sessionID: chat.id, agent: "build", model: ref, command: "sleep 0.2" })
           .pipe(Effect.forkChild)
         yield* Effect.sleep(50)
 
@@ -1244,7 +2019,7 @@ it.live(
         yield* llm.text("done")
 
         const sh = yield* prompt
-          .shell({ sessionID: chat.id, agent: "build", command: "sleep 0.2" })
+          .shell({ sessionID: chat.id, agent: "build", model: ref, command: "sleep 0.2" })
           .pipe(Effect.forkChild)
         yield* Effect.sleep(50)
 

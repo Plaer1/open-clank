@@ -1,0 +1,28 @@
+Execute JavaScript to orchestrate the available tools.
+
+Write the body of an async function. The global `tools` object exposes every tool available to this execution, and each method returns a promise:
+
+```ts
+const results = await Promise.all(urls.map((url) => tools.webfetch({ url, format: "markdown" })))
+return results.map((result) => result.output)
+```
+
+Use `exec` when JavaScript can batch multiple independent tool calls, programmatically transform their results, or keep large intermediate outputs out of the conversation. Run independent calls with `Promise.all` or `Promise.allSettled`, but keep dependent operations sequential. Prefer direct tool calls when a result needs model judgment before the next call or only one small call is needed; do not use `exec` merely to force concurrency.
+
+The script environment provides JavaScript built-ins plus `tools`, `files`, and `console`. It does not provide Node.js modules, `import`, `require`, `process`, `fetch`, or timers. Use the available tools for external operations.
+
+- Call tools with `await tools.name(input)`.
+- Active MCP tools are also callable as `tools.<mcp_tool_name>(input)` with the same permission checks as direct calls. When the MCP server returns structured data, the result carries it pre-parsed in the `structured` field.
+- Use `Promise.all` or `Promise.allSettled` only for independent calls; at most 8 run concurrently.
+- Return a small JSON-serializable aggregate. Circular values, BigInt, and throwing getters fail execution.
+- Use `console.log` only for debugging; logs are included in the result.
+- Tool permissions are enforced for every nested call.
+- State does not persist between executions. For temporary cross-execution data, use `files.writeText` and `files.readText` under the OS temp directory.
+- `bash` is available as both `tools.bash(...)` and its alias `tools.exec_command(...)`; both use the same permission and execution path.
+- Conversation-control tools are not available inside `exec`.
+
+By default an execution may make 50 tool calls and use 60 seconds of active compute. The `max_tool_calls` and `timeout_seconds` inputs can raise those limits to 500 calls and 600 seconds. Time waiting for nested tools does not count toward active compute.
+
+The result is wrapped in `<exec status="...">` and may contain `<return_value>`, `<warnings>`, `<logs>`, `<trace>`, and `<error_message>` blocks.
+
+The available tools and their exact input types are declared below.

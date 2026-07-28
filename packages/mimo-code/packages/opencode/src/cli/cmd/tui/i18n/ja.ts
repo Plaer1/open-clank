@@ -45,20 +45,29 @@ export const dict = {
 
   // Tips
   "tui.tips.label": "ヒント",
-  "tui.tips.plain_terminal": "iTerm または VS Code ターミナルの使用をおすすめします",
+  "tui.tips.plain_terminal": "Mac 標準ターミナルは描画に制限があります。iTerm2 または VS Code ターミナルをご利用ください",
   "tui.tips.attach_file": "{highlight}@{/highlight} の後にファイル名を入力するとファジー検索でファイルを添付できます",
   "tui.tips.shell_prefix":
     "メッセージを {highlight}!{/highlight} で始めるとシェルコマンドを直接実行できます（例：{highlight}!ls -la{/highlight}）",
   "tui.tips.tab_agent":
+    "{highlight}Tab{/highlight} または {highlight}Shift+Tab{/highlight} で Build / Plan / Compose エージェントを切り替えます",
+  "tui.tips.tab_agent_orchestrator":
     "{highlight}Tab{/highlight} または {highlight}Shift+Tab{/highlight} で Build / Plan / Compose / Orchestrator エージェントを切り替えます",
   "tui.tips.theme_mode":
     "{highlight}/dark{/highlight} でダークモード、{highlight}/light{/highlight} でライトモードに切り替えます",
   "tui.tips.doc": "{highlight}/doc{/highlight} を実行してユーザードキュメントを開きます",
   "tui.tips.free_models": "期間限定で無料モデルを提供中。今すぐお試しください！",
+  "tui.tips.free_api_sunset":
+    "無料 API サービスは終了しました。{highlight}/login{/highlight} でログインしてください。MiMo Token Plan を購読するか、サードパーティ API を設定して MiMo Code をご利用ください。",
+  "tui.tips.multi_skills":
+    "1 つのメッセージ内で複数の {highlight}/skill-name{/highlight} を組み合わせて、複数の Skill を同時に使えます",
+  "tui.tips.ask_slash_commands":
+    "ショートカットを探すには、チャットで {highlight}使えるスラッシュコマンドは？{/highlight} と直接質問できます",
   "tui.tips.background": "{highlight}/background{/highlight} を実行してホーム背景にお好みの画像を設定できます",
+  "tui.tips.compose_next":
+    "{highlight}/compose-next{/highlight} を推奨（強力なモデル向け・Compose 代替）",
   "tui.tips.undo": "{highlight}/undo{/highlight} で直前のメッセージとファイル変更を取り消します",
   "tui.tips.redo": "{highlight}/redo{/highlight} で取り消したメッセージとファイル変更を復元します",
-  "tui.tips.share": "{highlight}/share{/highlight} を実行すると opencode.ai に会話の公開リンクを作成します",
   "tui.tips.drag_drop": "画像や PDF をターミナルにドラッグ＆ドロップしてコンテキストに追加できます",
   "tui.tips.paste_image": "{highlight}Ctrl+V{/highlight} でクリップボードの画像を貼り付けます（macOS では Cmd+V ではなく Ctrl+V を使用してください。Cmd+V は端末が横取りします）",
   "tui.tips.editor":
@@ -142,7 +151,6 @@ export const dict = {
   "tui.tips.upgrade": "{highlight}mimo upgrade{/highlight} で最新バージョンに更新します",
   "tui.tips.auth_list": "{highlight}mimo auth list{/highlight} で設定済みプロバイダを確認します",
   "tui.tips.agent_create": "{highlight}mimo agent create{/highlight} でガイド付きエージェント作成を行います",
-  "tui.tips.github_trigger": "GitHub の issue/PR で {highlight}/opencode{/highlight} を入力すると AI を起動します",
   "tui.tips.github_install": "{highlight}mimo github install{/highlight} で GitHub workflow を設定します",
   "tui.tips.github_oc": "PR のコード行に {highlight}/oc{/highlight} とコメントすると的を絞ったレビューが行われます",
   "tui.tips.theme_system": '{highlight}"theme": "system"{/highlight} でターミナルの配色に合わせます',
@@ -178,8 +186,6 @@ export const dict = {
     "{highlight}tui.json{/highlight} の {highlight}scroll_acceleration{/highlight} を有効にすると macOS 風のなめらかなスクロールになります",
   "tui.tips.username_toggle":
     "コマンドパレット（{highlight}Ctrl+P{/highlight}）でチャット内のユーザー名表示を切り替えます",
-  "tui.tips.docker":
-    "{highlight}docker run -it --rm ghcr.io/anomalyco/opencode{/highlight} でコンテナ版を実行できます",
   "tui.tips.zen": "MiMo Code と組み合わせて {highlight}/connect{/highlight} で厳選されたモデルを使えます",
   "tui.tips.agents_md": "プロジェクトの {highlight}AGENTS.md{/highlight} を Git にコミットしてチームで共有します",
   "tui.tips.review": "{highlight}/review{/highlight} で未コミット変更、ブランチ、PR をレビューします",
@@ -221,11 +227,19 @@ export const dict = {
   "tui.skill.html-to-video-pipeline.description": "ショート動画の神ツール - HTML でショート動画を制作",
   "tui.skill.arxiv.description": "arXiv 論文の検索・引用・ダウンロード・追跡",
   "tui.skill.skill-creator.description": "エージェントスキルの作成・レビュー・改善",
+  "tui.skill.drive-mimo.description": "別の MiMoCode プロセスをプログラムで操作——ヘッドレス JSON イベントまたは tmux 経由のインタラクティブ TUI",
   "tui.skill.research-paper-writing.description": "学術論文の執筆・推敲・査読者視点の批評",
+  "tui.skill.playwright.description": "ターミナルから実ブラウザの操作を自動化",
+  "tui.skill.codex.description": "スクリプト、CI、Docker、Kubernetes で Codex CLI を自律実行",
+  "tui.skill.claude-code.description": "コーディングタスクを Claude Code CLI に委任",
+  "tui.skill.grok-build.description": "コマンドラインから Grok Build を操作",
   "tui.skill.design-blueprint.description": "モックアップ着手前に設計仕様（DESIGN.md + Decision Trace）を作成",
   "tui.skill.super-research.description": "自律型研究——実験ループ、調査、量的分析、ベンチマーク、根本原因調査、アブレーション、論文再現、論文執筆",
   "tui.skill.deep-research.description": "深層マルチソース調査、クロスチェック付き引用レポート",
   "tui.skill.modern-python-toolchain.description": "モダン Python プロジェクト構成：uv, ruff, pyright",
+  "tui.skill.data-analytics.description": "製品・事業データの分析、KPI 設計、ダッシュボードとレポートの作成",
+  "tui.skill.product-design.description": "製品・UX デザインの調査、監査、プロトタイプ作成、検証",
+  "tui.skill.sales.description": "商談準備、アカウント調査、案件計画、営業システムの活用",
   "tui.skill.compose:ask.description": "ユーザーに判断や確認を求める",
   "tui.skill.compose:brainstorm.description": "実装前に要件と設計を探索する",
   "tui.skill.compose:debug.description": "修正提案前に体系的にデバッグ",
@@ -240,6 +254,8 @@ export const dict = {
   "tui.skill.compose:tdd.description": "テスト駆動開発 — コードの前にテストを書く",
   "tui.skill.compose:verify.description": "検証コマンドを実行し合格を確認",
   "tui.skill.compose:worktree.description": "機能開発用の隔離ワークスペースを作成",
+  "tui.skill.compose-next.description":
+    "新世代編成モード：強力なモデル向けにエンドツーエンドで機能開発を進める（grill・spec・実装・検証・レビュー・完了）",
 
   // Language switching
   "tui.command.language.switch.title": "言語を切り替え",
@@ -279,6 +295,8 @@ export const dict = {
   "tui.command.variant.cycle.title": "バリアントを循環",
   "tui.command.variant.list.title": "モデルバリアントを切り替え",
   "tui.command.agent.cycle.reverse.title": "エージェントを逆循環",
+  "tui.agent.locked": "{{mode}} モードに入った後はモードを切り替えできません",
+  "tui.agent.locked.subset": "このセッションでは {{agents}} の間でのみ切り替え可能です",
   "tui.command.provider.login.title": "ログイン",
   "tui.command.provider.connect.title": "プロバイダに接続",
   "tui.command.provider.logout.title": "ログアウト",
@@ -304,11 +322,15 @@ export const dict = {
   "tui.dialog.agreement.title": "利用規約とプライバシー",
   "tui.dialog.agreement.message": "内容を確認し、同意のうえで続行してください。",
   "tui.dialog.agreement.confirm": "同意して続行",
+  "tui.dialog.free_api_sunset.title": "無料 API サービスは終了しました",
+  "tui.dialog.free_api_sunset.message":
+    "/login でログインしてください。MiMo Token Plan を購読するか、サードパーティ API を設定して MiMo Code をご利用ください。",
   "tui.command.consent.revoke.title": "無料モデルの同意を取り消す",
   "tui.consent.revoked": "無料モデルの同意を取り消しました — 次回利用時に再度同意を求めます",
   "tui.dialog.select.placeholder": "検索",
   "tui.dialog.model.login_hint": "ヒント：モデルを切り替える前に /login でログインしてください",
-  "tui.model.mimo_auto.name": "MiMo Auto（MiMo-V2.5 期間限定無料）",
+  "tui.model.mimo_auto.name": "MiMo Auto（MiMo-V2.5 7月26日 18:00 まで無料 · UTC+8）",
+  "tui.model.mimo_auto.sunset_name": "MiMo Auto（MiMo-V2.5）",
   "tui.dialog.token_plan.title": "Token Plan を購読するか順番待ち",
   "tui.dialog.token_plan.line1":
     "無料モードでは現在順番待ちが必要です。安定した高品質なサービスをご利用いただくには、",
@@ -335,6 +357,21 @@ export const dict = {
   "tui.dialog.export.hint.confirm_action": "確認",
   "tui.dialog.export.hint.options_action": "オプション",
   "tui.toast.copied_to_clipboard": "クリップボードにコピーしました",
+  "tui.toast.try_best.paused_other": "Try-best ループを検出したため、セッション {{session}} を一時停止しました。",
+  "tui.toast.try_best.handoff_failed": "選択したハーネスへの引き継ぎを開始できませんでした。",
+  "tui.toast.try_best.continue_failed": "セッションを続行できませんでした",
+  "tui.dialog.try_best.title": "Try-best ループを検出 — ターンを一時停止しました",
+  "tui.dialog.try_best.reason.edit_repeat": "ほぼ同じ編集が {{count}} 回繰り返されました。",
+  "tui.dialog.try_best.reason.edit_repeat_path": "{{path}} でほぼ同じ編集が {{count}} 回繰り返されました。",
+  "tui.dialog.try_best.reason.bash_retry": "同じ失敗コマンドが、編集の成功なしに {{count}} 回再試行されました。",
+  "tui.dialog.try_best.reason.action_streak": "{{action}}操作が {{count}} 回連続しましたが、確認できる進展はありませんでした。",
+  "tui.dialog.try_best.action.edit": "編集",
+  "tui.dialog.try_best.action.verify": "検証",
+  "tui.dialog.try_best.action.same_kind": "同種の",
+  "tui.dialog.try_best.handoff.title": "{{target}} に引き継ぐ",
+  "tui.dialog.try_best.handoff.description": "未完了の作業をこのハーネスへ委任するよう MiMo に依頼",
+  "tui.dialog.try_best.continue.title": "{{model}} で続行",
+  "tui.dialog.try_best.continue.description": "現在のモデルにこのアプローチを破棄して再計画するよう依頼",
   "tui.toast.instructions_loaded": "{{files}} を読み込みました",
   "tui.toast.update_available.title": "アップデートがあります",
   "tui.toast.update_available.confirm": "新しいバージョン v{{version}} が利用可能です。今すぐ更新しますか？",
@@ -371,6 +408,7 @@ export const dict = {
   "tui.command.session.ask.title": "サイド質問をする",
   "tui.command.session.ask.description": "現在のセッションを中断せずに質問する",
   "tui.command.session.ask.placeholder": "サイド質問を入力…",
+  "tui.command.session.ask.busy": "考え中…",
   "tui.command.session.unshare.title": "共有を解除",
   "tui.command.session.undo.title": "直前のメッセージを取り消す",
   "tui.command.session.redo.title": "やり直し",

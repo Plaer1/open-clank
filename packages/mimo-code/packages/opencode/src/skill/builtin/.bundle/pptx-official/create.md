@@ -99,6 +99,51 @@ Notes on text:
   tf.auto_size = MSO_AUTO_SIZE.NONE
   ```
 
+### CJK / East-Asian text (Chinese, Japanese, Korean)
+
+`run.font.name` only sets the **Latin** typeface (`a:latin`). CJK glyphs are
+taken from the separate **East-Asian slot** (`a:ea`), which python-pptx does
+not expose. If you leave it unset, PowerPoint falls back to a default and
+Chinese / Japanese / Korean text often renders as tofu boxes (□□□) or an
+inconsistent substitute — even when `run.font.name` looks correct. For any run
+containing CJK text, set all three slots (`a:latin`, `a:ea`, `a:cs`) via XML:
+
+```python
+from pptx.oxml.ns import qn
+
+def set_cjk_font(run, font_name):
+    """Set Latin (a:latin), East-Asian (a:ea) and complex-script (a:cs) typefaces."""
+    run.font.name = font_name                      # a:latin (python-pptx inserts it in order)
+    rPr = run._r.get_or_add_rPr()
+    # a:ea / a:cs aren't exposed by python-pptx, so build them by hand. But a:rPr
+    # enforces child order (a:latin, a:ea, a:cs, a:sym, a:hlinkClick, ...); a bare
+    # append() lands after any existing a:hlinkClick/a:sym/etc. and yields invalid
+    # markup that PowerPoint "repairs" by dropping the font. Insert before the first
+    # legal successor instead (a:ea must also precede a:cs).
+    successors = {
+        "a:ea": ("a:cs", "a:sym", "a:hlinkClick", "a:hlinkMouseOver", "a:rtl", "a:extLst"),
+        "a:cs": ("a:sym", "a:hlinkClick", "a:hlinkMouseOver", "a:rtl", "a:extLst"),
+    }
+    for tag in ("a:ea", "a:cs"):
+        el = rPr.find(qn(tag))
+        if el is None:
+            el = rPr.makeelement(qn(tag), {})
+            rPr.insert_element_before(el, *successors[tag])
+        el.set("typeface", font_name)
+
+set_cjk_font(p.runs[0], "Noto Sans CJK SC")        # a CJK-capable font present on the render machine
+```
+
+Choose a font that actually ships CJK glyphs and exists on the machine where
+the deck will be viewed. In the common interactive case that's the machine
+generating it — use the current OS's standard CJK face (check the platform
+from your environment): `Microsoft YaHei` on Windows, `PingFang SC` on macOS,
+`Noto Sans CJK SC` on Linux. If the deck targets viewers on a different or
+unknown OS, prefer a portable name (`Microsoft YaHei` — every Windows ships
+it; other platforms substitute). A wrong-but-CJK name only causes font
+substitution; a Latin-only face such as Calibri causes tofu no matter which
+slot you set.
+
 ### Bulleted list
 
 ```python

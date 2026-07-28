@@ -6,12 +6,20 @@
  * file, prints the URL, and exits immediately. Detects already-running
  * instances. Supports --stop to kill a running server.
  *
- * Usage:
- *   bun run scripts/preview.ts output.pptx              # start, default port 4200
- *   bun run scripts/preview.ts output.pptx --port 5000  # start on custom port
- *   bun run scripts/preview.ts --stop output.pptx       # stop running server
+ * SCOPE: for the MiMoCode CLI only. If MiMoCode is embedded via SDK in
+ * a GUI host (web app, desktop app, IDE plugin, …), use that host's
+ * native preview instead of this server.
+ *
+ * PATHS: this script sits in the skill's bundle directory, not
+ * necessarily in your cwd. Invoke with the absolute path to it
+ * (<SKILL_DIR>/scripts/preview.ts).
+ *
+ * Usage (substitute <SKILL_DIR> with this skill's bundle dir):
+ *   bun run <SKILL_DIR>/scripts/preview.ts /path/to/output.pptx              # start, default port 4200
+ *   bun run <SKILL_DIR>/scripts/preview.ts /path/to/output.pptx --port 5000  # start on custom port
+ *   bun run <SKILL_DIR>/scripts/preview.ts --stop /path/to/output.pptx       # stop running server
  */
-import { resolve, dirname, basename } from "node:path"
+import { resolve, dirname } from "node:path"
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs"
 import { parseArgs } from "node:util"
 
@@ -51,7 +59,7 @@ function readPid(pidFile: string): { pid: number; port: number } | null {
 if (values.stop) {
   const source = positionals[0]
   if (!source) {
-    console.error("Usage: bun run preview.ts --stop <file.pptx>")
+    console.error("Usage: bun run <SKILL_DIR>/scripts/preview.ts --stop /path/to/file.pptx")
     process.exit(2)
   }
   const pidFile = pidFileFor(resolve(source))
@@ -70,8 +78,8 @@ if (values.stop) {
 // --- Start mode ---
 const source = positionals[0]
 if (!source) {
-  console.error("Usage: bun run preview.ts <file.pptx> [--port N]")
-  console.error("       bun run preview.ts --stop <file.pptx>")
+  console.error("Usage: bun run <SKILL_DIR>/scripts/preview.ts /path/to/file.pptx [--port N]")
+  console.error("       bun run <SKILL_DIR>/scripts/preview.ts --stop /path/to/file.pptx")
   process.exit(2)
 }
 
@@ -116,4 +124,4 @@ console.log(`PPTX Preview Server started (pid ${child.pid})`)
 console.log(`  Watching: ${pptxPath}`)
 console.log(`  URL:      http://localhost:${port}`)
 console.log(`  Log:      ${logFile}`)
-console.log(`\n  Stop with: bun run scripts/preview.ts --stop ${basename(pptxPath)}`)
+console.log(`\n  Stop with: bun run ${import.meta.path} --stop ${pptxPath}`)

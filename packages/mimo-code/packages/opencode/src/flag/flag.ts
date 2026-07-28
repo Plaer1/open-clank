@@ -121,6 +121,16 @@ export const Flag = {
   MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT: number("MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT") ?? 3,
   MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT: number("MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT") ?? 2,
   MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT: number("MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT") ?? 2,
+  // Defaults to false. When enabled, unsigned historical reasoning sent through
+  // the Anthropic Messages format receives an empty placeholder signature so it
+  // follows the same native thinking-block serialization path as signed content.
+  get MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT() {
+    return truthy("MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT")
+  },
+  // Empty/no-op tool-call loop guard: number of soft nudges (remind → replan)
+  // before the harness hard-halts the turn. N consecutive empty steps beyond
+  // this many recovery attempts terminates the turn. Mirrors TEXT_NGRAM_MAX_RECOVERY.
+  MIMOCODE_EMPTY_STEP_MAX_RECOVERY: number("MIMOCODE_EMPTY_STEP_MAX_RECOVERY") ?? 2,
 
   // Consecutive-block repetition detection for streamed reasoning + text.
   // A block of at least N tokens repeating REPEAT_THRESHOLD times consecutively
@@ -129,10 +139,13 @@ export const Flag = {
   MIMOCODE_TEXT_REPEAT_THRESHOLD: number("MIMOCODE_TEXT_REPEAT_THRESHOLD") ?? 20,
   MIMOCODE_TEXT_WINDOW_TOKENS: number("MIMOCODE_TEXT_WINDOW_TOKENS") ?? 500,
 
-  // Caps applied to image attachments before a prompt is sent. Both default to
-  // undefined (no limit). MIMOCODE_MAX_PROMPT_IMAGES bounds how many images may
-  // be sent per request (oldest excess images are dropped); MIMOCODE_MAX_PROMPT_IMAGE_SIZE
-  // bounds the decoded byte size of a single image. Values must be positive integers.
+  // Caps applied to image attachments before a prompt is sent.
+  // MIMOCODE_MAX_PROMPT_IMAGES (default undefined = no count limit) bounds how
+  // many images may be sent per request (oldest excess images are dropped).
+  // MIMOCODE_MAX_PROMPT_IMAGE_SIZE overrides the default per-image byte cap
+  // (DEFAULT_MAX_IMAGE_BYTES ~4.5 MB, kept under the provider 5 MB hard limit);
+  // oversized images are recompressed under the cap, or stripped to a text
+  // placeholder when they can't be compressed. Values must be positive integers.
   MIMOCODE_MAX_PROMPT_IMAGES: number("MIMOCODE_MAX_PROMPT_IMAGES"),
   MIMOCODE_MAX_PROMPT_IMAGE_SIZE: number("MIMOCODE_MAX_PROMPT_IMAGE_SIZE"),
   MIMOCODE_MIMO_ONLY,
@@ -153,12 +166,30 @@ export const Flag = {
   MIMOCODE_DISABLE_CODEX_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_CODEX_SKILLS"),
   MIMOCODE_DISABLE_OPENCODE_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_OPENCODE_SKILLS"),
 
+  // Skill-search ranking and loading policy. Exact mentions stay above BM25;
+  // the BM25/coverage blend has a 0.90 ceiling, and near-max results auto-load.
+  MIMOCODE_SKILL_SEARCH_EXACT_SCORE: 1,
+  MIMOCODE_SKILL_SEARCH_BM25_K1: 1.5,
+  MIMOCODE_SKILL_SEARCH_BM25_LENGTH_NORMALIZATION: 0.75,
+  MIMOCODE_SKILL_SEARCH_BM25_IDF_SMOOTHING: 0.5,
+  MIMOCODE_SKILL_SEARCH_BM25_SCORE_WEIGHT: 0.55,
+  MIMOCODE_SKILL_SEARCH_QUERY_COVERAGE_WEIGHT: 0.35,
+  MIMOCODE_SKILL_SEARCH_AUTO_LOAD_THRESHOLD: 0.85,
+  MIMOCODE_SKILL_SEARCH_SCORE_PRECISION: 4,
+  MIMOCODE_SKILL_SEARCH_MAX_RESULTS: 3,
+  MIMOCODE_SKILL_SEARCH_STEM_MIN_LENGTH: 3,
+  MIMOCODE_SKILL_SEARCH_FILE_SAMPLE_LIMIT: 10,
+  MIMOCODE_SKILL_SEARCH_REFRESH_INTERVAL_MS: 12 * 60 * 60 * 1000,
+  // Defaults to true. Set MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER=false (or 0)
+  // to stop injecting skill-search reminders into user queries.
+  MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER: !falsy("MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER"),
+
   // Defaults to false. When enabled, skill-source commands appear in the `/`
-  // autocomplete dropdown alongside user commands and MCP prompts (Claude
-  // Code-style). By default skills are only surfaced via the `/skills` picker
-  // and model-driven invocation, keeping the `/` list focused on user-authored
-  // commands.
-  MIMOCODE_ENABLE_SLASH_SKILLS: truthy("MIMOCODE_ENABLE_SLASH_SKILLS"),
+  // autocomplete dropdown alongside user commands and MCP prompts. Skills are
+  // surfaced in `/` completion by default; set MIMOCODE_DISABLE_SLASH_SKILLS=1
+  // to hide them and fall back to the `/skills` picker + model-driven
+  // invocation only.
+  MIMOCODE_DISABLE_SLASH_SKILLS: truthy("MIMOCODE_DISABLE_SLASH_SKILLS"),
   MIMOCODE_FAKE_VCS: process.env["MIMOCODE_FAKE_VCS"],
 
   // When enabled, skips all git subprocess calls during project discovery
@@ -170,6 +201,10 @@ export const Flag = {
   MIMOCODE_SERVER_PASSWORD,
   MIMOCODE_SERVER_USERNAME: process.env["MIMOCODE_SERVER_USERNAME"],
   MIMOCODE_ENABLE_QUESTION_TOOL: truthy("MIMOCODE_ENABLE_QUESTION_TOOL"),
+
+  // Defaults to false. Set MIMOCODE_ENABLE_TRY_BEST_HANDOFF=true (or 1) to
+  // enable try-best loop detection, automatic turn pausing, and handoff UI.
+  MIMOCODE_ENABLE_TRY_BEST_HANDOFF: truthy("MIMOCODE_ENABLE_TRY_BEST_HANDOFF"),
 
   // Defaults to false. The edit tool does pure exact-string matching with
   // explicit error signals. Set MIMOCODE_ENABLE_FUZZY_EDIT=true to opt into the
@@ -217,15 +252,24 @@ export const Flag = {
   MIMOCODE_EXPERIMENTAL_OXFMT: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_OXFMT"),
   MIMOCODE_EXPERIMENTAL_LSP_TY: truthy("MIMOCODE_EXPERIMENTAL_LSP_TY"),
   MIMOCODE_EXPERIMENTAL_LSP_TOOL: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_LSP_TOOL"),
+  // Defaults to OFF: exec (tool_script orchestration) is registered only for
+  // GPT-toolset models. Opt in here to expose it to every model.
+  MIMOCODE_ENABLE_EXEC_TOOL: truthy("MIMOCODE_ENABLE_EXEC_TOOL"),
+  // Defaults to OFF for non-GPT models. GPT models enable MCP Tool Search in
+  // SessionPrompt regardless of this flag. Opt in here to enable it for every
+  // function-calling model.
+  MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH:
+    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH"),
   // Defaults to OFF (opt-in): the Orchestrator primary mode — a general
   // coordinator that delegates to child sessions via the `session` tool, with a
   // global singleton workspace and child permission-approval routing. Enable with
   // MIMOCODE_EXPERIMENTAL_ORCHESTRATOR=true (or the umbrella MIMOCODE_EXPERIMENTAL).
   MIMOCODE_EXPERIMENTAL_ORCHESTRATOR: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_ORCHESTRATOR"),
-  // Defaults to true: dynamic workflow + built-in deep-research are on by default.
-  // Set MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL=false to opt out. The env-var name is
-  // kept for backwards compat (long-running experiments still pass it as `1`).
-  MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL: !falsy("MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL"),
+  // Defaults to OFF (opt-in): dynamic workflows and built-in workflows.
+  // Enable with MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL=true (or the umbrella
+  // MIMOCODE_EXPERIMENTAL flag).
+  MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL:
+    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL"),
   // Defaults to true: cron + self-paced loop scheduling are on by default.
   // Set MIMOCODE_EXPERIMENTAL_CRON=false to opt out. Runtime kill switch is
   // MIMOCODE_DISABLE_CRON (checked live every tick).

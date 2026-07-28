@@ -4,6 +4,7 @@ import { createWriteStream, readFileSync } from "node:fs"
 import * as Tool from "./tool"
 import path from "path"
 import DESCRIPTION from "./bash.txt"
+import GPT_DESCRIPTION from "./bash.gpt.txt"
 import { Log } from "../util"
 import { Instance } from "../project/instance"
 import { lazy } from "@/util/lazy"
@@ -53,6 +54,21 @@ const FILES = new Set([
 ])
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
+
+export function bashDescription(gpt = false) {
+  const name = Shell.name(Shell.acceptable())
+  const chaining =
+    name === "powershell"
+      ? "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell 5.1 does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
+      : "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, apply_patch before Bash for git operations, or git add before git commit), run these operations sequentially instead."
+  return (gpt ? GPT_DESCRIPTION : DESCRIPTION)
+    .replaceAll("${directory}", Instance.directory)
+    .replaceAll("${os}", process.platform)
+    .replaceAll("${shell}", name)
+    .replaceAll("${chaining}", chaining)
+    .replaceAll("${maxLines}", String(Truncate.MAX_LINES))
+    .replaceAll("${maxBytes}", String(Truncate.MAX_BYTES))
+}
 
 export function sanitizeShellEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
@@ -737,19 +753,10 @@ export const BashTool = Tool.define(
       Effect.sync(() => {
         const shell = Shell.acceptable()
         const name = Shell.name(shell)
-        const chain =
-          name === "powershell"
-            ? "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell 5.1 does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
-            : "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead."
         log.info("bash tool using shell", { shell })
 
         return {
-          description: DESCRIPTION.replaceAll("${directory}", Instance.directory)
-            .replaceAll("${os}", process.platform)
-            .replaceAll("${shell}", name)
-            .replaceAll("${chaining}", chain)
-            .replaceAll("${maxLines}", String(Truncate.MAX_LINES))
-            .replaceAll("${maxBytes}", String(Truncate.MAX_BYTES)),
+          description: bashDescription(),
           parameters: Parameters,
           execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
             Effect.gen(function* () {

@@ -18,6 +18,7 @@ import { Log } from "../util"
 import { createOpencodeClient } from "@mimo-ai/sdk"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
+import { XaiAuthPlugin } from "./xai"
 import { MimoAuthPlugin, AnthropicProxyPlugin } from "./mimo"
 import { Session } from "../session"
 import type { SessionID } from "../session/schema"
@@ -142,6 +143,7 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
   MimoAuthPlugin,
   AnthropicProxyPlugin,
   CodexAuthPlugin,
+  XaiAuthPlugin,
   CopilotAuthPlugin,
   // gitlab/poe auth are external npm packages typed against the published
   // upstream plugin package, which carries a duplicate (nominal) copy of the

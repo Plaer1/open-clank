@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["lxml>=4.9"]
+# ///
 """Extract plain text from a `.docx` using XPath expressions.
 
 Alternate implementation notes:
@@ -11,9 +15,9 @@ Alternate implementation notes:
       subset of lxml's.
 
 Usage:
-    python extract_text.py <input.docx>
-    python extract_text.py <input.docx> --out out.txt
-    python extract_text.py <input.docx> --include-notes --include-comments
+    uv run extract_text.py <input.docx>
+    uv run extract_text.py <input.docx> --out out.txt
+    uv run extract_text.py <input.docx> --include-notes --include-comments
 """
 from __future__ import annotations
 

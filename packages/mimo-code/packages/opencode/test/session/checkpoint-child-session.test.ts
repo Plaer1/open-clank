@@ -388,14 +388,19 @@ describe("checkpoint writer child-session isolation", () => {
         expect(r2).toBe("started")
         expect(spawnLog.count).toBe(2)
 
-        // A failed writer must leave the watermark untouched so the same
-        // uncovered range remains eligible for the retry above.
+        // Transactional invariant: on a FAILED writer the parent's
+        // last_checkpoint_message_id must NOT advance. The checkpoint content
+        // and the watermark move together or not at all; advancing on failure
+        // would "consume" the delta the failed checkpoint never captured and
+        // silently drop it from future rebuilds. (The settle watcher still
+        // clears the in-flight writers Map on failure — asserted above — so a
+        // fresh writer can retry; only the DB watermark is gated on success.)
         const parentRow = yield* Effect.sync(() =>
           Database.use((d) =>
             d.select().from(SessionTable).where(eq(SessionTable.id, info.id)).get(),
           ),
         )
-        expect(parentRow?.last_checkpoint_message_id ?? null).toBeNull()
+        expect(parentRow?.last_checkpoint_message_id ?? undefined).toBeUndefined()
       }),
       { config: { checkpoint: { fork: true } } },
     ),

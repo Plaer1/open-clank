@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, beforeEach, describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
 import * as fs from "fs/promises"
 import path from "path"
@@ -7,9 +7,12 @@ import { Config } from "../../src/config"
 import { Memory } from "../../src/memory"
 import { Session as SessionNs } from "../../src/session"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
+import { checkpointPath } from "../../src/session/checkpoint-paths"
 import { SessionCompaction } from "../../src/session/compaction"
 import { TaskRegistry } from "../../src/task/registry"
 import { ActorRegistry } from "../../src/actor/registry"
+import { ActorRegistryTable } from "../../src/actor/actor.sql"
+import { Database } from "../../src/storage"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Instance } from "../../src/project/instance"
@@ -27,6 +30,17 @@ const ref = {
 
 afterEach(async () => {
   await Instance.disposeAll()
+})
+
+// renderRebuildContext's "Active actors" section reads ActorRegistry.listActive(),
+// which is process-wide (pending/running + background), not session-scoped — peer
+// actors legitimately live in child sessions. Database.Client is a process-level
+// singleton and orphan recovery only clears rows from OTHER instance_ids, so
+// background actors left running by earlier test files survive into this one and
+// make the "nothing to push" context non-empty. Wipe them, same as
+// checkpoint-rebuild-v3.test.ts.
+beforeEach(() => {
+  Database.use((db) => db.delete(ActorRegistryTable).run())
 })
 
 const it = testEffect(
@@ -110,6 +124,50 @@ describe("SessionCheckpoint.insertRebuildBoundary", () => {
           expect(after.length).toBe(3)
         }),
       { outsideGit: true, config: { checkpoint: { push_caps: { recent_user: 0 } } } },
+    ),
+  )
+
+  it.live(
+    "insertRebuildBoundary appends a checkpoint boundary when a real checkpoint exists (the /rebuild + auto path behavior)",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const ssn = yield* SessionNs.Service
+          const cp = yield* SessionCheckpoint.Service
+          const info = yield* ssn.create({})
+
+          const m1 = yield* Effect.promise(() => seedUserMessage(info.id, "turn one"))
+          const _m2 = yield* Effect.promise(() => seedUserMessage(info.id, "turn two"))
+          const m3 = yield* Effect.promise(() => seedUserMessage(info.id, "turn three"))
+
+          // Put a REAL (non-template) checkpoint on disk so renderRebuildContext
+          // produces non-empty context. This is the state a manual /rebuild (and
+          // the automatic overflow path) rely on: a usable checkpoint exists, so
+          // a boundary must be inserted at the given watermark.
+          const cpPath = checkpointPath(info.id)
+          yield* Effect.promise(() => fs.mkdir(path.dirname(cpPath), { recursive: true }))
+          yield* Effect.promise(() =>
+            fs.writeFile(cpPath, "# Session checkpoint\n\n## §1 Active intent\nThe user is verifying /rebuild.\n"),
+          )
+
+          const inserted = yield* cp.insertRebuildBoundary({
+            sessionID: info.id,
+            boundary: m3.id,
+            agent: "build",
+            model: { providerID: "anthropic", modelID: "claude" },
+          })
+          expect(inserted).toBe(true)
+
+          const after = yield* ssn.messages({ sessionID: info.id })
+          // Originals preserved (never deleted) …
+          expect(after.some((m) => m.info.id === m1.id)).toBe(true)
+          expect(after.some((m) => m.info.id === m3.id)).toBe(true)
+          // … plus exactly one appended message carrying a `checkpoint` part.
+          expect(after.length).toBe(4)
+          const boundary = after.at(-1)!
+          expect(boundary.parts.some((p) => p.type === "checkpoint")).toBe(true)
+        }),
+      { outsideGit: true },
     ),
   )
 })

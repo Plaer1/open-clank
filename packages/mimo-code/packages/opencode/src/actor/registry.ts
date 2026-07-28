@@ -3,15 +3,23 @@ import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorRegistryTable } from "./actor.sql"
-import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist } from "./schema"
+import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness } from "./schema"
+import { deriveLiveness } from "./schema"
 import * as Events from "./events"
 import { Log } from "@/util"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { randomUUID } from "node:crypto"
 
 const log = Log.create({ service: "actor.registry" })
 
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000 // 5 minutes
 const SCAN_INTERVAL_MS = 60 * 1000 // every 60s
+
+// Process-level singleton instance ID for orphan recovery.
+// A unique token generated once at module load. Stable across layer rebuilds
+// within the same process; a fresh process gets a new token and correctly
+// reclaims dead rows.
+const PROCESS_INSTANCE_ID = randomUUID()
 
 type ActorRow = typeof ActorRegistryTable.$inferSelect
 
@@ -68,6 +76,14 @@ export interface Interface {
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
   readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
   readonly get: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
+  // Derived pull-side liveness for a single actor row (progressing/stalled/
+  // terminal), computed from honest registry fields. Returns undefined when the
+  // row is absent. Pass stallMs to override the default staleness window.
+  readonly liveness: (
+    sessionID: SessionID,
+    actorID: string,
+    stallMs?: number,
+  ) => Effect.Effect<{ liveness: Liveness; actor: Actor } | undefined>
   readonly listBySession: (sessionID: SessionID) => Effect.Effect<Actor[]>
   readonly listActive: () => Effect.Effect<Actor[]>
   readonly listByParent: (sessionID: SessionID, parentActorID: string) => Effect.Effect<Actor[]>
@@ -84,6 +100,10 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+
+    // Use the process-level singleton for orphan recovery.
+    // This is stable across layer rebuilds within the same process.
+    const instanceID = PROCESS_INSTANCE_ID
 
     // --- CRUD methods ---
 
@@ -118,6 +138,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         last_turn_time: now,
         turn_count: 0,
         last_error: null,
+        instance_id: instanceID,
         time_completed: null,
         time_created: now,
         time_updated: now,
@@ -241,6 +262,16 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         ),
       )
       return row ? fromRow(row) : undefined
+    })
+
+    const liveness = Effect.fn("ActorRegistry.liveness")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      stallMs?: number,
+    ) {
+      const actor = yield* get(sessionID, actorID)
+      if (!actor) return undefined
+      return { liveness: deriveLiveness(actor, Date.now(), stallMs), actor }
     })
 
     const listBySession = Effect.fn("ActorRegistry.listBySession")(function* (sessionID: SessionID) {
@@ -379,24 +410,25 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     })
 
     // --- Orphan Recovery ---
-    // On init, mark all pending/running actors as idle with failure outcome.
-    // Per spec B6: don't auto-revive — they wake on next sender's send.
+    // On init, mark pending/running actors from a PREVIOUS process as idle
+    // with failure outcome. Actors from this very instance (same instanceID)
+    // are still alive and must NOT be touched.
     yield* Effect.sync(() =>
       Database.use((db) => {
         const now = Date.now()
-        db.update(ActorRegistryTable)
-          .set({
-            status: "idle",
-            last_outcome: "failure",
-            last_error: "orphaned: process restarted",
-            time_updated: now,
-            time_completed: now,
-          })
-          .where(inArray(ActorRegistryTable.status, ["pending", "running"]))
-          .run()
+        db.run(sql`
+          UPDATE actor_registry
+          SET status = 'idle',
+              last_outcome = 'failure',
+              last_error = 'orphaned: process restarted',
+              time_updated = ${now},
+              time_completed = ${now}
+          WHERE status IN ('pending', 'running')
+            AND instance_id != ${instanceID}
+        `)
       }),
     )
-    log.info("orphan recovery complete")
+    log.info("orphan recovery complete", { instanceID })
 
     // --- Stuck Detection ---
     const scanStuck = Effect.gen(function* () {
@@ -440,6 +472,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       updateTurn,
       updateAgent,
       get,
+      liveness,
       listBySession,
       listActive,
       listByParent,

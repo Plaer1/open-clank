@@ -238,14 +238,29 @@ export const layer: Layer.Layer<
       overflow?: boolean
       agentID?: string
     }) {
-      const parent = input.messages.findLast((m) => m.info.id === input.parentID)
+      const parentIdx = input.messages.findLastIndex((m) => m.info.id === input.parentID)
+      const parent = parentIdx >= 0 ? input.messages[parentIdx] : undefined
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
       }
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
-      let messages = input.messages
+      // Truncate history at the previous compaction boundary so a repeat
+      // compaction summarizes [previous summary + messages since], not the full raw
+      // history (which would grow unboundedly and overflow the compaction model).
+      // Only compaction boundaries are used — checkpoint boundaries inject a
+      // lossy rebuild and compaction benefits from seeing the full window since
+      // the last compaction (including any checkpoint rebuild text in between).
+      const boundaryIdx = input.messages.findLastIndex(
+        (m, i) =>
+          i < parentIdx &&
+          m.info.role === "user" &&
+          m.parts.some((p) => p.type === "compaction"),
+      )
+      const scoped = boundaryIdx >= 0 ? input.messages.slice(boundaryIdx) : input.messages
+
+      let messages = scoped
       let replay:
         | {
             info: MessageV2.User
@@ -253,20 +268,23 @@ export const layer: Layer.Layer<
           }
         | undefined
       if (input.overflow) {
-        const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
+        const idx = scoped.findIndex((m) => m.info.id === input.parentID)
         for (let i = idx - 1; i >= 0; i--) {
-          const msg = input.messages[i]
-          if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
+          const msg = scoped[i]
+          if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction" || p.type === "checkpoint")) {
             replay = { info: msg.info, parts: msg.parts }
-            messages = input.messages.slice(0, i)
+            messages = scoped.slice(0, i)
             break
           }
         }
         const hasContent =
-          replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
+          replay &&
+          messages.some(
+            (m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction" || p.type === "checkpoint"),
+          )
         if (!hasContent) {
           replay = undefined
-          messages = input.messages
+          messages = scoped
         }
       }
 

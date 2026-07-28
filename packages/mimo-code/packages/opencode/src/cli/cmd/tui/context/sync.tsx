@@ -228,6 +228,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         all: [],
         default: {},
         connected: [],
+        authenticated: [],
       },
       console_state: emptyConsoleState,
       provider_auth: {},

@@ -1,4 +1,6 @@
 import * as Tool from "./tool"
+import { realpathSync } from "fs"
+import path from "path"
 import DESCRIPTION from "./session.txt"
 import SHELL_DESCRIPTION from "./session.shell.txt"
 import { tokenize } from "./shell-tokenize"
@@ -10,17 +12,24 @@ import { Instance } from "@/project/instance"
 import { InstanceRef } from "@/effect/instance-ref"
 import { InstanceState } from "@/effect"
 import { ActorRegistry } from "@/actor/registry"
+import { deriveLiveness } from "@/actor/schema"
+import { joinGroup } from "@/actor/group"
+import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { forwardRef } from "@/permission/permission-forward-ref"
 import { Provider } from "@/provider"
 import { spawnRef } from "@/actor/spawn-ref"
+import { inboxServiceRef } from "@/inbox/inbox-ref"
 import { prefixCaptureRef } from "@/session/prefix-capture-ref"
 import type { ForkContext, Interface as ActorInterface } from "@/actor/spawn"
 import { Bus } from "@/bus"
+import { Git } from "@/git"
 import { TuiEvent } from "@/cli/cmd/tui/event"
+import { assembleFleet, renderFleetTable } from "./fleet"
+import type { FleetActorInput, WorktreeEntry } from "./fleet"
 import type { SessionID, MessageID } from "../session/schema"
 import type { ProviderID, ModelID } from "../provider/schema"
 
-const KNOWN_VERBS = ["create", "switch", "list", "cancel", "ask", "setmode", "approve", "grant-approval"]
+const KNOWN_VERBS = ["create", "send", "switch", "list", "dashboard", "status", "cancel", "ask", "join", "setmode", "approve", "grant-approval"]
 
 // Wraps the human/agent question in a side-boundary system-reminder:
 // one-shot, READ-ONLY, answer-to-caller.
@@ -52,14 +61,29 @@ export function forkQuery(deps: {
   sessions: Session.Interface
   provider: Provider.Interface
   actor: ActorInterface
-}, targetSessionID: SessionID, question: string) {
+}, targetSessionID: SessionID, question: string, selectedModel?: { providerID: ProviderID; modelID: ModelID }) {
   return Effect.gen(function* () {
-    // a. Read the target's main slice + compute the watermark boundary.
-    const msgs = yield* deps.sessions.messages({ sessionID: targetSessionID, agentID: "main" })
-    const watermark = yield* deps.sessions.lastMainMessageID(targetSessionID)
-    // Graceful: a target with no main-slice history (or no user message) can't
-    // be snapshotted — buildPrefix needs a user message and there is nothing to
-    // ask about. Answer directly instead of spawning.
+    // a. Resolve the target's persisted history and the slice to snapshot.
+    // A child created via `session create` runs as a PEER actor whose actorID
+    // === its own sessionID, so SessionPrompt persists its turns under
+    // agent_id = <targetSessionID> — NOT "main". Reading only the "main" slice
+    // (the old behaviour) therefore saw an empty history for every peer child
+    // (isolated or idle alike) and reported "no activity" even after real turns.
+    // Read ALL slices, then pick the slice that actually holds the child's
+    // conversation: "main" for an orchestrator/main session, else the peer's
+    // own-session slice. This answers from FROZEN persisted history regardless
+    // of whether the child is still running, went idle, or was isolated.
+    const all = yield* deps.sessions.messages({ sessionID: targetSessionID, agentID: "*" })
+    const sliceOf = (agentID: string) =>
+      all.filter((m) => (m.info.agentID ?? "main") === agentID)
+    const mainSlice = sliceOf("main")
+    // Prefer "main" when it carries real activity; otherwise fall back to the
+    // peer child's own-session slice (agent_id === targetSessionID).
+    const msgs = mainSlice.some((m) => m.info.role === "user") ? mainSlice : sliceOf(targetSessionID)
+    const watermark = msgs.at(-1)?.info.id
+    // Graceful: a target whose selected slice has no history (or no user
+    // message) can't be snapshotted — buildPrefix needs a user message and
+    // there is nothing to ask about. Answer directly instead of spawning.
     const hasUserMessage = msgs.some((m) => m.info.role === "user")
     if (!watermark || msgs.length === 0 || !hasUserMessage)
       return `(session ${targetSessionID} has no activity yet — nothing to ask about.)`
@@ -72,7 +96,7 @@ export function forkQuery(deps: {
 
     // Model for the prefix + the fork's LLM call: the project default. The prefix
     // captor needs a concrete provider/model; the answer quality is the default's.
-    const model = yield* deps.provider.defaultModel()
+    const model = selectedModel ?? (yield* deps.provider.defaultModel())
     const providerID = model.providerID as ProviderID
     const modelID = model.modelID as ModelID
 
@@ -131,7 +155,6 @@ export function forkQuery(deps: {
 
 function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length
-  if (m === 0) return n
   if (n === 0) return m
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
   for (let i = 0; i <= m; i++) dp[i][0] = i
@@ -153,6 +176,26 @@ function suggestVerb(input: string): string | undefined {
 
 const id = "session"
 
+// --topic persistence: the topic label is stored as a machine-readable marker
+// prefixed onto the child session's TITLE (`[topic:<label>] <title>`). The
+// Session row already persists across restarts and is returned by
+// sessions.children, so this needs no schema/migration — a deliberately thin
+// surface. topicOf() reads a peer child's topic back for the reuse lookup;
+// tagTitle() writes the marker at create time.
+const TOPIC_MARKER = /^\[topic:([^\]]+)\]\s?/
+
+function topicOf(title: string): string | undefined {
+  const m = title.match(TOPIC_MARKER)
+  return m ? m[1] : undefined
+}
+
+function tagTitle(topic: string, title: string): string {
+  // Idempotent: never double-tag if the base title already carries a marker.
+  const base = title.replace(TOPIC_MARKER, "")
+  return `[topic:${topic}] ${base}`
+}
+
+
 const createOperation = z.strictObject({
   action: z.literal("create"),
   task: z.string().min(1).describe("The task/prompt for the child session's first turn."),
@@ -166,6 +209,19 @@ const createOperation = z.strictObject({
   title: z.string().min(1).optional().describe("Title for the child session. Defaults to the task prefix."),
   dir: z.string().min(1).optional().describe("Working directory the child runs in (any project or path). Defaults to the orchestrator's directory."),
   isolate: z.boolean().optional().describe("Run the child in its own git worktree of `dir` (concurrent-edit isolation). Non-git dir falls back to shared."),
+  topic: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Reuse a standing per-theme child: if a peer child already carries this topic, RELAY the task into it (enqueue+wake) instead of spawning; otherwise create a new child tagged with this topic. Avoids over-spawning sessions for the same theme.",
+    ),
+})
+
+const sendOperation = z.strictObject({
+  action: z.literal("send"),
+  sessionID: z.string().min(1).describe("Child session id to relay a new task to (enqueues into its inbox and wakes it)."),
+  task: z.string().min(1).describe("The task/message to relay. The idle-but-persistent child wakes and drains it as its next turn."),
 })
 
 const switchOperation = z.strictObject({
@@ -177,6 +233,15 @@ const listOperation = z.strictObject({
   action: z.literal("list"),
 })
 
+const dashboardOperation = z.strictObject({
+  action: z.literal("dashboard"),
+})
+
+const statusOperation = z.strictObject({
+  action: z.literal("status"),
+  sessionID: z.string().min(1).describe("Child session id to report derived liveness for (progressing/stalled/terminal + turn telemetry)."),
+})
+
 const cancelOperation = z.strictObject({
   action: z.literal("cancel"),
   sessionID: z.string().min(1).describe("Session id of the child session to stop."),
@@ -186,6 +251,22 @@ const askOperation = z.strictObject({
   action: z.literal("ask"),
   session_id: z.string().min(1).describe("Session id to ask a one-shot read-only side question."),
   question: z.string().min(1).describe("The side question to answer from a frozen snapshot of that session's history."),
+})
+
+const joinOperation = z.strictObject({
+  action: z.literal("join"),
+  sessionIDs: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe(
+      "Child session ids forming the dispatch group. Blocks until ALL have reached a terminal state (success/fail/cancel), then returns one aggregated per-child summary.",
+    ),
+  timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Milliseconds to wait before returning a partial (timeout) aggregate. Default 600000 (10 min)."),
 })
 
 const setmodeOperation = z.strictObject({
@@ -216,7 +297,7 @@ const parameters = z.strictObject({
   // {"operation":"{\"action\":\"create\",...}"} which fails zod validation.
   // See research-tool-call-schema/REPORT.md §2.5 "success-nested" warning.
   operation: z
-    .discriminatedUnion("action", [createOperation, switchOperation, listOperation, cancelOperation, askOperation, setmodeOperation, approveOperation, grantApprovalOperation])
+    .discriminatedUnion("action", [createOperation, sendOperation, switchOperation, listOperation, dashboardOperation, statusOperation, cancelOperation, askOperation, joinOperation, setmodeOperation, approveOperation, grantApprovalOperation])
     .meta({ type: "object" }),
 })
 
@@ -227,7 +308,7 @@ type Metadata = {
   sessionID?: string
 }
 
-type Deps = Session.Service | ActorRegistry.Service | Provider.Service | Worktree.Service
+type Deps = Session.Service | ActorRegistry.Service | Provider.Service | Worktree.Service | Bus.Service | Git.Service
 
 function parseSessionScript(script: string): Effect.Effect<SessionOperation[], unknown> {
   return Effect.gen(function* () {
@@ -270,6 +351,7 @@ export function recoverSessionArgs(rawArgs: unknown): SessionOperation | undefin
     if (obj.mode === "build" || obj.mode === "plan" || obj.mode === "compose") op.mode = obj.mode
     if (typeof obj.model === "string") op.model = obj.model
     if (typeof obj.title === "string") op.title = obj.title
+    if (typeof obj.topic === "string") op.topic = obj.topic
     return { operation: op } as SessionOperation
   }
   return undefined
@@ -329,10 +411,10 @@ function arityError(verb: string, expected: string, args: string[], line: number
 function mapVerb(verb: string | undefined, args: string[], line: number): Effect.Effect<SessionOperation, unknown> {
   switch (verb) {
     case "create": {
-      const { flags, bools, rest, error } = extractSessionFlags(args, ["mode", "model", "title", "dir"], ["isolate"])
+      const { flags, bools, rest, error } = extractSessionFlags(args, ["mode", "model", "title", "dir", "topic"], ["isolate"])
       if (error) return flagError("create", error, line)
       if (rest.length < 1)
-        return arityError("create", "<task...> [--mode build|plan|compose] [--model <ref>] [--title <t>] [--dir <path>] [--isolate]", rest, line)
+        return arityError("create", "<task...> [--mode build|plan|compose] [--model <ref>] [--title <t>] [--dir <path>] [--topic <label>] [--isolate]", rest, line)
       if (flags.mode && flags.mode !== "build" && flags.mode !== "plan" && flags.mode !== "compose")
         return flagError("create", `--mode must be build, plan or compose (got '${flags.mode}')`, line)
       return Effect.succeed({
@@ -343,8 +425,17 @@ function mapVerb(verb: string | undefined, args: string[], line: number): Effect
           ...(flags.model ? { model: flags.model } : {}),
           ...(flags.title ? { title: flags.title } : {}),
           ...(flags.dir ? { dir: flags.dir } : {}),
+          ...(flags.topic ? { topic: flags.topic } : {}),
           ...(bools.isolate ? { isolate: true } : {}),
         },
+      })
+    }
+    case "send": {
+      const { rest, error } = extractSessionFlags(args, [])
+      if (error) return flagError("send", error, line)
+      if (rest.length < 2) return arityError("send", "<sessionID> <task...>", rest, line)
+      return Effect.succeed({
+        operation: { action: "send" as const, sessionID: rest[0], task: rest.slice(1).join(" ") },
       })
     }
     case "switch": {
@@ -359,6 +450,18 @@ function mapVerb(verb: string | undefined, args: string[], line: number): Effect
       if (rest.length !== 0) return arityError("list", "", rest, line)
       return Effect.succeed({ operation: { action: "list" as const } })
     }
+    case "dashboard": {
+      const { rest, error } = extractSessionFlags(args, [])
+      if (error) return flagError("dashboard", error, line)
+      if (rest.length !== 0) return arityError("dashboard", "", rest, line)
+      return Effect.succeed({ operation: { action: "dashboard" as const } })
+    }
+    case "status": {
+      const { rest, error } = extractSessionFlags(args, [])
+      if (error) return flagError("status", error, line)
+      if (rest.length !== 1) return arityError("status", "<sessionID>", rest, line)
+      return Effect.succeed({ operation: { action: "status" as const, sessionID: rest[0] } })
+    }
     case "cancel": {
       const { rest, error } = extractSessionFlags(args, [])
       if (error) return flagError("cancel", error, line)
@@ -371,6 +474,25 @@ function mapVerb(verb: string | undefined, args: string[], line: number): Effect
       if (rest.length < 2) return arityError("ask", "<sessionID> <question...>", rest, line)
       return Effect.succeed({
         operation: { action: "ask" as const, session_id: rest[0], question: rest.slice(1).join(" ") },
+      })
+    }
+    case "join": {
+      const { flags, rest, error } = extractSessionFlags(args, ["timeout"])
+      if (error) return flagError("join", error, line)
+      if (rest.length < 1) return arityError("join", "<sessionID...> [--timeout <ms>]", rest, line)
+      let timeout_ms: number | undefined
+      if (flags.timeout !== undefined) {
+        const n = Number(flags.timeout)
+        if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n))
+          return flagError("join", `--timeout must be a positive integer (got '${flags.timeout}')`, line)
+        timeout_ms = n
+      }
+      return Effect.succeed({
+        operation: {
+          action: "join" as const,
+          sessionIDs: rest,
+          ...(timeout_ms !== undefined ? { timeout_ms } : {}),
+        },
       })
     }
     case "setmode": {
@@ -406,6 +528,58 @@ function mapVerb(verb: string | undefined, args: string[], line: number): Effect
   }
 }
 
+// Enumerate the worktrees of the orchestrator's repo and, per branch, its
+// commits-ahead of the repo's default branch — the raw material assembleFleet
+// correlates to isolated child sessions by directory. Reads git through the
+// Git.Service (run + defaultBranch). `git worktree list --porcelain` emits
+// stanzas ("worktree <path>", "branch refs/heads/<b>", "detached", blank line);
+// we parse path + short branch, realpath-canonicalize the path so it matches a
+// session.directory, and compute ahead via `rev-list --count <base>..<branch>`.
+// Best-effort per entry: a failed rev-list leaves `ahead` undefined; a git
+// failure at the list step propagates to the caller's catch (→ no correlation).
+function collectWorktrees(git: Git.Interface, dir: string) {
+  return Effect.gen(function* () {
+    const list = yield* git.run(["worktree", "list", "--porcelain"], { cwd: dir })
+    if (list.exitCode !== 0) return [] as WorktreeEntry[]
+
+    const raw: { path: string; branch?: string }[] = []
+    for (const line of list.text().split("\n")) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith("worktree ")) raw.push({ path: trimmed.slice("worktree ".length).trim() })
+      else if (trimmed.startsWith("branch ")) {
+        const current = raw[raw.length - 1]
+        if (current) current.branch = trimmed.slice("branch ".length).trim().replace(/^refs\/heads\//, "")
+      }
+    }
+
+    const base = yield* git.defaultBranch(dir).pipe(Effect.catch(() => Effect.succeed(undefined)))
+    const baseRef = base?.ref
+
+    return yield* Effect.forEach(raw, (entry) =>
+      Effect.gen(function* () {
+        const directory = yield* Effect.sync(() => {
+          try {
+            return realpathSync(entry.path)
+          } catch {
+            return path.normalize(entry.path)
+          }
+        })
+        let ahead: number | undefined
+        if (baseRef && entry.branch) {
+          const rev = yield* git
+            .run(["rev-list", "--count", `${baseRef}..${entry.branch}`], { cwd: dir })
+            .pipe(Effect.catch(() => Effect.succeed(undefined)))
+          if (rev && rev.exitCode === 0) {
+            const n = Number(rev.text().trim())
+            if (Number.isFinite(n)) ahead = n
+          }
+        }
+        return { directory, branch: entry.branch, ahead } satisfies WorktreeEntry
+      }),
+    )
+  })
+}
+
 export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
   id,
   Effect.gen(function* () {
@@ -413,6 +587,8 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
     const actorReg = yield* ActorRegistry.Service
     const provider = yield* Provider.Service
     const worktreeSvc = yield* Worktree.Service
+    const bus = yield* Bus.Service
+    const git = yield* Git.Service
 
     // Resolve the Actor service through the late-bound spawnRef rather than as a
     // Layer dependency: pulling Actor.Service into Deps would create a layer
@@ -436,6 +612,55 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
 
       if (op.action === "create") {
         const actor = yield* requireActor()
+
+        // --topic find-or-reuse: before spawning, look for a standing peer child
+        // already tagged with this topic. If found, RELAY the task into it
+        // (enqueue+wake — the same idle-peer path `session send` uses) instead of
+        // over-spawning a fresh child. Filter identical to the `list` branch:
+        // real peers only (exclude subagents + system-spawned agents).
+        if (op.topic) {
+          const children = yield* sessions.children(ctx.sessionID as SessionID)
+          const enriched = yield* Effect.forEach(children, (child) =>
+            actorReg.get(child.id, child.id).pipe(Effect.map((a) => ({ child, actor: a }))),
+          )
+          const match = enriched.find(
+            ({ child, actor: a }) =>
+              a?.mode !== "subagent" &&
+              !(a && SYSTEM_SPAWNED_AGENT_TYPES.has(a.agent)) &&
+              topicOf(child.title) === op.topic,
+          )
+          if (match) {
+            const childID = match.child.id
+            const inboxSvc = inboxServiceRef.current
+            if (!inboxSvc) {
+              return yield* Effect.fail(
+                new Error("Inbox service unavailable — Inbox.defaultLayer must be running for the session tool to relay tasks"),
+              )
+            }
+            const sendResult = yield* inboxSvc
+              .send({
+                receiverSessionID: childID,
+                receiverActorID: childID,
+                senderSessionID: ctx.sessionID as SessionID,
+                senderActorID: ctx.actorID ?? "main",
+                content: op.task,
+              })
+              .pipe(Effect.catchTag("InboxReceiverNotFound", () => Effect.succeed({ inboxID: null as string | null })))
+            if (sendResult.inboxID !== null) {
+              return {
+                title: `Reused topic '${op.topic}' → relayed to ${childID}`,
+                output:
+                  `Found standing child ${childID} for topic '${op.topic}'. ` +
+                  `Enqueued the task into it and woke it — it runs the relayed task as its next turn.`,
+                metadata: { sessionID: childID } as Metadata,
+              }
+            }
+            // The tagged peer exists but isn't reachable yet (no receiver row).
+            // Fall through to create a fresh tagged child rather than fail — the
+            // topic still gets a standing child, just a new one.
+          }
+        }
+
         const model = op.model
           ? yield* provider
               .resolveModelRef(op.model, undefined)
@@ -494,15 +719,85 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         })
         // spawnPeer titles the child session `${agentType}: ${task}`; honor an
         // explicit --title by overwriting it so `session list` shows what the
-        // orchestrator asked for.
-        if (op.title) yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
+        // orchestrator asked for. When --topic is set, prefix the title with a
+        // `[topic:X]` marker so a later `create --topic X` finds and reuses this
+        // standing child (topicOf reads it back from sessions.children).
+        if (op.topic) {
+          const base = op.title ?? `${op.mode ?? "build"}: ${op.task.slice(0, 40)}`
+          yield* sessions.setTitle({ sessionID: result.sessionID, title: tagTitle(op.topic, base) })
+        } else if (op.title) {
+          yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
+        }
         return {
           title: `Session created: ${result.sessionID}`,
           output:
             `Created child session ${result.sessionID} (mode: ${op.mode ?? "build"}) in ${effectiveDir}.` +
+            (op.topic ? ` Tagged with topic '${op.topic}' for reuse.` : ``) +
             (op.isolate && !isolateNotice ? ` Isolated in its own worktree.` : isolateNotice) +
             ` Running in the background.`,
           metadata: { sessionID: result.sessionID } as Metadata,
+        }
+      }
+
+      if (op.action === "send") {
+        // Relay a NEW task into a standing (persistent) child, waking it if idle.
+        // A peer child registers with session_id === actor_id === its own child
+        // id (see the create branch / Actor.spawnPeer), so both the receiver
+        // session and actor id are the child session id. Inbox.send enqueues a
+        // durable row and fork-schedules a wake; the woken runLoop drains it as
+        // the child's next turn. Gap-A's drain seed-fallback ensures an idle /
+        // turnCount-0 peer still converts the queued task into a turn instead of
+        // idling back with the task stuck in the DB.
+        const childID = op.sessionID as SessionID
+        // Pre-check the child is actually a peer we manage; give a clear message
+        // instead of a raw ESRCH if the id is wrong or the child never existed.
+        const actor = yield* actorReg.get(childID, childID)
+        if (!actor) {
+          return {
+            title: `Send failed: ${op.sessionID} not found`,
+            output:
+              `No child session ${op.sessionID} is registered. Use \`session list\` to see your children, ` +
+              `or \`session create\` to start a new one.`,
+            metadata: { sessionID: op.sessionID } as Metadata,
+          }
+        }
+        const inboxSvc = inboxServiceRef.current
+        if (!inboxSvc) {
+          return yield* Effect.fail(
+            new Error("Inbox service unavailable — Inbox.defaultLayer must be running for the session tool to relay tasks"),
+          )
+        }
+        const sendResult = yield* inboxSvc
+          .send({
+            receiverSessionID: childID,
+            receiverActorID: childID,
+            senderSessionID: ctx.sessionID as SessionID,
+            senderActorID: ctx.actorID ?? "main",
+            content: op.task,
+          })
+          .pipe(
+            Effect.catchTag("InboxReceiverNotFound", () =>
+              Effect.succeed({ inboxID: null as string | null }),
+            ),
+          )
+        if (sendResult.inboxID === null) {
+          return {
+            title: `Send failed: ${op.sessionID} not reachable`,
+            output:
+              `Child ${op.sessionID} exists but has no inbox receiver row yet (it may not have started). ` +
+              `Retry once it is running, or \`session create\` a fresh child.`,
+            metadata: { sessionID: op.sessionID } as Metadata,
+          }
+        }
+        return {
+          title: `Relayed task to ${op.sessionID}`,
+          output:
+            `Enqueued the task into child ${op.sessionID} and woke it. ` +
+            `It will run the relayed task as its next turn` +
+            (actor.status === "running" || actor.status === "pending"
+              ? ` (currently busy — the task is queued and drains after its current turn).`
+              : `.`),
+          metadata: { sessionID: op.sessionID } as Metadata,
         }
       }
 
@@ -523,16 +818,139 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         // to ctx.sessionID at create time. Enrich each child with its actor
         // row (mode/agent/status) keyed by sessionID === actorID === child.id.
         const children = yield* sessions.children(ctx.sessionID as SessionID)
-        if (children.length === 0)
-          return { title: "Child sessions: 0", output: "No child sessions.", metadata: {} as Metadata }
-        const lines = yield* Effect.forEach(children, (child) =>
-          actorReg.get(child.id, child.id).pipe(
-            Effect.map((actor) =>
-              `${child.id} — ${child.title} — ${actor?.agent ?? "?"} — ${actor?.status ?? "unknown"}`,
-            ),
-          ),
+        const enriched = yield* Effect.forEach(children, (child) =>
+          actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
         )
-        return { title: `Child sessions: ${children.length}`, output: lines.join("\n"), metadata: {} as Metadata }
+        const peers = enriched.filter(
+          ({ actor }) => actor?.mode !== "subagent" && !(actor && SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)),
+        )
+        if (peers.length === 0)
+          return { title: "Child sessions: 0", output: "No child sessions.", metadata: {} as Metadata }
+        // The actor row's status enum is only pending|running|idle; a terminal
+        // idle carries a lastOutcome (success/failure/cancelled). deriveLiveness
+        // maps (status, lastOutcome, lastTurnTime) to a display bucket:
+        // running/pending split into progressing vs stalled by whether the last
+        // turn advanced within the staleness window (updateTurn bumps
+        // last_turn_time per step — recent == progressing); terminal idle rows
+        // map to success(→idle)/failure/cancelled. Never fabricate a state the
+        // data lacks: a missing actor row is a plain idle.
+        const now = Date.now()
+        const bucketOf = ({ actor }: (typeof peers)[number]) => {
+          if (!actor) return "idle" as const
+          const live = deriveLiveness(actor, now)
+          if (live === "progressing") return "progressing" as const
+          if (live === "stalled") return "stalled" as const
+          if (live === "cancelled") return "cancelled" as const
+          if (live === "failure") return "failed" as const
+          return "idle" as const
+        }
+        const tagged = peers.map((p) => ({ ...p, bucket: bucketOf(p) }))
+        const counts = {
+          progressing: tagged.filter((p) => p.bucket === "progressing").length,
+          stalled: tagged.filter((p) => p.bucket === "stalled").length,
+          idle: tagged.filter((p) => p.bucket === "idle").length,
+          cancelled: tagged.filter((p) => p.bucket === "cancelled").length,
+          failed: tagged.filter((p) => p.bucket === "failed").length,
+        }
+        const groups: { bucket: keyof typeof counts; heading: string }[] = [
+          { bucket: "progressing", heading: "In progress — progressing (running/pending, advancing)" },
+          { bucket: "stalled", heading: "In progress — stalled (running/pending, no recent turn)" },
+          { bucket: "idle", heading: "Finished / idle" },
+          { bucket: "failed", heading: "Failed" },
+          { bucket: "cancelled", heading: "Cancelled" },
+        ]
+        const sections = groups
+          .filter((g) => counts[g.bucket] > 0)
+          .map((g) => {
+            const lines = tagged
+              .filter((p) => p.bucket === g.bucket)
+              .map(
+                ({ child, actor }) =>
+                  `  ${child.id} — ${child.title} — ${actor?.agent ?? "?"} — ${actor?.status ?? "unknown"}`,
+              )
+            return `${g.heading} (${counts[g.bucket]}):\n${lines.join("\n")}`
+          })
+        const running = counts.progressing + counts.stalled
+        const summary =
+          `Child sessions: ${peers.length} total — ${running} running (${counts.progressing} progressing, ${counts.stalled} stalled), ${counts.idle} idle` +
+          (counts.failed > 0 ? `, ${counts.failed} failed` : "") +
+          (counts.cancelled > 0 ? `, ${counts.cancelled} cancelled` : "")
+        return {
+          title: `Child sessions: ${peers.length}`,
+          output: [summary, "", ...sections].join("\n"),
+          metadata: {} as Metadata,
+        }
+      }
+
+      if (op.action === "dashboard") {
+        // Fleet observability: the same peer set as `list`, but correlated to
+        // (a) each child's derived liveness + turn telemetry, and (b) the git
+        // worktree backing isolated children (dir + branch + commits-ahead) —
+        // the mapping `list` never surfaced. Assembly is delegated to the pure
+        // assembleFleet/renderFleetTable (tool/fleet.ts); here we only gather
+        // the live inputs: sessions.children → actor rows → git worktree list.
+        const children = yield* sessions.children(ctx.sessionID as SessionID)
+        const enriched = yield* Effect.forEach(children, (child) =>
+          actorReg.get(child.id, child.id).pipe(Effect.map((actor) => ({ child, actor }))),
+        )
+        const peers = enriched.filter(
+          ({ actor }) => actor?.mode !== "subagent" && !(actor && SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)),
+        )
+        if (peers.length === 0)
+          return { title: "Fleet: 0", output: "No child sessions.", metadata: {} as Metadata }
+
+        // Correlate worktrees from the orchestrator's own repo. `git worktree
+        // list --porcelain` enumerates every worktree of the common repo (the
+        // isolated children live under <data>/worktree/... of it); we resolve
+        // each entry's directory to realpath so it matches a session.directory
+        // (which the create branch sets to the worktree dir). commits-ahead is
+        // computed per branch against the repo's default branch via rev-list.
+        // Best-effort: any git failure degrades to no worktree correlation
+        // rather than failing the dashboard.
+        const orchestratorDir = yield* InstanceState.directory
+        const worktrees = yield* collectWorktrees(git, orchestratorDir).pipe(
+          Effect.catch(() => Effect.succeed([] as WorktreeEntry[])),
+        )
+
+        const inputs: FleetActorInput[] = peers.map(({ child, actor }) => ({
+          session: { id: child.id, title: child.title, directory: child.directory },
+          actor: actor ?? null,
+        }))
+        const summary = assembleFleet(inputs, worktrees, Date.now())
+        return {
+          title: `Fleet: ${summary.total}`,
+          output: renderFleetTable(summary),
+          metadata: {} as Metadata,
+        }
+      }
+
+
+      if (op.action === "status") {
+        // Derived pull-side liveness for one child. A peer registers with
+        // session_id === actor_id === its own child id (see the create branch /
+        // Actor.spawnPeer), so key the row by (childID, childID). deriveLiveness
+        // turns the honest registry fields (status/lastOutcome/lastTurnTime) into
+        // progressing|stalled|terminal — never fabricating a state the row lacks.
+        const childID = op.sessionID
+        const found = yield* actorReg.liveness(childID as SessionID, childID)
+        if (!found)
+          return {
+            title: `Status: ${childID} not found`,
+            output: `No actor registered for ${childID}. It may not exist or never started.`,
+            metadata: { sessionID: childID } as Metadata,
+          }
+        const ageMs = Date.now() - found.actor.lastTurnTime
+        const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`
+        const outcome = found.actor.lastOutcome ? ` (last outcome: ${found.actor.lastOutcome})` : ""
+        return {
+          title: `Status ${childID}: ${found.liveness}`,
+          output:
+            `${childID} — ${found.liveness}${outcome}\n` +
+            `  raw status: ${found.actor.status}\n` +
+            `  turnCount: ${found.actor.turnCount}\n` +
+            `  lastTurnTime: ${found.actor.lastTurnTime} (${ageStr} ago)`,
+          metadata: { sessionID: childID } as Metadata,
+        }
       }
 
       if (op.action === "cancel") {
@@ -575,6 +993,52 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
           title: `Asked ${op.session_id}`,
           output: answer,
           metadata: { sessionID: op.session_id } as Metadata,
+        }
+      }
+
+      if (op.action === "join") {
+        // Fan-in barrier: block until EVERY named child reaches a terminal state
+        // (success/fail/cancel — all three notify via T41 and write lastOutcome),
+        // then return one aggregated per-child summary. Peers register with
+        // session_id === actor_id === their own child id (see the create branch /
+        // Actor.spawnPeer), so both keys are the child session id. joinGroup does
+        // not busy-wait — it subscribes to ActorStatusChanged and re-snapshots the
+        // group as children settle. A bad/unknown id counts as "unknown" and never
+        // blocks the barrier.
+        const members = op.sessionIDs.map((sid) => ({
+          sessionID: sid as SessionID,
+          actorID: sid,
+        }))
+        const agg = yield* joinGroup(
+          { reg: actorReg, sessions, bus },
+          { members, ...(op.timeout_ms !== undefined ? { timeout_ms: op.timeout_ms } : {}) },
+        )
+        const lines = agg.members.map((m) => {
+          const who = m.description ? `${m.actorID} (${m.description})` : m.actorID
+          const detail =
+            m.outcome === "success"
+              ? m.reportedSummary ?? (m.result ? m.result.slice(0, 200) : "done")
+              : m.outcome === "failure"
+                ? m.error ?? "failed"
+                : m.outcome === "cancelled"
+                  ? "cancelled"
+                  : "unknown (no registered actor)"
+          return `  ${who} — ${m.outcome}: ${detail}`
+        })
+        const header =
+          agg.status === "timeout"
+            ? `Join TIMED OUT — ${agg.counts.success + agg.counts.failure + agg.counts.cancelled}/${agg.total} children terminal`
+            : `Join complete — all ${agg.total} children terminal`
+        const tally =
+          `${agg.counts.success} success, ${agg.counts.failure} failed, ${agg.counts.cancelled} cancelled` +
+          (agg.counts.unknown > 0 ? `, ${agg.counts.unknown} unknown` : "")
+        return {
+          title:
+            agg.status === "timeout"
+              ? `Join timed out (${agg.total} children)`
+              : `Joined ${agg.total} children`,
+          output: [`${header} (${tally}).`, "", ...lines].join("\n"),
+          metadata: {} as Metadata,
         }
       }
 

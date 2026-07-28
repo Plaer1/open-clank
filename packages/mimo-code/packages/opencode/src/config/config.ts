@@ -29,6 +29,7 @@ import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigCompose } from "./compose"
 import { ConfigFormatter } from "./formatter"
+import { MIMOCODE_GITIGNORE_ENTRIES } from "./gitignore"
 import { ConfigHistory } from "./history"
 import { ConfigLayout } from "./layout"
 import { ConfigLSP } from "./lsp"
@@ -92,21 +93,19 @@ const LogLevelRef = Schema.Any.annotate({ [ZodOverride]: Log.Level })
 
 const PositiveInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThan(0))
 const NonNegativeInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0))
+// Token count as a number or a shorthand string ("300K", "1.5M", "50%").
+const TokenQuantity = Schema.Union([NonNegativeInt, Schema.String])
 
 const InfoSchema = Schema.Struct({
   $schema: Schema.optional(Schema.String).annotate({
     description: "JSON schema reference for configuration validation",
   }),
   logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
-  env: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
-    description:
-      "Environment variables to inject into the mimocode process and its child processes (e.g. the bash tool). A variable already set in the real environment takes precedence — config values only apply when the variable is not already set. Supports {env:VAR} and {file:path} substitution.",
-  }),
   server: Schema.optional(ConfigServer.Server).annotate({
     description: "Server configuration for mimo serve and web commands",
   }),
   command: Schema.optional(Schema.Record(Schema.String, ConfigCommand.Info)).annotate({
-    description: "Command configuration, see https://opencode.ai/docs/commands",
+    description: "Command configuration, see https://mimo.xiaomi.com/mimocode/commands",
   }),
   skills: Schema.optional(ConfigSkills.Info).annotate({ description: "Additional skill folder paths" }),
   compose: Schema.optional(ConfigCompose.Info).annotate({ description: "Compose mode configuration" }),
@@ -196,7 +195,7 @@ const InfoSchema = Schema.Struct({
       }),
       [Schema.Record(Schema.String, AgentRef)],
     ),
-  ).annotate({ description: "Agent configuration, see https://opencode.ai/docs/agents" }),
+  ).annotate({ description: "Agent configuration, see https://mimo.xiaomi.com/mimocode/agents" }),
   provider: Schema.optional(Schema.Record(Schema.String, ConfigProvider.Info)).annotate({
     description: "Custom provider configurations and model overrides",
   }),
@@ -257,6 +256,14 @@ const InfoSchema = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      max_context: Schema.optional(Schema.Union([TokenQuantity, Schema.Record(Schema.String, TokenQuantity)])).annotate(
+        {
+          description:
+            'Compact earlier than the model window. A token count (300000), a shorthand string ("300K", "1M", "50%"), ' +
+            'or a map keyed by "<providerID>/<modelID>" with wildcards ("openai/gpt-5*"). Always clamped to the ' +
+            "model's real window — it can only lower the compaction trigger, never raise it. 0 means no budget.",
+        },
+      ),
     }),
   ),
   checkpoint: Schema.optional(
@@ -418,6 +425,22 @@ const InfoSchema = Schema.Struct({
       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
         description: "Continue the agent loop when a tool call is denied",
       }),
+      try_best: Schema.optional(
+        Schema.Struct({
+          edit_window: Schema.optional(PositiveInt).annotate({
+            description: "Recent edit events to compare (default 12).",
+          }),
+          edit_similarity: Schema.optional(Schema.Number).annotate({
+            description: "Jaccard threshold for near-identical edit detection (default 0.8).",
+          }),
+          edit_matches: Schema.optional(PositiveInt).annotate({
+            description: "Prior similar edits required before pausing (default 2).",
+          }),
+          action_streak: Schema.optional(PositiveInt).annotate({
+            description: "Consecutive edit or verify actions without progress before pausing (default 4).",
+          }),
+        }),
+      ).annotate({ description: "Try-best loop detector thresholds." }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
@@ -563,14 +586,6 @@ export const layer = Layer.effect(
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
 
-    // Keys injected by config `env`, mapped to the process.env value that
-    // existed before we first touched them (undefined = was unset). Lives in
-    // the layer closure so it survives instance disposal / config reload,
-    // matching process.env's lifetime. Lets a reload distinguish "set by the
-    // real environment" (defer) from "set by our own prior injection"
-    // (re-apply edits, restore on removal).
-    const injectedEnv = new Map<string, string | undefined>()
-
     const readConfigFile = Effect.fnUntraced(function* (filepath: string) {
       return yield* fs.readFileString(filepath).pipe(
         Effect.catchIf(
@@ -676,7 +691,7 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore", ".cron-lock"].join("\n"),
+            MIMOCODE_GITIGNORE_ENTRIES.join("\n"),
           )
           .pipe(
             Effect.catchIf(
@@ -998,34 +1013,6 @@ export const layer = Layer.effect(
         }
         if (Flag.MIMOCODE_DISABLE_PRUNE) {
           result.compaction = { ...result.compaction, prune: false }
-        }
-
-        const nextEnv = result.env ?? {}
-        // Reconcile keys we injected on a previous load that are no longer in
-        // config (removed/renamed): restore their original value so a config
-        // edit + reload takes effect without a process restart.
-        for (const [key, original] of injectedEnv) {
-          if (key in nextEnv) continue
-          if (original === undefined) {
-            delete process.env[key]
-            yield* env.remove(key)
-          } else {
-            process.env[key] = original
-            yield* env.set(key, original)
-          }
-          injectedEnv.delete(key)
-        }
-        for (const [key, value] of Object.entries(nextEnv)) {
-          // Defer to the real environment: only inject when the variable is
-          // not already set by something other than our own prior injection.
-          // A caller's runtime env (CI, container, `FOO=bar mimo`) is more
-          // specific than a persisted config default and must win. Matches
-          // Claude Code, where the settings field applies only when the env
-          // var is not set.
-          if (!injectedEnv.has(key) && process.env[key] !== undefined) continue
-          if (!injectedEnv.has(key)) injectedEnv.set(key, process.env[key])
-          process.env[key] = value
-          yield* env.set(key, value)
         }
 
         return {

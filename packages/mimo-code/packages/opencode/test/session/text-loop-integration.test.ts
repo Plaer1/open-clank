@@ -47,7 +47,6 @@ import { Team } from "../../src/team"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
 import { TaskRegistry } from "../../src/task/registry"
 import { defaultLayer as SchedulerDefaultLayer } from "../../src/cron/scheduler"
-import { TaskGateState } from "../../src/task/gate-state"
 import { Auth } from "../../src/auth"
 import { Log } from "../../src/util"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
@@ -189,7 +188,6 @@ function makeLayers() {
   const trunc = Truncate.layer.pipe(Layer.provideMerge(deps))
   return SessionPrompt.layer.pipe(
     Layer.provide(Goal.defaultLayer),
-    Layer.provide(TaskGateState.defaultLayer),
     Layer.provide(TaskRegistry.defaultLayer),
     Layer.provide(SchedulerDefaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
@@ -440,7 +438,15 @@ describe("text loop detection (integration, MockLLM)", () => {
 
           // Verify: 2 recovery prompts injected (mild + strong)
           const recoveryMsgs = allMsgs.filter(
-            (m) => m.info.role === "user" && m.parts.some((p) => "synthetic" in p && (p as any).synthetic && p.type === "text" && p.text.includes("system-reminder")),
+            (m) =>
+              m.info.role === "user" &&
+              m.parts.some(
+                (p) =>
+                  "synthetic" in p &&
+                  (p as any).synthetic &&
+                  p.type === "text" &&
+                  (p.text.includes("LOOP DETECTED") || p.text.includes("CRITICAL")),
+              ),
           )
           console.log(`[7-repeats] Recovery messages injected: ${recoveryMsgs.length}`)
           expect(recoveryMsgs.length).toBe(2)

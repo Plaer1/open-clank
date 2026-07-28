@@ -767,7 +767,7 @@ export const ActorTool = Tool.define(
             metadata: { sessionId: spawnResult.sessionID, actorId: spawnResult.actorID, model },
             output:
               (taskNotice ? taskNotice + "\n" : "") +
-              `Background actor started. actor_id: ${spawnResult.actorID}\nThe result will be delivered as a notification when complete.`,
+              `Background sub-session started. actor_id: ${spawnResult.actorID}\nThe result will be delivered as a notification when complete.`,
           }
         }
 
