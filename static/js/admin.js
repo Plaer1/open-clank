@@ -483,14 +483,18 @@ async function loadEndpoints() {
   if (window.modelsModule && window.modelsModule.refreshModels) {
     window.modelsModule.refreshModels(true);
     setTimeout(() => {
-      if (window.sessionModule && window.sessionModule.updateModelPicker) {
-        window.sessionModule.updateModelPicker();
+      if (window.modelsModule && window.modelsModule.refreshModels) {
+        window.modelsModule.refreshModels(!!force, force ? {} : { cacheOnly: true }).then(() => {
+          if (window.sessionModule && window.sessionModule.updateModelPicker) {
+            window.sessionModule.updateModelPicker();
+          }
+        }).catch(() => {});
       }
-    }, 1500);
-  }
-  if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
-    settingsModule.refreshAiModelEndpoints();
-  }
+      if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
+        settingsModule.refreshAiModelEndpoints();
+      }
+    }, 0);
+  };
   try {
     const res = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
     // Treat a non-OK response (e.g. 401/403 for non-admins, or backend
@@ -508,15 +512,18 @@ async function loadEndpoints() {
       const empty = '<div class="admin-empty">None</div>';
       if (listLocal) listLocal.innerHTML = empty;
       if (listApi) listApi.innerHTML = '<div class="admin-empty">None</div>';
-      if (listLegacy) listLegacy.innerHTML = empty;
+      refreshDependentModelUi();
       return;
     }
     const rowHtml = data.map(ep => {
       const readOnly = !!ep.read_only;
       const shared = !!ep.shared;
       const epModels = Array.isArray(ep.models) ? ep.models : [];
-      const visibleCount = epModels.length;
-      const totalCount = visibleCount + (ep.hidden_count || 0);
+      const pinnedModels = Array.isArray(ep.pinned_models) ? ep.pinned_models : [];
+      const visibleCount = ep.picker_requires_pinning ? pinnedModels.length : epModels.length;
+      const totalCount = Number.isFinite(Number(ep.model_count))
+        ? Number(ep.model_count)
+        : visibleCount + (ep.hidden_count || 0);
       // `ep.models` is the *visible* set — when every model is hidden it's
       // empty, but we still need to render the expand panel so the user can
       // un-hide them. Gate on the total instead.
@@ -602,11 +609,10 @@ async function loadEndpoints() {
     apiIdx.sort(_sortByEnabled);
     _renderInto(listLocal, localIdx);
     _renderInto(listApi, apiIdx);
-    if (listLegacy) listLegacy.innerHTML = rowHtml.join('');
     // Iterate matching nodes across both containers.
     const queryAll = (sel) => {
       const out = [];
-      [listLocal, listApi, listLegacy].forEach(c => {
+      [listLocal, listApi].forEach(c => {
         if (c) c.querySelectorAll(sel).forEach(n => out.push(n));
       });
       return out;
@@ -732,6 +738,8 @@ async function loadEndpoints() {
           const _loadingHtml = (label) => `<span style="opacity:0.55;font-size:11px;display:inline-flex;align-items:center;gap:8px;">${esc(label)}</span>`;
           const renderModels = (models, warning = '') => {
             const sortedModels = sortModelObjects(models);
+            const usesPinnedPicker = sortedModels.some(m => !!m.picker_requires_pinning);
+            panel.dataset.pickerMode = usesPinnedPicker ? 'pinned' : 'hidden';
             const warningHtml = warning ? `<div class="admin-error" style="font-size:11px;margin:6px 0;">${esc(warning)}</div>` : '';
             if (readOnly) {
               const providerAction = endpoint.shared
@@ -756,6 +764,7 @@ async function loadEndpoints() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   const refreshedModels = await res.json();
                   renderModels(refreshedModels, refreshWarning);
+                  _refreshAfterEndpointChange();
                   if (refreshWarning && uiModule?.showToast) uiModule.showToast(refreshWarning, 6000);
                 } catch (_) {
                   renderModels(sortedModels, 'Model refresh failed; kept cached models.');
@@ -766,14 +775,15 @@ async function loadEndpoints() {
               panel.innerHTML = `<div class="mcp-tools-header">
                 <span>Models</span>
                 <span style="display:flex;gap:8px;align-items:center;">
-                  <span class="mcp-tools-count">0/0 enabled</span>
                   <a href="#" data-ep-refresh-models="${epId}">Refresh</a>
                 </span>
               </div>${warningHtml}<span style="opacity:0.5;font-size:11px;">No models</span>`;
               attachRefresh();
               return;
             }
-            const hiddenSet = new Set(sortedModels.filter(m => m.is_hidden).map(m => m.id));
+            const enabledCount = usesPinnedPicker
+              ? sortedModels.filter(m => m.is_pinned).length
+              : sortedModels.filter(m => !m.is_hidden).length;
             const showSearch = sortedModels.length >= 8;
             const capabilityControls = (model) => {
               const cap = capabilityByModel.get(String(model.id)) || {};
@@ -790,7 +800,6 @@ async function loadEndpoints() {
             panel.innerHTML = `<div class="mcp-tools-header">
               <span>Models</span>
               <span style="display:flex;gap:8px;align-items:center;">
-                <span class="mcp-tools-count">${sortedModels.length - hiddenSet.size}/${sortedModels.length} enabled</span>
                 <a href="#" data-ep-refresh-models="${epId}">Refresh</a>
                 <a href="#" data-ep-select-all="${epId}">All</a>
                 <a href="#" data-ep-select-none="${epId}">None</a>
@@ -877,9 +886,10 @@ async function loadEndpoints() {
         }
       });
     });
+    refreshDependentModelUi();
   } catch (e) {
     const err = '<div class="admin-error">Failed to load</div>';
-    [listLocal, listApi, listLegacy].forEach(c => { if (c) c.innerHTML = err; });
+    [listLocal, listApi].forEach(c => { if (c) c.innerHTML = err; });
   }
 }
 
@@ -894,18 +904,21 @@ async function _saveEpModelState(epId, panel) {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ hidden }),
+      body: JSON.stringify(usesPinnedPicker ? { pinned_models: pinned } : { hidden }),
     });
-    const countLabel = panel.querySelector('.mcp-tools-count');
-    if (countLabel) countLabel.textContent = `${total - hidden.length}/${total} enabled`;
     const row = panel.closest('[data-adm-ep-id]');
     if (row) {
       const badge = row.querySelector('.admin-badge');
-      if (badge && !badge.classList.contains('admin-badge-off')) badge.textContent = `${total - hidden.length}/${total} models enabled`;
+      if (badge && !badge.classList.contains('admin-badge-off')) {
+        const match = String(badge.textContent || '').match(/\/(\d+)/);
+        const canonicalTotal = match ? Number(match[1]) : total;
+        badge.textContent = `${enabled}/${canonicalTotal} models enabled`;
+      }
     }
     if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
       settingsModule.refreshAiModelEndpoints();
     }
+    _refreshAfterEndpointChange();
   } catch (e) { /* silent */ }
 }
 
@@ -1067,6 +1080,13 @@ function initEndpointForm() {
   function _apiEndpointKind() {
     return (kindSel && kindSel.value) ? kindSel.value : 'api';
   }
+  function _modelRefreshModeForApiEndpoint(url, endpointKind) {
+    if (endpointKind === 'proxy') return 'manual';
+    try {
+      if ((new URL(url)).hostname.toLowerCase() === 'generativelanguage.googleapis.com') return '';
+    } catch (_) {}
+    return 'auto';
+  }
   function _normalizeBaseUrl(raw) {
     let u = raw.trim();
     // Fix common protocol typos
@@ -1214,7 +1234,8 @@ function initEndpointForm() {
       fd.append('base_url', url);
       const endpointKind = _apiEndpointKind();
       fd.append('endpoint_kind', endpointKind);
-      fd.append('model_refresh_mode', endpointKind === 'proxy' ? 'manual' : 'auto');
+      const refreshMode = _modelRefreshModeForApiEndpoint(url, endpointKind);
+      if (refreshMode) fd.append('model_refresh_mode', refreshMode);
       fd.append('model_refresh_timeout', '30');
       if (apiKey) fd.append('api_key', apiKey);
       if (provider.value && provider.selectedOptions && provider.selectedOptions[0]) {
@@ -1605,6 +1626,7 @@ function initEndpointForm() {
         })());
         await Promise.all(workers);
         await loadEndpoints();
+        await _refreshAfterEndpointChange();
         _refreshOfflineCount();
         if (uiModule && uiModule.showToast) {
           const ok = Math.max(0, ids.length - failed);

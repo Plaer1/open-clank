@@ -14,6 +14,7 @@ from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+             "apply_patch", "todowrite",
              "grep", "glob", "ls", "get_workspace", "publish_file", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",

@@ -418,12 +418,12 @@ class WebhookManager:
         body = json.dumps({"event": event, "timestamp": _utcnow().isoformat(), "data": payload})
         headers = {
             "Content-Type": "application/json",
-            "X-Open Clank-Event": event,
+            "X-Odysseus-Event": event,
             "User-Agent": "OpenClank-Webhook/1.0",
         }
         if secret:
             sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
-            headers["X-Open Clank-Signature"] = sig
+            headers["X-Odysseus-Signature"] = sig
 
         db = SessionLocal()
         try:

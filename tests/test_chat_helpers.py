@@ -343,10 +343,10 @@ def test_clean_thinking_for_save_extracts_thought_tag():
     assert metadata["thinking"] == "internal reasoning"
 
 
-def test_save_assistant_response_preserves_actual_and_requested_model():
+def test_save_assistant_response_incognito_does_not_mutate_session_history():
     sess = _FakeSession("selected-model")
 
-    save_assistant_response(
+    saved_id = save_assistant_response(
         sess,
         session_manager=None,
         session_id="s1",
@@ -355,8 +355,24 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
         incognito=True,
     )
 
-    assert sess.history[-1].metadata["requested_model"] == "selected-model"
-    assert sess.history[-1].metadata["model"] == "actual-model"
+    assert saved_id is None
+    assert sess.history == []
+
+
+def test_add_user_message_incognito_does_not_mutate_session_history():
+    sess = _FakeSession("selected-model")
+    chat_handler = SimpleNamespace(update_session_name_if_needed=lambda *_args, **_kwargs: None)
+    preprocessed = PreprocessedMessage(
+        enhanced_message="secret",
+        user_content="secret",
+        text_for_context="secret",
+        youtube_transcripts=[],
+        attachment_meta=[],
+    )
+
+    chat_helpers.add_user_message(sess, chat_handler, preprocessed, incognito=True)
+
+    assert sess.history == []
 
 
 def test_save_assistant_response_builds_valid_reference_layout():
@@ -364,12 +380,12 @@ def test_save_assistant_response_builds_valid_reference_layout():
 
     save_assistant_response(
         sess,
-        session_manager=None,
+        session_manager=SimpleNamespace(save_sessions=lambda: None),
         session_id="s1",
         full_response="<think>reason</think>Answer U0001f600",
         last_metrics={},
         tool_events=[{"round": 1, "tool": "read", "output": "ok"}],
-        incognito=True,
+        incognito=False,
     )
 
     message = sess.history[-1]
@@ -382,12 +398,12 @@ def test_transcript_layout_rejects_hash_range_and_tool_tampering():
     sess = _FakeSession()
     save_assistant_response(
         sess,
-        session_manager=None,
+        session_manager=SimpleNamespace(save_sessions=lambda: None),
         session_id="s1",
         full_response="answer",
         last_metrics={},
         tool_events=[{"id": "call-1", "round": 1, "tool": "read"}],
-        incognito=True,
+        incognito=False,
     )
     message = sess.history[-1]
 

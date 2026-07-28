@@ -682,7 +682,7 @@ app.include_router(setup_session_routes(
 ))
 
 # Admin Danger Zone wipes (Settings → System → Danger Zone)
-from routes.admin_wipe_routes import setup_admin_wipe_routes
+from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager, memory_provider=memory_provider))
 
 # Memory
@@ -723,7 +723,7 @@ from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
 # Cleanup
-from routes.cleanup_routes import setup_cleanup_routes
+from routes.cleanup.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
 
 # Personal docs
@@ -814,7 +814,7 @@ from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
 
 # Model A/B Comparison
-from routes.compare_routes import setup_compare_routes
+from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
 # User Preferences
@@ -859,7 +859,7 @@ app.include_router(setup_api_token_routes())
 logger.info("Webhook & API token routes initialized")
 
 # Notes (Google Keep-style notes/todos)
-from routes.note_routes import setup_note_routes
+from routes.note.note_routes import setup_note_routes
 app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
 
 # Email

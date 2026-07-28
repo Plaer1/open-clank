@@ -6,30 +6,30 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js';
+import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js';
-import compareModule from './js/compare/index.js';
-import documentModule from './js/document.js';
+import chatModule from './js/chat.js?v=20260722ctxheader4';
+import compareModule from './js/compare/index.js?v=20260723compareicon2';
+import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js';
-import sessionModule from './js/sessions.js';
-import memoryModule from './js/memory.js';
+import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
+import sessionModule from './js/sessions.js?v=20260722ctxheader4';
+import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
-import tasksModule from './js/tasks.js?v=20260630tasksactivity';
+import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 import copalModule from './js/copal.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
-import './js/modalManager.js';
+import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
 import themeModule from './js/theme.js';
@@ -44,7 +44,7 @@ import * as researchPanelModule from './js/research/panel.js?v=20260630researcht
 import ttsModule from './js/tts-ai.js';
 import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
-import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
+import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 
 const API_BASE = window.location.origin;
@@ -206,12 +206,22 @@ const el = uiModule.el;
 // changes take effect immediately (previously cached once at page load and
 // went stale when the user changed their default model).
 let _defaultChat = null;
+try {
+  const cachedDefaultChat = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+  if (cachedDefaultChat && cachedDefaultChat.endpoint_url && cachedDefaultChat.model) {
+    _defaultChat = cachedDefaultChat;
+    window.__odysseusDefaultChat = cachedDefaultChat;
+  }
+} catch (_) {}
 async function _refreshDefaultChat() {
   try {
     const d = await (await fetch('/api/default-chat')).json();
     if (d && d.endpoint_url && d.model) {
       _defaultChat = d;
-      try { window.__odysseusDefaultChat = d; } catch (_) {}
+      try {
+        window.__odysseusDefaultChat = d;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(d));
+      } catch (_) {}
       return d;
     }
   } catch (_) {}
@@ -252,50 +262,6 @@ async function _createDirectChatFromPreferredModel() {
   }
 
   return false;
-}
-
-async function _hasUsableChatModel() {
-  try {
-    const pending = sessionModule?.getPendingChat?.();
-    if (pending && pending.url && pending.modelId) return true;
-  } catch (_) {}
-  try {
-    const current = sessionModule?.getSessions?.()
-      ?.find(s => s.id === sessionModule?.getCurrentSessionId?.());
-    if (current && current.endpoint_url && current.model) return true;
-  } catch (_) {}
-  const dc = await _refreshDefaultChat();
-  if (dc && dc.endpoint_url && dc.model) return true;
-  try {
-    const items = window.modelsModule?.getCachedItems?.() || [];
-    if (items.some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length))) {
-      return true;
-    }
-  } catch (_) {}
-  try {
-    const res = await fetch(`${API_BASE}/api/models?background=false`, { credentials: 'same-origin' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return (data.items || []).some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
-  } catch (_) {
-    return false;
-  }
-}
-
-async function _syncWelcomeModelHint() {
-  const tip = document.getElementById('welcome-tip');
-  const sub = document.getElementById('welcome-sub');
-  if (!tip && !sub) return;
-  const hasModel = await _hasUsableChatModel();
-  if (hasModel) {
-    if (sub && !sub.dataset.researchOrigText) sub.textContent = 'New chat ready.';
-    if (tip) tip.textContent = 'Pick a model if you want, or just type.';
-  } else {
-    if (sub && !sub.dataset.researchOrigText) {
-      sub.innerHTML = 'Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.';
-    }
-    if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
-  }
 }
 
 // ============================================
@@ -524,6 +490,20 @@ function initializeEventListeners() {
     });
   }
 
+  // Export menu: Compact current chat context
+  const exportCompactBtn = el('export-compact-btn');
+  if (exportCompactBtn) {
+    exportCompactBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (window.compactCurrentChatContext) {
+        await window.compactCurrentChatContext();
+      } else {
+        uiModule.showError('Compact action is not ready yet');
+      }
+    });
+  }
+
   // Export: PDF
   const exportPdfBtn = el('export-pdf-btn');
   if (exportPdfBtn) {
@@ -572,6 +552,18 @@ function initializeEventListeners() {
       } catch (err) {
         console.error('Save to docs failed:', err);
         uiModule.showError('Failed to save to documents');
+      }
+    });
+  }
+
+  // Export menu: Delete current chat
+  const exportDeleteBtn = el('export-delete-btn');
+  if (exportDeleteBtn) {
+    exportDeleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (sessionModule?.deleteCurrentSessionFromTopMenu) {
+        await sessionModule.deleteCurrentSessionFromTopMenu();
       }
     });
   }
@@ -1246,6 +1238,7 @@ function initializeEventListeners() {
   if (libraryNewDocBtn) {
     libraryNewDocBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
+      if (libraryNewDocBtn.dataset.docNewWired === '1') return;
       try {
         if (documentModule && documentModule.newDocument) await documentModule.newDocument();
       } catch (err) {
@@ -1748,6 +1741,42 @@ function initializeEventListeners() {
     uiModule.showToast(`${label} ${active ? 'on' : 'off'}`, 1800);
   }
 
+  function syncPlanToggle(active) {
+    const btn = el('plan-toggle-btn');
+    const chk = el('plan-toggle');
+    const status = el('plan-mode-status');
+    const statusToggle = el('plan-mode-status-toggle');
+    if (chk) chk.checked = !!active;
+    document.body.classList.toggle('plan-mode-active', !!active);
+    if (status) status.hidden = !active;
+    if (statusToggle) {
+      statusToggle.setAttribute('aria-pressed', String(!!active));
+      statusToggle.setAttribute('aria-label', active ? 'Turn off plan mode' : 'Turn on plan mode');
+    }
+    if (btn) {
+      btn.classList.toggle('active', !!active);
+      btn.setAttribute('aria-pressed', String(!!active));
+      btn.title = active
+        ? 'Plan mode on - next message proposes a plan only'
+        : 'Plan mode';
+    }
+  }
+
+  function setPlanMode(active, options = {}) {
+    const on = !!active;
+    const st = loadToggleState();
+    st.plan_mode = on;
+    saveToggleState(st);
+    syncPlanToggle(on);
+    if (on) {
+      const resChk = el('research-toggle');
+      if (resChk && resChk.checked) _syncResearchIndicator(false);
+    }
+    if (!options.silent && uiModule?.showToast) {
+      uiModule.showToast(on ? 'Plan mode on' : 'Plan mode off', 1600);
+    }
+  }
+
   function applyModeToToggles(mode) {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
@@ -2247,9 +2276,10 @@ function initializeEventListeners() {
     const PLACEHOLDER_COMPACT_WIDTH = 400;
     const PICKER_HIDE_WIDTH = 220;
     const TOOLBAR_HIDE_WIDTH = 160;
-    const textarea = el('message');
-    const inputBottom = document.querySelector('.chat-input-bottom');
-    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    const textarea = el('message');
+	    const inputBottom = document.querySelector('.chat-input-bottom');
+	    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    let _placeholderHintOn = false;
 
     function checkPickerOverflow() {
       // Skip responsive collapse on mobile — keyboard open/close causes flicker
@@ -2503,10 +2533,9 @@ function initializeEventListeners() {
     'sidebar-brand':       '.sidebar-brand-title',
     'sidebar-new-chat':    '#sidebar-new-chat-btn',
     'sidebar-search':      '#sidebar-search-btn',
-    'sessions-section':    '#sessions-section',
-    'email-section':       '#email-section',
-    'models-section':      '#models-section',
-    'tools-section':       '#tools-section',
+	    'sessions-section':    '#sessions-section',
+	    'email-section':       '#email-section',
+	    'tools-section':       '#tools-section',
     // Per-tool visibility — fine-grained control over which entries show
     // inside the Tools section in the sidebar.
     'tool-calendar':       '#tool-calendar-btn',
@@ -2536,7 +2565,7 @@ function initializeEventListeners() {
   };
 
   // Keys hidden by default on first run (no localStorage yet)
-  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
+	  const UI_VIS_DEFAULT_OFF = new Set(['rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);
@@ -3057,7 +3086,7 @@ function initializeEventListeners() {
       ['.memory-tabs', '.memory-tab'],
       ['.admin-tabs', '.admin-tab'],
     ];
-    const _IGNORE = 'input, textarea, select, [contenteditable="true"], .preset-range, ' +
+    const _IGNORE = '.chat-input-bar, input, textarea, select, [contenteditable="true"], .preset-range, ' +
       '.note-cl-row, .minimized-dock-chip, canvas, .email-card-reader';
     let sx = 0, sy = 0, tracking = false;
 
@@ -3473,6 +3502,7 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
+  tasksModule?.startNotificationPolling?.();
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
   const _bumpChatPriority = (ms = 10000) => {
@@ -3685,6 +3715,7 @@ function startOdysseusApp() {
       return;
     }
 
+    chatRenderer.hideWelcomeScreen();
     return originalSubmit.call(chatModule, e);
   }
 
@@ -3694,6 +3725,86 @@ function startOdysseusApp() {
   const sendBtn = document.querySelector('.send-btn');
   const messageInput = el('message');
   const modelPickerWrap = document.getElementById('model-picker-wrap');
+
+  function _readComposerPromptHistory() {
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return [];
+    return Array.from(chatBox.querySelectorAll('.msg-user'))
+      .reverse()
+      .map(msg => {
+        const body = msg.querySelector('.body');
+        return msg.dataset?.raw || (body ? body.textContent : '') || '';
+      })
+      .filter(Boolean);
+  }
+
+  if (messageInput && !messageInput._odysseusPromptRecallCapture) {
+    messageInput._odysseusPromptRecallCapture = true;
+    let recallHistory = [];
+    let recallIndex = -1;
+    let lastRecalled = '';
+    const norm = (v) => String(v || '').replace(/\r\n/g, '\n').trimEnd();
+    messageInput.addEventListener('input', () => {
+      if (norm(messageInput.value) === norm(lastRecalled)) return;
+      recallHistory = [];
+      recallIndex = -1;
+      lastRecalled = '';
+      try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
+    }, true);
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
+      if (window._ghostAutocomplete?.isActive?.()) return;
+      const fresh = _readComposerPromptHistory();
+      const history = fresh.length ? fresh : recallHistory;
+      if (!history.length) return;
+      const current = norm(messageInput.value);
+      let currentIndex = current ? history.findIndex(item => norm(item) === current) : -1;
+      if (current && currentIndex < 0 && current === norm(lastRecalled)) currentIndex = recallIndex;
+      if (current && currentIndex < 0) {
+        const markedIndex = Number(messageInput.dataset.odysseusRecallIndex);
+        if (Number.isInteger(markedIndex) && markedIndex >= 0 && markedIndex < history.length) {
+          currentIndex = markedIndex;
+        }
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (e.key === 'ArrowDown') {
+        if (currentIndex < 0) return;
+        const nextIndex = currentIndex - 1;
+        if (nextIndex < 0) {
+          recallHistory = history;
+          recallIndex = -1;
+          lastRecalled = '';
+          try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
+          messageInput.value = '';
+          try { messageInput.selectionStart = messageInput.selectionEnd = 0; } catch {}
+          try { uiModule.autoResize(messageInput); } catch {}
+          return;
+        }
+        const recalled = history[nextIndex];
+        recallHistory = history;
+        recallIndex = nextIndex;
+        lastRecalled = recalled;
+        try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
+        messageInput.value = recalled;
+        try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
+        try { uiModule.autoResize(messageInput); } catch {}
+        return;
+      }
+      const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
+      const recalled = history[nextIndex];
+      if (!recalled) return;
+      recallHistory = history;
+      recallIndex = nextIndex;
+      lastRecalled = recalled;
+      try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
+      messageInput.value = recalled;
+      try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
+      try { uiModule.autoResize(messageInput); } catch {}
+    }, true);
+  }
 
   const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
@@ -3904,13 +4015,18 @@ function startOdysseusApp() {
   // Toggle mic/send icon on input change + hide model picker after enough text
   if (messageInput) {
     const _debouncedUpdateIcon = uiModule.debounce(_updateSendBtnIcon, 50);
-    const _MODEL_PICKER_HIDE_CHARS = 10;
-    const _syncModelPickerAutohide = () => {
-      const hidePicker = (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
-      if (modelPickerWrap) {
-        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
-      }
-    };
+		    const _MODEL_PICKER_HIDE_CHARS = 23;
+		    const _syncModelPickerAutohide = () => {
+		      const compactMobile = _isMobileChatInput() && !!(messageInput.value || '').trim();
+		      const hidePicker = compactMobile || (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
+		      if (modelPickerWrap) {
+		        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
+		      }
+	      const planStatus = el('plan-mode-status');
+	      if (planStatus) {
+	        planStatus.classList.toggle('plan-mode-status-autohide', hidePicker);
+	      }
+	    };
     window._syncModelPickerAutohide = _syncModelPickerAutohide;
     _syncModelPickerAutohide();
     messageInput.addEventListener('input', () => {
@@ -4136,23 +4252,119 @@ function startOdysseusApp() {
 
   // Non-critical startup work must not compete with first paint, chat send, or
   // chat switching. Panels load their own data when opened; these are only warmups.
-  _syncWelcomeModelHint().catch(() => {});
   runNonCriticalStartup(() => {
     modelsModule.refreshModels(false).then(() => {
       try { sessionModule.updateModelPicker(); } catch (_) {}
-      _syncWelcomeModelHint().catch(() => {});
     }).catch(() => {});
   }, 3500);
   runNonCriticalStartup(() => modelsModule.refreshProviders(), 6500);
   runNonCriticalStartup(() => ragModule.loadPersonalDocs(), 9000);
-  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
-  
-  // Ensure proper initial state
-  voiceRecorderModule.init();
-  if (censorModule) censorModule.init();
+	  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
 
-  // Auto-focus message input on load
-  const msgEl = document.getElementById('message');
+	  // Ensure proper initial state
+	  voiceRecorderModule.init();
+	  if (censorModule) censorModule.init();
+
+	  // ── Mobile pull-to-refresh for the active chat ──
+	  (function initMobileChatPullRefresh() {
+	    const historyEl = document.getElementById('chat-history');
+	    const container = document.getElementById('chat-container');
+	    if (!historyEl || !container || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) return;
+
+	    const THRESHOLD = 72;
+	    const MAX_PULL = 104;
+	    let startY = 0;
+	    let pullY = 0;
+	    let tracking = false;
+	    let refreshing = false;
+	    let spinner = null;
+	    const indicator = document.createElement('div');
+	    indicator.className = 'chat-pull-refresh';
+	    indicator.setAttribute('aria-hidden', 'true');
+	    indicator.innerHTML = '<div class="chat-pull-refresh-spinner"></div>';
+	    container.prepend(indicator);
+	    const spinnerMount = indicator.querySelector('.chat-pull-refresh-spinner');
+	    try {
+	      spinner = spinnerModule.createWhirlpool(18);
+	      spinnerMount.replaceChildren(spinner.element);
+	    } catch (_) {}
+
+	    function setPull(px, active = false) {
+	      pullY = Math.max(0, Math.min(MAX_PULL, px));
+	      const pct = Math.min(1, pullY / THRESHOLD);
+	      indicator.style.setProperty('--pull-refresh-y', `${pullY}px`);
+	      indicator.style.setProperty('--pull-refresh-progress', `${pct}`);
+	      indicator.classList.toggle('is-visible', active || refreshing || pullY > 2);
+	      indicator.classList.toggle('is-ready', pct >= 1 && !refreshing);
+	      indicator.classList.toggle('is-refreshing', refreshing);
+	    }
+
+	    async function runRefresh() {
+	      if (refreshing) return;
+	      if (_isForegroundChatBusy()) {
+	        setPull(0, false);
+	        return;
+	      }
+	      refreshing = true;
+	      setPull(THRESHOLD, true);
+	      const safetyTimer = setTimeout(() => {
+	        refreshing = false;
+	        setPull(0, false);
+	      }, 8000);
+	      try {
+	        const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+	        if (sid && sessionModule.selectSession) {
+	          await sessionModule.selectSession(sid, { keepSidebar: true, showLoading: false, immediateLoading: true });
+	        } else if (sessionModule && sessionModule.loadSessions) {
+	          await sessionModule.loadSessions();
+	        }
+	      } catch (err) {
+	        console.warn('pull refresh failed:', err);
+	      } finally {
+	        clearTimeout(safetyTimer);
+	        refreshing = false;
+	        setPull(0, false);
+	      }
+	    }
+
+	    historyEl.addEventListener('touchstart', (e) => {
+	      if (refreshing || window.innerWidth > 768) return;
+	      if (document.querySelector('.modal:not(.hidden)')) return;
+	      if (historyEl.scrollTop > 0) return;
+	      if (e.target && e.target.closest && e.target.closest('.chat-input-bar, textarea, input, button, select, a')) return;
+	      tracking = true;
+	      startY = e.touches[0].clientY;
+	      setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchmove', (e) => {
+	      if (!tracking || refreshing) return;
+	      const dy = e.touches[0].clientY - startY;
+	      if (dy <= 0) {
+	        setPull(0, false);
+	        return;
+	      }
+	      if (historyEl.scrollTop <= 0) {
+	        e.preventDefault();
+	        setPull(dy * 0.62, true);
+	      }
+	    }, { passive: false });
+
+	    historyEl.addEventListener('touchend', () => {
+	      if (!tracking) return;
+	      tracking = false;
+	      if (pullY >= THRESHOLD) runRefresh();
+	      else setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchcancel', () => {
+	      tracking = false;
+	      if (!refreshing) setPull(0, false);
+	    }, { passive: true });
+	  })();
+
+	  // Auto-focus message input on load
+	  const msgEl = document.getElementById('message');
   if (msgEl) msgEl.focus();
   
   // Initialize mouse-based drag for sidebar sections

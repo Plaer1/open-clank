@@ -44,7 +44,7 @@ def manager(tmp_path, monkeypatch):
 
 def test_factory_default_when_never_edited(manager):
     record = get_default_persona("alice")
-    assert record["name"] == FACTORY_NAME == "Odysseus"
+    assert record["name"] == FACTORY_NAME == "Open Clank"
     assert record["system_prompt"] == FACTORY_PROMPT
     assert record["is_factory"] is True
 

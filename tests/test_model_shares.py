@@ -1128,6 +1128,7 @@ def test_personal_and_shared_routes_for_same_model_coexist(share_rows):
             api_key="recipient-secret",
             is_enabled=True,
             cached_models=json.dumps(["full-model"]),
+            pinned_models=json.dumps(["full-model"]),
             model_type="llm",
         ))
         db.commit()

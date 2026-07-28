@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
+from core.database import ModelEndpoint, SessionLocal
 from src.llm_core import _detect_provider, _host_match, _ollama_api_root
 
 logger = logging.getLogger(__name__)
@@ -567,8 +568,6 @@ def resolve_endpoint(
     )
 
     if share_id_from_endpoint(ep_id) is not None:
-        from core.database import SessionLocal
-
         db = SessionLocal()
         try:
             access = resolve_shared_model_access(
@@ -591,7 +590,6 @@ def resolve_endpoint(
             return fallback_url, fallback_model, fallback_headers
         return "mimo://acp", selected, fallback_headers or {}
 
-    from core.database import SessionLocal, ModelEndpoint
     db = SessionLocal()
     try:
         ep = db.query(ModelEndpoint).filter(

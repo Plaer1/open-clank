@@ -91,14 +91,14 @@ def test_local_minimax_mlx_payload_gets_stability_defaults(monkeypatch):
 
     monkeypatch.setattr(model_context, "is_local_endpoint", lambda _url: True)
     payload = {
-        "model": "cookietimeh/MiniMax-M2.7-BF16-ultra-uncensored-heretic-mlx-4Bit",
+        "model": "example-org/MiniMax-M2.7-BF16-mlx-4Bit",
         "temperature": 0.9,
     }
 
     llm_core._apply_local_generation_stability(
         payload,
         "http://192.168.1.22:8091/v1/chat/completions",
-        "cookietimeh/MiniMax-M2.7-BF16-ultra-uncensored-heretic-mlx-4Bit",
+        "example-org/MiniMax-M2.7-BF16-mlx-4Bit",
     )
 
     assert payload["temperature"] == 0.2

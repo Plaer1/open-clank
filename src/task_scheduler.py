@@ -1940,9 +1940,9 @@ class TaskScheduler:
             msg["From"] = from_addr
             msg["To"] = to_addr
             msg["Subject"] = f"[Task] {task.name}"
-            msg["X-Open Clank-Origin"] = "odysseus-ui"
-            msg["X-Open Clank-Kind"] = "task"
-            msg["X-Open Clank-Ref"] = str(task.id)
+            msg["X-Odysseus-Origin"] = "odysseus-ui"
+            msg["X-Odysseus-Kind"] = "task"
+            msg["X-Odysseus-Ref"] = str(task.id)
             msg.set_content(result or "")
             _send_smtp_message(cfg, from_addr, [to_addr], msg.as_string(), timeout=30)
             logger.info("Task %s emailed result (recipient_set=%s, %sb)", task.id, bool(to_addr), len(result or ""))
@@ -2323,9 +2323,9 @@ class TaskScheduler:
             "subject": f"[Task] {task.name}",
             "body": result,
             "headers": {
-                "X-Open Clank-Origin": "odysseus-ui",
-                "X-Open Clank-Kind": "task",
-                "X-Open Clank-Ref": str(task.id),
+                "X-Odysseus-Origin": "odysseus-ui",
+                "X-Odysseus-Kind": "task",
+                "X-Odysseus-Ref": str(task.id),
             },
         }
         if recipient:

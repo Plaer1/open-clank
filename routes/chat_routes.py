@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import logging
 from datetime import datetime
@@ -44,6 +45,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import classify_tool_intent as _classify_tool_intent
+from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
@@ -55,7 +57,6 @@ logger = logging.getLogger(__name__)
 
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
-_IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
 
 
 def _resolved_session_target(sess):
@@ -254,6 +255,41 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
     return repaired
 
 
+_WEB_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:check|try\s+again|look(?:\s+now|\s+it\s+up)?|search(?:\s+now|\s+online|\s+it)?|"
+    r"do\s+it|again|approved|approve(?:d)?|yes|ok(?:ay)?|proceed|go\s+ahead|"
+    r"send(?:\s+it)?|submit(?:\s+it)?|email(?:\s+them|\s+it)?)\??\s*$",
+    re.I,
+)
+_RECENT_BROWSER_CONTEXT_RE = re.compile(
+    r"\b(?:browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|click|"
+    r"fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|contact\s+form|web\s*form|"
+    r"form\s+submission|playwright|automation)\b",
+    re.I,
+)
+
+
+def _recent_session_text(sess, limit: int = 8, max_chars: int = 2000) -> str:
+    history = getattr(sess, "history", None) or getattr(sess, "_history", None) or []
+    chunks: List[str] = []
+    for msg in history[-limit:]:
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        text = _message_plain_text(content).strip()
+        if text:
+            chunks.append(text)
+    return " ".join(chunks)[-max_chars:]
+
+
+
+
+def _is_contextual_browser_followup(message: str, sess) -> bool:
+    """Treat short retry replies as browser tasks when recent context was forms/browser automation."""
+    if not message or not _WEB_FOLLOWUP_RE.search(message):
+        return False
+    return bool(_RECENT_BROWSER_CONTEXT_RE.search(_recent_session_text(sess, limit=12, max_chars=4000)))
 
 
 def _resolve_request_workspace(request, raw_value) -> tuple:
@@ -319,6 +355,21 @@ def _native_connection_is_available(
         return True
     finally:
         db.close()
+
+
+def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
+    if not session_url or not endpoint_base:
+        return False
+    from src.endpoint_resolver import build_chat_url, normalize_base
+
+    sess = session_url.rstrip("/")
+    base = normalize_base(endpoint_base).rstrip("/")
+    variants = {
+        base,
+        base + "/chat/completions",
+        build_chat_url(base).rstrip("/"),
+    }
+    return sess in variants or sess.startswith(base + "/")
 
 
 def _clear_orphaned_session_endpoint(sess, owner: str | None = None) -> bool:
@@ -409,7 +460,7 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     models into the image-generation path.
     """
     model = (getattr(sess, "model", "") or "").strip()
-    if any(model.lower().startswith(prefix) for prefix in _IMAGE_MODEL_PREFIXES):
+    if looks_like_image_generation_model(model):
         return True
 
     endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
@@ -445,6 +496,29 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     finally:
         db.close()
     return False
+
+
+def _first_image_attachment(chat_handler, att_ids: List[str], owner: str | None = None) -> Optional[Dict[str, Any]]:
+    """Return the first attached image file that this owner can read."""
+    upload_handler = getattr(chat_handler, "upload_handler", None)
+    if not upload_handler:
+        return None
+    for att_id in att_ids or []:
+        try:
+            info = upload_handler.resolve_upload(att_id, owner=owner)
+        except Exception as e:
+            logger.warning("Failed to resolve image edit upload %s", att_id, exc_info=e)
+            continue
+        if not info:
+            continue
+        name = info.get("name") or info.get("original_name") or info.get("id") or ""
+        mime = info.get("mime", "")
+        try:
+            if upload_handler.is_image_file(name, mime):
+                return info
+        except Exception:
+            continue
+    return None
 
 
 def _recover_empty_session_model(sess, session_id: str, owner: str | None = None) -> bool:
@@ -563,9 +637,85 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
     except Exception as e:
         db.rollback()
         logger.warning("Failed to recover empty session model for %s: %s", session_id, e)
+    return False
+
+
+def _reconcile_selected_route_from_request(
+    request: Request,
+    sess,
+    session_id: str,
+    form_data,
+    owner: str | None = None,
+) -> bool:
+    """Apply the model route the browser selected before streaming.
+
+    The frontend creates a pending chat first and only materializes it on first
+    send. Startup/default-model refreshes can race with that UI state, so the
+    stream request includes the route that was selected at click/send time.
+    Trust only registered endpoint ids, or the session's existing endpoint URL.
+    """
+    selected_model = str(form_data.get("selected_model") or "").strip()
+    selected_endpoint_id = str(form_data.get("selected_endpoint_id") or "").strip()
+    selected_endpoint_url = str(form_data.get("selected_endpoint_url") or "").strip()
+    if not selected_model:
         return False
+
+    endpoint_url = ""
+    headers = None
+    if selected_endpoint_id or selected_endpoint_url:
+        try:
+            from src.auth_helpers import owner_filter
+            from src.endpoint_resolver import build_headers, normalize_base
+            db = SessionLocal()
+            try:
+                q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+                if selected_endpoint_id:
+                    q = q.filter(ModelEndpoint.id == selected_endpoint_id)
+                if owner:
+                    q = owner_filter(q, ModelEndpoint, owner)
+                candidates = q.all() if selected_endpoint_url and not selected_endpoint_id else [q.first()]
+                ep = None
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    if selected_endpoint_id or _session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
+                        ep = cand
+                        break
+                if not ep:
+                    return False
+                endpoint_url = build_chat_url(normalize_base(ep.base_url or ""))
+                headers = build_headers(ep.api_key or "", ep.base_url or "") if ep.api_key else {}
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Failed to resolve selected endpoint %s/%s for %s: %s", selected_endpoint_id, selected_endpoint_url, session_id, e)
+            return False
+
+    if not endpoint_url:
+        return False
+
+    if (
+        selected_model == (getattr(sess, "model", "") or "")
+        and endpoint_url == (getattr(sess, "endpoint_url", "") or "")
+    ):
+        return False
+
+    sess.model = selected_model
+    sess.endpoint_url = endpoint_url
+    sess.headers = headers or {}
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.model = selected_model
+            db_session.endpoint_url = endpoint_url
+            db_session.headers = sess.headers or {}
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
     finally:
         db.close()
+    logger.info("Reconciled selected route for %s: model=%r endpoint=%s", session_id, selected_model, redact_url(endpoint_url))
+    return True
 
 
 def _set_user_time_from_request(request: Request) -> None:
@@ -741,6 +891,7 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
             # Issue #587: picker shows a model from the endpoint cache but
@@ -790,6 +941,7 @@ def setup_chat_routes(
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
+        image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         _turn_memory_prefs = _load_prefs_for_user(owner) or {}
         memory_read_allowed = _agent_memory_read_allowed(
@@ -947,7 +1099,7 @@ def setup_chat_routes(
         # explicitly enable it.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
-        _explicit_web_intent = bool(_tool_intent and _tool_intent.category == "web")
+        _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
         if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
             disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
@@ -961,7 +1113,7 @@ def setup_chat_routes(
                 "create_document", "edit_document", "update_document",
                 "send_email", "reply_to_email",
                 "manage_notes", "manage_calendar", "manage_tasks",
-                "api_call", "builtin_browser",
+                "api_call",
             })
             if _search_enabled:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
@@ -978,6 +1130,11 @@ def setup_chat_routes(
                 "recall_memory",      # persistent memory reads
                 "search_chats",       # past chat history
                 "manage_skills",      # skill presets tied to user
+                "create_session",
+                "list_sessions",
+                "manage_session",
+                "send_to_session",
+                "chat_with_model",
             })
         if not memory_read_allowed:
             disabled_tools.update({"manage_memory", "recall_memory"})
@@ -1006,7 +1163,7 @@ def setup_chat_routes(
             if not _privs.get("can_use_bash", True):
                 disabled_tools.update({"bash", "python", "read_file", "write_file"})
             if not _privs.get("can_use_browser", True):
-                disabled_tools.add("builtin_browser")
+                disabled_tools.update(_BROWSER_MCP_TOOLS)
             if not _privs.get("can_use_documents", True):
                 disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
             if not _privs.get("can_generate_images", True):
@@ -1283,17 +1440,73 @@ def setup_chat_routes(
                     yield "data: [DONE]\n\n"
                     _active_streams.pop(session, None)
                     return
-                from src.ai_interaction import do_generate_image
+                from src.ai_interaction import do_edit_image, do_generate_image
                 _user_msg = message or ""
-                yield f'data: {json.dumps({"type": "tool_start", "tool": "generate_image", "command": _user_msg[:100]})}\n\n'
+                _image_upload = _first_image_attachment(chat_handler, att_ids, owner=_user)
+                _image_tool_name = "edit_image" if _image_upload else "generate_image"
+                yield f'data: {json.dumps({"type": "tool_start", "tool": _image_tool_name, "command": _user_msg[:100]})}\n\n'
                 yield ": heartbeat\n\n"
-                _img_result = await do_generate_image(f"{_user_msg}\n{sess.model}", session, owner=_user)
+                _progress_queue: asyncio.Queue = asyncio.Queue()
+
+                async def _image_progress_callback(progress: Dict[str, Any]):
+                    try:
+                        _progress_queue.put_nowait(progress)
+                    except Exception:
+                        pass
+
+                if _image_upload:
+                    _img_task = asyncio.create_task(do_edit_image(
+                        _user_msg,
+                        _image_upload.get("path", ""),
+                        model_spec=sess.model,
+                        session_id=session,
+                        owner=_user,
+                        size="1024x1024",
+                        progress_callback=_image_progress_callback,
+                    ))
+                else:
+                    _img_task = asyncio.create_task(do_generate_image(f"{_user_msg}\n{sess.model}\n512x512", session, owner=_user))
+                _img_started = time.time()
+                _img_tick = 0
+                while not _img_task.done():
+                    try:
+                        _progress = await asyncio.wait_for(_progress_queue.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        _progress = None
+                    _img_tick += 1
+                    _elapsed = int(time.time() - _img_started)
+                    _label = "Editing image" if _image_upload else "Generating image"
+                    yield ": image generation still running\n\n"
+                    _progress_data = {"type": "tool_progress", "tool": _image_tool_name, "message": f"{_label}… {_elapsed}s", "elapsed": _elapsed, "tick": _img_tick}
+                    if isinstance(_progress, dict) and _progress.get("total"):
+                        _step = int(_progress.get("step") or 0)
+                        _total = int(_progress.get("total") or 0)
+                        _percent = _progress.get("percent")
+                        _progress_data.update({
+                            "step": _step,
+                            "total": _total,
+                            "percent": _percent,
+                            "message": f"{_label}… {_step}/{_total}",
+                        })
+                    yield f'data: {json.dumps(_progress_data)}\n\n'
+                _img_result = await _img_task
                 _img_output = _img_result.get("results", _img_result.get("error", ""))
-                _img_tool_data = {"type": "tool_output", "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
+                _img_tool_data = {"type": "tool_output", "tool": _image_tool_name, "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
                 for _k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                     if _k in _img_result:
                         _img_tool_data[_k] = _img_result[_k]
+                if _image_upload:
+                    _img_tool_data["source_image"] = {
+                        "id": _image_upload.get("id"),
+                        "name": _image_upload.get("name") or _image_upload.get("original_name"),
+                    }
                 yield f'data: {json.dumps(_img_tool_data)}\n\n'
+                if _img_result.get("image_url"):
+                    _img_event = {"type": "generated_image", "url": _img_result.get("image_url")}
+                    for _k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
+                        if _img_result.get(_k):
+                            _img_event[_k] = _img_result[_k]
+                    yield f'data: {json.dumps(_img_event)}\n\n'
                 _desc = _img_result.get("results", _img_result.get("error", "Image generation complete"))
                 full_response = _desc
                 yield f'data: {json.dumps({"delta": _desc})}\n\n'
@@ -1346,6 +1559,10 @@ def setup_chat_routes(
                     _forced_tools = None
                     if _search_enabled:
                         _forced_tools = set(WEB_TOOL_NAMES)
+                        if _explicit_browser_intent:
+                            _forced_tools |= set(_BROWSER_MCP_TOOLS)
+                    elif _explicit_browser_intent:
+                        _forced_tools = set(_BROWSER_MCP_TOOLS)
 
                     _agent_envelope = _turn_envelope(
                         session_id=session,
@@ -1569,7 +1786,7 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response:
+                        if full_response and not incognito:
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
                             save_assistant_response(
                                 sess,

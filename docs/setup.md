@@ -150,6 +150,79 @@ scripts/check-docker-gpu.sh --enable-nvidia-overlay
 # Full assisted setup — install toolkit, then enable overlay if passthrough works:
 scripts/check-docker-gpu.sh --install-nvidia-toolkit --enable-nvidia-overlay
 ```
+#### Arch Linux NVIDIA Docker notes
+
+On Arch Linux, verify the host NVIDIA driver and Docker GPU passthrough before enabling the Odysseus NVIDIA overlay.
+
+Install the required packages:
+
+```bash
+sudo pacman -Syu
+sudo pacman -S docker docker-compose nvidia-container-toolkit nvidia-utils
+sudo systemctl enable --now docker
+```
+
+Configure Docker to use the NVIDIA container runtime:
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+Verify the host GPU:
+
+```bash
+nvidia-smi
+```
+
+Verify Docker GPU passthrough:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
+```
+
+Then enable the Odysseus NVIDIA compose overlay:
+
+```env
+COMPOSE_FILE=docker-compose.yml:docker/gpu.nvidia.yml
+```
+
+Rebuild and verify the GPU inside the Odysseus container:
+
+```bash
+docker compose up -d --build
+docker compose exec odysseus nvidia-smi -L
+```
+
+For first-time local model testing on 8 GB laptop GPUs, start with GGUF/Q4 models on llama.cpp before trying GPTQ/AWQ models on vLLM or SGLang. This keeps the first run simpler while confirming GPU passthrough works.
+
+**WSL2 + snap Docker.** If the NVIDIA check fails with this error, Docker may be
+installed via snap:
+
+```text
+failed to fulfil mount request: open /usr/lib/wsl/lib/libdxcore.so: no such file or directory
+```
+
+Check with `snap list docker` or:
+
+```bash
+docker info --format '{{.DockerRootDir}}'
+```
+
+A Docker root under `/var/snap/docker/` means snap confinement can prevent
+Docker from seeing WSL2's `/usr/lib/wsl/lib` GPU libraries even when the files
+exist on the host. Reinstalling or reconfiguring `nvidia-container-toolkit` will
+not fix that. Remove snap Docker, install the official apt-based Docker Engine
+([Docker docs](https://docs.docker.com/engine/install/ubuntu/)), then configure
+the NVIDIA runtime again:
+
+```bash
+sudo snap remove docker
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+Then re-run `scripts/check-docker-gpu.sh`.
 
 Safety notes:
 - The app never installs host GPU runtime automatically.

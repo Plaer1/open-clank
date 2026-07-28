@@ -64,11 +64,9 @@ DEFAULT_SETTINGS = {
     "search_url": "",
     "search_result_count": 5,
     # SafeSearch level applied to every provider that exposes one.
-    # "strict"   — block adult / explicit results (default; matches what users
-    #              expect from a research tool and avoids unrelated NSFW URLs
-    #              bleeding in via provider "related" / spam recommendations)
-    # "moderate" — provider-default behavior (filter explicit but allow
-    #              suggestive content)
+    # "strict"   — apply the provider's strongest filtering level (default;
+    #              keeps unrelated low-quality/spam recommendations out)
+    # "moderate" — provider-default filtering behavior
     # "off"      — disable filtering entirely (advanced users only)
     #
     # Providers that honor this setting (translated to each provider's native

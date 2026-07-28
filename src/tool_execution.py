@@ -758,6 +758,11 @@ async def _execute_tool_block_impl(
             or {"error": "publish_file: execution failed", "exit_code": 1}
         if result.get("filename"):
             desc = f"publish_file: {result['filename']}"
+    elif tool in ("apply_patch", "todowrite"):
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"{tool}: {first_line}" if first_line else tool
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"

@@ -46,12 +46,53 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 const SERVE_FAVORITES_KEY = 'cookbook-serve-favorite-models';
 
 let _cachedAllModels = [];
-const _CACHED_MODELS_SCAN_KEY = 'cookbook_cached_models_scan_v1';
+const _CACHED_MODELS_SCAN_KEY = 'cookbook_cached_models_scan_v3_ltx_video';
 const _CACHED_MODELS_SCAN_TTL = 6 * 3600 * 1000;
 
 function _normalizeCookbookModelDir(dir) {
   const d = String(dir || '').replaceAll('✕', '').replaceAll('✖', '').trim();
   return /^(home|mnt|media|data|opt|srv|var)\//.test(d) ? `/${d}` : d;
+}
+
+function _serveCmdPort(cmd) {
+  const s = String(cmd || '');
+  const m = s.match(/--port[=\s]+(\d+)/)
+    || s.match(/(?:^|\s)-p[=\s]+(\d+)/)
+    || s.match(/OLLAMA_HOST=[^:\s]+:(\d+)/);
+  return m ? m[1] : '';
+}
+
+function _replaceServeCmdPort(cmd, port) {
+  const s = String(cmd || '');
+  const p = String(port || '').trim();
+  if (!s || !p) return s;
+  if (/(^|\s)--port=\d+/.test(s)) return s.replace(/(^|\s)--port=\d+/, `$1--port=${p}`);
+  if (/(^|\s)--port\s+\d+/.test(s)) return s.replace(/(^|\s)--port\s+\d+/, `$1--port ${p}`);
+  if (/(^|\s)-p=\d+/.test(s)) return s.replace(/(^|\s)-p=\d+/, `$1-p=${p}`);
+  if (/(^|\s)-p\s+\d+/.test(s)) return s.replace(/(^|\s)-p\s+\d+/, `$1-p ${p}`);
+  if (/OLLAMA_HOST=([^:\s]+):\d+/.test(s)) return s.replace(/OLLAMA_HOST=([^:\s]+):\d+/, `OLLAMA_HOST=$1:${p}`);
+  return `${s} --port ${p}`;
+}
+
+function _nextServeLaunchPort(currentPort, runningMod, host, serverKey) {
+  const used = new Set();
+  try {
+    for (const t of (runningMod?._loadTasks ? runningMod._loadTasks() : [])) {
+      if (!t || t.type !== 'serve') continue;
+      if (!(t.status === 'queued' || t.status === 'running' || t.status === 'ready' || t._serveReady)) continue;
+      const sameTarget = ((t.remoteHost || '') === (host || ''))
+        || ((t.remoteServerKey || '') === (serverKey || ''));
+      if (!sameTarget) continue;
+      const tp = runningMod?._taskPort ? runningMod._taskPort(t) : _serveCmdPort(t.payload?._cmd || t.cmd || '');
+      const n = parseInt(tp, 10);
+      if (Number.isFinite(n) && n > 0) used.add(n);
+    }
+  } catch {}
+  const start = parseInt(currentPort || '8000', 10) || 8000;
+  used.add(start);
+  let next = Math.max(1, start + 1);
+  while (used.has(next)) next += 1;
+  return String(next);
 }
 
 function _readCachedModelScan(sig) {
@@ -611,6 +652,56 @@ function _estimateLlamaContextFit(model, fields, modelCtxMax, modelWeightsGb = 0
   };
 }
 
+function _estimateMlxContextFit(model, fields, modelCtxMax, modelWeightsGb = 0, fitSystem = null) {
+  const sys = fitSystem || _hwfitCache?.system || {};
+  const modelMax = Math.max(1024, _modelContextMaxForServe(model, modelCtxMax));
+  const modelGb = _modelSizeGb(model, modelWeightsGb);
+  const availableRamGb = Number(sys.available_ram_gb) || 0;
+  const totalRamGb = Number(sys.total_ram_gb) || 0;
+  const unifiedPoolGb = Math.max(availableRamGb, totalRamGb > 0 ? totalRamGb * 0.75 : 0);
+  if (!unifiedPoolGb) {
+    return {
+      ctx: Math.min(modelMax, 32768),
+      needsHardwareScan: true,
+      reason: 'scan Apple memory first; using model limit fallback',
+    };
+  }
+  if (!modelGb) {
+    return {
+      ctx: Math.min(modelMax, 32768),
+      needsModelSize: true,
+      reason: 'model weight size unknown; using MLX fallback',
+    };
+  }
+
+  const usableGb = Math.max(1, unifiedPoolGb - Math.max(4.0, unifiedPoolGb * 0.10));
+  const freeForKv = usableGb - modelGb;
+  const name = `${model?.repo_id || ''} ${model?.name || ''} ${model?.quant || ''}`.toLowerCase();
+  const totalParams = _parseParamsB(name) || Math.max(1, modelGb / 0.58);
+  const activeMatch = name.match(/\ba(\d+(?:\.\d+)?)b\b/);
+  const activeParams = activeMatch ? parseFloat(activeMatch[1]) : (/moe|minimax|deepseek|mixtral|kimi-k2/.test(name) ? Math.min(totalParams, 32) : totalParams);
+  // MLX uses unified memory. This is intentionally conservative because the
+  // server exposes max generation tokens, not a hard prefill context length.
+  const kvGbPerToken = Math.max(0.00002, 0.0000065 * activeParams);
+  if (freeForKv <= 0) {
+    return {
+      ctx: Math.min(modelMax, 2048),
+      modelGb,
+      kvGbPerToken,
+      reason: `model ${modelGb.toFixed(1)}G exceeds usable unified memory ${usableGb.toFixed(1)}G before KV`,
+    };
+  }
+  const raw = Math.floor(freeForKv / kvGbPerToken);
+  const rounded = Math.max(1024, Math.floor(raw / 1024) * 1024);
+  const ctx = Math.min(modelMax, rounded);
+  return {
+    ctx,
+    modelGb,
+    kvGbPerToken,
+    reason: `MLX --max-tokens from unified memory (${freeForKv.toFixed(1)}G free)`,
+  };
+}
+
 function _selectedServeTarget(panel) {
   const select = panel?.querySelector?.('#hwfit-server-select')
     || document.getElementById('hwfit-server-select')
@@ -629,11 +720,11 @@ function _selectedServeTarget(panel) {
     }
   }
   const typedVenv = panel?.querySelector('[data-field="venv"]')?.value?.trim() || '';
-  // For remote targets the server profile is authoritative. Otherwise a stale
-  // venv typed/loaded for another host can leak into this launch, e.g. a Linux
-  // /home/... Python path being used on an Apple Silicon MLX server.
+  // A venv typed in the serve panel is a per-launch/per-model override and must
+  // win over the server default. _buildServeCmd still drops obviously wrong
+  // platform paths, so stale Linux/macOS paths do not leak across hosts.
   const venv = host
-    ? (server?.envPath || typedVenv || '')
+    ? (typedVenv || server?.envPath || '')
     : (typedVenv || server?.envPath || _envState.envPath || '');
   const label = host
     ? (server?.name ? `${server.name} (${host})` : host)
@@ -660,19 +751,79 @@ function _backendChoicesForTarget(target) {
     return [['llamacpp','llama.cpp'],['diffusers','Diffusers']];
   }
   return _isMetal()
-    ? [['mlx','MLX'],['llamacpp','llama.cpp'],['ollama','Ollama']]
-    : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['mlx','MLX'],['diffusers','Diffusers']];
+    ? [['mlx','MLX'],['mlx_image','MLX Image'],['llamacpp','llama.cpp'],['ollama','Ollama']]
+    : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['mlx','MLX'],['mlx_image','MLX Image'],['diffusers','Diffusers']];
 }
 
-async function _fetchServeRuntimePackage(panel, backend) {
+function _dependencyPkgForServeBackend(backend, modelName = '') {
+  const nm = String(modelName || '').toLowerCase();
+  if (backend === 'mlx_image' && nm.includes('boogu')) return 'boogu_image_mlx';
+  if (backend === 'mlx_image' && (nm.includes('mi-gan') || nm.includes('migan') || nm.includes('lama'))) return 'mlx_lama_swift';
+  if (backend === 'mlx_image' && nm.includes('ddcolor')) return 'mlx_ddcolor_swift';
+  if (backend === 'diffusers' && nm.includes('krea')) return 'krea_diffusers';
   const packageByBackend = {
     vllm: 'vllm',
     sglang: 'sglang',
     llamacpp: 'llama_cpp',
     mlx: 'mlx_lm',
+    mlx_image: 'mflux',
     diffusers: 'diffusers',
   };
-  const packageName = packageByBackend[backend];
+  return packageByBackend[backend];
+}
+
+function _looksLikeAdapterModel(m) {
+  const repo = String(m?.repo_id || '');
+  const n = repo.toLowerCase();
+  return !!(
+    m?.is_adapter
+    || /\b(lora|adapter|peft|qlora)\b/i.test(n)
+    || /(?:^|[-_/])(lora|adapter|peft|qlora)(?:[-_/]|$)/i.test(repo)
+    || /control[-_]?lora|diffusion[-_]?lora/i.test(repo)
+  );
+}
+
+function _cachedAdapterModels(currentRepo = '') {
+  const current = String(currentRepo || '');
+  return (_cachedAllModels || [])
+    .filter(m => m && m.status === 'ready' && m.repo_id && m.repo_id !== current)
+    .sort((a, b) => String(a.repo_id || '').localeCompare(String(b.repo_id || '')));
+}
+
+function _cachedAdapterSelectHtml(kind, currentRepo = '') {
+  const adapters = _cachedAdapterModels(currentRepo);
+  const cls = kind === 'vllm_lora_modules'
+    ? 'hwfit-backend-vllm'
+    : kind === 'diff_lora'
+    ? 'hwfit-backend-diffusers'
+    : kind === 'mlx_lora_paths'
+    ? 'hwfit-backend-mlx_image'
+    : '';
+  if (!adapters.length) {
+    return `<label class="hwfit-cached-adapter-label ${cls}" style="grid-column:1 / -1;">Cached adapter <select class="hwfit-cached-adapter-select" data-adapter-kind="${esc(kind)}" disabled style="height:30px;width:100%;background:var(--bg);color:var(--fg-muted);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;opacity:0.75;"><option value="">No cached adapters found</option></select></label>`;
+  }
+  const opts = adapters.map(m => {
+    const repo = String(m.repo_id || '');
+    const value = m.is_local_dir && m.path
+      ? `${String(m.path || '').replace(/\/+$/, '')}/${repo}`
+      : repo;
+    const short = repo.split('/').pop() || repo;
+    return `<option value="${esc(value)}">${esc(short)}</option>`;
+  }).join('');
+  return `<label class="hwfit-cached-adapter-label ${cls}" style="grid-column:1 / -1;">Cached adapter <select class="hwfit-cached-adapter-select" data-adapter-kind="${esc(kind)}" style="height:30px;width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;"><option value="">Choose cached adapter…</option>${opts}</select></label>`;
+}
+
+async function _fetchServeRuntimePackage(panel, backend) {
+  const repo = (panel.closest('.doclib-card, .memory-item')?.dataset?.repo) || '';
+  const packageByBackend = {
+    vllm: 'vllm',
+    sglang: 'sglang',
+    llamacpp: 'llama_cpp',
+    mlx: 'mlx_lm',
+    mlx_image: 'mflux',
+    diffusers: 'diffusers',
+  };
+  const packageName = _dependencyPkgForServeBackend(backend, repo) || packageByBackend[backend];
   if (!packageName) return null;
   const target = _selectedServeTarget(panel);
   const params = new URLSearchParams();
@@ -681,6 +832,7 @@ async function _fetchServeRuntimePackage(panel, backend) {
     if (target.port) params.set('ssh_port', target.port);
     if (target.venv) params.set('venv', target.venv);
   }
+  if (repo) params.set('model_hint', repo);
   const res = await fetch('/api/cookbook/packages' + (params.toString() ? '?' + params.toString() : ''), { credentials: 'same-origin' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
@@ -689,7 +841,7 @@ async function _fetchServeRuntimePackage(panel, backend) {
 }
 
 function _runtimeNoteText(backend, pkg, target) {
-  const labels = { vllm: 'vLLM', sglang: 'SGLang', llamacpp: 'llama.cpp', mlx: 'MLX', diffusers: 'Diffusers' };
+  const labels = { vllm: 'vLLM', sglang: 'SGLang', llamacpp: 'llama.cpp', mlx: 'MLX', mlx_image: 'MLX Image', diffusers: 'Diffusers' };
   const label = labels[backend] || backend;
   if (!pkg) return `${label} readiness unavailable for ${target.label}.`;
   const note = pkg.status_note || pkg.update_note || '';
@@ -748,6 +900,14 @@ function _isActivelyServing(repoId) {
       && (t.payload?.repo_id === repoId || t.name === repoId || t.name === short
           || (t.payload?.repo_id || '').split('/').pop() === short));
   } catch { return false; }
+}
+
+function _isIncompleteCachedModel(model) {
+  return !!model && (
+    model.status === 'stalled'
+    || model.has_incomplete
+    || (model.status === 'downloading' && !_isActivelyDownloading(model.repo_id))
+  );
 }
 
 function _formatGgufSize(bytes) {
@@ -964,6 +1124,7 @@ function _rerenderCachedModels() {
   let html = '';
   let visibleCount = 0;
   for (const m of allModels) {
+	    if (m.is_adapter && !m.is_diffusion && !m.is_video) continue;
     if (activeTag && m._tag !== activeTag) continue;
     if (searchVal && !(m.repo_id || '').toLowerCase().includes(searchVal)) continue;
     visibleCount++;
@@ -1085,7 +1246,9 @@ function _rerenderCachedModels() {
       const items = [];
       items.push({ label: _favNow ? 'Unfavorite' : 'Favorite', icon: _favIco, action: 'favorite' });
       if (m && m.status === 'ready') items.push({ label: 'Serve', icon: _serveIco, action: 'serve' });
-      if (m && m.status === 'downloading') items.push({ label: 'Retry', icon: _retryIco, action: 'retry' });
+      if (m && (m.status === 'downloading' || m.status === 'stalled' || m.has_incomplete)) {
+        items.push({ label: 'Resume download', icon: _retryIco, action: 'retry' });
+      }
       if (m && m.status === 'ready') items.push({ label: 'Schedule…', icon: _schedIco, action: 'schedule' });
       items.push({ label: 'Select', icon: _selectIco, action: 'select' });
       items.push({ label: 'Delete', icon: _deleteIco, action: 'delete', danger: true });
@@ -1102,7 +1265,7 @@ function _rerenderCachedModels() {
             _rerenderCachedModels();
           }
           else if (opt.action === 'delete') _deleteCachedModel(repo, item, false, m);
-          else if (opt.action === 'retry') _retryCachedModel(repo, m);
+          else if (opt.action === 'retry') _promptResumeIncompleteModel(m, item);
           else if (opt.action === 'schedule') {
             // Same entry point as the ^ button next to Launch — let
             // cookbookSchedule.js handle it. Expand the panel first
@@ -1171,7 +1334,7 @@ function _rerenderCachedModels() {
 
   // Wire click on card to expand serve panel
   list.querySelectorAll('.memory-item[data-repo]').forEach(item => {
-    item.addEventListener('click', (e) => {
+    item.addEventListener('click', async (e) => {
       if (e.target.closest('a, .hwfit-cached-menu-btn, .memory-item-btn, .hwfit-serve-panel')) return;
       if (document.getElementById('hwfit-cache-select')?.classList.contains('active')) return;
       const repo = item.dataset.repo;
@@ -1179,9 +1342,15 @@ function _rerenderCachedModels() {
       const m = allModels.find(x => x.repo_id === repo);
       if (!m) return;
       if (m.status !== 'ready') {
-        if (m.status === 'downloading' && !_isActivelyDownloading(m.repo_id)) {
+        if (m.status === 'downloading' && _isActivelyDownloading(m.repo_id)) {
+          uiModule.showToast?.(`${(m.name || m.repo_id || 'Model').split('/').pop()} is still downloading.`);
+        } else if (_isIncompleteCachedModel(m)) {
+          await _promptResumeIncompleteModel(m, item);
+        } else if (m.status === 'downloading') {
           uiModule.showToast?.('Refreshing cached model status…');
           _fetchCachedModels(true);
+        } else {
+          uiModule.showToast?.(`${(m.name || m.repo_id || 'Model').split('/').pop()} is not ready yet.`);
         }
         return;
       }
@@ -1245,11 +1414,12 @@ function _rerenderCachedModels() {
       const _backendChoices = _backendChoicesForTarget(_serveTarget);
       const _allowedBackends = new Set(_backendChoices.map(([v]) => v));
       const detectedBackend = _detectBackend(m).backend;
-      let defaultBackend = (_repoForcedBackend && ss.backend && _allowedBackends.has(ss.backend))
+      const _imageBackend = detectedBackend === 'mlx_image' || detectedBackend === 'diffusers';
+      let defaultBackend = (!_imageBackend && _repoForcedBackend && ss.backend && _allowedBackends.has(ss.backend))
         ? ss.backend
         : detectedBackend;
       if (!_allowedBackends.has(defaultBackend)) defaultBackend = _backendChoices[0]?.[0] || detectedBackend;
-      const savedMatchesBackend = _repoForcedBackend || (ss.backend || 'vllm') === detectedBackend;
+      const savedMatchesBackend = !_imageBackend && (_repoForcedBackend || (ss.backend || 'vllm') === detectedBackend);
       const sv = (k, def) => (ss[k] !== undefined && savedMatchesBackend) ? ss[k] : def;
       const defaultTp = defaultBackend === 'llamacpp' ? '1' : sv('tp', _isMiniMaxMSeries ? '8' : '1');
       const detectedGpuIds = _allGpuIds(_getGpuToggleTotal?.());
@@ -1452,6 +1622,8 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Attention','vLLM VLLM_ATTENTION_BACKEND. auto = vLLM picks (often FLASHINFER, which JITs and can fail on old nvcc). FLASH_ATTN skips the JIT entirely.')}<select class="hwfit-sf" data-field="vllm_attn_backend" style="height:32px;">${vllmAttnBackendOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Block Size','vLLM --block-size. Controls KV-cache block granularity. Leave blank for runtime default; some sparse-attention or custom runtimes need a specific value.')}<input type="text" class="hwfit-sf" data-field="vllm_block_size" value="${esc(svm('vllm_block_size', _isMiniMaxM3 ? '128' : ''))}" placeholder="auto" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','vLLM CPU swap space in GB. Blank/off omits the flag; enter a positive number only for older vLLM runtimes that support --swap-space.')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
+      panelHtml += _cachedAdapterSelectHtml('vllm_lora_modules', repo);
+      panelHtml += `<label class="hwfit-backend-vllm" style="grid-column:1 / -1;">${_l('LoRA Modules','vLLM LoRA modules, one per line or comma-separated, using name=path. Adds --enable-lora --lora-modules.')}<input type="text" class="hwfit-sf" data-field="vllm_lora_modules" value="${esc(sv('vllm_lora_modules', ''))}" placeholder="style=/path/to/lora or style=org/repo" style="width:100%;" /></label>`;
       {
         const _envPresetDefault = _isMiniMaxM3 ? 'minimax_m3_cuda' : '';
         const _envPresetVal = svm('vllm_env_preset', _envPresetDefault);
@@ -1471,14 +1643,35 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-extra-env-label">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). The Env Preset above covers the usual MiniMax M3 values; use this for additional overrides.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(svm('extra_env', sv('extra_env','')))}" placeholder="NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Row 2b: Diffusers settings
+      const diffDefaultNegative = 'low quality, blurry, out of focus, deformed, distorted, disfigured, unfinished, smudged, watermark, artifacts';
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
       const deviceMapOpts = ['balanced','auto','sequential'].map(d => `<option value="${d}"${sv('diff_device_map','balanced')===d?' selected':''}>${d}</option>`).join('');
-      panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers hwfit-diff-settings-row">`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers hwfit-backend-mlx_image hwfit-diff-settings-row">`;
       panelHtml += `<label>Dtype${_h('Precision. bfloat16 recommended for Flux, float16 for SD')} <select class="hwfit-sf" data-field="diff_dtype">${diffDtypeOpts}</select></label>`;
       panelHtml += `<label>Device Map${_h('How to place model on GPUs. balanced = split evenly')} <select class="hwfit-sf" data-field="diff_device_map">${deviceMapOpts}</select></label>`;
-      panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower. Override with the model card recommendation when needed.')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', '20'))}" placeholder="20" /></label>`;
+      panelHtml += `<label>Guidance${_h('Classifier-free guidance scale. Override with the model card recommended value when available.')} <input type="text" class="hwfit-sf" data-field="diff_guidance_scale" value="${esc(sv('diff_guidance_scale', '3.5'))}" placeholder="3.5" /></label>`;
       panelHtml += `<label>Width${_h('Default output width')} <input type="text" class="hwfit-sf" data-field="diff_width" value="${esc(sv('diff_width', ''))}" placeholder="1024" /></label>`;
       panelHtml += `<label>Height${_h('Default output height')} <input type="text" class="hwfit-sf" data-field="diff_height" value="${esc(sv('diff_height', ''))}" placeholder="1024" /></label>`;
+      panelHtml += `</div>`;
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers hwfit-backend-mlx_image hwfit-diff-adapters-row">`;
+      panelHtml += _cachedAdapterSelectHtml('diff_lora', repo);
+	      panelHtml += `<label class="hwfit-backend-diffusers" style="grid-column:1 / -1;">Negative${_h('Default negative prompt. Adds --negative-prompt for pipelines that support it. Edit or clear this per model.')} <input type="text" class="hwfit-sf" data-field="diff_negative_prompt" value="${esc(sv('diff_negative_prompt', diffDefaultNegative))}" placeholder="${esc(diffDefaultNegative)}" style="width:100%;" /></label>`;
+	      panelHtml += `<label class="hwfit-backend-diffusers" style="grid-column:1 / -1;">LoRA${_h('Diffusers LoRA file/path(s), comma or newline separated. Adds --lora.')} <input type="text" class="hwfit-sf" data-field="diff_lora" value="${esc(sv('diff_lora', ''))}" placeholder="/path/adapter.safetensors or org/repo" style="width:100%;" /></label>`;
+	      panelHtml += `<label class="hwfit-backend-diffusers">Scale${_h('Diffusers LoRA scale. Adds --lora-scale.')} <input type="text" class="hwfit-sf" data-field="diff_lora_scale" value="${esc(sv('diff_lora_scale', ''))}" placeholder="1.0" /></label>`;
+		      {
+		        const _mlxBase = sv('mlx_base_model', '');
+		        panelHtml += `<label class="hwfit-backend-mlx_image">Base model${_h('Optional runtime base model/family override from the model card. Adds --base-model. This is not a LoRA/adaptor.')} <input type="text" class="hwfit-sf" data-field="mlx_base_model" value="${esc(_mlxBase)}" placeholder="auto" /></label>`;
+		      }
+	      {
+	        const _mlxStyle = sv('mlx_lora_style', '');
+	        const _styleOpts = ['', 'couple', 'font', 'home', 'identity', 'illustration', 'portrait', 'ppt', 'sandstorm', 'sparklers', 'storyboard']
+          .map(v => `<option value="${v}"${_mlxStyle === v ? ' selected' : ''}>${v || 'none'}</option>`).join('');
+        panelHtml += `<label class="hwfit-backend-mlx_image">Style${_h('mflux built-in LoRA style. Adds --lora-style.')} <select class="hwfit-sf" data-field="mlx_lora_style">${_styleOpts}</select></label>`;
+      }
+      panelHtml += _cachedAdapterSelectHtml('mlx_lora_paths', repo);
+      panelHtml += `<label class="hwfit-backend-mlx_image" style="grid-column:1 / -1;">LoRA Paths${_h('mflux LoRA paths/repos, comma or newline separated. Adds --lora-paths.')} <input type="text" class="hwfit-sf" data-field="mlx_lora_paths" value="${esc(sv('mlx_lora_paths', ''))}" placeholder="org/lora or repo:file.safetensors" style="width:100%;" /></label>`;
+      panelHtml += `<label class="hwfit-backend-mlx_image" style="grid-column:1 / -1;">LoRA Scales${_h('mflux LoRA scales matching paths. Space/comma/newline separated. Adds --lora-scales.')} <input type="text" class="hwfit-sf" data-field="mlx_lora_scales" value="${esc(sv('mlx_lora_scales', ''))}" placeholder="0.8, 1.0" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Row 3: Advanced toggles for vLLM/SGLang. Several concepts overlap,
       // but the actual flags differ; keep labels backend-neutral where a
@@ -1581,11 +1774,11 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads.')} <input type="number" class="hwfit-sf hwfit-spec-tokens hwfit-spec-tokens-bare" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /></label>`;
       panelHtml += `</div>`;
       // Row 3b: Checkboxes (diffusers)
-      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers hwfit-diff-checks-row">`;
+      panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers hwfit-backend-mlx_image hwfit-diff-checks-row">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_offload"${sv('diff_offload',false)?' checked':''} /> CPU Offload${_h('Offload parts of model to CPU RAM to save VRAM. Slower but fits larger models')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_attention_slicing"${sv('diff_attention_slicing',false)?' checked':''} /> Attention Slicing${_h('Slice attention computation to reduce peak VRAM. Slower')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="diff_vae_slicing"${sv('diff_vae_slicing',false)?' checked':''} /> VAE Slicing${_h('Process VAE in slices. Reduces VRAM for high-res images')}</label>`;
-      panelHtml += `</div><div class="hwfit-serve-row hwfit-backend-diffusers hwfit-diff-harmonize-row">`;
+      panelHtml += `</div><div class="hwfit-serve-row hwfit-backend-diffusers hwfit-backend-mlx_image hwfit-diff-harmonize-row">`;
       panelHtml += `<label>Harmonize GPU${_h('Separate GPU for img2img/harmonize. Leave empty to use same GPU')}<input type="text" class="hwfit-sf" data-field="diff_harmonize_gpu" value="${esc(sv('diff_harmonize_gpu', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `</div>`;
       // Model-specific optimizations. The checks row always renders for the
@@ -1747,6 +1940,8 @@ function _rerenderCachedModels() {
         let fit = null;
         if (backend === 'vllm' || backend === 'sglang') {
           fit = _estimateVllmContextFit(m, f, panel._modelCtxMax, panel._modelWeightsGb, panel._fitSystem);
+        } else if (backend === 'mlx') {
+          fit = _estimateMlxContextFit(m, f, panel._modelCtxMax, panel._modelWeightsGb, panel._fitSystem);
         } else if (backend === 'llamacpp' || backend === 'ollama') {
           const ggufGb = _selectedGgufSizeGb(m, f.gguf_file);
           fit = _estimateLlamaContextFit(m, f, panel._modelCtxMax, ggufGb || panel._modelWeightsGb, panel._fitSystem, panel._contextProfileData);
@@ -1772,6 +1967,8 @@ function _rerenderCachedModels() {
             : 'selected GPU memory';
           _ctxAutoNote.title = backend === 'llamacpp' || backend === 'ollama'
             ? `Estimated from scanned GGUF/model size, trained context limit, and ${_llamaMemoryLabel} for llama.cpp KV cache.`
+            : backend === 'mlx'
+            ? `MLX-LM server does not expose a context-length flag; Cookbook maps this estimate to MLX --max-tokens using scanned unified memory and model size.`
             : `Estimated from model size, selected GPU VRAM, GPU utilization, TP, and KV dtype.`;
         }
         if (apply && _ctxEl0.dataset.autoCtx === '1') {
@@ -1951,6 +2148,7 @@ function _rerenderCachedModels() {
         vllm:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"/><path d="M14 4l4 9 3-9"/></svg>',
         sglang: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
         mlx: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18V6l4 7 4-7v12"/><path d="M16 6v12"/><path d="M20 6v12"/></svg>',
+        mlx_image: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="M21 15l-5-5L5 20"/><path d="M17.5 4v4M15.5 6h4"/></svg>',
         llamacpp: '<svg width="14" height="14" viewBox="0 0 600 600" fill="none" aria-hidden="true"><path d="M600 392L504.249 558L504.137 557.929C487.252 584.069 458.193 600 426.864 600H120L240 392H600Z" fill="currentColor"/><path d="M240 392H0L199.602 46.0254C216.032 17.5463 246.411 0 279.29 0H466.154L240 392Z" fill="currentColor"/></svg>',
         ollama: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;mask:url(/static/icons/ollama-mark-crop.png) center/contain no-repeat;"></span>',
         diffusers: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>',
@@ -2064,7 +2262,7 @@ function _rerenderCachedModels() {
         const backend = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
         const noteText = note.querySelector('.hwfit-serve-runtime-text');
         const _writeNote = (s) => { if (noteText) noteText.textContent = s; else note.textContent = s; };
-        if (!['vllm', 'sglang', 'llamacpp', 'mlx', 'diffusers'].includes(backend)) {
+        if (!['vllm', 'sglang', 'llamacpp', 'mlx', 'mlx_image', 'diffusers'].includes(backend)) {
           note.style.display = 'none';
           _writeNote('');
           return;
@@ -2104,8 +2302,8 @@ function _rerenderCachedModels() {
             // recipe panel for this backend so the user has one click
             // to the fix instead of hunting for the right row.
             if (noteText) {
-              const pkgName = pkg?.name || ({ vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp', mlx: 'mlx_lm', diffusers: 'diffusers' }[backend]);
               const repo = (panel.closest('.doclib-card, .memory-item')?.dataset?.repo) || '';
+              const pkgName = pkg?.name || _dependencyPkgForServeBackend(backend, repo);
               const link = document.createElement('a');
               link.href = '#';
               link.textContent = ' Install in Dependencies →';
@@ -2159,15 +2357,16 @@ function _rerenderCachedModels() {
           });
         } else {
           const fields = {
-            backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp' : cmd.includes('mlx_lm.server') ? 'mlx' : cmd.includes('diffusion_server') ? 'diffusers' : cmd.includes('sglang') ? 'sglang' : cmd.includes('ollama') ? 'ollama' : 'vllm',
+            backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp' : cmd.includes('mlx_image_server') ? 'mlx_image' : cmd.includes('mlx_lm.server') ? 'mlx' : cmd.includes('diffusion_server') ? 'diffusers' : cmd.includes('sglang') ? 'sglang' : cmd.includes('ollama') ? 'ollama' : 'vllm',
             port: _ex(/--port\s+(\d+)/) || '8000',
             tp: _ex(/--tensor-parallel-size\s+(\d+)/) || '1',
-            ctx: _ex(/--max-model-len\s+(\d+)/) || _ex(/--n_ctx\s+(\d+)/) || _ex(/-c\s+(\d+)/) || '8192',
+            ctx: _ex(/--max-model-len\s+(\d+)/) || _ex(/--context-length\s+(\d+)/) || _ex(/--max-tokens\s+(\d+)/) || _ex(/--n_ctx\s+(\d+)/) || _ex(/-c\s+(\d+)/) || '8192',
             gpu_mem: _ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
             swap: _ex(/--swap-space\s+(\d+)/) || '',
             dtype: _ex(/--dtype\s+(\w+)/) || 'auto',
             vllm_kv_cache_dtype: _ex(/--kv-cache-dtype\s+([\w.-]+)/) || 'auto',
             max_seqs: _ex(/--max-num-seqs\s+(\d+)/) || '',
+            vllm_lora_modules: _ex(/--lora-modules\s+(.+?)(?:\s+--|$)/) || '',
             cache_type: _ex(/(?:--cache-type-k|-ctk)\s+(\S+)/) || '',
             llama_fit: _ex(/(?:--fit|-fit)\s+(on|off)/) || '',
             llama_split_mode: _ex(/(?:--split-mode|-sm)\s+(none|layer|row|tensor)/) || '',
@@ -2177,6 +2376,14 @@ function _rerenderCachedModels() {
             llama_batch_size: _ex(/(?:--batch-size|-b)\s+(\d+)/) || '',
             llama_ubatch_size: _ex(/(?:--ubatch-size|-ub)\s+(\d+)/) || '',
             llama_spec_tokens: _ex(/--spec-draft-n-max\s+(\d+)/) || '3',
+		            diff_lora: (_ex(/--lora\s+'([^']*)'/) || _ex(/--lora\s+(\S+)/) || '').replace(/,/g, '\n'),
+		            diff_lora_scale: _ex(/--lora-scale\s+([\d.]+)/) || '',
+		            diff_guidance_scale: _ex(/--guidance-scale\s+([\d.]+)/) || '',
+		            diff_negative_prompt: _ex(/--negative-prompt\s+'([^']*)'/) || _ex(/--negative-prompt\s+(.+?)(?:\s+--|$)/) || '',
+		            mlx_base_model: _ex(/--base-model\s+'?([^'\s]+)'?/) || '',
+	            mlx_lora_style: _ex(/--lora-style\s+'?([^'\s]+)'?/) || '',
+            mlx_lora_paths: (_ex(/--lora-paths\s+(.+?)(?:\s+--|$)/) || '').replace(/'\s+'/g, '\n').replace(/^'|'$/g, ''),
+            mlx_lora_scales: (_ex(/--lora-scales\s+(.+?)(?:\s+--|$)/) || '').replace(/'\s+'/g, '\n').replace(/^'|'$/g, ''),
             venv: p.envPath || '',
           };
           const checks = {
@@ -2268,8 +2475,9 @@ function _rerenderCachedModels() {
         const presets = _loadPresets();
         const modelSlots = _presetsForModel(presets, repo);
         // Compute the current launch command first so we can detect a no-op save.
-        updateCmd();
-        const cmd = panel._cmd;
+        if (!_cmdManuallyEdited) updateCmd();
+        const cmdBox = panel.querySelector('.hwfit-serve-cmd');
+        const cmd = _normalizeServeCmdForLaunch((_cmdManuallyEdited && cmdBox) ? cmdBox.value : panel._cmd);
         // Already saved? If an existing preset for this model has the identical
         // launch command, don't make a duplicate — tell the user via a popup.
         const _norm = s => String(s || '').replace(/\s+/g, ' ').trim();
@@ -2289,6 +2497,8 @@ function _rerenderCachedModels() {
           if (el.type === 'checkbox') fields[el.dataset.field] = el.checked;
           else fields[el.dataset.field] = el.value;
         });
+        if (_cmdManuallyEdited) fields._manual_cmd = cmd;
+        else delete fields._manual_cmd;
         presets.push(_redactServeStateForStorage({ name: shortName, model: repo, cmd, remoteHost: host, port: fields.port || '8000', label, fields }));
         _savePresets(presets);
         uiModule.showToast(`Saved "${label}"`);
@@ -2513,6 +2723,7 @@ function _rerenderCachedModels() {
           menu.appendChild(mk('Cancel', 'dropdown-cancel-mobile', () => {}));
           const r = _launchMoreBtn.getBoundingClientRect();
           menu.style.position = 'fixed';
+          menu.style.zIndex = String(topPortalZ());
           menu.style.right = (window.innerWidth - r.right) + 'px';
           document.body.appendChild(menu);
           {
@@ -2559,6 +2770,7 @@ function _rerenderCachedModels() {
           menu.appendChild(mk('Cancel', 'dropdown-cancel-mobile', () => {}));
           const r = _splitArrow.getBoundingClientRect();
           menu.style.position = 'fixed';
+          menu.style.zIndex = String(topPortalZ());
           menu.style.right = (window.innerWidth - r.right) + 'px';
           document.body.appendChild(menu);
           // Default open BELOW, but if there's no room (esp. on mobile where
@@ -2916,6 +3128,31 @@ function _rerenderCachedModels() {
           }
         });
       });
+
+      panel.querySelectorAll('.hwfit-cached-adapter-select').forEach(sel => {
+        sel.addEventListener('change', () => {
+          const repoId = String(sel.value || '').trim();
+          if (!repoId) return;
+          const kind = sel.dataset.adapterKind || '';
+          const target = panel.querySelector(`[data-field="${kind}"]`);
+          if (!target) return;
+          const current = String(target.value || '').trim();
+          let next = repoId;
+          if (kind === 'vllm_lora_modules') {
+            const name = repoId.split('/').pop().replace(/[^A-Za-z0-9_.-]+/g, '_') || 'adapter';
+            next = `${name}=${repoId}`;
+          }
+          if (current) {
+            const lines = current.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+            if (!lines.includes(next)) lines.push(next);
+            target.value = lines.join('\n');
+          } else {
+            target.value = next;
+          }
+          target.dispatchEvent(new Event('input', { bubbles: true }));
+          updateCmd();
+        });
+      });
       // llama.cpp CPU/GPU/Unified mode-toggle wiring. Clicking a mode
       // flips the .active classes + marker class (so the sliding
       // pill matches Agent/Chat), updates the hidden data-field input,
@@ -2994,6 +3231,14 @@ function _rerenderCachedModels() {
       // Track manual edits
       let _cmdManuallyEdited = false;
       const _cmdTextarea = panel.querySelector('.hwfit-serve-cmd');
+      const _savedManualCmd = String(svm('_manual_cmd', '') || '').trim();
+      if (_cmdTextarea && _savedManualCmd) {
+        panel._cmd = _savedManualCmd;
+        _cmdTextarea.value = _formatServeCmdPreview(_savedManualCmd);
+        _cmdTextarea.style.height = 'auto';
+        _cmdTextarea.style.height = _cmdTextarea.scrollHeight + 'px';
+        _cmdManuallyEdited = true;
+      }
       if (_cmdTextarea) _cmdTextarea.addEventListener('input', () => { _cmdManuallyEdited = true; });
 
       // Cancel button — collapses the serve config panel (same effect as
@@ -3078,8 +3323,9 @@ function _rerenderCachedModels() {
         // all whitespace to single spaces before launch — same effect as the
         // user manually re-flowing the textarea, no behavior change.
         const _rawLaunchCmd = (_cmdManuallyEdited && _cmdTextarea) ? _cmdTextarea.value : panel._cmd;
-        const launchCmd = _normalizeServeCmdForLaunch(_rawLaunchCmd);
+        let launchCmd = _normalizeServeCmdForLaunch(_rawLaunchCmd);
         const serveState = {};
+        let launchAnyway = false;
         panel.querySelectorAll('.hwfit-sf').forEach(el => {
           if (el.type === 'checkbox') serveState[el.dataset.field] = el.checked;
           else serveState[el.dataset.field] = el.value;
@@ -3091,7 +3337,7 @@ function _rerenderCachedModels() {
           uiModule.showToast('Vision is checked, but no mmproj projector is in the launch command. Refresh cached models after downloading mmproj, or add --mmproj manually.', 8000);
           return;
         }
-        if (serveState.backend === 'diffusers' && _remoteWindowsDiffusersUnsupported(launchTarget)) {
+        if ((serveState.backend === 'diffusers' || serveState.backend === 'mlx_image') && _remoteWindowsDiffusersUnsupported(launchTarget)) {
           _restoreLaunchBtn();
           uiModule.showToast('Diffusers serving is not supported on remote Windows servers yet. Use local Windows or a Linux server.', 9000);
           return;
@@ -3113,37 +3359,52 @@ function _rerenderCachedModels() {
           // Only block when the new model's port genuinely collides with
           // a running serve. Different ports coexist fine (issue #4507).
           if (_active.length) {
-            const _newPort = (launchCmd.match(/--port[=\s]+(\d+)/) || [])[1] || '';
+            const _newPort = _serveCmdPort(launchCmd);
             const _clashing = _newPort
               ? _active.filter(t => _runningMod._taskPort(t) === _newPort)
               : _active;
             if (_clashing.length) {
               const _names = _clashing.map(t => t.payload?.repo_id || t.repo || t.name || '?').filter(Boolean);
               const _portNote = _newPort ? ` on port ${_newPort}` : '';
-              const _ok = await window.styledConfirm(
-                `${_clashing.length} model${_clashing.length === 1 ? '' : 's'} already serving on ${_hostStr || 'local'} (${_names.join(', ')})${_portNote}. Stop it and launch this one?`,
-                { title: _newPort ? `Port ${_newPort} in use` : 'Server already running', confirmText: 'Stop & launch', cancelText: 'Cancel' },
+              const _choice = await window.styledConfirm(
+                `${_clashing.length} model${_clashing.length === 1 ? '' : 's'} already serving on ${_hostStr || 'local'} (${_names.join(', ')})${_portNote}. Stop it first, or launch anyway?`,
+                { title: _newPort ? `Port ${_newPort} in use` : 'Server already running', confirmText: 'Stop & launch', alternateText: 'Launch anyway', cancelText: 'Cancel' },
               );
-              if (!_ok) { _restoreLaunchBtn(); return; }
+              if (!_choice) { _restoreLaunchBtn(); return; }
+              if (_choice === 'alternate') {
+                launchAnyway = true;
+                const _oldPort = _newPort || _serveCmdPort(launchCmd);
+                const _nextPort = _nextServeLaunchPort(_oldPort, _runningMod, _hostStr, _serverKeyStr);
+                if (_oldPort && _nextPort && _nextPort !== _oldPort) {
+                  launchCmd = _replaceServeCmdPort(launchCmd, _nextPort);
+                  serveState.port = _nextPort;
+                  panel._cmd = launchCmd;
+                  if (_cmdTextarea) _cmdTextarea.value = launchCmd;
+                  uiModule.showToast(`Launching anyway on port ${_nextPort}. Existing serve stays on ${_oldPort}.`, 7000);
+                } else {
+                  uiModule.showToast('Launching anyway. If the port is already occupied, the new serve may fail.', 6000);
+                }
+              } else {
               // Kill each clashing serve; prefer the rendered Stop button so
               // endpoint cleanup + Ollama unload run normally. Fall back to
               // a raw tmux kill when the Active tab isn't in the DOM.
-              for (const t of _clashing) {
-                try {
-                  const _el = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
-                  const _btn = _el?.querySelector('.cookbook-task-action-stop');
-                  if (_btn) {
-                    _btn.click();
-                  } else if (_runningMod._tmuxGracefulKill) {
-                    await fetch('/api/shell/exec', {
-                      method: 'POST', credentials: 'same-origin',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ command: _runningMod._tmuxGracefulKill(t) }),
-                    });
-                  }
-                } catch (_killErr) { /* best-effort */ }
+                for (const t of _clashing) {
+                  try {
+                    const _el = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
+                    const _btn = _el?.querySelector('.cookbook-task-action-stop');
+                    if (_btn) {
+                      _btn.click();
+                    } else if (_runningMod._tmuxGracefulKill) {
+                      await fetch('/api/shell/exec', {
+                        method: 'POST', credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ command: _runningMod._tmuxGracefulKill(t) }),
+                      });
+                    }
+                  } catch (_killErr) { /* best-effort */ }
+                }
+                await new Promise(r => setTimeout(r, 2500));
               }
-              await new Promise(r => setTimeout(r, 2500));
             }
           }
         } catch (_e) { /* best-effort */ }
@@ -3387,6 +3648,8 @@ function _rerenderCachedModels() {
           const byRepo = (cur && cur._byRepo && typeof cur._byRepo === 'object') ? cur._byRepo : {};
           const _saved = { ...serveState, _forceBackend: true };
           delete _saved._replaceTaskId;
+          if (_cmdManuallyEdited) _saved._manual_cmd = launchCmd;
+          else delete _saved._manual_cmd;
           byRepo[repo] = _saved;
           localStorage.setItem(SERVE_STATE_KEY, JSON.stringify(_redactServeStateForStorage({ _byRepo: byRepo, _lastUsed: _saved })));
         } catch {}
@@ -3446,7 +3709,7 @@ function _rerenderCachedModels() {
             // Pass the exact form values so the running task can be re-opened
             // in the Serve panel pre-filled with these settings (Edit button).
             const taskDisplayName = _serveTaskDisplayName(shortName, m, serveState);
-            await _launchServeTask(taskDisplayName, repo, launchCmd, serveState, serveHost, { serverKey: serveServerKey, serverName: serveServerName });
+            await _launchServeTask(taskDisplayName, repo, launchCmd, serveState, serveHost, { serverKey: serveServerKey, serverName: serveServerName, launchAnyway });
           });
         } finally {
           _envState.env = origEnv;
@@ -3481,8 +3744,12 @@ function _rerenderCachedModels() {
 // Resolve the host the cached list was scanned from, mirroring
 // _fetchCachedModels — so a delete targets the SAME machine the model
 // actually lives on, not just the globally-selected serve host.
-function _resolveCacheHost() {
+function _serverFromCacheSelection() {
   let host = _envState.remoteHost || '';
+  let server = host
+    ? (_envState.servers || []).find(s => s.host === host) || null
+    : ((_envState.servers || []).find(s => !s.host || s.host === 'local') || null);
+  let key = '';
   const cacheSrv = document.getElementById('hwfit-cache-server');
 
   function _serverByCacheValue(val) {
@@ -3496,14 +3763,25 @@ function _resolveCacheHost() {
 
   if (cacheSrv) {
     const val = cacheSrv.value;
+    key = val || '';
     if (val === 'local') {
       host = '';
+      server = (_envState.servers || []).find(s => !s.host || s.host === 'local') || null;
     } else {
       const s = _serverByCacheValue(val);
-      if (s) host = s.host;
+      if (s) {
+        host = s.host || '';
+        server = s;
+        key = _serverKey?.(s) || val || '';
+      }
     }
   }
-  return host;
+
+  return { host, server, key };
+}
+
+function _resolveCacheHost() {
+  return _serverFromCacheSelection().host || '';
 }
 
 async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null) {
@@ -3628,27 +3906,55 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
   }
 }
 
+async function _promptResumeIncompleteModel(m, itemEl = null) {
+  const repo = m?.repo_id || itemEl?.dataset?.repo || '';
+  if (!repo) return;
+  const short = (m?.name || repo).split('/').pop();
+  if (_isActivelyDownloading(repo)) {
+    uiModule.showToast?.(`${short} is already downloading.`);
+    return;
+  }
+
+  const ok = await uiModule.styledConfirm(
+    `${short} is not finished downloading.\n\nResume the download on the selected cache server?`,
+    { confirmText: 'Resume download', cancelText: 'Not now' }
+  );
+  if (!ok) return;
+  uiModule.showToast?.(`Resuming ${short}…`);
+  _retryCachedModel(repo, m);
+}
+
 function _retryCachedModel(repo, m) {
   const payload = { repo_id: repo };
   if (_envState.hfToken) payload.hf_token = _envState.hfToken;
-  const _target = _selectedServeTarget(document.getElementById('cookbook-modal') || document);
+  const _target = _serverFromCacheSelection();
+  const srv = _target.server || {};
   if (_target.host) {
     payload.remote_host = _target.host;
-    if (_target.port) payload.ssh_port = _target.port;
+    if (_target.key && _target.key !== 'local') payload.remote_server_key = _target.key;
+    if (srv.name) payload.remote_server_name = srv.name;
+    const port = srv.port || _getPort(_target.host);
+    if (port) payload.ssh_port = port;
   }
-  if (_target.platform) payload.platform = _target.platform;
-  if (_isWindows()) {
-    if (_envState.env === 'venv' && _envState.envPath) {
-      payload.env_prefix = '& ' + _psQuote(_envState.envPath.endsWith('\\Scripts\\Activate.ps1') ? _envState.envPath : _envState.envPath + '\\Scripts\\Activate.ps1');
-    } else if (_envState.env === 'conda' && _envState.envPath) {
-      payload.env_prefix = 'conda activate ' + _psQuote(_envState.envPath);
+  const platform = _target.host ? (srv.platform || _getPlatform(_target.host) || '') : (_envState.hostPlatform || '');
+  if (platform) payload.platform = platform;
+  const env = _target.host ? (srv.env || 'none') : (_envState.env || 'none');
+  const envPath = _target.host ? (srv.envPath || '') : (_envState.envPath || '');
+  const downloadDir = srv.downloadDir || (m?.is_local_dir && m?.path ? m.path : '');
+  if (downloadDir) payload.local_dir = _normalizeCookbookModelDir(downloadDir);
+  payload.disable_hf_transfer = true;
+  if (platform === 'windows') {
+    if (env === 'venv' && envPath) {
+      payload.env_prefix = '& ' + _psQuote(envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
+    } else if (env === 'conda' && envPath) {
+      payload.env_prefix = 'conda activate ' + _psQuote(envPath);
     }
   } else {
-    if (_envState.env === 'venv' && _envState.envPath) {
-      const p = _envState.envPath;
+    if (env === 'venv' && envPath) {
+      const p = envPath;
       payload.env_prefix = 'source ' + _shellQuote(p.endsWith('/bin/activate') ? p : p + '/bin/activate');
-    } else if (_envState.env === 'conda' && _envState.envPath) {
-      payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(_envState.envPath);
+    } else if (env === 'conda' && envPath) {
+      payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(envPath);
     }
   }
   _retryDownload((m?.name || repo).split('/').pop(), payload);
@@ -3752,17 +4058,16 @@ function _renderCachedModelsData(list, data, host) {
   const _familyMap = {};
   const _families = [
     [/qwen/i, 'qwen'], [/llama/i, 'llama'], [/mistral|mixtral/i, 'mistral'],
-    [/deepseek/i, 'deepseek'], [/gemma/i, 'gemma'], [/phi/i, 'phi'],
-    [/minimax/i, 'minimax'], [/glm/i, 'glm'], [/flux/i, 'flux'],
-    [/stable.?diffusion|sdxl/i, 'sd'], [/z-image/i, 'z-image'],
-    [/whisper/i, 'whisper'], [/command|cohere/i, 'cohere'],
+	    [/deepseek/i, 'deepseek'], [/gemma/i, 'gemma'], [/phi/i, 'phi'],
+	    [/minimax/i, 'minimax'], [/glm/i, 'glm'],
+	    [/whisper/i, 'whisper'], [/command|cohere/i, 'cohere'],
     [/yi-/i, 'yi'], [/intern/i, 'intern'], [/falcon/i, 'falcon'],
   ];
   for (const m of allModels) {
     const n = (m.repo_id || '').toLowerCase();
     let tag = 'other';
     if (m.backend === 'ollama' || m.is_ollama) tag = 'llm';
-    else if (m.is_diffusion || /flux|sdxl|stable-diffusion|z-image|qwen-image|diffusion|dreamshar/i.test(n)) tag = 'image';
+		    else if (m.is_diffusion || m.is_video || m.is_image_gen || /(?:^|[-_/])(diffusion|image)(?:[-_/]|$)/i.test(n)) tag = 'image';
     else if (/whisper|stt|asr/i.test(n)) tag = 'stt';
     else if (/tts|cosyvoice|parler/i.test(n)) tag = 'tts';
     else if (/embed|bge|minilm|e5-/i.test(n)) tag = 'embedding';

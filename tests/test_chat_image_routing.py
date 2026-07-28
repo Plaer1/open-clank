@@ -88,6 +88,13 @@ def test_available_native_connection_is_not_cleared_as_orphan(
 
     assert chat_routes._clear_orphaned_session_endpoint(session, "alice") is False
     assert chat_routes._is_image_generation_session(session, "alice") is False
+def test_namespaced_gpt_image_model_routes_to_image_generation_without_endpoint_lookup(monkeypatch):
+    def fail_if_called():
+        raise AssertionError("provider-prefixed image models should not need a DB lookup")
+
+    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
+
+    assert chat_routes._is_image_generation_session(_session(model="openai/gpt-5-image"))
 
 
 def test_image_endpoint_does_not_catch_text_model_on_different_path(monkeypatch):

@@ -246,6 +246,7 @@ import re as _re_reply
 # serves replies and summaries (any fenced final-output block).
 _REPLY_OPEN_RE = _re_reply.compile(r"<<<\s*(?:REPLY|SUMMARY|OUTPUT)\s*>>+", _re_reply.I)
 _REPLY_CLOSE_RE = _re_reply.compile(r"<<<\s*END\s*>>+", _re_reply.I)
+_REPLY_ROLE_MARKER_RE = _re_reply.compile(r"</?\|(?:assistant|assistan|user|system|tool)\|>?|</\|end\|>?", _re_reply.I)
 
 
 def _extract_reply(text: str) -> str:
@@ -272,6 +273,7 @@ def _extract_reply(text: str) -> str:
     # Drop any stray/duplicate marker tokens, then strip think markup.
     t = _REPLY_OPEN_RE.sub("", t)
     t = _REPLY_CLOSE_RE.sub("", t)
+    t = _REPLY_ROLE_MARKER_RE.sub("", t)
     return _strip_think(t).strip()
 
 
@@ -1035,13 +1037,23 @@ def _coerce_imap_timeout_seconds(raw: str | None) -> int:
 _IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(os.environ.get("ODYSSEUS_IMAP_TIMEOUT_SECONDS"))
 
 
-def _open_imap_connection(host: str, port: int, *, starttls: bool, timeout: int = _IMAP_TIMEOUT_SECONDS):
+def _open_imap_connection(
+    host: str,
+    port: int,
+    *,
+    starttls: bool,
+    timeout: int = _IMAP_TIMEOUT_SECONDS,
+    ssl_context=None,
+):
     """Open an IMAP connection using the configured security mode."""
     port = int(port or 993)
     if starttls:
         conn = imaplib.IMAP4(host, port, timeout=timeout)
         try:
-            conn.starttls()
+            if ssl_context:
+                conn.starttls(ssl_context=ssl_context)
+            else:
+                conn.starttls()
         except Exception:
             # Don't leak the open plain socket if the STARTTLS upgrade is
             # rejected; close it before propagating. (#3174)
@@ -1051,7 +1063,8 @@ def _open_imap_connection(host: str, port: int, *, starttls: bool, timeout: int 
                 pass
             raise
     elif port == 993:
-        conn = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+        kwargs = {"ssl_context": ssl_context} if ssl_context else {}
+        conn = imaplib.IMAP4_SSL(host, port, timeout=timeout, **kwargs)
     else:
         conn = imaplib.IMAP4(host, port, timeout=timeout)
     try:

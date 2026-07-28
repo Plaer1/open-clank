@@ -110,6 +110,18 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("research", "deep research imperative request", rf"{_PLEASE}(?:research|deep\s+dive|look\s+into|investigate)\s+.+"),
         ("research", "assistant deep research request", rf"{_ACTION_QUESTION}(?:research|do\s+research|deep\s+dive|look\s+into|investigate)\s+.+"),
 
+        # Workspace / coding-agent intent. These should promote to the agent
+        # workspace with shell/file tools available, not the "light" typed-tool
+        # path used for notes/calendar/email.
+        ("workspace", "repo implementation request", rf"{_PLEASE}(?:fix|debug|implement|change|update|refactor|patch|review|test)\b.{{0,160}}\b(?:repo|repository|codebase|project|app|server|api|frontend|backend|tests?|bug|issue|pr)\b"),
+        ("workspace", "assistant repo implementation request", rf"{_ACTION_QUESTION}(?:fix|debug|implement|change|update|refactor|patch|review|test)\b.{{0,160}}\b(?:repo|repository|codebase|project|app|server|api|frontend|backend|tests?|bug|issue|pr)\b"),
+        ("workspace", "test/build command request", rf"{_PLEASE}(?:run|execute|start|launch)\b.{{0,80}}\b(?:tests?|pytest|npm\s+test|pnpm\s+test|yarn\s+test|build|lint|typecheck|benchmark|eval|terminal[- ]bench|tbench)\b"),
+        ("workspace", "file/code inspection request", rf"{_PLEASE}(?:find|inspect|look\s+at|open|read|check)\b.{{0,120}}\b(?:file|folder|directory|repo|repository|code|source|logs?|trace|stack|diff)\b"),
+        ("workspace", "server/process debugging request", rf"{_PLEASE}(?:check|debug|fix|restart|start|stop|kill|tail|inspect)\b.{{0,120}}\b(?:server|service|process|port|docker|container|tmux|endpoint|logs?)\b"),
+        ("workspace", "local computer task request", r"\b(?:on|from|in|using|with)\s+(?:this|my|the)\s+(?:computer|machine|pc|laptop|device|system)\b|\b(?:local|host)\s+(?:computer|machine|files?|system)\b"),
+        ("workspace", "named computer task request", r"\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)(?:[a-z][a-z0-9_.-]{1,31})\b"),
+        ("workspace", "terminal workspace request", r"\b(?:terminal|shell|workspace|tmux|docker|container|git|branch|commit|diff|pytest|stacktrace|traceback|benchmark|terminal[- ]bench|tbench)\b"),
+
         # Shell / remote-host intent.
         ("shell", "ssh request", r"\bssh\s+(?:in)?to\b"),
         ("shell", "ssh target request", r"\bssh\s+\w+"),

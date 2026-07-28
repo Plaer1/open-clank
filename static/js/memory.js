@@ -566,6 +566,9 @@ async function fetchMemoryPages() {
 
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
+  memoriesLoading = true;
+  renderMemoryList();
+  updateMemoryCount();
   try {
     const [data] = await Promise.all([fetchMemoryPages(), _loadTrustPrefs()]);
     memoryLoadError = null;
@@ -580,6 +583,7 @@ export async function loadMemories() {
       memories = [];
     }
 
+    memoriesLoading = false;
     buildCategoryChips();
     _syncSignalFilterVisibility();
     renderMemoryList();
@@ -590,6 +594,7 @@ export async function loadMemories() {
     memoryProviderStatus = 'unavailable';
     _renderMemoryProviderStatus();
     memories = [];
+    memoriesLoading = false;
     buildCategoryChips();
     renderMemoryList();
     updateMemoryCount();
@@ -1509,6 +1514,12 @@ export function renderMemoryList() {
     const selectBtn = document.getElementById('memory-select-btn');
     if (selectBtn) selectBtn.disabled = true;
     if (selectMode) exitSelectMode();
+    if (memoriesLoading) {
+      const row = spinnerModule.createLoadingRow('Loading memories...', 14);
+      row.classList.add('memory-empty');
+      memoryList.replaceChildren(row);
+      return;
+    }
     const searchTerm = document.getElementById('memory-search')?.value?.trim() || '';
     const _smiley = '<span style="vertical-align:-3px;margin-left:6px;">' + uiModule.emptyStateIcon('smiley') + '</span>';
     if (memoryLoadError) {
@@ -1943,6 +1954,11 @@ export function updateMemoryCount() {
   const h2Count = document.getElementById('memory-count-h2');
   const tabCount = document.getElementById('memory-count'); // optional (may be absent)
   if (!h2Count && !tabCount) return;
+  if (memoriesLoading) {
+    if (h2Count) h2Count.textContent = 'loading...';
+    if (tabCount) tabCount.textContent = '...';
+    return;
+  }
 
   const searchInput = document.getElementById('memory-search');
   const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';

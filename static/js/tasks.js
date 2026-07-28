@@ -20,6 +20,8 @@ let _escHandler = null;
 let _viewingRuns = null; // task id when viewing run history
 let _clockInterval = null;
 let _taskFailurePending = false;
+let _taskCompletionPending = false;
+let _taskBulkDeleting = false;
 
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -27,6 +29,12 @@ function _setTaskFailurePending(active) {
   _taskFailurePending = !!active;
   document.getElementById('tool-tasks-btn')?.classList.toggle('task-failure-pending', _taskFailurePending);
   document.getElementById('rail-tasks')?.classList.toggle('task-failure-pending', _taskFailurePending);
+}
+
+function _setTaskCompletionPending(active) {
+  _taskCompletionPending = !!active;
+  document.getElementById('tool-tasks-btn')?.classList.toggle('task-completion-pending', _taskCompletionPending);
+  document.getElementById('rail-tasks')?.classList.toggle('task-completion-pending', _taskCompletionPending);
 }
 
 // ---- API ----
@@ -103,6 +111,25 @@ function _animateTaskRemoval(ids) {
     card.classList.add('memory-tidy-removing');
   }
   return new Promise(resolve => setTimeout(resolve, 520));
+}
+
+function _setTaskCardsDeleting(ids, active) {
+  for (const id of ids) {
+    const card = _taskCardById(id);
+    if (!card) continue;
+    card.classList.toggle('task-card-deleting', !!active);
+    const existing = card.querySelector('.task-card-delete-busy');
+    if (!active) {
+      existing?.remove();
+      continue;
+    }
+    if (!existing) {
+      const badge = document.createElement('span');
+      badge.className = 'task-card-delete-busy';
+      badge.innerHTML = '<span class="task-card-delete-busy-label">Deleting</span><span class="task-card-delete-busy-spin" aria-hidden="true"></span>';
+      card.appendChild(badge);
+    }
+  }
 }
 
 async function _pauseTask(id) {
@@ -669,17 +696,65 @@ function _taskUpdateBulkCount() {
 }
 async function _taskBulkDelete() {
   const ids = [..._taskSelected];
-  if (!ids.length) return;
+  if (!ids.length || _taskBulkDeleting) return;
   const ok = uiModule?.styledConfirm
     ? await uiModule.styledConfirm(`Delete ${ids.length} task${ids.length > 1 ? 's' : ''}? This cannot be undone.`, { confirmText: 'Delete', danger: true })
     : confirm(`Delete ${ids.length} task(s)?`);
   if (!ok) return;
-  const results = await Promise.allSettled(ids.map(id => _deleteTask(id)));
-  const deletedIds = ids.filter((_, i) => results[i].status === 'fulfilled');
-  await _animateTaskRemoval(deletedIds);
-  if (uiModule) uiModule.showToast(`Deleted ${deletedIds.length} task${deletedIds.length > 1 ? 's' : ''}`);
-  await _fetchTasks();
-  _taskExitSelect();  // clears selection + re-renders the fresh list
+  _taskBulkDeleting = true;
+  const countEl = document.getElementById('tasks-selected-count');
+  const deleteBtn = document.getElementById('tasks-bulk-delete');
+  const cancelBtn = document.getElementById('tasks-bulk-cancel');
+  const selectAll = document.getElementById('tasks-select-all');
+  const originalDeleteHtml = deleteBtn?.innerHTML || '';
+  let busySpinner = null;
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.classList.add('tasks-bulk-loading');
+    deleteBtn.innerHTML = '<span class="tasks-bulk-loading-label">Deleting</span>';
+    busySpinner = spinnerModule.create('', 'clean', 'whirlpool');
+    const spEl = busySpinner.createElement();
+    spEl.classList.add('tasks-bulk-whirlpool');
+    deleteBtn.appendChild(spEl);
+    busySpinner.start();
+  }
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (selectAll) selectAll.disabled = true;
+  if (countEl) countEl.textContent = `Deleting 0/${ids.length}…`;
+  _setTaskCardsDeleting(ids, true);
+  const deletedIds = [];
+  let finished = 0;
+  try {
+    const results = await Promise.allSettled(ids.map(async (id) => {
+      try {
+        await _deleteTask(id);
+        deletedIds.push(id);
+      } finally {
+        finished += 1;
+        if (countEl) countEl.textContent = `Deleting ${finished}/${ids.length}…`;
+      }
+    }));
+    const failed = results.filter(r => r.status === 'rejected').length;
+    await _animateTaskRemoval(deletedIds);
+    if (uiModule) {
+      const msg = failed
+        ? `Deleted ${deletedIds.length}, failed ${failed}`
+        : `Deleted ${deletedIds.length} task${deletedIds.length > 1 ? 's' : ''}`;
+      uiModule.showToast(msg);
+    }
+    await _fetchTasks();
+  } finally {
+    _setTaskCardsDeleting(ids, false);
+    if (busySpinner) busySpinner.destroy();
+    if (deleteBtn) {
+      deleteBtn.classList.remove('tasks-bulk-loading');
+      deleteBtn.innerHTML = originalDeleteHtml || deleteBtn.innerHTML;
+    }
+    if (cancelBtn) cancelBtn.disabled = false;
+    if (selectAll) selectAll.disabled = false;
+    _taskBulkDeleting = false;
+    _taskExitSelect();  // clears selection + re-renders the fresh list
+  }
 }
 
 // Category filter chips (library-style tags) — solo-select: click one to
@@ -1937,8 +2012,91 @@ function _switchTab(tab) {
     b.classList.toggle('active', on);
   });
   if (tab === 'tasks') _renderMainView();
+  else if (tab === 'completed') _renderCompletedView();
   else if (tab === 'activity') _renderActivityView();
   else if (tab === 'new') _showPresetPicker();
+}
+
+function _runToActivityEntry(r) {
+  let resultText = r.result || r.error || '';
+  if (!resultText) {
+    if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
+    if (r.status === 'running') resultText = '_Running…_';
+  }
+  return {
+    kind: r.task_type || 'llm',
+    taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
+    taskId: r.task_id,
+    action: r.action || '',
+    result: resultText,
+    prompt: '',
+    ts: r.finished_at || r.started_at,
+    status: r.status,
+    model: r.model || '',
+    endpointUrl: r.endpoint_url || '',
+    sessionId: r.session_id || '',
+    researchId: r.research_id || '',
+    output_target: r.output_target || 'session',
+  };
+}
+
+function _isFinishedRun(entry) {
+  return !['queued', 'running', 'skipped'].includes(entry.status || '');
+}
+
+function _isChatResultRun(entry) {
+  return _isFinishedRun(entry)
+    && (entry.kind === 'llm' || entry.kind === 'research')
+    && !!(entry.result || '').trim();
+}
+
+async function _renderCompletedView() {
+  _setTaskCompletionPending(false);
+  const modal = document.getElementById('tasks-modal');
+  const body = modal?.querySelector('.modal-body');
+  if (!body) return;
+  body.innerHTML = `
+    <div class="admin-card tasks-activity-card tasks-completed-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
+        <h2 style="margin:0;padding:0;line-height:1;">Completed</h2>
+        <button class="memory-toolbar-btn" id="tasks-completed-refresh" title="Refresh" style="margin-left:auto;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></button>
+      </div>
+      <p class="memory-desc">Completed assistant/research outputs you can open in chat.</p>
+      <div id="tasks-completed-list" class="memory-list tasks-activity-list tasks-completed-list" style="flex:1;overflow:auto;font-size:13px;min-height:0;"></div>
+    </div>
+  `;
+  document.getElementById('tasks-completed-refresh')?.addEventListener('click', _renderCompletedView);
+  const list = document.getElementById('tasks-completed-list');
+  list?.appendChild(spinnerModule.createLoadingRow('Loading…'));
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/runs/recent?limit=${_completedLimit}&max_result_chars=10000`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const finished = (data.runs || []).map(_runToActivityEntry).filter(_isChatResultRun);
+    _completedHasMore = !!data.has_more && _completedLimit < 200;
+    _activityEntries = finished;
+    _syncCompletedTabCount(finished.length);
+    if (!list) return;
+    if (finished.length === 0) {
+      list.innerHTML = '<div class="doclib-empty task-completed-empty">No completed task outputs yet.</div>';
+      return;
+    }
+    list.innerHTML = finished.map(_renderCompletedPreviewEntry).join('');
+    if (_completedHasMore) {
+      list.insertAdjacentHTML('beforeend', `
+        <button type="button" class="memory-toolbar-btn tasks-activity-load-more" id="tasks-completed-load-more" style="width:100%;justify-content:center;margin-top:6px;">
+          Load more
+        </button>
+      `);
+      list.querySelector('#tasks-completed-load-more')?.addEventListener('click', () => {
+        _completedLimit = Math.min(200, _completedLimit + 40);
+        _renderCompletedView();
+      });
+    }
+    _wireCompletedPreviewRows(list);
+  } catch (e) {
+    if (list) list.innerHTML = `<div style="opacity:0.5;padding:12px;">Failed to load completed tasks: ${_escHtml(e.message || String(e))}</div>`;
+  }
 }
 
 // ---- Activity view (assistant session log) ----
@@ -2082,32 +2240,8 @@ async function _renderActivityView() {
       list.innerHTML = '<div style="opacity:0.5;padding:12px;">No activity yet. Scheduled tasks will log here once they run.</div>';
       return;
     }
-    _activityEntries = runs.map(r => {
-      let resultText = r.result || r.error || '';
-      if (!resultText) {
-        if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
-        if (r.status === 'running') resultText = '_Running…_';
-      }
-      return {
-        // Surface the actual task_type ('llm' | 'research' | 'action') so the
-        // chat-worthy check in _renderActivityEntry can decide between "Open
-        // in chat" (llm/research) and "Copy log" (action). Was hardcoded
-        // 'task', which never matched and made Open-in-chat dead code.
-        kind: r.task_type || 'llm',
-        taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
-        taskId: r.task_id,
-        action: r.action || '',
-        result: resultText,
-        prompt: '',
-        ts: r.finished_at || r.started_at,
-        status: r.status,
-        model: r.model || '',
-        endpointUrl: r.endpoint_url || '',
-        sessionId: r.session_id || '',
-        researchId: r.research_id || '',
-        output_target: r.output_target || 'session',
-      };
-    });
+    _activityEntries = runs.map(_runToActivityEntry);
+    _syncCompletedTabCount(_activityEntries.filter(_isChatResultRun).length);
     _buildChips();
     _applyFilter();
   } catch (e) {
@@ -2119,6 +2253,13 @@ async function _renderActivityView() {
 let _activityEntries = [];
 let _activityLimit = 40;
 let _activityHasMore = false;
+let _completedLimit = 40;
+let _completedHasMore = false;
+
+function _syncCompletedTabCount(count) {
+  const el = document.getElementById('tasks-completed-tab-count');
+  if (el) el.textContent = String(count || 0);
+}
 
 function _stackActivityEntries(entries) {
   const out = [];
@@ -2291,6 +2432,86 @@ function _wireActivityRows(list) {
   });
 }
 
+function _renderCompletedPreviewEntry(entry) {
+  const entryIdx = _activityEntries.indexOf(entry);
+  const tsLabel = _relativeTime(entry.ts);
+  const tsAbs = entry.ts ? new Date(entry.ts).toLocaleString() : '';
+  const modelTag = entry.model
+    ? `<span class="doclib-chat-msg-model">${_escHtml(entry.model.split('/').pop())}</span>`
+    : '';
+  const raw = (entry.result || '').trim();
+  const truncated = raw.length > 1400 ? raw.slice(0, 1400) + '…' : raw;
+  const cleaned = truncated
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/<think>[\s\S]*$/, '')
+    .trim();
+  let body;
+  try {
+    body = markdownModule.mdToHtml(cleaned);
+  } catch {
+    body = _escHtml(cleaned);
+  }
+  const title = _escHtml(entry.taskName || 'Task');
+  const time = `<span class="task-log-time" title="${_escHtml(tsAbs)}">${_escHtml(tsLabel)}</span>`;
+  return `
+    <div class="memory-item doclib-chat-row task-completed-preview-row" data-entry-idx="${entryIdx}">
+      <div class="doclib-chat-header task-completed-preview-head">
+        <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
+        <span class="task-log-name">${title}</span>${_taskAiMark(entry)}
+        <span style="flex:1"></span>
+        ${time}
+      </div>
+      <div class="doclib-chat-preview task-completed-chat-preview" style="display:block;">
+        <div class="doclib-chat-preview-messages">
+          <div class="doclib-chat-bubble-row assistant">
+            <div class="doclib-chat-bubble">
+              ${modelTag}
+              <div class="doclib-chat-bubble-body">${body}</div>
+            </div>
+          </div>
+        </div>
+        <div class="doclib-chat-preview-actions">
+          <button class="doclib-chat-copy-btn task-completed-copy-btn" type="button">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy
+          </button>
+          <button class="doclib-chat-open-btn task-completed-open-chat" type="button">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+            Open chat
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _wireCompletedPreviewRows(list) {
+  list.querySelectorAll('.task-completed-open-chat').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = btn.closest('.task-completed-preview-row');
+      const idx = parseInt(row?.dataset.entryIdx || '-1', 10);
+      const entry = _activityEntries[idx];
+      if (entry) _openResultInChat(entry);
+    });
+  });
+  list.querySelectorAll('.task-completed-copy-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const row = btn.closest('.task-completed-preview-row');
+      const idx = parseInt(row?.dataset.entryIdx || '-1', 10);
+      const entry = _activityEntries[idx];
+      if (!entry) return;
+      try {
+        uiModule.copyToClipboard((entry.result || '').trim());
+        uiModule.showToast('Output copied');
+      } catch (_) {
+        uiModule.showError('Copy failed');
+      }
+    });
+  });
+}
+
 // Open a task run's result in a fresh chat session so it's comfortable
 // to read full-width and the user can ask follow-ups.
 async function _openResultInChat(entry) {
@@ -2422,7 +2643,7 @@ function _categoryLabel(taskName) {
   return 'other';
 }
 
-function _renderActivityEntry(entry) {
+function _renderActivityEntry(entry, opts = {}) {
   // Canonical index into _activityEntries (map() passes the FILTERED
   // index, which would be wrong) — used by the Open-in-chat handler.
   const entryIdx = Number.isInteger(entry.sourceIdx) ? entry.sourceIdx : _activityEntries.indexOf(entry);
@@ -2568,7 +2789,7 @@ function _renderActivityEntry(entry) {
     `;
   }
   return `
-    <div class="task-log-row${rowStatusClass}${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
+    <div class="task-log-row${rowStatusClass}${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}${opts.expanded ? ' expanded' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
       <div class="task-log-row-head">
         ${statusDot}
         <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
@@ -2715,10 +2936,13 @@ export function openTasks(focusId, opts) {
   startNotificationPolling();
   const o = opts || {};
   const openActivityForFailure = _taskFailurePending && !focusId && o.filter === undefined;
+  const openCompletedForNotification = _taskCompletionPending && !focusId && o.filter === undefined;
   _setTaskFailurePending(false);
+  _setTaskCompletionPending(false);
   if (_open) {
     // Already open — just focus the requested task / apply filter.
     if (openActivityForFailure) _switchTab('activity');
+    else if (openCompletedForNotification) _switchTab('completed');
     if (o.filter !== undefined) { _taskFilter = o.filter; _renderList(); }
     if (focusId) _focusTask(focusId);
     return;
@@ -2750,6 +2974,10 @@ export function openTasks(focusId, opts) {
         <button class="memory-tab tasks-tab" data-tab="activity" role="tab" aria-selected="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           Activity
+        </button>
+        <button class="memory-tab tasks-tab" data-tab="completed" role="tab" aria-selected="false">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M20 6 9 17l-5-5"/></svg>
+          Completed <span id="tasks-completed-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
         </button>
         <button class="memory-tab tasks-tab" data-tab="new" role="tab" aria-selected="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
@@ -2825,7 +3053,7 @@ export function openTasks(focusId, opts) {
   // of an empty modal-body that fills in after the fetch resolves — that delay
   // was visible as a "flicker" right after opening.
   _activeTab = 'tasks';
-  _switchTab(openActivityForFailure ? 'activity' : 'tasks');
+  _switchTab(openActivityForFailure ? 'activity' : openCompletedForNotification ? 'completed' : 'tasks');
   _fetchTasks().then(() => {
     // Re-render so the list swaps the Loading row for real cards.
     _renderList();
@@ -2901,6 +3129,15 @@ async function _pollTaskNotifications() {
     const notes = data.notifications || [];
     for (const n of notes) {
       const ok = n.status === 'success';
+      if (ok) {
+        const completedOpen = _open && document.querySelector('.tasks-tab.active[data-tab="completed"]');
+        if (completedOpen) {
+          _setTaskCompletionPending(false);
+          _renderCompletedView();
+        } else {
+          _setTaskCompletionPending(true);
+        }
+      }
       // Tasks with output_target='notification' carry the result text in `body`
       // — show it as a real browser Notification (richer than a toast). Falls
       // back to a toast when permission is denied or unavailable.
@@ -2934,6 +3171,7 @@ async function _pollTaskNotifications() {
 
 function startNotificationPolling() {
   if (_notifInterval) return;
+  setTimeout(_pollTaskNotifications, 1500);
   _notifInterval = setInterval(_pollTaskNotifications, 30000);
 }
 

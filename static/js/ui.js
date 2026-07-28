@@ -577,9 +577,11 @@ export function el(id) {
 
 /**
  * Styled confirm dialog — replaces native browser confirm().
- * Returns a Promise<boolean>.
+ * Returns a Promise<boolean|'alternate'>. Existing two-button callers only
+ * receive true/false; callers that pass alternateText can detect the third
+ * action via the string 'alternate'.
  */
-export function styledConfirm(message, { confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+export function styledConfirm(message, { confirmText = 'Confirm', cancelText = 'Cancel', alternateText = '', title = 'Confirm', danger = false } = {}) {
   return new Promise(resolve => {
     // Reuse or create the modal
     let overlay = document.getElementById('styled-confirm-overlay');
@@ -593,6 +595,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
           '<div class="modal-body"><p id="styled-confirm-msg"></p></div>' +
           '<div class="modal-footer">' +
             '<button id="styled-confirm-cancel"></button>' +
+            '<button id="styled-confirm-alt" style="display:none;"></button>' +
             '<button id="styled-confirm-ok"></button>' +
           '</div>' +
         '</div>';
@@ -600,14 +603,25 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     }
 
     const msgEl = document.getElementById('styled-confirm-msg');
+    const titleEl = document.getElementById('styled-confirm-title');
     const okBtn = document.getElementById('styled-confirm-ok');
     const cancelBtn = document.getElementById('styled-confirm-cancel');
+    let altBtn = document.getElementById('styled-confirm-alt');
+    if (!altBtn) {
+      altBtn = document.createElement('button');
+      altBtn.id = 'styled-confirm-alt';
+      okBtn.parentNode.insertBefore(altBtn, okBtn);
+    }
 
+    if (titleEl) titleEl.textContent = title || 'Confirm';
     msgEl.textContent = message;
     okBtn.textContent = confirmText;
     cancelBtn.textContent = cancelText;
+    altBtn.textContent = alternateText || '';
     okBtn.className = danger ? 'confirm-btn confirm-btn-danger' : 'confirm-btn confirm-btn-primary';
     cancelBtn.className = 'confirm-btn confirm-btn-secondary';
+    altBtn.className = 'confirm-btn confirm-btn-secondary';
+    altBtn.style.display = alternateText ? '' : 'none';
 
     // Remember what had focus so we can restore it when the dialog closes.
     const _prevFocus = document.activeElement;
@@ -619,20 +633,23 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       overlay.style.display = 'none';
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
+      altBtn.removeEventListener('click', onAlt);
       overlay.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey);
       try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
       resolve(result);
     }
     function onOk() { cleanup(true); }
+    function onAlt() { cleanup('alternate'); }
     function onCancel() { cleanup(false); }
     function onBackdrop(e) { if (e.target === overlay) cleanup(false); }
     function onKey(e) {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        const active = document.activeElement;
-        if (active === okBtn) cancelBtn.focus();
-        else okBtn.focus();
+        const f = alternateText ? [cancelBtn, altBtn, okBtn] : [cancelBtn, okBtn];
+        const i = f.indexOf(document.activeElement);
+        const dir = e.key === 'ArrowRight' ? 1 : -1;
+        f[(i + dir + f.length) % f.length].focus();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
@@ -641,7 +658,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       } else if (e.key === 'Tab') {
         // Trap focus inside the dialog so Tab can't wander to the page behind.
         e.preventDefault();
-        const f = [cancelBtn, okBtn];
+        const f = alternateText ? [cancelBtn, altBtn, okBtn] : [cancelBtn, okBtn];
         const i = f.indexOf(document.activeElement);
         const n = e.shiftKey ? (i <= 0 ? f.length - 1 : i - 1) : (i >= f.length - 1 ? 0 : i + 1);
         f[n].focus();
@@ -649,6 +666,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     }
 
     okBtn.addEventListener('click', onOk);
+    altBtn.addEventListener('click', onAlt);
     cancelBtn.addEventListener('click', onCancel);
     overlay.addEventListener('click', onBackdrop);
     document.addEventListener('keydown', onKey);
