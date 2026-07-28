@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -56,6 +57,9 @@ def _is_casual_low_signal(text: str) -> bool:
 # the background work (extraction, auto-naming) silently never runs.
 # Mirrors WebhookManager._spawn_tracked from src/webhook_manager.py.
 _BG_TASKS: set[asyncio.Task] = set()
+_INCOGNITO_CONTEXTS: dict[str, dict[str, Any]] = {}
+_INCOGNITO_CONTEXT_TTL_SECONDS = 6 * 60 * 60
+_INCOGNITO_CONTEXT_MAX_MESSAGES = 80
 
 
 def _spawn_bg(coro) -> asyncio.Task:
@@ -64,6 +68,40 @@ def _spawn_bg(coro) -> asyncio.Task:
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
     return task
+
+
+def _prune_incognito_contexts(now: float | None = None):
+    now = now or time.time()
+    stale = [
+        sid for sid, bundle in _INCOGNITO_CONTEXTS.items()
+        if now - float(bundle.get("updated_at") or 0) > _INCOGNITO_CONTEXT_TTL_SECONDS
+    ]
+    for sid in stale:
+        _INCOGNITO_CONTEXTS.pop(sid, None)
+
+
+def _incognito_messages(session_id: str) -> list[dict[str, Any]]:
+    _prune_incognito_contexts()
+    bundle = _INCOGNITO_CONTEXTS.get(str(session_id or ""))
+    if not bundle:
+        return []
+    return [dict(m) for m in bundle.get("messages", []) if isinstance(m, dict)]
+
+
+def _append_incognito_message(session_id: str, role: str, content: Any, metadata: dict | None = None):
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    _prune_incognito_contexts()
+    bundle = _INCOGNITO_CONTEXTS.setdefault(sid, {"messages": [], "updated_at": time.time()})
+    msg: dict[str, Any] = {"role": role, "content": content}
+    if metadata:
+        msg["metadata"] = dict(metadata)
+    messages = bundle.setdefault("messages", [])
+    messages.append(msg)
+    if len(messages) > _INCOGNITO_CONTEXT_MAX_MESSAGES:
+        del messages[:-_INCOGNITO_CONTEXT_MAX_MESSAGES]
+    bundle["updated_at"] = time.time()
 
 
 # ── Data containers ────────────────────────────────────────────────────── #
@@ -434,12 +472,13 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
 
 def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
     """Add user message to session history and update session name.
-    In incognito mode, still add to in-memory history (for conversation context)
-    but skip session name update (which would persist)."""
+    Incognito messages must not mutate persistent session history, even in
+    memory, because a later normal turn can persist the same session object."""
+    if incognito:
+        return
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
     sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
-    if not incognito:
-        chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
+    chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
 
 def fire_message_event(request, webhook_manager, session_id: str, sess, message: str, compare_mode: bool = False):
@@ -668,8 +707,14 @@ async def build_chat_context(
         allow_tool_preprocessing=allow_tool_preprocessing,
     )
 
-    # Add user message to history
-    add_user_message(sess, chat_handler, preprocessed, incognito=incognito)
+    # Add user message to history. Nobody/incognito uses a request-local
+    # transcript store instead of session history so stale saved chats cannot
+    # bleed into context and the turn is not persisted.
+    if incognito:
+        user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
+        _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
+    else:
+        add_user_message(sess, chat_handler, preprocessed, incognito=False)
 
     # Fire events
     if not incognito:
@@ -760,8 +805,10 @@ async def build_chat_context(
     if norm:
         sess.model = norm
 
-    # Build messages
-    messages = preface + sess.get_context_messages()
+    # Build messages. In Nobody/incognito mode, never read saved session
+    # history: the session id may be a temporary wrapper or, in buggy clients, a
+    # stale normal session id. Only the ephemeral incognito transcript is safe.
+    messages = preface + (_incognito_messages(session_id) if incognito else sess.get_context_messages())
 
     # Current date/time — injected as a standalone *user*-role context message
     # placed immediately before the latest user turn, NOT folded into the
@@ -1027,7 +1074,12 @@ def save_assistant_response(
     tool_events: list = None,
     incognito: bool = False,
 ):
-    """Add assistant response to session history. In incognito mode, keeps in-memory context but skips DB persistence."""
+    """Add assistant response to session history.
+
+    Incognito responses are intentionally not added to the session object. The
+    session may later be saved by a normal turn, so "in-memory only" is not
+    private enough.
+    """
     md = dict(last_metrics) if last_metrics else {}
     def _model_value(value) -> str:
         if value is None:
@@ -1067,19 +1119,18 @@ def save_assistant_response(
         _content = _think_info["reply"]
     else:
         _content = full_response
+    if incognito:
+        _append_incognito_message(session_id, "assistant", _content, md)
+        return None
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
-    if not incognito:
-        from core.database import update_session_last_accessed
-        update_session_last_accessed(session_id)
-        session_manager.save_sessions()
+    from core.database import update_session_last_accessed
+    update_session_last_accessed(session_id)
+    session_manager.save_sessions()
 
     # Return the persisted message's DB id so the stream can wire it onto the
     # freshly-rendered bubble — lets the user edit/delete a just-streamed reply
-    # without reloading. Incognito returns None: those messages are ephemeral,
-    # so we don't hand out an edit/delete handle for them.
-    if incognito:
-        return None
+    # without reloading.
     try:
         _last = sess.history[-1]
         _meta = getattr(_last, "metadata", None)

@@ -16,6 +16,7 @@ const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
 const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 const COPY_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const CHECK_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+const PAPERCLIP_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
 
 /** Sanitize a URL for use in href — only allow http(s) and protocol-relative. */
 function _safeHref(url) {
@@ -1197,7 +1198,7 @@ document.addEventListener('click', function(e) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js').then(mod => {
+    import('./document.js?v=20260722emailfastindex1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1219,7 +1220,7 @@ document.addEventListener('click', function(e) {
       if (open) open(id);
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js').then(mod => {
+    import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -1254,6 +1255,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   var esc = uiModule.esc;
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-ai generated-image-wrap';
+  wrap.dataset.imageUrl = imageUrl || '';
+  wrap.dataset.imageKey = String(imageId || imageUrl || '');
+  if (imageId) wrap.dataset.imageId = imageId;
 
   const role = document.createElement('div');
   role.className = 'role';
@@ -1328,6 +1332,42 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     } catch { dlBtn.textContent = '\u2717'; setTimeout(() => { dlBtn.textContent = '\u2913'; }, 1500); }
   });
   actions.appendChild(dlBtn);
+
+  const reuseBtn = document.createElement('button');
+  reuseBtn.className = 'footer-copy-btn';
+  reuseBtn.type = 'button';
+  reuseBtn.title = 'Attach image to new prompt';
+  reuseBtn.innerHTML = PAPERCLIP_ICON;
+  reuseBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    reuseBtn.disabled = true;
+    try {
+      const resp = await fetch(safeImageUrl, { credentials: 'same-origin' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const ext = (blob.type || '').includes('jpeg') ? 'jpg'
+        : (blob.type || '').includes('webp') ? 'webp'
+        : (blob.type || '').includes('gif') ? 'gif'
+        : 'png';
+      const base = (prompt || 'generated-image').slice(0, 36).replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'generated-image';
+      const file = new File([blob], `${base}.${ext}`, { type: blob.type || 'image/png', lastModified: Date.now() });
+      const mod = await import('./fileHandler.js');
+      const addFiles = mod.addFiles || (mod.default && mod.default.addFiles);
+      if (!addFiles) throw new Error('attachment handler unavailable');
+      await addFiles([file], { skipCrop: true });
+      const input = document.getElementById('message');
+      if (input) input.focus();
+      reuseBtn.innerHTML = CHECK_ICON;
+      if (window.showToast) window.showToast('Image attached');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1400);
+    } catch (err) {
+      console.warn('Attach generated image failed', err);
+      reuseBtn.textContent = '\u2717';
+      if (window.showToast) window.showToast('Could not attach image');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1600);
+    }
+  });
+  actions.appendChild(reuseBtn);
 
   const editBtn = document.createElement('button');
   editBtn.className = 'footer-copy-btn';
@@ -1447,8 +1487,12 @@ export function hideWelcomeScreen() {
 export function showWelcomeScreen() {
   const ws = document.getElementById('welcome-screen');
   const cc = document.getElementById('chat-container');
+  const alreadyVisible = !!(ws && !ws.classList.contains('hidden'));
   if (ws) ws.classList.remove('hidden');
   if (cc) cc.classList.add('welcome-active');
+  if (alreadyVisible) {
+    return;
+  }
   // Entering the New Chat / welcome state: discard any stale draft left in the
   // composer from the previous session so the input starts empty (issue #1343).
   // Switching between existing sessions loads them directly and does NOT call

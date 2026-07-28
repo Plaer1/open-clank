@@ -73,6 +73,23 @@ _HF_TOKEN_STATUS_SNIPPET = (
 )
 
 
+def _append_mlx_image_server_script(runner_lines: list[str]) -> None:
+    """Write the MLX image API helper next to the tmux runner on remote hosts."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "mlx_image_server.py"
+    try:
+        script = script_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("Failed to read mlx_image_server.py: %s", e)
+        runner_lines.append('echo "ERROR: Odysseus could not prepare the MLX image server helper."')
+        runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=127')
+        return
+    runner_lines.append('mkdir -p scripts')
+    runner_lines.append("cat > scripts/mlx_image_server.py <<'PY'")
+    runner_lines.extend(script.splitlines())
+    runner_lines.append("PY")
+    runner_lines.append('chmod +x scripts/mlx_image_server.py 2>/dev/null || true')
+
+
 def _venv_root_from_serve_cmd(cmd: str) -> str:
     """Best-effort venv root from an absolute venv python in a serve command."""
     try:
@@ -493,6 +510,11 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
             ),
             (
+                r"OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed",
+                "This image model uses a custom Diffusers pipeline that the launch environment does not know yet.",
+                [{"label": "update Diffusers image dependencies", "op": "dependency", "package": "diffusers transformers accelerate"}],
+            ),
+            (
                 r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
                 "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
                 [
@@ -530,9 +552,9 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
             ),
             (
-                r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
-                "Diffusion serving requires PyTorch and diffusers.",
-                [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
+                r"No module named 'torch'|No module named torch|No module named 'torchvision'|No module named torchvision|No module named 'diffusers'|No module named diffusers|No module named 'scipy'|No module named scipy|install scipy if you want to use beta sigmas|requires the Torchvision library",
+                "Diffusion serving requires PyTorch, Torchvision, Diffusers, Accelerate, and SciPy.",
+                [{"label": "install Diffusers image deps in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch] torchvision accelerate scipy python-multipart"}],
             ),
             (
                 r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",
@@ -1433,9 +1455,11 @@ def setup_cookbook_routes() -> APIRouter:
                     "nb_files": m["nb_files"],
                     "has_incomplete": m["has_incomplete"],
                     "status": "downloading" if m["has_incomplete"] else "ready",
-                    "path": m.get("path", ""),
-                    "is_diffusion": m.get("is_diffusion", False),
-                }
+	                    "path": m.get("path", ""),
+	                    "is_diffusion": m.get("is_diffusion", False),
+	                    "is_video": m.get("is_video", False),
+	                    "is_adapter": m.get("is_adapter", False),
+	                }
                 if m.get("is_local_dir"):
                     entry["is_local_dir"] = True
                 if m.get("is_gguf"):
@@ -1460,6 +1484,7 @@ def setup_cookbook_routes() -> APIRouter:
         """Register a diffusion model as an image endpoint so it appears in the model selector."""
         import re
         from core.database import SessionLocal, ModelEndpoint
+        from src.settings import load_settings, save_settings
 
         # Parse port from command (--port NNNN), default 8100 for diffusion_server
         port_match = re.search(r'--port\s+(\d+)', req.cmd)
@@ -1477,6 +1502,7 @@ def setup_cookbook_routes() -> APIRouter:
         # Friendly display name from repo_id
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
         display_name = f"{short_name} (image)"
+        pinned_models = [req.repo_id] if req.repo_id else []
 
         db = SessionLocal()
         try:
@@ -1486,7 +1512,16 @@ def setup_cookbook_routes() -> APIRouter:
                 existing.is_enabled = True
                 existing.model_type = "image"
                 existing.name = display_name
+                existing.endpoint_kind = "local"
+                existing.model_refresh_mode = "manual"
+                if pinned_models:
+                    existing.cached_models = json.dumps(pinned_models)
+                    existing.pinned_models = json.dumps(pinned_models)
                 db.commit()
+                settings = load_settings()
+                if settings.get("image_gen_enabled") is not True:
+                    settings["image_gen_enabled"] = True
+                    save_settings(settings)
                 logger.info(f"Updated existing image endpoint: {base_url}")
                 return existing.id
 
@@ -1498,9 +1533,18 @@ def setup_cookbook_routes() -> APIRouter:
                 api_key=None,
                 is_enabled=True,
                 model_type="image",
+                endpoint_kind="local",
+                model_refresh_mode="manual",
+                cached_models=json.dumps(pinned_models) if pinned_models else None,
+                pinned_models=json.dumps(pinned_models) if pinned_models else None,
             )
             db.add(ep)
             db.commit()
+            settings = load_settings()
+            settings["image_gen_enabled"] = True
+            if not settings.get("image_model"):
+                settings["image_model"] = req.repo_id
+            save_settings(settings)
             logger.info(f"Auto-registered image endpoint: {display_name} @ {base_url}")
             return ep_id
         except Exception as e:
@@ -2356,24 +2400,8 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
             elif "sglang.launch_server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! command -v sglang &>/dev/null; then')
-                runner_lines.append('  echo "ERROR: SGLang is not installed."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('elif ! ODYSSEUS_SGLANG_IMPORT_ERROR="$(python3 -c "import sglang" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: SGLang is installed but failed to import."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
-            elif "mlx_lm.server" in req.cmd:
-                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_MLX_IMPORT_ERROR="$(python3 -c "import mlx_lm" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: MLX LM is not installed."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_MLX_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
                 runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
-                runner_lines.append('  ODYSSEUS_MLX_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('ODYSSEUS_SGLANG_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2384,6 +2412,36 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
+                runner_lines.append('if ! "$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" &>/dev/null; then')
+                runner_lines.append('  if ! command -v sglang &>/dev/null; then')
+                runner_lines.append('    echo "ERROR: SGLang is not installed."')
+                runner_lines.append('  else')
+                runner_lines.append('    echo "ERROR: SGLang is installed but failed to import in the launch Python."')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_SGLANG_IMPORT_ERROR="$("$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" 2>&1)"')
+                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+            elif "mlx_lm.server" in req.cmd:
+                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_MLX_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for i, part in enumerate(parts):')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if ! ODYSSEUS_MLX_IMPORT_ERROR="$("$ODYSSEUS_MLX_CMD_PY" -c "import mlx_lm" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: MLX LM is not installed in the launch Python: $ODYSSEUS_MLX_CMD_PY"')
+                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_MLX_IMPORT_ERROR"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
                 runner_lines.append('  ODYSSEUS_SERVE_CMD="$("$ODYSSEUS_MLX_CMD_PY" - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import json, os, shlex, sys')
                 runner_lines.append('from pathlib import Path')
@@ -2474,10 +2532,111 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('PY')
                 runner_lines.append(')"')
                 runner_lines.append('fi')
+            elif "scripts/mlx_image_server.py" in req.cmd or ".mlx_image_server.py" in req.cmd:
+                _append_mlx_image_server_script(runner_lines)
+                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for part in parts:')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_BIN_DIR="$(dirname "$ODYSSEUS_MLX_IMAGE_CMD_PY" 2>/dev/null || true)"')
+                runner_lines.append('if [ -n "$ODYSSEUS_MLX_IMAGE_BIN_DIR" ]; then export PATH="$ODYSSEUS_MLX_IMAGE_BIN_DIR:$PATH"; fi')
+                runner_lines.append('if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import fastapi, uvicorn, multipart" >/dev/null 2>&1; then')
+                runner_lines.append('  echo "ERROR: MLX image serving requires FastAPI + uvicorn + python-multipart in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY. Install the MLX image dependencies in Cookbook Dependencies."')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_MODEL="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('model = ""')
+                runner_lines.append('for i, part in enumerate(parts):')
+                runner_lines.append('    if part == "--model" and i + 1 < len(parts):')
+                runner_lines.append('        model = parts[i + 1]')
+                runner_lines.append('        break')
+                runner_lines.append('print(model)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi hidream; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import mlx, mlx_vlm, transformers, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: HiDream MLX serving needs the model requirements in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart mlx mlx-vlm \'transformers>=4.57.0,<6.0\' huggingface_hub safetensors numpy pillow tqdm sentencepiece hf_transfer"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi boogu; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import boogu_image_mlx, mlx, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: Boogu MLX serving needs boogu-image-mlx in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U git+https://github.com/xocialize/boogu-image-mlx.git fastapi uvicorn python-multipart pillow"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "ddcolor"; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  if ! command -v odysseus-mlx-colorize >/dev/null 2>&1 && ! command -v mlx-ddcolor-serve >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving requires the Odysseus mlx-ddcolor-swift bridge on PATH: odysseus-mlx-colorize or mlx-ddcolor-serve."')
+                runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_DDCOLOR_BIN="$(command -v odysseus-mlx-colorize 2>/dev/null || command -v mlx-ddcolor-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$ODYSSEUS_DDCOLOR_BIN" ]; then')
+                runner_lines.append('    ODYSSEUS_DDCOLOR_DIR="$(dirname "$ODYSSEUS_DDCOLOR_BIN")"')
+                runner_lines.append('    if [ ! -f "$ODYSSEUS_DDCOLOR_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_DDCOLOR_DIR/default.metallib" ]; then')
+                runner_lines.append('      echo "ERROR: DDColor MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
+                runner_lines.append('      echo "Run the DDColor MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
+                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    fi')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "mi-gan|migan|lama"; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  if ! command -v odysseus-mlx-inpaint >/dev/null 2>&1 && ! command -v mlx-lama-serve >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving requires the Odysseus mlx-lama-swift bridge on PATH: odysseus-mlx-inpaint or mlx-lama-serve."')
+                runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_INPAINT_BIN="$(command -v odysseus-mlx-inpaint 2>/dev/null || command -v mlx-lama-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$ODYSSEUS_INPAINT_BIN" ]; then')
+                runner_lines.append('    ODYSSEUS_INPAINT_DIR="$(dirname "$ODYSSEUS_INPAINT_BIN")"')
+                runner_lines.append('    if [ ! -f "$ODYSSEUS_INPAINT_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_INPAINT_DIR/default.metallib" ]; then')
+                runner_lines.append('      echo "ERROR: LaMa / MI-GAN MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
+                runner_lines.append('      echo "Run the LaMa / MI-GAN MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
+                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    fi')
+                runner_lines.append('  fi')
+                runner_lines.append('elif ! command -v mflux-generate >/dev/null 2>&1 && ! command -v mflux-generate-qwen >/dev/null 2>&1; then')
+                runner_lines.append('  echo "ERROR: mflux-compatible MLX image serving requires mflux-generate or mflux-generate-qwen in PATH for launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('  echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U mflux fastapi uvicorn python-multipart"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
             elif "scripts/diffusion_server.py" in req.cmd or ".diffusion_server.py" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + diffusers."')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_DIFFUSION_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for part in parts:')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$("$ODYSSEUS_DIFFUSION_CMD_PY" -c "import torch, torchvision, diffusers" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + Torchvision + diffusers in the launch Python: $ODYSSEUS_DIFFUSION_CMD_PY."')
                 runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
@@ -2588,8 +2747,8 @@ def setup_cookbook_routes() -> APIRouter:
         # endpoint; any other real model serve (i.e. not a pip-install task) gets
         # a local LLM endpoint pointed at its /v1.
         endpoint_id = None
-        is_diffusion = "diffusion_server.py" in req.cmd
-        if is_diffusion:
+        is_image_endpoint = "diffusion_server.py" in req.cmd or "mlx_image_server.py" in req.cmd
+        if is_image_endpoint:
             endpoint_id = _auto_register_image_endpoint(req, remote)
         elif not is_pip_install:
             endpoint_id = _auto_register_llm_endpoint(req, remote)
@@ -2605,7 +2764,7 @@ def setup_cookbook_routes() -> APIRouter:
         # if N != 0 within the watch window, delete the endpoint we just
         # created. Skipped for diffusion (different image-endpoint cleanup
         # path) and pip-install tasks (no endpoint to drop).
-        if endpoint_id and not is_diffusion and not is_pip_install:
+        if endpoint_id and not is_image_endpoint and not is_pip_install:
             asyncio.create_task(_serve_crash_watchdog(
                 endpoint_id=endpoint_id,
                 session_id=session_id,

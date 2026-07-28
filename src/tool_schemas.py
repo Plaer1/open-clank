@@ -25,6 +25,7 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "read_file": ("path",),
     "write_file": ("path",),
     "edit_file": ("path",),
+    "apply_patch": ("patch_text", "patchText", "patch"),
 }
 
 # ---------------------------------------------------------------------------
@@ -189,6 +190,49 @@ FUNCTION_TOOL_SCHEMAS = [
                     "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"}
                 },
                 "required": ["path", "old_string", "new_string"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Apply a multi-file source-code patch to disk. Use for real project files in the workspace when several edits belong together. Patch must use *** Begin Patch / *** End Patch with Add File, Update File, or Delete File sections. Prefer this over bash redirects/heredocs/sed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch_text": {
+                        "type": "string",
+                        "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
+                    }
+                },
+                "required": ["patch_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todowrite",
+            "description": "Create and maintain a structured task list for the current coding session. Use during multi-step implementation/debug/refactor work and keep statuses current.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "Current task list. Only one item should be in_progress.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Task description"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                                "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
             }
         }
     },
@@ -814,12 +858,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "serve_model",
-            "description": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, or Diffusers. If `host` is omitted, defaults to the cookbook's selected server (not localhost). For image/inpainting/diffusion models use the built-in command `python3 scripts/diffusion_server.py --model <repo> --port 8100` rather than inventing a custom diffusers API server. After launching, call list_served_models to check readiness/errors; if it reports a diagnosis with retry suggestions, retry via serve_model using the suggested adjusted cmd.",
+            "description": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, MLX Image, or Diffusers. If `host` is omitted, defaults to the cookbook's selected server (not localhost). For MLX image models on Apple Silicon use `python3 scripts/mlx_image_server.py --model <repo> --port 8100`; for non-MLX image/inpainting/diffusion models use `python3 scripts/diffusion_server.py --model <repo> --port 8100`. Never serve image models with `mlx_lm.server`; that is only for text/chat MLX models. After launching, call list_served_models to check readiness/errors; if it reports a diagnosis with retry suggestions, retry via serve_model using the suggested adjusted cmd.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "repo_id": {"type": "string", "description": "Model repo (e.g. 'Qwen/Qwen3-8B')"},
-                    "cmd": {"type": "string", "description": "Full serve command (e.g. 'vllm serve Qwen/Qwen3-8B --port 8000 --tp 2', 'python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B --port 30000', or for inpainting/image models: 'python3 scripts/diffusion_server.py --model diffusers/stable-diffusion-xl-1.0-inpainting-0.1 --port 8100')"},
+                    "cmd": {"type": "string", "description": "Full serve command (e.g. 'vllm serve <repo> --port 8000 --tp 2', 'python3 -m sglang.launch_server --model-path <repo> --port 30000', for MLX image models: 'python3 scripts/mlx_image_server.py --model <repo> --port 8100', or for non-MLX image models: 'python3 scripts/diffusion_server.py --model <repo> --port 8100')"},
                     "host": {"type": "string", "description": "Target server — friendly NAME from list_cookbook_servers (e.g. 'gpu-box', 'workstation') or raw user@host. Omit to use the cookbook's selected default."},
                     "local": {"type": "boolean", "description": "Force serve on THIS machine instead of the default remote server."},
                 },
@@ -913,7 +957,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_serve_presets",
-            "description": "List saved Cookbook serve presets. Each preset is a launch template (name, model, host, port, tmux cmd) the user previously saved from the UI. Call this BEFORE serve_model when the user asks to launch a model by name — there's almost always a working preset for it.",
+            "description": "List saved Cookbook serve presets. Each preset is a launch template (name, model, host, port, tmux cmd) the user previously saved from the UI. Call this BEFORE raw serve_model when the user asks to launch a model by name manually.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -954,11 +998,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_cached_models",
-            "description": "List models already cached on disk locally or on a remote server. `host` accepts friendly Cookbook server names from list_cookbook_servers (for example ajax) or raw user@host. Also reports completed Cookbook download tasks when the filesystem cache scan cannot locate the HF cache path.",
+            "description": "List models already cached on disk locally or on a remote server. `host` accepts friendly Cookbook server names from list_cookbook_servers (for example workstation) or raw user@host. Also reports completed Cookbook download tasks when the filesystem cache scan cannot locate the HF cache path.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string", "description": "Friendly Cookbook server name (e.g. 'ajax', 'gpu-box') or raw remote host (e.g. 'user@gpu-box'). Omit for local."},
+                    "host": {"type": "string", "description": "Friendly Cookbook server name (e.g. 'workstation', 'gpu-box') or raw remote host (e.g. 'user@gpu-box'). Omit for local."},
                     "model_dir": {"type": "string", "description": "Comma-separated additional model directories to scan beyond ~/.cache/huggingface/hub"},
                     "ssh_port": {"type": "string", "description": "SSH port for remote host (default 22)"},
                     "platform": {"type": "string", "enum": ["linux", "windows"], "description": "Remote platform"}
@@ -1109,6 +1153,40 @@ FUNCTION_TOOL_SCHEMAS = [
                     "uid": {"type": "string", "description": "Email UID to read"},
                     "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
                     "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts, especially when the UID came from a non-default mailbox"},
+                },
+                "required": ["uid"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_email_unsubscribes",
+            "description": "Scan recent email headers for likely spam/newsletter unsubscribe candidates. Does not unsubscribe anything. Review candidates with the user before acting; mailto methods can be executed with unsubscribe_email, web URL methods require browser/web tools after approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "IMAP folder to scan (default: INBOX)"},
+                    "limit": {"type": "integer", "description": "Maximum candidates to return (default: 25)"},
+                    "max_scan": {"type": "integer", "description": "How many newest emails to inspect (default: 150)"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unsubscribe_email",
+            "description": "Execute one approved unsubscribe action for an email UID. Safe mailto List-Unsubscribe methods are sent/staged. Web URL methods return a requires-browser instruction and exact URL; use browser/web tools only after user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Email UID from scan_email_unsubscribes/list_emails"},
+                    "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                    "method_index": {"type": "integer", "description": "Method index from scan_email_unsubscribes (default: 0)"},
+                    "allow_web": {"type": "boolean", "description": "Return browser/web instructions when selected method is URL"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
                 },
                 "required": ["uid"]
             }
@@ -1366,6 +1444,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")
     elif tool_type == "edit_file":
+        content = json.dumps(args)
+    elif tool_type == "apply_patch":
+        content = args.get("patch_text") or args.get("patchText") or args.get("patch") or ""
+    elif tool_type == "todowrite":
         content = json.dumps(args)
     elif tool_type == "create_document":
         parts = [args.get("title", "Untitled")]

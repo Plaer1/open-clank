@@ -19,6 +19,8 @@ BUILTIN_EMAIL_TOOLS = frozenset({
     "list_emails",
     "read_email",
     "search_emails",
+    "scan_email_unsubscribes",
+    "unsubscribe_email",
     "send_email",
     "reply_to_email",
     "draft_email",
@@ -44,6 +46,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "read_file",
     "write_file",
     "edit_file",
+    "apply_patch",
     "grep",
     "glob",
     "ls",
@@ -110,6 +113,7 @@ PLAN_MODE_READONLY_TOOLS = {
     # classified — see the plan-mode partition test in
     # tests/test_email_registry_sync.py.
     "search_emails",
+    "scan_email_unsubscribes",
     "list_served_models",
     "list_downloads",
     "list_cached_models",
@@ -136,14 +140,15 @@ PLAN_MODE_READONLY_TOOLS = {
 # here — read-only tools are covered by the allowlist. Keep in sync when adding
 # new mutating tools.
 _PLAN_MODE_KNOWN_MUTATORS = {
-    "write_file", "create_document", "edit_document", "update_document",
+    "write_file", "edit_file", "apply_patch", "todowrite",
+    "create_document", "edit_document", "update_document",
     "suggest_document", "manage_documents", "create_session", "manage_session",
     "send_to_session", "pipeline", "manage_memory", "manage_skills",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
     "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
     "manage_calendar", "api_call", "app_api", "ui_control",
     "send_email", "reply_to_email", "bulk_email", "delete_email",
-    "archive_email", "mark_email_read",
+    "archive_email", "mark_email_read", "unsubscribe_email",
     # The draft tools create documents and download_attachment writes to
     # disk — mutating. They have no native schemas (yet), so without these
     # static entries plan-mode safety for their bare fence tags would depend

@@ -392,6 +392,7 @@ let _loading = false;
 // Undo stack — most recent action is at the end. We cap it small because the
 // only entries that survive a panel reload are in-memory anyway.
 const _undoStack = [];
+const _NOTE_UNDO_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
 function _pushUndo(entry) {
   _undoStack.push(entry);
   if (_undoStack.length > 20) _undoStack.shift();
@@ -414,6 +415,33 @@ function _undoArchive(note, prevIdx) {
     _renderNotes();
     uiModule.showError('Undo failed');
   });
+}
+
+function _archiveNoteById(id, { card = null, celebrate = false } = {}) {
+  if (!id) return false;
+  const idx = _notes.findIndex(n => n.id === id);
+  if (idx < 0) return false;
+  const note = _notes[idx];
+  if (celebrate && card && note && _hasItems(note)) {
+    const undone = (note.items || []).filter(i => !i.done);
+    if (undone.length === 0) {
+      const r = card.getBoundingClientRect();
+      spawnConfetti(r.left + r.width / 2, r.top + r.height / 2, 80);
+    }
+  }
+  const removed = _notes.splice(idx, 1)[0];
+  _editingId = null;
+  _renderNotes();
+  const undo = () => _undoArchive(removed, idx);
+  _pushUndo({ label: 'archive', run: undo });
+  _patchNote(id, { archived: true }).then(() => {
+    uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _NOTE_UNDO_ICON, onAction: undo, actionHint: 'Ctrl+Z' });
+  }).catch(() => {
+    _notes.splice(idx, 0, removed);
+    _renderNotes();
+    uiModule.showError('Failed to archive');
+  });
+  return true;
 }
 
 async function _fetchNotes() {
@@ -2396,34 +2424,12 @@ function _bindCardEvents(body) {
       e.stopPropagation();
       const id = btn.dataset.noteId;
       if (!id) return;
-      const note = _notes.find(n => n.id === id);
       const card = btn.closest('.note-card');
-      // Confetti when archiving a fully-completed checklist (todo or goal).
-      if (note && _hasItems(note) && card) {
-        const undone = (note.items || []).filter(i => !i.done);
-        if (undone.length === 0) {
-          const r = card.getBoundingClientRect();
-          spawnConfetti(r.left + r.width / 2, r.top + r.height / 2, 80);
-        }
-      }
       let done = false;
       const finishRemove = () => {
         if (done) return;
         done = true;
-        const curIdx = _notes.findIndex(n => n.id === id);
-        if (curIdx < 0) return;
-        const removed = _notes.splice(curIdx, 1)[0];
-        _renderNotes();
-        const undo = () => _undoArchive(removed, curIdx);
-        _pushUndo({ label: 'archive', run: undo });
-        const _undoIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
-        _patchNote(id, { archived: true }).then(() => {
-          uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _undoIcon, onAction: undo, actionHint: 'Ctrl+Z' });
-        }).catch(() => {
-          _notes.splice(curIdx, 0, removed);
-          _renderNotes();
-          uiModule.showError('Failed to archive');
-        });
+        _archiveNoteById(id, { card, celebrate: true });
       };
       if (card) {
         card.classList.add('note-card-sliding-out');
@@ -3615,10 +3621,11 @@ function _buildForm(note = null) {
     if (_saveBtn._saving) return;
     // Mobile: when an existing note is opened and closed without edits, the
     // Update (✓) button morphs into Archive (set up below). Route the click
-    // to the hidden archive button so the existing archive flow + undo toast
-    // run unchanged.
+    // directly through the archive flow. Using a DOM .click() proxy here was
+    // fragile on mobile because the real archive button can move from the
+    // footer to the fullscreen header.
     if (_saveBtn.classList.contains('archive-mode')) {
-      form.querySelector('.note-form-archive-btn')?.click();
+      _archiveNoteById(note?.id);
       return;
     }
     _saveBtn._saving = true; _saveBtn.disabled = true; _saveBtn.style.opacity = '0.5';
@@ -3743,22 +3750,7 @@ function _buildForm(note = null) {
   // Archive / Delete — edit-mode-only buttons, mirror the (now-hidden) card actions.
   form.querySelector('.note-form-archive-btn')?.addEventListener('click', () => {
     if (!isEdit) return;
-    const id = note.id;
-    const idx = _notes.findIndex(n => n.id === id);
-    if (idx < 0) return;
-    const removed = _notes.splice(idx, 1)[0];
-    _editingId = null;
-    _renderNotes();
-    const undo = () => _undoArchive(removed, idx);
-    _pushUndo({ label: 'archive', run: undo });
-    const _undoIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
-    _patchNote(id, { archived: true }).then(() => {
-      uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _undoIcon, onAction: undo, actionHint: 'Ctrl+Z' });
-    }).catch(() => {
-      _notes.splice(idx, 0, removed);
-      _renderNotes();
-      uiModule.showError('Failed to archive');
-    });
+    _archiveNoteById(note.id);
   });
   form.querySelector('.note-form-delete-btn')?.addEventListener('click', async () => {
     if (!isEdit) return;

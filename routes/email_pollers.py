@@ -100,6 +100,272 @@ def _owner_for_email_account(account_id: str | None) -> str:
         return ""
 
 
+def _email_date_only(value: str | None):
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+_AUTO_REPLY_KEYS = {
+    "email_auto_reply",
+    "email_auto_reply_start",
+    "email_auto_reply_end",
+    "email_auto_reply_subject",
+    "email_auto_reply_message",
+    "email_auto_reply_cooldown",
+    "email_auto_reply_scope",
+    "email_auto_reply_account_id",
+    "email_auto_reply_exclude_automated",
+    "email_auto_reply_pause_notifications",
+    "email_auto_reply_enabled_at",
+}
+
+
+def _effective_settings_for_email_account(settings: dict, account_id: str | None) -> dict:
+    """Overlay per-account auto-reply settings onto global settings.
+
+    Other automation toggles remain global. This lets each mailbox have its own
+    away reply while preserving existing installs that only have global keys.
+    """
+    effective = dict(settings or {})
+    key = str(account_id or "").strip()
+    by_account = effective.get("email_auto_reply_by_account") or {}
+    account_cfg = by_account.get(key) if key and isinstance(by_account, dict) else None
+    if isinstance(account_cfg, dict):
+        for k in _AUTO_REPLY_KEYS:
+            if k in account_cfg:
+                effective[k] = account_cfg[k]
+    return effective
+
+
+def _away_reply_active(settings: dict, account_id: str | None) -> bool:
+    if not settings.get("email_auto_reply", False):
+        return False
+
+    scope = str(settings.get("email_auto_reply_scope") or "all").strip().lower()
+    if scope == "account":
+        selected = str(settings.get("email_auto_reply_account_id") or "").strip()
+        if selected and selected != str(account_id or ""):
+            return False
+
+    today = datetime.utcnow().date()
+    start = _email_date_only(settings.get("email_auto_reply_start"))
+    end = _email_date_only(settings.get("email_auto_reply_end"))
+    if start and today < start:
+        return False
+    if end and today > end:
+        return False
+    return True
+
+
+def _message_after_away_enabled(settings: dict, msg) -> bool:
+    enabled_at = (settings.get("email_auto_reply_enabled_at") or "").strip()
+    if not enabled_at:
+        # Existing installs may already have the toggle on before this feature
+        # existed. Do not back-reply old mail until the user saves/toggles it.
+        return False
+    try:
+        enabled_dt = datetime.fromisoformat(enabled_at.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    try:
+        msg_dt = email.utils.parsedate_to_datetime(msg.get("Date", ""))
+    except Exception:
+        return False
+    try:
+        if enabled_dt.tzinfo and not msg_dt.tzinfo:
+            msg_dt = msg_dt.replace(tzinfo=enabled_dt.tzinfo)
+        elif msg_dt.tzinfo and not enabled_dt.tzinfo:
+            enabled_dt = enabled_dt.replace(tzinfo=msg_dt.tzinfo)
+    except Exception:
+        pass
+    return msg_dt >= enabled_dt
+
+
+def _away_reply_period_key(settings: dict) -> str:
+    start = (settings.get("email_auto_reply_start") or "").strip()
+    end = (settings.get("email_auto_reply_end") or "").strip()
+    return f"{start or '*'}..{end or '*'}"
+
+
+def _away_reply_cooldown_seconds(settings: dict) -> int | None:
+    raw = str(settings.get("email_auto_reply_cooldown") or "period").strip().lower()
+    if raw == "1d":
+        return 24 * 60 * 60
+    if raw == "3d":
+        return 3 * 24 * 60 * 60
+    if raw == "7d":
+        return 7 * 24 * 60 * 60
+    return None
+
+
+def _ensure_away_reply_table():
+    import sqlite3 as _sql3
+    conn = _sql3.connect(SCHEDULED_DB)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_away_replies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner TEXT DEFAULT '',
+                account_id TEXT DEFAULT '',
+                message_id TEXT DEFAULT '',
+                sender_addr TEXT DEFAULT '',
+                subject TEXT DEFAULT '',
+                period_key TEXT DEFAULT '',
+                sent_at TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_away_msg ON email_away_replies(owner, account_id, message_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_away_sender ON email_away_replies(owner, account_id, sender_addr, sent_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sender_is_automated(msg, sender_addr: str) -> bool:
+    auto_submitted = (msg.get("Auto-Submitted") or "").strip().lower()
+    if auto_submitted and auto_submitted != "no":
+        return True
+    precedence = (msg.get("Precedence") or "").strip().lower()
+    if precedence in {"bulk", "junk", "list"}:
+        return True
+    if msg.get("List-Id") or msg.get("List-Unsubscribe"):
+        return True
+    local = (sender_addr or "").split("@", 1)[0].lower()
+    return local in {
+        "no-reply", "noreply", "do-not-reply", "donotreply",
+        "notification", "notifications", "automated", "mailer-daemon",
+        "postmaster",
+    }
+
+
+def _away_reply_already_sent(settings: dict, account_owner: str, account_id: str | None,
+                             message_id: str, sender_addr: str) -> bool:
+    import sqlite3 as _sql3
+    _ensure_away_reply_table()
+    owner = account_owner or ""
+    aid = account_id or ""
+    sender = (sender_addr or "").strip().lower()
+    conn = _sql3.connect(SCHEDULED_DB)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM email_away_replies WHERE owner=? AND account_id=? AND message_id=? LIMIT 1",
+            (owner, aid, message_id),
+        ).fetchone()
+        if row:
+            return True
+
+        cooldown = _away_reply_cooldown_seconds(settings)
+        if cooldown is None:
+            period_key = _away_reply_period_key(settings)
+            row = conn.execute(
+                "SELECT 1 FROM email_away_replies WHERE owner=? AND account_id=? AND sender_addr=? AND period_key=? LIMIT 1",
+                (owner, aid, sender, period_key),
+            ).fetchone()
+            return bool(row)
+
+        since = datetime.utcnow().timestamp() - cooldown
+        rows = conn.execute(
+            "SELECT sent_at FROM email_away_replies WHERE owner=? AND account_id=? AND sender_addr=? ORDER BY sent_at DESC LIMIT 5",
+            (owner, aid, sender),
+        ).fetchall()
+        for (sent_at,) in rows:
+            try:
+                if datetime.fromisoformat(sent_at).timestamp() >= since:
+                    return True
+            except Exception:
+                continue
+        return False
+    finally:
+        conn.close()
+
+
+def _record_away_reply(settings: dict, account_owner: str, account_id: str | None,
+                       message_id: str, sender_addr: str, subject: str):
+    import sqlite3 as _sql3
+    _ensure_away_reply_table()
+    conn = _sql3.connect(SCHEDULED_DB)
+    try:
+        conn.execute(
+            """
+            INSERT INTO email_away_replies
+            (owner, account_id, message_id, sender_addr, subject, period_key, sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_owner or "",
+                account_id or "",
+                message_id,
+                (sender_addr or "").strip().lower(),
+                subject or "",
+                _away_reply_period_key(settings),
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _send_away_reply(settings: dict, account_owner: str, account_id: str | None,
+                     msg, message_id: str, sender: str, subject: str):
+    sender_name, sender_addr = email.utils.parseaddr(sender or "")
+    sender_addr = (sender_addr or "").strip()
+    if not sender_addr:
+        return False, "missing sender"
+
+    cfg = _get_email_config(account_id, owner=account_owner)
+    from_addr = (cfg.get("from_address") or cfg.get("smtp_user") or "").strip()
+    if not from_addr:
+        return False, "missing from address"
+    if sender_addr.lower() == from_addr.lower():
+        return False, "self mail"
+    if settings.get("email_auto_reply_exclude_automated", True) and _sender_is_automated(msg, sender_addr):
+        return False, "automated sender"
+    if _away_reply_already_sent(settings, account_owner, account_id, message_id, sender_addr):
+        return False, "already sent"
+
+    body = (settings.get("email_auto_reply_message") or "").strip()
+    if not body:
+        body = "Thanks for your email. I'm away and may be slower to reply."
+
+    subject_template = (settings.get("email_auto_reply_subject") or "(Away) {subject}").strip()
+    if subject_template:
+        original_subject = subject or ""
+        reply_subject = (
+            subject_template
+            .replace("{subject}", original_subject)
+            .replace("{original_subject}", original_subject)
+        ).strip() or "Re:"
+    else:
+        reply_subject = subject or ""
+        if not reply_subject.lower().lstrip().startswith("re:"):
+            reply_subject = f"Re: {reply_subject}" if reply_subject else "Re:"
+
+    outer = MIMEMultipart("alternative")
+    display = cfg.get("display_name") or ""
+    outer["From"] = email.utils.formataddr((display, from_addr)) if display else from_addr
+    outer["To"] = email.utils.formataddr((sender_name, sender_addr)) if sender_name else sender_addr
+    outer["Subject"] = reply_subject
+    outer["Date"] = email.utils.formatdate(localtime=False)
+    outer["Message-ID"] = email.utils.make_msgid()
+    outer["Auto-Submitted"] = "auto-replied"
+    outer["X-Auto-Response-Suppress"] = "All"
+    if message_id:
+        outer["In-Reply-To"] = message_id
+        refs = (msg.get("References") or "").strip()
+        outer["References"] = f"{refs} {message_id}".strip()
+    outer.attach(MIMEText(body, "plain", "utf-8"))
+
+    _send_smtp_message(cfg, from_addr, [sender_addr], outer.as_string())
+    _record_away_reply(settings, account_owner, account_id, message_id, sender_addr, subject)
+    return True, sender_addr
+
+
 # ── Routes ──
 
 async def _emit_progress(progress_cb, message: str):
@@ -125,9 +391,10 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
     settings = _load_settings()
     prev = {k: settings.get(k, False) for k in
             ("email_auto_summarize", "email_auto_reply", "email_auto_tag",
-             "email_auto_spam", "email_auto_calendar")}
+             "email_auto_spam", "email_auto_calendar", "_email_auto_reply_draft_only")}
     settings["email_auto_summarize"] = bool(do_summary)
     settings["email_auto_reply"] = bool(do_reply)
+    settings["_email_auto_reply_draft_only"] = bool(do_reply)
     settings["email_auto_tag"] = bool(do_tag)
     settings["email_auto_spam"] = bool(do_spam)
     settings["email_auto_calendar"] = bool(do_calendar)
@@ -142,7 +409,10 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
     finally:
         s2 = _load_settings()
         for k, v in prev.items():
-            s2[k] = v
+            if v is None and k.startswith("_"):
+                s2.pop(k, None)
+            else:
+                s2[k] = v
         _save_settings(s2)
 
 
@@ -176,7 +446,7 @@ def _latest_inbox_fallback_uids(conn, reconnect):
         return [], reconnect()
 
 
-async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None) -> str:
+async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
     """Single pass of the auto-summarize/reply scan.
 
     When account_id is None, iterates over every enabled account in
@@ -208,6 +478,7 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                 account_id=(ids[0] if ids else None),
                 max_process=max_process,
                 progress_cb=progress_cb,
+                away_only=away_only,
             )
         outs = []
         for idx, aid in enumerate(ids, start=1):
@@ -218,6 +489,7 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     account_id=aid,
                     max_process=max_process,
                     progress_cb=progress_cb,
+                    away_only=away_only,
                 )
                 outs.append(f"[{names.get(aid, aid[:8])}] {result}")
             except Exception as e:
@@ -229,23 +501,32 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
         account_id=account_id,
         max_process=max_process,
         progress_cb=progress_cb,
+        away_only=away_only,
     )
 
 
-async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None) -> str:
+async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
     """Single pass of the auto-summarize/reply scan for ONE account.
     Reads current settings flags."""
     import asyncio
     import sqlite3 as _sql3
     from src.llm_core import _uses_max_completion_tokens
 
-    settings = _load_settings()
+    settings = _effective_settings_for_email_account(_load_settings(), account_id)
     auto_sum = settings.get("email_auto_summarize", False)
     auto_reply = settings.get("email_auto_reply", False)
+    auto_reply_draft = bool(auto_reply and settings.get("_email_auto_reply_draft_only", False))
+    auto_reply_away = bool(auto_reply and not auto_reply_draft and _away_reply_active(settings, account_id))
     auto_tag = settings.get("email_auto_tag", False)
     auto_spam = settings.get("email_auto_spam", False)
     auto_cal = settings.get("email_auto_calendar", False)
-    if not auto_sum and not auto_reply and not auto_tag and not auto_spam and not auto_cal:
+    if away_only:
+        auto_sum = False
+        auto_reply_draft = False
+        auto_tag = False
+        auto_spam = False
+        auto_cal = False
+    if not auto_sum and not auto_reply_draft and not auto_reply_away and not auto_tag and not auto_spam and not auto_cal:
         return "Nothing to do"
 
     # Owner of the account being processed. All calendar + mailbox reads/writes
@@ -304,11 +585,11 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
         _c = _sql3.connect(SCHEDULED_DB)
         _cache_owner_clause, _cache_owner_params = _email_cache_owner_clause(account_owner)
-        _sum_existing = {r[0] for r in _c.execute(
+        _sum_existing = set() if away_only else {r[0] for r in _c.execute(
             f"SELECT message_id FROM email_summaries WHERE {_cache_owner_clause}",
             _cache_owner_params,
         ).fetchall()}
-        _reply_existing = {r[0] for r in _c.execute(
+        _reply_existing = set() if away_only else {r[0] for r in _c.execute(
             f"SELECT message_id FROM email_ai_replies WHERE {_cache_owner_clause}",
             _cache_owner_params,
         ).fetchall()}
@@ -325,7 +606,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 ).fetchall()}
         else:
             _tag_existing = set()
-        _cal_existing = {r[0] for r in _c.execute(
+        _cal_existing = set() if away_only else {r[0] for r in _c.execute(
             f"SELECT message_id FROM email_calendar_extractions WHERE {_cache_owner_clause}",
             _cache_owner_params,
         ).fetchall()} if auto_cal else set()
@@ -351,12 +632,21 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         if auto_spam and not spam_folder:
             logger.warning("Auto-spam enabled but no Junk/Spam folder detected — will classify but not move")
 
-        task_candidates = resolve_task_candidates(owner=account_owner)
-        if not task_candidates:
-            return "No model configured"
-        url, model, headers = task_candidates[0]
+        needs_llm = bool(auto_sum or auto_reply_draft or auto_tag or auto_spam or auto_cal)
+        if needs_llm:
+            task_candidates = resolve_task_candidates(owner=account_owner)
+            if not task_candidates:
+                return "No model configured"
+            url, model, headers = task_candidates[0]
+        else:
+            url, model, headers = None, "", None
 
-        writing_style = settings.get("email_writing_style", "")
+        by_account_styles = settings.get("email_writing_styles_by_account") or {}
+        writing_style = ""
+        if account_id and isinstance(by_account_styles, dict):
+            writing_style = str(by_account_styles.get(str(account_id)) or "")
+        if not writing_style:
+            writing_style = settings.get("email_writing_style", "")
         processed = 0
         already_cached = 0
         too_short = 0
@@ -366,12 +656,15 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         _events_created = 0
         _replies_drafted = 0
         _reply_failed = 0
+        _away_replies_sent = 0
+        _away_replies_skipped = 0
+        _away_replies_failed = 0
         _detail_lines = []
         _current_folder = "INBOX"
         # Calendar extraction is sequential and each row can involve a model
         # call plus a calendar write. Keep the scheduled calendar-only pass
         # below the 5-minute action budget instead of timing out mid-run.
-        _default_max_process = 3 if (auto_cal and not auto_sum and not auto_reply and not auto_tag and not auto_spam) else 5
+        _default_max_process = 3 if (auto_cal and not auto_sum and not auto_reply_draft and not auto_reply_away and not auto_tag and not auto_spam) else 5
         try:
             _max_process = max(1, int(max_process)) if max_process is not None else _default_max_process
         except Exception:
@@ -402,10 +695,6 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     seed = f"{_folder}|{uid_str}|{msg.get('From','')}|{msg.get('Date','')}|{msg.get('Subject','')}"
                     message_id = f"<synth-{_hl.sha256(seed.encode()).hexdigest()[:16]}@local>"
                     no_msgid += 1
-                need_sum = auto_sum and message_id not in _sum_existing
-                need_reply = auto_reply and message_id not in _reply_existing
-                need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
-                need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
                 # Only check urgency on INBOX (received mail), not Sent
                 # Skip messages that are themselves urgency alerts, or that
                 # we sent to ourselves — otherwise the alert loop re-flags
@@ -422,17 +711,45 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 except Exception:
                     _from_addr_only = ""
                 _is_self_mail = bool(_self_self_addr) and _from_addr_only.lower() == _self_self_addr
+                need_sum = auto_sum and message_id not in _sum_existing
+                need_reply = auto_reply_draft and message_id not in _reply_existing
+                need_away_reply = bool(
+                    auto_reply_away
+                    and _folder.upper() == "INBOX"
+                    and not _is_self_mail
+                    and (away_only or _message_after_away_enabled(settings, msg))
+                    and not _away_reply_already_sent(settings, account_owner, account_id, message_id, _from_addr_only)
+                )
+                need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
+                need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
                 need_urgent = (auto_urgent and message_id not in _urgent_existing
                                and not _folder.lower().startswith("sent")
                                and "sent" not in _folder.lower()
                                and not _is_alert_echo
                                and not _is_self_mail)
-                if not need_sum and not need_reply and not need_class and not need_cal and not need_urgent:
+                if not need_sum and not need_reply and not need_away_reply and not need_class and not need_cal and not need_urgent:
                     already_cached += 1
                     await _emit_progress(progress_cb, f"Checked {examined}/{len(uid_list)} · {already_cached} already cached")
                     continue
                 subject = _decode_header(msg.get("Subject", ""))
                 sender = _decode_header(msg.get("From", ""))
+                if need_away_reply:
+                    try:
+                        sent_away, away_detail = _send_away_reply(
+                            settings, account_owner, account_id, msg, message_id, sender, subject
+                        )
+                        if sent_away:
+                            _away_replies_sent += 1
+                            _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                            _detail_lines.append(f"away reply · {_folder}#{_uid_text} · {subject or '(no subject)'} — {away_detail}")
+                        else:
+                            _away_replies_skipped += 1
+                            logger.info(f"Away reply skipped for uid={uid}: {away_detail}")
+                    except Exception as e:
+                        _away_replies_failed += 1
+                        _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                        _detail_lines.append(f"away reply failed · {_folder}#{_uid_text} · {subject or '(no subject)'}")
+                        logger.warning(f"Away reply {uid} failed: {e}")
                 body = _extract_text(msg)
                 # Pull text out of any PDFs / text attachments and append to
                 # the body so summaries / replies can actually reason about
@@ -454,7 +771,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 elif need_reply:
                     if not body:
                         body = subject
-                elif (not body or len(body) < 100) and not att_text:
+                elif not need_away_reply and (not body or len(body) < 100) and not att_text:
                     too_short += 1
                     continue
                 # Augmented body sent to the LLM: original body + attachment text.
@@ -993,7 +1310,8 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         # Build a clear status message
         ops = []
         if auto_sum: ops.append("summary")
-        if auto_reply: ops.append("reply")
+        if auto_reply_draft: ops.append("reply")
+        if auto_reply_away: ops.append("away")
         if auto_tag: ops.append("tag")
         if auto_spam: ops.append("spam")
         ops_label = "/".join(ops) or "none"
@@ -1002,10 +1320,14 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
             parts.append(f"processed {processed} new")
         if auto_sum:
             parts.append(f"summarized {_summaries_created}")
-        if auto_reply:
+        if auto_reply_draft:
             parts.append(f"drafted {_replies_drafted} repl" + ("y" if _replies_drafted == 1 else "ies"))
             if _reply_failed:
                 parts.append(f"{_reply_failed} reply failed")
+        if auto_reply_away:
+            parts.append(f"sent {_away_replies_sent} away repl" + ("y" if _away_replies_sent == 1 else "ies"))
+            if _away_replies_failed:
+                parts.append(f"{_away_replies_failed} away failed")
         if already_cached:
             parts.append(f"{already_cached} already cached")
         if too_short:
@@ -1032,12 +1354,13 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
 
 async def _auto_summarize_poller():
-    """Background loop kept for backward compatibility — calls _auto_summarize_pass every 60s.
+    """Background loop kept for backward compatibility — calls _auto_summarize_pass periodically.
     Newer setups should use scheduled tasks instead (summarize_emails, draft_email_replies)."""
     import asyncio as _asyncio
     while True:
         try:
-            await _asyncio.sleep(1800)
+            settings = _load_settings()
+            await _asyncio.sleep(60 if settings.get("email_auto_reply", False) else 1800)
             await _auto_summarize_pass()
         except Exception as e:
             logger.error(f"Auto-summarize poller crash: {e}")

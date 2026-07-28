@@ -5,7 +5,7 @@ import re
 import difflib
 import fnmatch
 import shutil
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
 
@@ -229,6 +229,181 @@ class WriteFileTool:
         if diff:
             result["diff"] = diff
         return result
+
+class ApplyPatchTool:
+    async def execute(self, content: str, ctx: dict) -> dict:
+        """Apply a small Codex-style patch using exact context matching.
+
+        This is deliberately stricter than git-apply: if an update hunk's old
+        text is not found exactly once, the whole patch is rejected before any
+        file is changed. That keeps agent edits reviewable and avoids fuzzy
+        corruption when the model patches stale context.
+        """
+        from src.tool_execution import _resolve_tool_path
+
+        patch_text = content or ""
+        stripped = patch_text.strip()
+        if stripped.startswith("{"):
+            try:
+                args = json.loads(stripped)
+                if isinstance(args, dict):
+                    patch_text = str(args.get("patch_text") or args.get("patchText") or args.get("patch") or "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not patch_text.strip():
+            return {"error": "apply_patch: patch_text required", "exit_code": 1}
+
+        try:
+            ops = _parse_agent_patch(patch_text)
+            if not ops:
+                return {"error": "apply_patch: no file operations found", "exit_code": 1}
+            prepared = []
+            for op in ops:
+                path = _resolve_tool_path(op["path"])
+                kind = op["kind"]
+                if kind == "add":
+                    if os.path.exists(path):
+                        return {"error": f"apply_patch: {op['path']}: already exists", "exit_code": 1}
+                    old = ""
+                    new = op["content"]
+                elif kind == "delete":
+                    if not os.path.isfile(path):
+                        return {"error": f"apply_patch: {op['path']}: not found", "exit_code": 1}
+                    with open(path, "r", encoding="utf-8") as f:
+                        old = f.read()
+                    new = ""
+                else:
+                    if not os.path.isfile(path):
+                        return {"error": f"apply_patch: {op['path']}: not found", "exit_code": 1}
+                    with open(path, "r", encoding="utf-8") as f:
+                        old = f.read()
+                    new = _apply_patch_hunks(old, op["hunks"], op["path"])
+                prepared.append((kind, path, old, new))
+
+            diffs = []
+            for kind, path, old, new in prepared:
+                if kind == "delete":
+                    os.remove(path)
+                else:
+                    directory = os.path.dirname(path)
+                    if directory:
+                        os.makedirs(directory, exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(new)
+                diff = _unified_diff(old, new, path)
+                if diff:
+                    diffs.append(diff)
+        except (ValueError, UnicodeDecodeError, PermissionError, OSError) as e:
+            return {"error": f"apply_patch: {e}", "exit_code": 1}
+
+        added = sum(int(d.get("added") or 0) for d in diffs)
+        removed = sum(int(d.get("removed") or 0) for d in diffs)
+        text_parts = [d.get("text", "") for d in diffs if d.get("text")]
+        diff_text = "\n".join(text_parts)
+        if len(diff_text.splitlines()) > MAX_DIFF_LINES:
+            diff_text = "\n".join(diff_text.splitlines()[:MAX_DIFF_LINES]) + f"\n... diff truncated at {MAX_DIFF_LINES} lines"
+        result = {
+            "output": f"Applied patch ({len(prepared)} file{'s' if len(prepared) != 1 else ''}, +{added}/-{removed})",
+            "exit_code": 0,
+        }
+        if diffs:
+            result["diff"] = {
+                "text": diff_text,
+                "added": added,
+                "removed": removed,
+                "new_file": any(d.get("new_file") for d in diffs),
+                "file": "patch",
+            }
+        return result
+
+def _parse_agent_patch(patch_text: str) -> List[Dict[str, Any]]:
+    lines = patch_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines or lines[0].strip() != "*** Begin Patch":
+        raise ValueError("patch must start with *** Begin Patch")
+    if lines[-1].strip() != "*** End Patch":
+        raise ValueError("patch must end with *** End Patch")
+
+    ops: List[Dict[str, Any]] = []
+    i = 1
+    while i < len(lines) - 1:
+        line = lines[i]
+        if not line:
+            i += 1
+            continue
+        if line.startswith("*** Add File: "):
+            path = line[len("*** Add File: "):].strip()
+            body = []
+            i += 1
+            while i < len(lines) - 1 and not lines[i].startswith("*** "):
+                if not lines[i].startswith("+"):
+                    raise ValueError(f"add file {path}: every content line must start with +")
+                body.append(lines[i][1:])
+                i += 1
+            ops.append({"kind": "add", "path": path, "content": "\n".join(body) + ("\n" if body else "")})
+            continue
+        if line.startswith("*** Delete File: "):
+            path = line[len("*** Delete File: "):].strip()
+            ops.append({"kind": "delete", "path": path})
+            i += 1
+            continue
+        if line.startswith("*** Update File: "):
+            path = line[len("*** Update File: "):].strip()
+            hunks = []
+            current = []
+            i += 1
+            if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
+                raise ValueError("move operations are not supported")
+            while i < len(lines) - 1 and not lines[i].startswith("*** "):
+                if lines[i].startswith("@@"):
+                    if current:
+                        hunks.append(current)
+                        current = []
+                elif lines[i].startswith((" ", "-", "+")):
+                    current.append(lines[i])
+                elif lines[i] == "":
+                    current.append(" ")
+                else:
+                    raise ValueError(f"update file {path}: invalid patch line {lines[i]!r}")
+                i += 1
+            if current:
+                hunks.append(current)
+            if not hunks:
+                raise ValueError(f"update file {path}: no hunks")
+            ops.append({"kind": "update", "path": path, "hunks": hunks})
+            continue
+        raise ValueError(f"unexpected patch line: {line!r}")
+    return ops
+
+def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str:
+    updated = original
+    for idx, hunk in enumerate(hunks, 1):
+        old_lines = []
+        new_lines = []
+        for line in hunk:
+            prefix, body = line[:1], line[1:]
+            if prefix in (" ", "-"):
+                old_lines.append(body)
+            if prefix in (" ", "+"):
+                new_lines.append(body)
+        old_text = "\n".join(old_lines)
+        new_text = "\n".join(new_lines)
+        if old_text and old_text in updated:
+            occurrences = updated.count(old_text)
+            if occurrences != 1:
+                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+            updated = updated.replace(old_text, new_text, 1)
+        elif old_text + "\n" in updated:
+            occurrences = updated.count(old_text + "\n")
+            if occurrences != 1:
+                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+            updated = updated.replace(old_text + "\n", new_text + "\n", 1)
+        else:
+            raise ValueError(f"{label}: hunk {idx} context not found")
+    return updated
 
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:

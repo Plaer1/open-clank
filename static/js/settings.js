@@ -22,7 +22,7 @@ function safeRasterDataUrl(raw) {
 }
 
 /* ── Tab switching ── */
-const ADMIN_TABS = new Set(['services', 'integrations', 'tools', 'users', 'system']);
+const ADMIN_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system']);
 
 function initTabs() {
   modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
@@ -792,8 +792,9 @@ async function initImageSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      const res = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value }) });
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
@@ -1860,7 +1861,7 @@ const SHORTCUT_ICONS = {
   settings:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   focus_input:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   open_calendar:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>',
+  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>',
   open_cookbook:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
   open_research:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
   open_gallery:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
@@ -2412,11 +2413,16 @@ async function initReminderSettings() {
   // what the Integrations panel manages. Treat the email channel as
   // configured if there's at least one account with SMTP set.
   let emailAccounts = [];
+  const smtpAccountReady = (account) => !!(
+    account.smtp_host
+    && account.smtp_user
+    && (account.has_smtp_password || account.oauth_provider === 'google')
+  );
   try {
     const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
     if (res.ok) {
       const d = await res.json();
-      emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+      emailAccounts = (d.accounts || []).filter(smtpAccountReady);
     }
   } catch (_) {}
   let smtpConfigured = emailAccounts.length > 0;
@@ -2520,7 +2526,7 @@ async function initReminderSettings() {
       const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
       if (res.ok) {
         const d = await res.json();
-        emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+        emailAccounts = (d.accounts || []).filter(smtpAccountReady);
       }
     } catch (_) {}
     smtpConfigured = emailAccounts.length > 0;
@@ -2816,6 +2822,17 @@ async function initReminderSettings() {
 async function initEmailAccountsSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
+
+  el('set-email-open-library-settings')?.addEventListener('click', async () => {
+    try {
+      const mod = await import('./emailLibrary.js?v=20260722emailfastindex1');
+      if (typeof mod.openEmailLibrarySettings === 'function') {
+        await mod.openEmailLibrarySettings();
+      }
+    } catch (e) {
+      console.warn('Failed to open Email settings page', e);
+    }
+  });
   const manageBtn = el('set-email-open-integrations');
   if (manageBtn && manageBtn.dataset.bound !== '1') {
     manageBtn.dataset.bound = '1';
@@ -3106,24 +3123,31 @@ async function initEmailSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
 
-  const styleKey = 'odysseus-email-writing-style';
+  const styleKey = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `odysseus-email-writing-style:${account}` : 'odysseus-email-writing-style';
+  };
   const styleEl = el('set-email-style');
+  const emailAccountSuffix = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `?account_id=${encodeURIComponent(account)}` : '';
+  };
 
   // The account/CardDAV config endpoints can be slow when remote mail servers
   // are cold. Populate the Writing Style box independently so saved prose does
   // not appear seconds after the panel opens.
   try {
-    const cachedStyle = localStorage.getItem(styleKey);
+    const cachedStyle = localStorage.getItem(styleKey());
     if (styleEl && cachedStyle !== null && !styleEl.value) styleEl.value = cachedStyle;
   } catch (_) {}
 
   const loadWritingStyle = async () => {
     try {
-      const res = await fetch('/api/email/style');
+      const res = await fetch(`/api/email/style${emailAccountSuffix()}`);
       const data = await res.json();
       const style = data.style || '';
       if (styleEl) styleEl.value = style;
-      try { localStorage.setItem(styleKey, style); } catch (_) {}
+      try { localStorage.setItem(styleKey(), style); } catch (_) {}
     } catch (_) {}
   };
   loadWritingStyle();
@@ -3235,7 +3259,7 @@ async function initEmailSettings() {
       }
     }
     try {
-      const res = await fetch('/api/email/extract-style', {
+      const res = await fetch(`/api/email/extract-style${emailAccountSuffix()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sample_count: 15 }),
@@ -3243,7 +3267,7 @@ async function initEmailSettings() {
       const data = await res.json();
       if (data.success && data.style) {
         if (styleEl) styleEl.value = data.style;
-        try { localStorage.setItem(styleKey, data.style); } catch (_) {}
+        try { localStorage.setItem(styleKey(), data.style); } catch (_) {}
         if (msg) msg.textContent = '✓ Style extracted';
       } else {
         if (msg) msg.textContent = data.error || 'Failed';
@@ -3263,14 +3287,14 @@ async function initEmailSettings() {
     if (msg) msg.textContent = 'Saving...';
     try {
       const style = styleEl ? styleEl.value : '';
-      const res = await fetch('/api/email/style', {
+      const res = await fetch(`/api/email/style${emailAccountSuffix()}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ style }),
       });
       const result = await res.json();
       if (result.success) {
-        try { localStorage.setItem(styleKey, style); } catch (_) {}
+        try { localStorage.setItem(styleKey(), style); } catch (_) {}
       }
       if (msg) msg.textContent = result.success ? '✓ Saved' : 'Failed';
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);

@@ -123,6 +123,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let activeDocId = null;           // currently visible doc
   let _lastSessionId = '';          // session context for "+" button
   const docs = new Map();           // docId -> { id, title, language, content, version, sessionId }
+  let _emailSendInFlight = false;
 
   const _docOpenKey = (sessionId) => 'odysseus-doc-open-' + sessionId;
   const _docMinimizedKey = (sessionId) => 'odysseus-doc-minimized-' + sessionId;
@@ -158,6 +159,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       getDocs: () => docs,
       isOpen: () => isOpen,
       createDocument,
+      newDocument,
       loadDocument,
       switchToDoc,
       openPanel,
@@ -2244,6 +2246,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   // ── Email document type helpers ──
 
+  function _unfoldEmailHeaderLines(header) {
+    const lines = [];
+    for (const rawLine of String(header || '').replace(/\r\n/g, '\n').split('\n')) {
+      if (/^[ \t]/.test(rawLine) && lines.length) {
+        lines[lines.length - 1] += ' ' + rawLine.trim();
+      } else {
+        lines.push(rawLine);
+      }
+    }
+    return lines;
+  }
+
   function _parseEmailHeader(content) {
     const empty = { to: '', cc: '', bcc: '', subject: '', inReplyTo: '', references: '', sourceUid: '', sourceFolder: '', forwardAttachments: false, attachments: [], body: content || '' };
     if (!content) return empty;
@@ -2252,7 +2266,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const header = parts[0];
     const body = parts.slice(1).join('\n---\n');
     const fields = { to: '', cc: '', bcc: '', subject: '', inReplyTo: '', references: '', sourceUid: '', sourceFolder: '', forwardAttachments: false, attachments: [], body: body };
-    for (const line of header.split('\n')) {
+    for (const line of _unfoldEmailHeaderLines(header)) {
       const m = line.match(/^(To|Cc|Bcc|Subject|In-Reply-To|References|X-Source-UID|X-Source-Folder|X-Forward-Attachments|X-Attachments):\s*(.*)$/i);
       if (m) {
         let key = m[1].toLowerCase();
@@ -2373,16 +2387,20 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function _emailFieldsWithLocalDraft(fields) {
     const draft = _loadEmailLocalDraft(fields);
     if (!draft) return fields;
+    const keepRealField = (draftValue, fieldValue) => {
+      const d = draftValue == null ? '' : String(draftValue);
+      return d.trim() ? d : (fieldValue || '');
+    };
     return {
       ...fields,
-      to: draft.to ?? fields.to,
-      cc: draft.cc ?? fields.cc,
-      bcc: draft.bcc ?? fields.bcc,
-      subject: draft.subject ?? fields.subject,
-      inReplyTo: draft.inReplyTo ?? fields.inReplyTo,
-      references: draft.references ?? fields.references,
-      sourceUid: draft.sourceUid ?? fields.sourceUid,
-      sourceFolder: draft.sourceFolder ?? fields.sourceFolder,
+      to: keepRealField(draft.to, fields.to),
+      cc: keepRealField(draft.cc, fields.cc),
+      bcc: keepRealField(draft.bcc, fields.bcc),
+      subject: keepRealField(draft.subject, fields.subject),
+      inReplyTo: keepRealField(draft.inReplyTo, fields.inReplyTo),
+      references: keepRealField(draft.references, fields.references),
+      sourceUid: keepRealField(draft.sourceUid, fields.sourceUid),
+      sourceFolder: keepRealField(draft.sourceFolder, fields.sourceFolder),
       body: _sanitizeOutgoingEmailBody(draft.body ?? fields.body),
     };
   }
@@ -2439,7 +2457,20 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return d.innerHTML.replace(/\n/g, '<br>');
   }
 
-  function _emailBodyToHtml(text) {
+  function _emailHtmlToPlainText(html) {
+    if (typeof document === 'undefined') return String(html || '');
+    const d = document.createElement('div');
+    d.innerHTML = String(html || '');
+    return d.innerText || d.textContent || '';
+  }
+
+  function _emailQuoteMarkerMatch(text) {
+    const raw = String(text || '');
+    return raw.match(/(?:<p[^>]*>\s*)?-{5,}\s*Previous message\s*-{5,}(?:\s*<\/p>)?/i)
+      || raw.match(/-{5,}\s*Previous message\s*-{5,}/i);
+  }
+
+  function _emailBodyFragmentToHtml(text) {
     const t = (text || '').trim();
     if (!t) return '';
     // If it already contains a formatting/structural HTML tag, it's a saved
@@ -2454,6 +2485,36 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // (shortcode → emoji) is scoped to chat; do not rewrite colons in mail.
     try { return markdownModule.mdToHtml(text, { shortcodes: false }); }
     catch (_) { return _emailPlainTextToHtml(text); }
+  }
+
+  function _emailBodyToHtml(text) {
+    const raw = String(text || '');
+    const marker = _emailQuoteMarkerMatch(raw);
+    if (!marker) {
+      const t = raw.trim();
+      if (/<\/?(b|i|u|s|strong|em|del|strike|a|p|div|br|ul|ol|li|h[1-3]|blockquote|span|code|pre)\b[^>]*>/i.test(t)) {
+        return markdownModule.sanitizeAllowedHtml
+          ? markdownModule.sanitizeAllowedHtml(t)
+          : _emailPlainTextToHtml(t);
+      }
+      return _emailBodyFragmentToHtml(raw);
+    }
+    const replyPart = raw.slice(0, marker.index);
+    const quotedPart = raw.slice(marker.index);
+    const quotedText = _emailHtmlToPlainText(quotedPart)
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    const replyHtml = _emailBodyFragmentToHtml(replyPart);
+    if (!quotedText) return replyHtml;
+    const firstQuoted = quotedText
+      .split(/\n\s*-{5,}\s*Previous message\s*-{5,}\s*\n/i)[0]
+      .trim();
+    const truncatedQuote = firstQuoted.length > 1800
+      ? `${firstQuoted.slice(0, 1800).replace(/\s+\S*$/, '').trim()}\n\n[Quoted thread truncated]`
+      : firstQuoted;
+    return `${replyHtml}<div class="email-quoted-history" contenteditable="false">${_emailPlainTextToHtml(truncatedQuote)}</div>`;
   }
   // Mirror the rich body's plain text into the hidden textarea so the existing
   // send / draft / change-detection plumbing (which reads the textarea) stays
@@ -2756,8 +2817,21 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     target.focus();
     if (target.isContentEditable) {
       const range = document.createRange();
-      range.selectNodeContents(target);
-      range.collapse(false);
+      const quote = target.querySelector('.email-quoted-history');
+      if (quote) {
+        let slot = quote.previousElementSibling;
+        if (!slot || slot.classList.contains('email-quoted-history')) {
+          slot = document.createElement('div');
+          slot.className = 'email-reply-edit-slot';
+          slot.innerHTML = '<br>';
+          target.insertBefore(slot, quote);
+        }
+        range.selectNodeContents(slot);
+        range.collapse(false);
+      } else {
+        range.selectNodeContents(target);
+        range.collapse(false);
+      }
       const sel = window.getSelection();
       if (sel) {
         sel.removeAllRanges();
@@ -2820,7 +2894,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (_shouldAutoCollapseEmailHeader()) _setEmailHeaderCollapsed(true, { manual: false });
   }
 
-  function _showEmailFields(doc, { applyLocalDraft = true } = {}) {
+  function _showEmailFields(doc, { applyLocalDraft = true, forceHeaderFields = false } = {}) {
     const emailHeader = document.getElementById('doc-email-header');
     const emailActions = document.getElementById('doc-email-actions');
     // Show MD toolbar for email too (B, I, etc.)
@@ -2857,8 +2931,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const preserveEmailHeader = !!(fields.sourceUid || fields.inReplyTo || fields.references);
     const subjectInput = document.getElementById('doc-email-subject');
     const textarea = document.getElementById('doc-editor-textarea');
-    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     _setEmailHeaderCollapsed(!!(doc && doc._emailHeaderCollapsed), { manual: false });
     if (subjectInput && !subjectInput._emailTabBodyBound) {
       subjectInput._emailTabBodyBound = true;
@@ -2869,10 +2943,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         }
       });
     }
-    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     // Show/hide unread button only if we have a source UID (came from inbox)
     const unreadBtn = document.getElementById('doc-email-unread-btn');
     if (unreadBtn) unreadBtn.style.display = fields.sourceUid ? '' : 'none';
@@ -2984,7 +3058,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       setTimeout(() => {
         try {
           const _isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
-          if (!_isTouch) _rich.focus();
+          if (!_isTouch) _focusEmailBodyEnd();
           _rich.scrollTop = 0;
         } catch (_) {}
       }, 50);
@@ -2995,8 +3069,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const ccRow = document.getElementById('doc-email-cc-row');
     const bccRow = document.getElementById('doc-email-bcc-row');
     const ccToggle = document.getElementById('doc-email-show-cc');
-    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     const hasCcBcc = !!(
       fields.cc ||
       fields.bcc ||
@@ -3777,6 +3851,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   async function _sendEmail() {
+    if (_emailSendInFlight) {
+      if (uiModule) uiModule.showToast('Already sending');
+      return;
+    }
+    if (uiModule) uiModule.showToast('Preparing send', { duration: 1200 });
     const sendDocId = activeDocId;
     const to = document.getElementById('doc-email-to')?.value?.trim();
     const cc = document.getElementById('doc-email-cc')?.value?.trim() || '';
@@ -3810,11 +3889,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const proceed = await _confirmMissingAttachment();
       if (!proceed) return;
     }
-    const btn = document.getElementById('doc-email-send-btn');
-    const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const btn = Array.from(document.querySelectorAll('#doc-email-send-btn')).find((candidate) => candidate.offsetParent !== null) || document.getElementById('doc-email-send-btn');
     let sendSpinner = null;
     let origBtnHtml = '';
-    let detachedEmailDoc = null;
+    _emailSendInFlight = true;
     if (btn) {
       btn.disabled = true;
       origBtnHtml = btn.innerHTML;
@@ -3825,24 +3903,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       btn.appendChild(document.createTextNode('Sending'));
     }
     try {
-      let canceled = false;
-      if (uiModule) {
-        uiModule.showToast('Sending', {
-          duration: 3200,
-          leadingIcon: 'spinner',
-          action: 'Cancel',
-          onAction: () => { canceled = true; },
-        });
-      }
-      await _sleep(3000);
-      if (!canceled) detachedEmailDoc = _detachActiveEmailForBackground(sendDocId);
-      await _sleep(200);
-      if (canceled) {
-        _restoreDetachedEmailDoc(detachedEmailDoc);
-        detachedEmailDoc = null;
-        if (uiModule) uiModule.showToast('Send canceled');
-        return;
-      }
+      if (uiModule) uiModule.showToast('Sending', { duration: 2200, leadingIcon: 'spinner' });
 
       const activeAccountId = await _resolveComposeSendAccountId();
       const res = await fetch(`${API_BASE}/api/email/send`, {
@@ -3873,7 +3934,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             leadingIcon: 'check',
             action: 'View Message',
             onAction: () => {
-              import('./emailLibrary.js').then(mod => {
+              import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
                 const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
                 if (open) open({
                   account_id: data.account_id || activeAccountId || null,
@@ -3912,9 +3973,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           // Tell the inbox to refresh so the answered state shows
           window.dispatchEvent(new CustomEvent('email-answered', { detail: { uid: sourceUid, folder: sourceFolder, account_id: data.account_id || activeAccountId || null } }));
         }
-        // Delete the compose document after successful send. It was usually
-        // already detached from the visible tabs so sending can finish in the
-        // background while the user continues in the next tab.
+        // Delete the compose document after successful send.
         if (sendDocId) {
           fetch(`${API_BASE}/api/document/${sendDocId}`, { method: 'DELETE' }).catch(() => {});
           const wasActiveSentDoc = activeDocId === sendDocId;
@@ -3930,15 +3989,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           _syncDocIndicator();
         }
       } else {
-        _restoreDetachedEmailDoc(detachedEmailDoc);
-        detachedEmailDoc = null;
         if (uiModule) uiModule.showError(data.error || 'Failed to send');
       }
     } catch (e) {
-      _restoreDetachedEmailDoc(detachedEmailDoc);
-      detachedEmailDoc = null;
       if (uiModule) uiModule.showError(e?.message ? `Failed to send email: ${e.message}` : 'Failed to send email');
     } finally {
+      _emailSendInFlight = false;
       if (sendSpinner) sendSpinner.destroy();
       if (btn) {
         btn.disabled = false;
@@ -4013,41 +4069,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return ids;
   }
 
-  function _detachActiveEmailForBackground(docId) {
-    if (!docId || !docs.has(docId)) return null;
-    saveCurrentToMap();
-    const doc = docs.get(docId);
-    const snapshot = { id: docId, doc: { ...doc } };
-    const wasActive = activeDocId === docId;
-    if (wasActive) saveDocument({ silent: true }).catch(() => {});
-
-    const visibleBefore = _visibleDocIdsForCurrentSession();
-    const idx = visibleBefore.indexOf(docId);
-    docs.delete(docId);
-    if (wasActive) activeDocId = null;
-
-    if (wasActive) {
-      const remaining = visibleBefore.filter(id => id !== docId && docs.has(id));
-      const nextId = remaining[idx] || remaining[idx - 1] || remaining[0] || null;
-      if (nextId) {
-        switchToDoc(nextId);
-      } else {
-        closePanel();
-      }
-    }
-    renderTabs();
-    _syncDocIndicator();
-    return snapshot;
-  }
-
-  function _restoreDetachedEmailDoc(snapshot) {
-    if (!snapshot || !snapshot.id || !snapshot.doc) return;
-    if (!docs.has(snapshot.id)) docs.set(snapshot.id, snapshot.doc);
-    _ensureDocPaneMounted();
-    switchToDoc(snapshot.id);
-    _syncDocIndicator();
-  }
-
   function _closeWithoutDeleting(deleteDoc = false) {
     if (!activeDocId) return;
     if (deleteDoc) {
@@ -4068,10 +4089,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     renderTabs();
   }
 
-  // Fast/Full + optional context popover for the doc-editor email Reply button.
-  // Mirrors the email reader's AI reply choice popover so the UX is identical:
-  // textarea for an optional steering note, then Fast (lightning) or Full
-  // (concentric dot) buttons; both feed into _aiReply with the chosen mode.
+  // Fast AI reply + optional context popover for the doc-editor email Reply button.
+  // Mirrors the email reader's AI reply choice popover: textarea for an
+  // optional steering note, then one Submit button.
   let _docAiReplyChoiceMenu = null;
   const _AI_REPLY_CONTEXT_STORE_PREFIX = 'odysseus:email-ai-reply-context:v1:';
   function _docAiReplyContextKey() {
@@ -4149,15 +4169,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     ].join(';');
     menu.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:6px;min-width:200px;">
-        <textarea data-note-input rows="2" placeholder="Add context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
+        <textarea data-note-input rows="2" placeholder="Context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
         <div style="display:flex;align-items:center;gap:4px;">
-          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            Fast
-          </button>
-          <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Fuller reply with more context" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
-            Full
+          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Draft reply" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>
+            Submit
           </button>
         </div>
       </div>
@@ -4203,6 +4219,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const inReplyTo = document.getElementById('doc-email-in-reply-to')?.value?.trim() || '';
     const sourceUid = document.getElementById('doc-email-source-uid')?.value?.trim() || '';
     const sourceFolder = document.getElementById('doc-email-source-folder')?.value?.trim() || 'INBOX';
+    const sourceAccountId = docs.get(activeDocId)?.sourceEmailAccountId || window.__odysseusActiveEmailAccount || '';
     const cleanAiReplyText = (text) => {
       if (!text) return '';
       let t = String(text);
@@ -4217,15 +4234,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       return t
         .replace(/<<<\s*(?:REPLY|SUMMARY|OUTPUT)\s*>>+/gi, '')
         .replace(/<<<\s*END\s*>>+/gi, '')
+        .replace(/<\/?\|(?:assistant|assistan|user|system|tool)\|>?|<\/\|end\|>?/gi, '')
         .trim();
     };
-    const shouldUseFastAiReply = () => {
-      const text = `${subject}\n${currentBody}`.toLowerCase();
-      if (/\b(attach(?:ed|ment)?|pdf|document|contract|invoice|receipt|quote|estimate|proposal|question|questions|details|schedule|booking|reservation|meeting|calendar|availability|confirm|confirmation|review|sign|signature)\b/.test(text)) {
-        return false;
-      }
-      return currentBody.length < 2500;
-    };
+    const splitCurrent = _splitEmailReplyQuote(currentBody);
+    const ownText = String(splitCurrent.body || '').trim();
+    const isReplaceableDraft = !ownText || /^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText);
+    if (!isReplaceableDraft) {
+      if (uiModule) uiModule.showToast('Reply already has text');
+      return;
+    }
 
     // Use the current chat model
     let currentModel = '';
@@ -4243,9 +4261,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       // so the backend's "no body" guard doesn't fail. The user_hint carries
       // the user's compose intent; the model uses To/Subject + that hint.
       const bodyForApi = currentBody || (noteHint ? '(no prior email — compose a new message based on the To, Subject, and user instructions)' : currentBody);
-      const fastFlag = mode === 'ai-reply-fast' ? true
-                     : mode === 'ai-reply-full' ? false
-                     : shouldUseFastAiReply();
       const res = await fetch(`${API_BASE}/api/email/ai-reply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4258,7 +4273,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           message_id: inReplyTo,
           uid: sourceUid,
           folder: sourceFolder,
-          fast: fastFlag,
+          account_id: sourceAccountId,
+          fast: true,
           user_hint: noteHint || '',
         }),
       });
@@ -4271,11 +4287,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         // currentBody. Without this, AI's invented quote stacked on top
         // of the real one and looked like the history had been "edited".
         cleanReply = cleanReply.replace(/\n*On\b[\s\S]*?\bwrote:[\s\S]*$/m, '').trim();
-        // Never overwrite the existing draft (user's typed text + the
-        // quoted history below it). Always prepend the AI suggestion so
-        // the user can read it, copy parts, or delete it — but their
-        // own work and the original quote are untouched.
-        const newBody = currentBody ? cleanReply + '\n\n' + currentBody : cleanReply;
+        const quote = splitCurrent.quote || '';
+        const newBody = cleanReply + (quote ? `\n\n${quote}` : '');
         await _streamEmailBodyText(textarea, newBody);
         _clearDocAiReplyContext(contextKey || _docAiReplyContextKey());
         if (uiModule) uiModule.showToast(`AI draft inserted (${data.model_used || 'AI'})`);
@@ -4568,7 +4581,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const isEmail = doc.language === 'email';
     if (isEmail) {
       _setMarkdownPreviewActive(false, { remember: false });
-      _showEmailFields(doc);
+      const forceHeaderFields = !!doc._skipLocalDraftOnce;
+      const applyLocalDraft = forceHeaderFields ? false : true;
+      doc._skipLocalDraftOnce = false;
+      _showEmailFields(doc, { applyLocalDraft, forceHeaderFields });
     } else {
       _hideEmailFields();
       const wantsMarkdownPreview = (doc.language || 'markdown') === 'markdown' && doc._markdownPreviewActive === true;
@@ -4913,7 +4929,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             <button type="button" class="md-view-opt" data-renderview="code" title="Edit code"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
             <button type="button" class="md-view-opt" data-renderview="run" title="Run / Preview"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
           </span>
-          <button id="doc-email-ai-reply-btn" class="doc-action-icon-btn md-toolbar-email-only" type="button" title="Draft a reply with AI (Fast / Full + optional context)" style="display:none;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg><span style="font-size:11px;">Reply</span></button>
+          <button id="doc-email-ai-reply-btn" class="doc-action-icon-btn md-toolbar-email-only" type="button" title="Draft a reply with AI (fast + optional context)" style="display:none;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg><span style="font-size:11px;">Reply</span></button>
           <button id="doc-fontsize-btn" class="doc-action-icon-btn" title="Font size" style="position:relative;width:28px;height:26px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;"><path d="M4 7V4h16v3"/><path d="M12 4v16"/><path d="M8 20h8"/></svg><span class="doc-fontsize-levels"><i data-sz="s">S</i><i data-sz="m">M</i><i data-sz="l">L</i></span></button>
           <button id="doc-diff-toggle-btn" class="doc-action-icon-btn" title="Compare changes" style="opacity:0.7;display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M5 12H2l5-5 5 5H9"/><path d="M19 12h3l-5 5-5-5h3"/></svg></button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
@@ -4963,8 +4979,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         <button id="doc-email-discard-btn" class="email-discard-btn" title="Close email" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Close</span></button>
         <span style="flex:1"></span>
         <div class="email-send-split">
-          <button id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
-          <button id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)" onpointerdown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onmousedown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onclick="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
+          <button type="button" id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false" onpointerdown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)" onmousedown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
           <div id="doc-email-more-menu" class="email-more-menu" style="display:none">
             <div class="dropdown-item-compact" id="doc-email-draft-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></span>Save Draft</div>
             <div class="dropdown-item-compact" id="doc-email-schedule-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>Schedule Send...</div>
@@ -5400,13 +5416,80 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       ));
     }
 
-    document.getElementById('doc-email-send-btn')?.addEventListener('click', () => {
-      // Pressing Send must never leave the "more options" menu showing.
+    const _eventInsideElement = (e, el) => {
+      if (!e || !el || typeof e.clientX !== 'number' || typeof e.clientY !== 'number') return false;
+      const rect = el.getBoundingClientRect();
+      return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    };
+
+    const handleSendIntent = (e) => {
+      if (e && e.__odysseusEmailSendHandled) return;
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const sendButtons = Array.from(document.querySelectorAll('#doc-email-send-btn'));
+      const targetBtn = target && target.closest ? target.closest('#doc-email-send-btn') : null;
+      const rectBtn = sendButtons.find((candidate) => _eventInsideElement(e, candidate));
+      const btn = targetBtn || rectBtn || null;
+      if (!btn || btn.disabled) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailSendHandled = true;
+      }
       const _m = document.getElementById('doc-email-more-menu');
       if (_m) _m.style.display = 'none';
       document.getElementById('doc-email-send-caret')?.setAttribute('aria-expanded', 'false');
       _sendEmail();
-    });
+    };
+    window.odysseusEmailSendIntent = handleSendIntent;
+    if (!window._emailSendDelegatedBoundV3) {
+      window._emailSendDelegatedBoundV3 = true;
+      ['pointerdown', 'mousedown', 'pointerup', 'click'].forEach((type) => {
+        window.addEventListener(type, handleSendIntent, true);
+        document.addEventListener(type, handleSendIntent, true);
+      });
+    }
+
+    let lastCaretToggleAt = 0;
+    const toggleSendMenu = (caret) => {
+      const menu = document.getElementById('doc-email-more-menu');
+      if (!menu) return;
+      const opening = menu.style.display === 'none';
+      menu.style.display = opening ? '' : 'none';
+      if (caret) caret.setAttribute('aria-expanded', String(opening));
+    };
+    const handleCaretIntent = (e) => {
+      if (e && e.__odysseusEmailCaretHandled) return;
+      const now = Date.now();
+      if (e && e.type === 'click' && now - lastCaretToggleAt < 350) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+        return;
+      }
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const carets = Array.from(document.querySelectorAll('#doc-email-send-caret'));
+      const targetCaret = target && target.closest ? target.closest('#doc-email-send-caret') : null;
+      const rectCaret = carets.find((candidate) => _eventInsideElement(e, candidate));
+      const caret = targetCaret || rectCaret || null;
+      if (!caret) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+      }
+      lastCaretToggleAt = now;
+      toggleSendMenu(caret);
+    };
+    window.odysseusEmailCaretIntent = handleCaretIntent;
+    if (!window._emailCaretDelegatedBoundV1) {
+      window._emailCaretDelegatedBoundV1 = true;
+      ['pointerdown', 'mousedown', 'click'].forEach((type) => {
+        window.addEventListener(type, handleCaretIntent, true);
+        document.addEventListener(type, handleCaretIntent, true);
+      });
+    }
 
     // Ctrl+Enter / Cmd+Enter sends the email when an email doc is active
     // Bind once at module level via a guard to avoid duplicate listeners on re-open
@@ -5493,16 +5576,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       window.visualViewport.addEventListener('resize', _maybeAutoCollapseEmailHeader);
     }
 
-    // Split-button caret toggles the send-options menu (drops up).
-    document.getElementById('doc-email-send-caret')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const menu = document.getElementById('doc-email-more-menu');
-      const caret = document.getElementById('doc-email-send-caret');
-      if (!menu) return;
-      const opening = menu.style.display === 'none';
-      menu.style.display = opening ? '' : 'none';
-      if (caret) caret.setAttribute('aria-expanded', String(opening));
-    });
+    // Split-button caret toggles the send-options menu.
+    document.getElementById('doc-email-send-caret')?.addEventListener('click', handleCaretIntent);
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('doc-email-more-menu');
       // Keep the menu open ONLY while interacting with the caret itself or the
@@ -7009,6 +7084,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   export function injectFreshDoc(doc) {
     if (!doc || !doc.id) return;
     const sessionId = doc.session_id || _lastSessionId || null;
+    if (doc.language === 'email') {
+      doc._skipLocalDraftOnce = true;
+      try {
+        const fields = _parseEmailHeader(doc.current_content || doc.content || '');
+        _clearEmailLocalDraft(fields.sourceUid, fields.sourceFolder, fields.inReplyTo);
+      } catch (_) {}
+    }
     addDocToTabs(doc, sessionId);
     // Use _ensureDocPaneMounted (not `if (!isOpen) openPanel()`): when a draft
     // is composed from the email modal, `isOpen` can be stale-true while the
@@ -7016,10 +7098,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // mounts into a wrong/half-built pane (rendered as a narrow sidebar on
     // mobile instead of its own full-screen window). This remounts it cleanly.
     _ensureDocPaneMounted();
-    // Defer to next frame so the panel DOM exists before switchToDoc populates
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      switchToDoc(doc.id);
-    }));
+    // Defer to the next frame so the panel DOM exists before switchToDoc
+    // populates it. Do not call switchToDoc synchronously here: it saves the
+    // previously active doc and can re-enter the email draft path while a reply
+    // document is still being injected.
+    requestAnimationFrame(() => {
+      if (docs.has(doc.id)) switchToDoc(doc.id);
+    });
   }
 
   export async function replaceEmailReplyBody(docId, replyText, { force = false } = {}) {
@@ -7051,6 +7136,90 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     clearTimeout(_autoSaveDebounce);
     _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+  }
+
+  function _buildEmailContentFromFields(fields, body) {
+    const f = fields || {};
+    let header = `To: ${f.to || ''}`;
+    if (f.cc) header += `\nCc: ${f.cc}`;
+    if (f.bcc) header += `\nBcc: ${f.bcc}`;
+    header += `\nSubject: ${f.subject || ''}`;
+    if (f.inReplyTo) header += `\nIn-Reply-To: ${f.inReplyTo}`;
+    if (f.references) header += `\nReferences: ${f.references}`;
+    if (f.sourceUid) header += `\nX-Source-UID: ${f.sourceUid}`;
+    if (f.sourceFolder) header += `\nX-Source-Folder: ${f.sourceFolder}`;
+    if (f.forwardAttachments) header += `\nX-Forward-Attachments: 1`;
+    if (Array.isArray(f.attachments) && f.attachments.length) {
+      const attStr = f.attachments
+        .map(a => `${a.index}:${a.filename}:${a.size}`)
+        .join('|');
+      header += `\nX-Attachments: ${attStr}`;
+    }
+    return header + '\n---\n' + (body || '');
+  }
+
+  export async function ensureEmailDraftEnvelope(docId, freshContent) {
+    const doc = docs.get(docId);
+    if (!doc || doc.language !== 'email') return false;
+    const current = _parseEmailHeader(doc.content || '');
+    const fresh = _parseEmailHeader(freshContent || '');
+    if (!fresh.to && !fresh.subject && !fresh.sourceUid) return false;
+
+    const needsEnvelope = (
+      (!current.to && !!fresh.to) ||
+      (!current.subject && !!fresh.subject) ||
+      (!current.inReplyTo && !!fresh.inReplyTo) ||
+      (!current.references && !!fresh.references) ||
+      (!current.sourceUid && !!fresh.sourceUid) ||
+      (!current.sourceFolder && !!fresh.sourceFolder)
+    );
+
+    const currentSplit = _splitEmailReplyQuote(current.body || '');
+    const freshSplit = _splitEmailReplyQuote(fresh.body || '');
+    const currentOwnText = String(currentSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshOwnText = String(freshSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const currentBodyText = String(current.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshBodyText = String(fresh.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const needsBodyRepair = (
+      !!freshBodyText &&
+      (
+        !currentBodyText ||
+        (!currentOwnText && !!freshOwnText) ||
+        (!currentSplit.quote && !!freshSplit.quote)
+      )
+    );
+    if (!needsEnvelope && !needsBodyRepair) return false;
+
+    let body = current.body || '';
+    if (needsBodyRepair && (!currentBodyText || (!currentOwnText && !!freshOwnText))) {
+      body = fresh.body || '';
+    } else if (!String(body).trim()) {
+      body = fresh.body || '';
+    } else if (currentSplit.body && freshSplit.quote && !currentSplit.quote) {
+      body = `${currentSplit.body}\n\n${freshSplit.quote}`;
+    }
+
+    const merged = {
+      ...fresh,
+      to: current.to || fresh.to || '',
+      cc: current.cc || fresh.cc || '',
+      bcc: current.bcc || fresh.bcc || '',
+      subject: current.subject || fresh.subject || '',
+      inReplyTo: current.inReplyTo || fresh.inReplyTo || '',
+      references: current.references || fresh.references || '',
+      sourceUid: current.sourceUid || fresh.sourceUid || '',
+      sourceFolder: current.sourceFolder || fresh.sourceFolder || '',
+      forwardAttachments: current.forwardAttachments || fresh.forwardAttachments || false,
+      attachments: (current.attachments && current.attachments.length) ? current.attachments : (fresh.attachments || []),
+    };
+
+    doc.content = _buildEmailContentFromFields(merged, body);
+    if (activeDocId === docId) {
+      _showEmailFields(doc, { applyLocalDraft: false });
+    }
+    clearTimeout(_autoSaveDebounce);
+    _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+    return true;
   }
 
   // Force the panel into a genuinely-open state. `isOpen` can be true while the
@@ -7187,31 +7356,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _syncDocIndicator();
       // Switch to the most recently active one (or first)
       const target = activeDocs[0];
-      if (restoreMode && shouldRestoreMinimized && !shouldRestoreOpen) {
-        activeDocId = null;
+      if (restoreMode && !shouldRestoreOpen) {
+        // Coming back to a chat with documents should advertise the doc without
+        // stealing half the screen. Default to a docked chip; only reopen the
+        // full editor when this session explicitly persisted an open state.
+        activeDocId = target.id;
         _minimizedDocId = target.id;
         _markDocVisibleState(sessionId, 'minimized');
         _ensureDocChipRegistered();
-        Modals.minimize('doc-panel');
+        if (isOpen) {
+          try { switchToDoc(target.id); } catch (e) { console.error('Minimize restored doc failed:', e); }
+          closePanel('down');
+        } else {
+          Modals.minimize('doc-panel');
+        }
         return;
       }
-      // Removed: the old "if restoreMode && !shouldRestoreOpen → stay
-      // closed" branch. Users expect that entering a chat with an
-      // attached document opens the panel automatically, not just shows
-      // an indicator. The minimised branch above still respects an
-      // explicit user choice to dock the panel; everything else falls
-      // through to the "open panel" path below.
-      if (false) {
-        activeDocId = null;
-        _minimizedDocId = null;
-        if (Modals.isRegistered('doc-panel')) Modals.unregister('doc-panel');
-        return;
-      }
-      // Always open when there are docs — the minimised branch above
-      // already returned for users who explicitly docked the panel.
-      // The previous `if (!restoreMode || shouldRestoreOpen)` gate left
-      // the panel closed on first entry to a chat with docs, which
-      // hides the doc unless the user manually opens the panel.
       _markDocVisibleState(sessionId, 'open');
       if (!isOpen) openPanel();
       switchToDoc(target.id);
@@ -7231,11 +7391,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       id: doc.id,
       title: doc.title || '',
       language: doc.language || '',
-      content: doc.current_content || '',
+      content: doc.current_content || doc.content || '',
       version: doc.version_count || 1,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
       _composeAtts: existing?._composeAtts,
+      _skipLocalDraftOnce: !!doc._skipLocalDraftOnce,
       // Provenance for the "Send signed reply" flow
       sourceEmailUid:       doc.source_email_uid || null,
       sourceEmailFolder:    doc.source_email_folder || null,
@@ -11010,6 +11171,7 @@ const documentModule = {
   loadDocument,
   injectFreshDoc,
   replaceEmailReplyBody,
+  ensureEmailDraftEnvelope,
   ensurePaneMounted: _ensureDocPaneMounted,
   loadSessionDocs,
   ensureDocPanel,

@@ -89,6 +89,71 @@ class ChatProcessor:
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
+    MEMORY_CONTEXT_LIMIT = 5
+    PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
+
+    def _is_core_memory(self, memory: Dict[str, Any]) -> bool:
+        """Return whether a pinned memory is safe to keep globally available."""
+        category = (memory.get("category") or "").lower()
+        if category in {"identity", "contact"}:
+            return True
+        text = (memory.get("text") or "").lower()
+        return any(marker in text for marker in (
+            "my name is",
+            "name is",
+            "call me",
+            "i am ",
+            "i'm ",
+            "email",
+            "phone",
+            "address",
+        ))
+
+    def _select_pinned_memories(self, message: str, pinned: list) -> list:
+        """Keep pinned memories high-priority without injecting all of them.
+
+        Pinned used to mean "always send every pinned memory to the model".
+        That bloats every request and leaks unrelated personal context into
+        tasks that do not need it. Now only a small set of core identity/contact
+        memories is always available; other pinned memories must match the
+        current request, but are retrieved before ordinary memories.
+        """
+        if not pinned:
+            return []
+
+        def _recent_first(memory: Dict[str, Any]) -> int:
+            try:
+                return int(memory.get("timestamp") or 0)
+            except Exception:
+                return 0
+
+        core = sorted(
+            [m for m in pinned if self._is_core_memory(m)],
+            key=_recent_first,
+            reverse=True,
+        )[:self.PINNED_MEMORY_LIMIT]
+
+        core_ids = {m.get("id") for m in core if m.get("id")}
+        contextual_candidates = [
+            m for m in pinned
+            if not (m.get("id") and m.get("id") in core_ids)
+        ]
+        remaining_slots = max(self.PINNED_MEMORY_LIMIT - len(core), 0)
+        contextual = self._hybrid_retrieve(
+            message,
+            contextual_candidates,
+            k=remaining_slots,
+        ) if remaining_slots else []
+
+        selected = []
+        seen = set()
+        for memory in [*core, *contextual]:
+            key = memory.get("id") or memory.get("text")
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(memory)
+        return selected[:self.PINNED_MEMORY_LIMIT]
 
     def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
         """Retrieve memories relevant to the message.
@@ -242,7 +307,7 @@ class ChatProcessor:
             "content": UNTRUSTED_CONTEXT_POLICY,
         })
 
-        # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
+        # Memory: core pinned facts + relevant pinned/extended recall.
         self._last_used_memories = []  # track what was injected
         if use_memory:
             mem_entries = self.memory_manager.load(owner=owner)
@@ -251,19 +316,24 @@ class ChatProcessor:
             extended = [m for m in mem_entries if not m.get("pinned")]
 
             _used_ids: list = []
-            if pinned:
-                pinned_text = "\n- ".join([m["text"] for m in pinned])
+            selected_pinned = self._select_pinned_memories(message, pinned)
+            if selected_pinned:
+                pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
                 preface.append(untrusted_context_message(
-                    "saved memory: pinned user facts",
-                    f"Core facts about the user:\n- {pinned_text}",
+                    "saved memory: pinned context",
+                    (
+                        "Pinned memory context. Some pinned memories are only "
+                        f"included when relevant:\n- {pinned_text}"
+                    ),
                 ))
-                for m in pinned:
+                for m in selected_pinned:
                     self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
-            if extended:
-                relevant = self._hybrid_retrieve(message, extended, k=3)
+            remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
+            if extended and remaining_memory_slots:
+                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(

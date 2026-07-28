@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js';
+import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -16,13 +16,13 @@ import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
 import searchModule from './search.js';
-import documentModule from './document.js';
-import * as emailInbox from './emailInbox.js';
+import documentModule from './document.js?v=20260722emailfastindex1';
+import * as emailInbox from './emailInbox.js?v=20260722emailfastindex1';
 import codeRunnerModule from './codeRunner.js';
-import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
+import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260722emailfastindex1';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
-import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -43,6 +43,246 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  let _contextHeaderSeq = 0;
+  let _contextHeaderData = null;
+  let _contextHeaderBound = false;
+
+  function _fmtContextNumber(n) {
+    const v = Number(n || 0);
+    return v ? v.toLocaleString() : '?';
+  }
+
+  function _contextColorClass(pct) {
+    const n = Number(pct || 0);
+    if (n >= 85) return 'danger';
+    if (n >= 70) return 'warn';
+    return '';
+  }
+
+  function _contextRingColor(pct) {
+    const n = Number(pct || 0);
+    if (n >= 85) return 'var(--red, #e06c75)';
+    if (n >= 70) return '#ff9900';
+    return 'var(--green, #98c379)';
+  }
+
+  function _contextRingMarkup(pct, { includeLabel = true, labelId = '' } = {}) {
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    const r = 6;
+    const stroke = 1.5;
+    const circ = 2 * Math.PI * r;
+    const fill = circ * (value / 100);
+    const label = value.toFixed(value >= 10 ? 0 : 1);
+    const idAttr = labelId ? ` id="${labelId}"` : '';
+    return `<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+        <circle cx="7" cy="7" r="${r}" fill="none" stroke="var(--border, #333)" stroke-width="${stroke}" opacity="0.3"/>
+        <circle cx="7" cy="7" r="${r}" fill="none" stroke="var(--ctx-stroke)" stroke-width="${stroke}"
+          stroke-dasharray="${fill} ${circ - fill}" stroke-dashoffset="${circ * 0.25}"
+          stroke-linecap="round" transform="rotate(-90 7 7)"/>
+      </svg>${includeLabel ? `<span class="ctx-ring-pct"${idAttr}>${label}%</span>` : ''}`;
+  }
+
+  function _renderContextHeaderRing(pill, pct) {
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    pill.style.setProperty('--ctx-color', _contextRingColor(value));
+    pill.innerHTML = _contextRingMarkup(value, { includeLabel: true, labelId: 'chat-context-pill-label' });
+  }
+
+  function _renderCompactMenuContextIcon(pct) {
+    const icon = document.querySelector('#export-compact-btn .dropdown-icon');
+    if (!icon) return;
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    const row = document.getElementById('export-compact-btn');
+    const color = _contextRingColor(value);
+    if (row) row.style.setProperty('--ctx-color', color);
+    icon.style.setProperty('--ctx-color', color);
+    icon.innerHTML = _contextRingMarkup(value, { includeLabel: false });
+  }
+
+  function _liveSessionModule() {
+    return (window.sessionModule && window.sessionModule.getCurrentSessionId)
+      ? window.sessionModule
+      : sessionModule;
+  }
+
+  function _closeContextHeaderPopup() {
+    document.querySelectorAll('.chat-context-popup').forEach(el => el.remove());
+    const pill = document.getElementById('chat-context-pill');
+    if (pill) pill.classList.remove('open');
+  }
+
+  function _positionContextHeaderPopup(popup, pill) {
+    const rect = pill.getBoundingClientRect();
+    popup.style.top = `${Math.round(rect.bottom + 8)}px`;
+    popup.style.left = `${Math.round(rect.left + (rect.width / 2) - 119)}px`;
+    document.body.appendChild(popup);
+    const pRect = popup.getBoundingClientRect();
+    if (pRect.left < 8) popup.style.left = '8px';
+    if (pRect.right > window.innerWidth - 8) popup.style.left = `${Math.max(8, window.innerWidth - pRect.width - 8)}px`;
+    if (pRect.bottom > window.innerHeight - 8) popup.style.top = `${Math.max(8, rect.top - pRect.height - 8)}px`;
+  }
+
+  function _showContextHeaderPopup() {
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill || pill.hidden || !_contextHeaderData) return;
+    const wasOpen = pill.classList.contains('open');
+    _closeContextHeaderPopup();
+    if (wasOpen) return;
+
+    const d = _contextHeaderData;
+    const pct = Number(d.context_percent || 0);
+    const colorClass = _contextColorClass(pct);
+    const modelShort = String(d.model || 'Unknown').split('/').pop();
+    const popup = document.createElement('div');
+    popup.className = `chat-context-popup ${colorClass}`.trim();
+
+    const title = document.createElement('div');
+    title.className = 'chat-context-popup-title';
+    title.textContent = 'Chat Context';
+    popup.appendChild(title);
+
+    const bar = document.createElement('div');
+    bar.className = 'chat-context-popup-bar';
+    const fill = document.createElement('div');
+    fill.className = 'chat-context-popup-fill';
+    fill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    bar.appendChild(fill);
+    popup.appendChild(bar);
+
+    const rows = [
+      ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
+      ['Usage', `${pct}%`],
+      ['Window model', modelShort],
+      ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
+      ['Auto compact', `${Number(d.auto_compact_threshold || 85)}%`],
+    ];
+    rows.forEach(([label, value]) => {
+      const row = document.createElement('div');
+      row.className = 'chat-context-popup-row';
+      const a = document.createElement('span');
+      a.textContent = label;
+      const b = document.createElement('span');
+      b.textContent = value;
+      row.appendChild(a);
+      row.appendChild(b);
+      popup.appendChild(row);
+    });
+
+    if (d.can_compact) {
+      const compactBtn = document.createElement('button');
+      compactBtn.type = 'button';
+      compactBtn.className = 'chat-context-compact-btn';
+      compactBtn.textContent = 'Compact';
+      compactBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        compactBtn.disabled = true;
+        compactBtn.replaceChildren();
+        try {
+          const wp = spinnerModule.createWhirlpool(13);
+          wp.element.style.margin = '0 5px 0 0';
+          compactBtn.appendChild(wp.element);
+        } catch (_) {}
+        compactBtn.appendChild(document.createTextNode('Compacting'));
+        const ok = await compactCurrentChatContext();
+        if (!ok) {
+          compactBtn.disabled = false;
+          compactBtn.textContent = 'Compact failed';
+        }
+      });
+      popup.appendChild(compactBtn);
+    }
+
+    pill.classList.add('open');
+    _positionContextHeaderPopup(popup, pill);
+    setTimeout(() => {
+      const close = (ev) => {
+        if (popup.contains(ev.target) || pill.contains(ev.target)) return;
+        document.removeEventListener('pointerdown', close, true);
+        _closeContextHeaderPopup();
+      };
+      document.addEventListener('pointerdown', close, true);
+    }, 0);
+  }
+
+  function _bindContextHeaderPill() {
+    if (_contextHeaderBound) return;
+    _contextHeaderBound = true;
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill) return;
+    pill.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      _showContextHeaderPopup();
+    });
+  }
+
+  export async function compactCurrentChatContext() {
+    const sm = _liveSessionModule();
+    const sid = sm && sm.getCurrentSessionId && sm.getCurrentSessionId();
+    if (!sid) {
+      uiModule.showToast('Open a chat first');
+      return false;
+    }
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid)}/compact`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      uiModule.showToast('Context compacted');
+      _closeContextHeaderPopup();
+      if (sm && sm.selectSession) await sm.selectSession(sid, { keepSidebar: true, showLoading: false });
+      refreshChatContextHeader('compact');
+      return true;
+    } catch (err) {
+      uiModule.showError(`Compact failed: ${err.message || err}`);
+      return false;
+    }
+  }
+  try { window.compactCurrentChatContext = compactCurrentChatContext; } catch (_) {}
+
+  export async function refreshChatContextHeader(reason = '') {
+    _bindContextHeaderPill();
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill) return;
+    const sm = _liveSessionModule();
+    const sid = sm && sm.getCurrentSessionId && sm.getCurrentSessionId();
+    const seq = ++_contextHeaderSeq;
+    if (!sid) {
+      _contextHeaderData = null;
+      pill.hidden = true;
+      _closeContextHeaderPopup();
+      return;
+    }
+    pill.hidden = false;
+    pill.classList.add('loading');
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid)}/context`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      if (seq !== _contextHeaderSeq) return;
+      const latestSm = _liveSessionModule();
+      if (!latestSm.getCurrentSessionId || latestSm.getCurrentSessionId() !== sid) return;
+      _contextHeaderData = data;
+      const pct = Number(data.context_percent || 0);
+      _renderContextHeaderRing(pill, pct);
+      _renderCompactMenuContextIcon(pct);
+      pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${String(data.model || '').split('/').pop()}`;
+      pill.classList.remove('warn', 'danger');
+      const colorClass = _contextColorClass(pct);
+      if (colorClass) pill.classList.add(colorClass);
+      pill.classList.remove('loading');
+      if (pill.classList.contains('open')) {
+        _closeContextHeaderPopup();
+        _showContextHeaderPopup();
+      }
+    } catch (err) {
+      if (seq !== _contextHeaderSeq) return;
+      _contextHeaderData = null;
+      pill.hidden = true;
+      pill.classList.remove('loading', 'warn', 'danger');
+      _closeContextHeaderPopup();
+      console.warn('context header refresh failed:', reason, err);
+    }
+  }
+  try { window.refreshChatContextHeader = refreshChatContextHeader; } catch (_) {}
 
   function _setForegroundChatBusy(active) {
     try {
@@ -95,6 +335,38 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
     };
   }
+
+  function _hashSessionCandidate() {
+    try {
+      const hashId = String(window.location.hash || '').replace(/^#/, '').trim();
+      if (!hashId) return '';
+      if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return '';
+      return hashId;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function _adoptOpenedSessionBeforeAutoCreate() {
+    if (!sessionModule || !sessionModule.getCurrentSessionId || sessionModule.getCurrentSessionId()) return true;
+    const activeRowId = document.querySelector('.list-item.active-session[data-session-id], .session-item.active[data-session-id]')?.dataset?.sessionId || '';
+    const hashId = _hashSessionCandidate();
+    const lastSelectedId = String(window.__odysseusLastSelectedSessionId || '').trim();
+    const targetId = activeRowId || hashId || lastSelectedId;
+    if (!targetId) return false;
+    try {
+      window.__odysseusComposerUserEdited = true;
+      if (sessionModule.selectSession) {
+        await sessionModule.selectSession(targetId, { keepSidebar: true, showLoading: false });
+      } else if (sessionModule.setCurrentSessionId) {
+        sessionModule.setCurrentSessionId(targetId);
+      }
+      return !!(sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── Auto-recovery: when a turn's stream silently dies (connection drop) or
   // goes quiet while the connection is alive, re-engage the model with a
   // completion handshake instead of leaving it hung. Capped so it can't loop.
@@ -124,6 +396,29 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       roleEl.removeAttribute('title');
     }
     if (tsSpan) roleEl.appendChild(tsSpan);
+  }
+
+  function _bestKnownStreamModel(routeSnapshot) {
+    try {
+      const current = sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '';
+      if (current) return current;
+    } catch (_) {}
+    try {
+      const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+      if (pending && pending.modelId) return pending.modelId;
+    } catch (_) {}
+    try {
+      const lastPicked = window.__odysseusLastPickedRoute || null;
+      if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
+        return lastPicked.model;
+      }
+    } catch (_) {}
+    if (routeSnapshot && routeSnapshot.model) return routeSnapshot.model;
+    try {
+      const dc = window.__odysseusDefaultChat || JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+      if (dc && dc.model) return dc.model;
+    } catch (_) {}
+    return '';
   }
   // Per-session research tracking (supports concurrent research across sessions)
   const _researchingStreamIds = new Set();
@@ -264,6 +559,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // Background streaming support
   const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
+  const _activeStreams = new Map();     // sessionId -> { abortCtrl, holder, query, startedAt }
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
@@ -273,8 +569,34 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   /** Check if an SSE reader is still actively connected for a session. */
   function hasActiveStream(sessionId) {
-    return _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
+    return _activeStreams.has(sessionId) || _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
            _resumingStreams.has(sessionId);
+  }
+
+  function _getForegroundStreamState() {
+    try {
+      const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+      return sid ? (_activeStreams.get(sid) || null) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function _syncForegroundStreamGlobals() {
+    const active = _getForegroundStreamState();
+    isStreaming = !!active;
+    currentAbort = active ? active.abortCtrl : null;
+    currentHolder = active ? active.holder : null;
+    _setForegroundChatBusy(!!active || !!_sendInFlight);
+    return active;
+  }
+
+  function _touchStreamActivity(sessionId) {
+    const now = Date.now();
+    _lastReaderActivity = now;
+    const active = sessionId ? _activeStreams.get(sessionId) : null;
+    if (active) active.lastActivity = now;
+    return now;
   }
 
   // Sources box builder and toggleSources are now in chatRenderer.js
@@ -287,6 +609,34 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   var _buildImageBubble = chatRenderer.buildImageBubble;
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
+
+  function _appendGeneratedImageBubble(data) {
+    const imageUrl = data?.image_url || data?.url || '';
+    if (!imageUrl) return false;
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return false;
+    const imageKey = String(data.image_id || imageUrl);
+    const exists = Array.from(chatBox.querySelectorAll('.generated-image-wrap')).some(el => (
+      el.dataset.imageKey === imageKey ||
+      el.dataset.imageUrl === imageUrl ||
+      el.querySelector('img.generated-image')?.getAttribute('src') === imageUrl
+    ));
+    if (exists) return false;
+    const bubble = _buildImageBubble(
+      imageUrl,
+      data.image_prompt,
+      data.image_model,
+      data.image_size,
+      data.image_quality,
+      data.image_id
+    );
+    bubble.dataset.imageKey = imageKey;
+    bubble.dataset.imageUrl = imageUrl;
+    chatBox.appendChild(bubble);
+    uiModule.scrollHistory();
+    window.dispatchEvent(new CustomEvent('gallery-refresh'));
+    return true;
+  }
 
   // stripToolBlocks and roleTimestamp now in chatRenderer.js
   var stripToolBlocks = chatRenderer.stripToolBlocks;
@@ -339,7 +689,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    */
   export function init(apiBase) {
     API_BASE = apiBase;
-    initSlashCommands({ apiBase, isStreaming: () => isStreaming });
+    initSlashCommands({ apiBase, isStreaming: () => !!_getForegroundStreamState() });
     // Initialize email inbox
     emailInbox.init(documentModule);
     // Wire the slash-command autocomplete popup on the chat composer. The
@@ -350,9 +700,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (ta && mod.initSlashAutocomplete) mod.initSlashAutocomplete(ta);
     }).catch(() => {});
 
-    // ArrowUp on empty composer recalls last user message (like many chat apps).
+    // ArrowUp on the composer recalls previous user prompts from this chat.
     const _wireArrowUpRecall = (composer) =>
-      wireArrowUpRecall(composer, () => getLastUserMessageFromChatHistory(), {
+      wireArrowUpRecall(composer, () => getUserMessagesFromChatHistory(), {
         autoResize: uiModule?.autoResize,
       });
 
@@ -434,12 +784,68 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // API key pattern for the guard in handleChatSubmit
   const API_KEY_RE = /^(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_\-]{30,}|xai-[a-zA-Z0-9]{20,})$/;
+  const PLAN_STORAGE_KEY = 'odysseus-active-plan';
 
   const _queuedAgentRequests = [];
   let _queuedDrainTimer = null;
   let _queuedPromoteTimer = null;
   let _queuedRequestSeq = 0;
   let _queuedBubbleHost = null;
+  let _pendingApprovedPlan = '';
+
+  function _extractPlanText(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+    const stripped = raw
+      .replace(/<think[\s\S]*?<\/think>/gi, '')
+      .replace(/<thought[\s\S]*?<\/thought>/gi, '')
+      .trim();
+    const lines = stripped.split('\n');
+    const firstChecklist = lines.findIndex(line => /^\s*(?:[-*]|\d+\.)\s+\[[ x-]\]\s+/i.test(line));
+    if (firstChecklist >= 0) return lines.slice(firstChecklist).join('\n').trim();
+    const firstPlanHeading = lines.findIndex(line => /^\s{0,3}#{1,4}\s+.*plan/i.test(line) || /^\s*(?:plan|proposed plan)\s*:?$/i.test(line));
+    if (firstPlanHeading >= 0) return lines.slice(firstPlanHeading).join('\n').trim();
+    return stripped;
+  }
+
+  function _getStoredPlan() {
+    try { return localStorage.getItem(PLAN_STORAGE_KEY) || ''; } catch (_) { return ''; }
+  }
+
+	  function _setStoredPlan(plan) {
+	    const text = _extractPlanText(plan);
+	    if (!text) return;
+	    try { localStorage.setItem(PLAN_STORAGE_KEY, text); } catch (_) {}
+	  }
+
+	  function _clearStoredPlan() {
+	    try { localStorage.removeItem(PLAN_STORAGE_KEY); } catch (_) {}
+	  }
+
+	  function _attachPlanActions(target, plan) {
+	    if (!target || !String(plan || '').trim() || target.querySelector('.plan-inline-actions')) return;
+	    const actions = document.createElement('div');
+	    actions.className = 'plan-inline-actions';
+	    actions.innerHTML = `
+	      <button type="button" class="plan-inline-execute">
+	        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="7 4 20 12 7 20 7 4"></polygon></svg>
+	        Execute
+	      </button>
+	      <button type="button" class="plan-inline-clear">Clear</button>`;
+	    actions.querySelector('.plan-inline-execute')?.addEventListener('click', () => {
+	      const approved = _getStoredPlan() || _extractPlanText(plan);
+	      if (!approved.trim()) return;
+	      _pendingApprovedPlan = approved;
+	      if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);
+	      if (window.__odysseusSetChatMode) window.__odysseusSetChatMode('agent');
+	      _setComposerAndSend('Execute the approved plan.');
+	    });
+	    actions.querySelector('.plan-inline-clear')?.addEventListener('click', () => {
+	      _clearStoredPlan();
+	      actions.remove();
+	    });
+	    (target.querySelector('.body') || target).appendChild(actions);
+	  }
 
   function _escapeQueueText(s) {
     return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -743,7 +1149,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (submitBtn) submitBtn.classList.add('send-pending');
     const _releaseSendFlag = () => {
       _sendInFlight = false;
-      _setForegroundChatBusy(isStreaming);
+      _syncForegroundStreamGlobals();
       if (_earlyMessageInput) _earlyMessageInput.disabled = false;
       if (submitBtn) submitBtn.classList.remove('send-pending');
     };
@@ -790,6 +1196,44 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
     }
 
+    const incognitoChkForSend = el('incognito-toggle');
+    const isIncognitoForSend = !!(incognitoChkForSend && incognitoChkForSend.checked);
+
+    if (!isIncognitoForSend) {
+      await _adoptOpenedSessionBeforeAutoCreate();
+    }
+
+    const selectedRouteForSend = (() => {
+      try {
+        const lastPicked = window.__odysseusLastPickedRoute || null;
+        if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
+          return {
+            model: lastPicked.model || '',
+            endpoint_url: lastPicked.endpoint_url || '',
+            endpoint_id: lastPicked.endpoint_id || '',
+            source: 'last-picked',
+          };
+        }
+        const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+        if (pending && pending.modelId) {
+          return {
+            model: pending.modelId || '',
+            endpoint_url: pending.url || '',
+            endpoint_id: pending.endpointId || '',
+            source: pending.source || '',
+          };
+        }
+        return {
+          model: sessionModule.getCurrentModel ? (sessionModule.getCurrentModel() || '') : '',
+          endpoint_url: sessionModule.getCurrentEndpointUrl ? (sessionModule.getCurrentEndpointUrl() || '') : '',
+          endpoint_id: '',
+          source: '',
+        };
+      } catch (_) {
+        return { model: '', endpoint_url: '', endpoint_id: '', source: '' };
+      }
+    })();
+
     // Materialize pending session (deferred from model click) on first message
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
       _sendPerf.mark('pending_session_begin');
@@ -814,21 +1258,31 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Auto-create a session using default chat config. Always fetch fresh
       // so that a recent Settings change takes effect without a page reload.
       try {
-        let dc = null;
+        let dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
+        if (!dc || !dc.endpoint_url || !dc.model) {
+          try {
+            dc = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+          } catch (_) {}
+        }
         try {
-          _sendPerf.mark('default_chat_fetch_begin');
-          const dcRes = await fetch('/api/default-chat');
-          dc = await dcRes.json();
-          _sendPerf.mark('default_chat_fetch_done');
-          if (dc && dc.endpoint_url && dc.model) {
-            try { window.__odysseusDefaultChat = dc; } catch (_) {}
+          if (!dc || !dc.endpoint_url || !dc.model) {
+            _sendPerf.mark('default_chat_fetch_begin');
+            const dcRes = await fetch('/api/default-chat');
+            dc = await dcRes.json();
+            _sendPerf.mark('default_chat_fetch_done');
+            if (dc && dc.endpoint_url && dc.model) {
+              try {
+                window.__odysseusDefaultChat = dc;
+                localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
+              } catch (_) {}
+            }
           }
         } catch (_) {
           dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
         }
         if (dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
@@ -877,11 +1331,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (submitBtn) submitBtn.classList.remove('send-pending');
     _sendInFlight = false;
 
+    try {
+      const pendingSwitch = window.__odysseusModelSwitchPromise;
+      if (pendingSwitch && typeof pendingSwitch.then === 'function') {
+        await pendingSwitch;
+      }
+    } catch (_) {}
+
     // Capture session ID for background stream detection
     const streamSessionId = sessionModule.getCurrentSessionId();
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
-    _lastReaderActivity = Date.now();
+    _touchStreamActivity(streamSessionId);
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
@@ -922,7 +1383,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         [120000, 'Still working - no tokens yet from the model'],
       ];
       firstTokenWaitTimers = steps.map(([ms, text]) => setTimeout(() => {
-        if (!accumulated && spinner && spinner.element && !(currentAbort && currentAbort.signal.aborted)) {
+        if (!accumulated && spinner && spinner.element && !(abortCtrl && abortCtrl.signal.aborted)) {
           spinner.updateMessage(text);
         }
       }, ms));
@@ -1166,6 +1627,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      if (selectedRouteForSend.model) fd.append('selected_model', selectedRouteForSend.model);
+      if (selectedRouteForSend.endpoint_url) fd.append('selected_endpoint_url', selectedRouteForSend.endpoint_url);
+      if (selectedRouteForSend.endpoint_id) fd.append('selected_endpoint_id', selectedRouteForSend.endpoint_id);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // Auto-save & send active doc ID so the backend sees latest content
       if (documentModule && activeDocIdForSend) {
@@ -1197,31 +1661,45 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Web toggle: pre-search in Chat mode only. Agent mode should not
       // opportunistically hit SearXNG just because the chat search toggle is
       // on; explicit web/current-info requests are handled by the backend
-      // intent gate.
-      const toggleState = Storage.loadToggleState();
-      let isAgentMode = (toggleState.mode || 'chat') === 'agent';
-      const incognitoChk = el('incognito-toggle');
-      const isIncognito = !!(incognitoChk && incognitoChk.checked);
-      // Auto-escalate to agent mode when a document is open — the user expects
-      // the AI to see the document and have tools to edit it
-      if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
-        isAgentMode = true;
-      }
-      fd.append('mode', isAgentMode ? 'agent' : 'chat');
-      if (el('web-toggle').checked) {
-        if (!isAgentMode) {
-          fd.append('use_web', 'true');
+	      // intent gate.
+	      const toggleState = Storage.loadToggleState();
+	      const isPlanMode = !!toggleState.plan_mode && !(el('research-toggle') && el('research-toggle').checked);
+	      let isAgentMode = (toggleState.mode || 'chat') === 'agent';
+      const isIncognito = isIncognitoForSend;
+	      const workspaceAgentIntent = !isIncognito && /\b(fix|debug|implement|change|update|refactor|patch|review|test|run|execute|start|launch|build|lint|typecheck|benchmark|eval|terminal[- ]bench|tbench|repo|repository|codebase|project|app|server|api|frontend|backend|bug|issue|pr|file|folder|directory|source|logs?|trace|stacktrace|traceback|docker|container|tmux|terminal|shell|git|branch|commit|diff|pytest|process|port|endpoint|computer|machine|laptop|device|system)\b/i.test(String(msg || ''));
+	      if (isPlanMode || _pendingApprovedPlan) {
+	        isAgentMode = true;
+	      }
+	      if (!isAgentMode && workspaceAgentIntent) {
+	        isAgentMode = true;
+	      }
+	      // Auto-escalate to agent mode when a document is open — the user expects
+	      // the AI to see the document and have tools to edit it
+	      if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
+	        isAgentMode = true;
+	      }
+	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
+	      fd.append('plan_mode', isPlanMode ? 'true' : 'false');
+	      if (!isPlanMode && _pendingApprovedPlan) {
+	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
+	        _pendingApprovedPlan = '';
+	      }
+	      if (el('web-toggle').checked) {
+	        if (!isAgentMode) {
+	          fd.append('use_web', 'true');
         }
       }
       if (isAgentMode) {
         fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
       }
-      if (el('research-toggle').checked) {
-        fd.append('use_research', 'true');
-        // Research always runs in chat mode — override agent if set
-        fd.set('mode', 'chat');
-      }
+	      if (el('research-toggle').checked) {
+	        fd.append('use_research', 'true');
+	        // Research always runs in chat mode — override agent if set
+	        fd.set('mode', 'chat');
+	        fd.set('plan_mode', 'false');
+	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      if (workspaceAgentIntent) fd.set('allow_bash', 'true');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {
         fd.append('use_rag', 'false');
@@ -1242,8 +1720,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       abortCtrl._reason = '';
       currentAbort = abortCtrl;
 
-      const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+	      const _tState = Storage.loadToggleState();
+	      const _isAgent = (_tState.mode || 'chat') === 'agent' || !!_tState.plan_mode || workspaceAgentIntent;
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -1274,9 +1752,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Track holder globally so stop button can access it
       currentHolder = holder;
+      _activeStreams.set(streamSessionId, {
+        abortCtrl,
+        holder,
+        query: streamQuery,
+        startedAt: Date.now(),
+        lastActivity: Date.now(),
+      });
+      _syncForegroundStreamGlobals();
       holder._researchQuery = msg; // Store query for notification text
       
-      const modelName = sessionModule.getCurrentModel() || null;
+      const modelName = _bestKnownStreamModel(selectedRouteForSend) || null;
 
       let loadingText = 'Initializing...';
 
@@ -1424,6 +1910,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _sourcesData = null;        // Raw sources data for rebuilding
       let _sourcesType = '';          // 'web' or 'research'
       let _findingsData = null;      // Raw findings data for collapsible box
+      const _generatedImagesForTurn = [];
+      function _rememberGeneratedImage(data) {
+        const imageUrl = data?.image_url || data?.url || '';
+        if (!imageUrl) return;
+        const imageKey = String(data.image_id || imageUrl);
+        if (_generatedImagesForTurn.some(x => String(x.image_id || x.image_url || x.url) === imageKey || x.image_url === imageUrl || x.url === imageUrl)) return;
+        _generatedImagesForTurn.push({ ...data, image_url: imageUrl, url: imageUrl });
+      }
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
       function _metricsTargetForTurn() {
         const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
@@ -1700,7 +2194,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       while (true) {
         const { done, value } = await reader.read();
-        _lastReaderActivity = Date.now();
+        _touchStreamActivity(streamSessionId);
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -1730,7 +2224,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 accumulated: accumulated,
                 sourcesHtml: _sourcesHtml,
                 findingsData: null,
-                abortCtrl: currentAbort,
+                abortCtrl,
                 query: streamQuery,
                 metrics: null,
               });
@@ -1822,10 +2316,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
+              }
+              if (json.type === 'generated_image') {
+                _rememberGeneratedImage(json);
+                if (!_isBg) _appendGeneratedImageBubble(json);
+                continue;
               }
               if (json.type === 'agent_prep') {
                 if (!_isBg) {
@@ -1853,8 +2352,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _delta = '</think>' + _delta; _thinkOpen = false;
 	                }
 	                const wasEmpty = !accumulated;
-	                accumulated += _delta;
-	                currentAccumulated = accumulated; // Update global tracker
+		                accumulated += _delta;
+		                if (!_isBg) currentAccumulated = accumulated; // Foreground stop-state text
 	                // First token arrived — switch stop button from processing to streaming
 	                if (wasEmpty && submitBtn && !_isBg) {
 	                  submitBtn.dataset.phase = 'receiving';
@@ -2337,7 +2836,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   contBtn.className = 'continue-btn';
                   contBtn.title = 'Continue the task';
                   contBtn.textContent = 'Continue ▸';
-                  const _holder = currentHolder;
+                  const _holder = holder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
                     _hideUserBubble = true;
@@ -2459,13 +2958,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (metrics) {
                   const metricsTarget = _metricsTargetForTurn();
                   if (metricsTarget) displayMetrics(metricsTarget, metrics);
+                  refreshChatContextHeader('metrics');
                 }
 
               } else if (json.type === 'message_saved') {
                 // Wire the persisted DB id onto the just-streamed bubble so it
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
-                if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
+                if (holder && json.id) holder.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
@@ -2589,6 +3089,29 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // user doesn't stare at a blind "Running…" spinner.
                 if (_isBg) continue;
                 if (!currentToolBubble) continue;
+                const isImageProgress = /image/i.test(String(json.tool || '')) || /image/i.test(String(json.message || ''));
+                if (json.total || json.percent != null || isImageProgress) {
+                  const content = currentToolBubble.querySelector('.agent-thread-content');
+                  if (content) {
+                    let progressEl = currentToolBubble.querySelector('.agent-image-progress');
+	                    if (!progressEl) {
+	                      progressEl = document.createElement('div');
+	                      progressEl.className = 'agent-image-progress';
+	                      progressEl.innerHTML = '<div class="agent-image-progress-row"><span class="agent-image-progress-label"></span><span class="agent-image-progress-value"></span></div>';
+	                      content.appendChild(progressEl);
+	                    }
+                    const step = Number(json.step || 0);
+                    const total = Number(json.total || 0);
+                    const hasExactProgress = total > 0 || json.percent != null;
+                    progressEl.classList.toggle('is-indeterminate', !hasExactProgress);
+                    const pct = Number(json.percent != null ? json.percent : (total ? (step / total) * 100 : 0));
+	                    const bounded = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
+	                    const label = progressEl.querySelector('.agent-image-progress-label');
+	                    const value = progressEl.querySelector('.agent-image-progress-value');
+	                    if (label) label.textContent = json.message || 'Editing image…';
+	                    if (value) value.textContent = hasExactProgress ? (total ? `${step}/${total}` : `${Math.round(bounded)}%`) : (json.elapsed ? `${json.elapsed}s` : '');
+	                  }
+	                }
                 // The per-second ticker (started in tool_start) owns the
                 // elapsed display; here we just surface the live output tail.
                 const tailStr = (json.tail || '').trim();
@@ -2666,11 +3189,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
                 // --- Render generated images inline ---
                 if (json.image_url) {
-                  const chatBox = document.getElementById('chat-history');
-                  chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
-                  uiModule.scrollHistory();
-                  // Notify gallery to refresh if open
-                  window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                  _rememberGeneratedImage(json);
+                  _appendGeneratedImageBubble(json);
                 }
                 // --- Render browser screenshots in tool output ---
                 if (json.screenshot && currentToolBubble) {
@@ -3121,15 +3641,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (!footerTarget.querySelector('.msg-footer')) {
           footerTarget.appendChild(createMsgFooter(footerTarget));
         }
+        if (_generatedImagesForTurn.length && !_isBg) {
+          _generatedImagesForTurn.forEach(imgData => _appendGeneratedImageBubble(imgData));
+        }
         // Add "View Report" link for completed research
         if (_researchingStreamIds.has(streamSessionId)) {
           _appendViewReportLink(footerTarget, streamSessionId);
         }
         // Also store raw on the footer target so copy/TTS work
-        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
-        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
-          addAITTSButton(footerTarget, accumulated);
-        }
+	        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
+		        try {
+		          const _endToggles = Storage.loadToggleState();
+		          if (_endToggles.plan_mode && accumulated) {
+		            _setStoredPlan(accumulated);
+		            _attachPlanActions(footerTarget, accumulated);
+		          }
+		        } catch (_) {}
+	        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
+	          addAITTSButton(footerTarget, accumulated);
+	        }
         // TTS auto-play: streaming mode flushes remaining text, non-streaming enqueues full message
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
           const ttsBtn = holder.querySelector('.ai-tts-button');
@@ -3233,8 +3763,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // Stop streaming TTS on any error/abort
         if (streamingTTS && window.aiTTSManager) window.aiTTSManager.stop();
 
-        if (currentAbort && currentAbort.signal.aborted) {
-          const abortReason = currentAbort._reason || '';
+        if (abortCtrl && abortCtrl.signal.aborted) {
+          const abortReason = abortCtrl._reason || '';
           // Timeout-triggered aborts should remain visible instead of disappearing.
           if (timedOut || abortReason === 'timeout') {
             const timeoutMsg = _isAgent
@@ -3251,7 +3781,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${timeoutMsg}]</span>`;
               holder.querySelector('.body').appendChild(timeoutNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3267,7 +3797,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${offlineMsg}]</span>`;
               holder.querySelector('.body').appendChild(offlineNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3283,7 +3813,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${recoveryMsg}]</span>`;
               holder.querySelector('.body').appendChild(recoveryNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3298,7 +3828,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               staleNote.innerHTML = `<span style="opacity:0.7;">[${staleMsg}]</span>`;
               holder.querySelector('.body').appendChild(staleNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3358,7 +3888,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
 
           // Now clear the abort controller
-          currentAbort = null;
+          if (currentAbort === abortCtrl) currentAbort = null;
         } else {
           console.error(err);
           // Stream died with a tool node still spinning. Its per-node tickers
@@ -3394,6 +3924,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       clearResponseTimeout();
       clearProcessingProbe();
       clearFirstTokenWaitTimers();
+      _activeStreams.delete(streamSessionId);
+      if (_streamSessionId === streamSessionId) _streamSessionId = null;
+      _syncForegroundStreamGlobals();
       // Streaming done — let screen readers announce the settled response.
       const _chatLogDone = document.getElementById('chat-history');
       if (_chatLogDone) _chatLogDone.setAttribute('aria-busy', 'false');
@@ -3502,13 +4035,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // the server run — otherwise closing the tab would kill the background task,
   // defeating the whole point. Only the Stop button cancels the server run.
   export function abortCurrentRequest(stopServer = false) {
-    if (currentAbort) {
-      currentAbort.abort();
+    const active = _getForegroundStreamState();
+    const abortCtrl = active ? active.abortCtrl : currentAbort;
+    if (abortCtrl) {
+      abortCtrl.abort();
       // Don't set to null here - let catch block handle it
     }
     if (stopServer) {
       try {
-        const _sid = _streamSessionId
+        const _sid = (sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId())
+          || _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
         if (_sid) {
           fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
@@ -3609,9 +4145,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (uiModule.scrollHistory) uiModule.scrollHistory();
   }
   async function _probeStaleLocalStream() {
-    if (!isStreaming || _staleStreamProbeInFlight) return;
-    if (Date.now() - _lastReaderActivity < STALE_LOCAL_STREAM_MS) return;
-    const sid = _streamSessionId || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    const active = _getForegroundStreamState();
+    if (!active || _staleStreamProbeInFlight) return;
+    if (Date.now() - (active.lastActivity || _lastReaderActivity) < STALE_LOCAL_STREAM_MS) return;
+    const sid = sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
     if (!sid) return;
     if (_backgroundStreams.has(sid) || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid)) return;
     _staleStreamProbeInFlight = true;
@@ -3620,16 +4157,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         credentials: 'same-origin',
         cache: 'no-store',
       });
-      if (!isStreaming || _backgroundStreams.has(sid)) return;
+      if (!_getForegroundStreamState() || _backgroundStreams.has(sid)) return;
       if (res.status !== 404) return;
 
       console.warn('[stream-watchdog] Local stream was stale and server has no active stream. Unlocking composer.');
-      if (currentAbort && !currentAbort.signal.aborted) {
-        currentAbort._reason = 'stale-local';
-        currentAbort.abort();
+      if (active.abortCtrl && !active.abortCtrl.signal.aborted) {
+        active.abortCtrl._reason = 'stale-local';
+        active.abortCtrl.abort();
       }
-      isStreaming = false;
-      _setForegroundChatBusy(false);
+      _activeStreams.delete(sid);
+      _syncForegroundStreamGlobals();
       _sendInFlight = false;
       if (_webLockRelease) {
         _webLockRelease();
@@ -3714,7 +4251,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    * Called when user switches sessions mid-stream.
    */
   export function detachCurrentStream(sessionId) {
-    if (!isStreaming || !currentAbort) {
+    const active = sessionId ? _activeStreams.get(sessionId) : _getForegroundStreamState();
+    if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
       return;
@@ -3725,8 +4263,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       accumulated: currentAccumulated,
       sourcesHtml: '',
       findingsData: null,
-      abortCtrl: currentAbort,
-      query: currentHolder ? (currentHolder._researchQuery || '') : '',
+      abortCtrl: active.abortCtrl,
+      query: active.query || (active.holder ? (active.holder._researchQuery || '') : ''),
       metrics: null,
     });
     // Mark session with pulsing dot in sidebar
@@ -3734,11 +4272,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       sessionModule.markStreaming(sessionId);
     }
     // Clear local state WITHOUT aborting the fetch
-    currentAbort = null;
-    isStreaming = false;
-    _setForegroundChatBusy(false);
-    currentHolder = null;
+    if (currentAbort === active.abortCtrl) currentAbort = null;
+    if (currentHolder === active.holder) currentHolder = null;
+    if (_streamSessionId === sessionId) _streamSessionId = null;
     currentAccumulated = '';
+    _syncForegroundStreamGlobals();
     // Reset submit button so the new chat is ready to send
     const submitBtn = document.querySelector('.send-btn');
     if (submitBtn) updateSubmitButton('idle', submitBtn);
@@ -4148,10 +4686,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Tab suspension recovery: when user tabs back in, check if stream froze
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (!isStreaming) return;
+      const active = _getForegroundStreamState();
+      if (!active) return;
 
       // Stream claims to be running — check if reader is actually alive
-      const staleSince = Date.now() - _lastReaderActivity;
+      const staleSince = Date.now() - (active.lastActivity || _lastReaderActivity);
       if (staleSince < 20000) return; // Active recently, probably fine
 
       // Reader hasn't produced data in 5+ seconds after tab resume.
@@ -4160,18 +4699,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       setTimeout(() => {
         // Re-check — maybe the reader woke up during the grace period
-        if (!isStreaming) return;
-        const stillStale = Date.now() - _lastReaderActivity;
+        const stillActive = _getForegroundStreamState();
+        if (!stillActive) return;
+        const stillStale = Date.now() - (stillActive.lastActivity || _lastReaderActivity);
         if (stillStale < 5000) return; // Came back to life
 
         console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
 
         // Abort the frozen stream, but preserve the visible bubble.
-        if (currentAbort) {
-          currentAbort._reason = 'recovery';
-          currentAbort.abort();
+        if (stillActive.abortCtrl) {
+          stillActive.abortCtrl._reason = 'recovery';
+          stillActive.abortCtrl.abort();
         }
-        isStreaming = false;
+        try {
+          const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+          if (sid) _activeStreams.delete(sid);
+        } catch (_) {}
+        _syncForegroundStreamGlobals();
 
         // Release Web Lock
         if (_webLockRelease) {

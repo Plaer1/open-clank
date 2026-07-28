@@ -42,6 +42,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
+from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
@@ -53,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
-_IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -111,7 +111,8 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
 _WEB_FOLLOWUP_RE = re.compile(
     r"^\s*(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:check|try\s+again|look(?:\s+now|\s+it\s+up)?|search(?:\s+now|\s+online|\s+it)?|"
-    r"do\s+it|again)\??\s*$",
+    r"do\s+it|again|approved|approve(?:d)?|yes|ok(?:ay)?|proceed|go\s+ahead|"
+    r"send(?:\s+it)?|submit(?:\s+it)?|email(?:\s+them|\s+it)?)\??\s*$",
     re.I,
 )
 _RECENT_WEB_CONTEXT_RE = re.compile(
@@ -119,6 +120,26 @@ _RECENT_WEB_CONTEXT_RE = re.compile(
     r"price|current|latest|search|look\s+up|online)\b",
     re.I,
 )
+_RECENT_BROWSER_CONTEXT_RE = re.compile(
+    r"\b(?:browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|click|"
+    r"fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|contact\s+form|web\s*form|"
+    r"form\s+submission|playwright|automation)\b",
+    re.I,
+)
+_BROWSER_MCP_TOOLS = {
+    "mcp__builtin_browser__browser_navigate",
+    "mcp__builtin_browser__browser_snapshot",
+    "mcp__builtin_browser__browser_click",
+    "mcp__builtin_browser__browser_type",
+    "mcp__builtin_browser__browser_fill_form",
+    "mcp__builtin_browser__browser_select_option",
+    "mcp__builtin_browser__browser_press_key",
+    "mcp__builtin_browser__browser_wait_for",
+    "mcp__builtin_browser__browser_take_screenshot",
+    "mcp__builtin_browser__browser_drag",
+    "mcp__builtin_browser__browser_navigate_back",
+    "mcp__builtin_browser__browser_close",
+}
 
 
 def _recent_session_text(sess, limit: int = 8, max_chars: int = 2000) -> str:
@@ -139,6 +160,13 @@ def _is_contextual_web_followup(message: str, sess) -> bool:
     if not message or not _WEB_FOLLOWUP_RE.search(message):
         return False
     return bool(_RECENT_WEB_CONTEXT_RE.search(_recent_session_text(sess)))
+
+
+def _is_contextual_browser_followup(message: str, sess) -> bool:
+    """Treat short retry replies as browser tasks when recent context was forms/browser automation."""
+    if not message or not _WEB_FOLLOWUP_RE.search(message):
+        return False
+    return bool(_RECENT_BROWSER_CONTEXT_RE.search(_recent_session_text(sess, limit=12, max_chars=4000)))
 
 
 def _resolve_request_workspace(request, raw_value) -> tuple:
@@ -166,6 +194,46 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     from src.tool_execution import vet_workspace
     workspace = vet_workspace(requested) or ""
     return workspace, (requested if not workspace else "")
+
+
+_ABS_PATH_RE = re.compile(r"(?<!\S)(~?/[^\"'\s`<>]+)")
+_LOCAL_FILE_TASK_RE = re.compile(
+    r"\b(?:file|folder|directory|path|workspace|repo|project|movie|video|"
+    r"subtitle|subtitles|srt|vtt|ass|download|save|rename|move|copy|extract|"
+    r"convert|ffmpeg|run|execute|open|read|inspect|fix|debug|test|build)\b",
+    re.IGNORECASE,
+)
+
+
+def _resolve_workspace_from_message_path(request, message: str) -> tuple[str, str]:
+    """Auto-bind a workspace only when the user names an explicit safe path.
+
+    This is intentionally deterministic rather than LLM/RAG-driven: RAG can
+    choose the tool family, but filesystem binding must not let a prompt infer
+    or probe arbitrary host paths. For a file path, bind its parent directory.
+    For a directory path, bind that directory.
+    """
+    text = str(message or "")
+    if not text or not _LOCAL_FILE_TASK_RE.search(text):
+        return "", ""
+
+    from src.tool_security import owner_is_admin_or_single_user
+    if not owner_is_admin_or_single_user(get_current_user(request)):
+        return "", ""
+
+    from src.tool_execution import vet_workspace
+
+    for match in _ABS_PATH_RE.finditer(text):
+        raw = match.group(1).rstrip(".,;:)]}")
+        expanded = os.path.realpath(os.path.expanduser(raw))
+        candidates = [expanded]
+        if os.path.isfile(expanded):
+            candidates.insert(0, os.path.dirname(expanded))
+        for candidate in candidates:
+            workspace = vet_workspace(candidate) or ""
+            if workspace:
+                return workspace, ""
+    return "", ""
 
 
 def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
@@ -243,7 +311,7 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     models into the image-generation path.
     """
     model = (getattr(sess, "model", "") or "").strip()
-    if any(model.lower().startswith(prefix) for prefix in _IMAGE_MODEL_PREFIXES):
+    if looks_like_image_generation_model(model):
         return True
 
     endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
@@ -269,6 +337,29 @@ def _is_image_generation_session(sess, owner: str | None = None) -> bool:
     finally:
         db.close()
     return False
+
+
+def _first_image_attachment(chat_handler, att_ids: List[str], owner: str | None = None) -> Optional[Dict[str, Any]]:
+    """Return the first attached image file that this owner can read."""
+    upload_handler = getattr(chat_handler, "upload_handler", None)
+    if not upload_handler:
+        return None
+    for att_id in att_ids or []:
+        try:
+            info = upload_handler.resolve_upload(att_id, owner=owner)
+        except Exception as e:
+            logger.warning("Failed to resolve image edit upload %s", att_id, exc_info=e)
+            continue
+        if not info:
+            continue
+        name = info.get("name") or info.get("original_name") or info.get("id") or ""
+        mime = info.get("mime", "")
+        try:
+            if upload_handler.is_image_file(name, mime):
+                return info
+        except Exception:
+            continue
+    return None
 
 
 def _recover_empty_session_model(sess, session_id: str, owner: str | None = None) -> bool:
@@ -381,9 +472,85 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
     except Exception as e:
         db.rollback()
         logger.warning("Failed to recover empty session model for %s: %s", session_id, e)
+    return False
+
+
+def _reconcile_selected_route_from_request(
+    request: Request,
+    sess,
+    session_id: str,
+    form_data,
+    owner: str | None = None,
+) -> bool:
+    """Apply the model route the browser selected before streaming.
+
+    The frontend creates a pending chat first and only materializes it on first
+    send. Startup/default-model refreshes can race with that UI state, so the
+    stream request includes the route that was selected at click/send time.
+    Trust only registered endpoint ids, or the session's existing endpoint URL.
+    """
+    selected_model = str(form_data.get("selected_model") or "").strip()
+    selected_endpoint_id = str(form_data.get("selected_endpoint_id") or "").strip()
+    selected_endpoint_url = str(form_data.get("selected_endpoint_url") or "").strip()
+    if not selected_model:
         return False
+
+    endpoint_url = ""
+    headers = None
+    if selected_endpoint_id or selected_endpoint_url:
+        try:
+            from src.auth_helpers import owner_filter
+            from src.endpoint_resolver import build_headers, normalize_base
+            db = SessionLocal()
+            try:
+                q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+                if selected_endpoint_id:
+                    q = q.filter(ModelEndpoint.id == selected_endpoint_id)
+                if owner:
+                    q = owner_filter(q, ModelEndpoint, owner)
+                candidates = q.all() if selected_endpoint_url and not selected_endpoint_id else [q.first()]
+                ep = None
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    if selected_endpoint_id or _session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
+                        ep = cand
+                        break
+                if not ep:
+                    return False
+                endpoint_url = build_chat_url(normalize_base(ep.base_url or ""))
+                headers = build_headers(ep.api_key or "", ep.base_url or "") if ep.api_key else {}
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Failed to resolve selected endpoint %s/%s for %s: %s", selected_endpoint_id, selected_endpoint_url, session_id, e)
+            return False
+
+    if not endpoint_url:
+        return False
+
+    if (
+        selected_model == (getattr(sess, "model", "") or "")
+        and endpoint_url == (getattr(sess, "endpoint_url", "") or "")
+    ):
+        return False
+
+    sess.model = selected_model
+    sess.endpoint_url = endpoint_url
+    sess.headers = headers or {}
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.model = selected_model
+            db_session.endpoint_url = endpoint_url
+            db_session.headers = sess.headers or {}
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
     finally:
         db.close()
+    logger.info("Reconciled selected route for %s: model=%r endpoint=%s", session_id, selected_model, redact_url(endpoint_url))
+    return True
 
 
 def _set_user_time_from_request(request: Request) -> None:
@@ -565,9 +732,7 @@ def setup_chat_routes(
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
-        # Plan mode is not part of the merge-ready UI. Ignore stale clients or
-        # manual form posts that still send plan_mode=true.
-        plan_mode = False
+        plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
@@ -589,6 +754,25 @@ def setup_chat_routes(
         # not chats we quietly promoted for a notes/calendar intent.
         user_requested_agent = (chat_mode == "agent")
         _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
+        _explicit_web_intent = False
+        _explicit_browser_intent = False
+        if isinstance(message, str):
+            _msg_l = message.lower()
+            _explicit_web_intent = bool(re.search(
+                r"\b(search|look\s*up|lookup|google|browse|web|online|latest|current|today|news|weather|forecast|rate|exchange\s+rate)\b",
+                _msg_l,
+            ))
+            _explicit_browser_intent = bool(re.search(
+                r"\b(browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|"
+                r"click|fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|"
+                r"contact\s+form|web\s*form|form\s+submission)\b",
+                _msg_l,
+            ))
+        _allow_browser_for_web_turn = bool(
+            _explicit_browser_intent
+            or _explicit_web_intent
+            or _search_enabled
+        )
         # Intent auto-escalation: if the user is clearly asking the assistant
         # to create a todo, reminder, or calendar event, promote chat → agent
         # for this turn so the LLM has access to manage_notes / manage_calendar.
@@ -598,9 +782,13 @@ def setup_chat_routes(
         # shell disabled).
         auto_escalated = False
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
+        _workspace_agent_intent = False
         if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
             chat_mode = "agent"
             auto_escalated = True
+            _workspace_agent_intent = _tool_intent.category in {"shell", "workspace"}
+            if _workspace_agent_intent:
+                allow_bash = "true"
             logger.info(
                 "chat→agent auto-escalation: category=%s reason=%s",
                 _tool_intent.category,
@@ -610,6 +798,10 @@ def setup_chat_routes(
             chat_mode = "agent"
             auto_escalated = True
             logger.info("chat→agent auto-escalation: search enabled")
+        elif chat_mode == "chat" and _explicit_web_intent:
+            chat_mode = "agent"
+            auto_escalated = True
+            logger.info("chat→agent auto-escalation: explicit web intent")
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
@@ -688,6 +880,7 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            _reconcile_selected_route_from_request(request, sess, session, form_data, owner=owner)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
             # Issue #587: picker shows a model from the endpoint cache but
@@ -711,11 +904,28 @@ def setup_chat_routes(
                 _tool_intent = ToolIntent(True, "web", "contextual web lookup follow-up")
                 chat_mode = "agent"
                 auto_escalated = True
+                _workspace_agent_intent = False
                 logger.info(
                     "chat→agent auto-escalation: category=%s reason=%s",
                     _tool_intent.category,
                     _tool_intent.reason,
                 )
+            if isinstance(message, str) and _is_contextual_browser_followup(message, sess):
+                _explicit_browser_intent = True
+                if chat_mode == "chat":
+                    chat_mode = "agent"
+                    auto_escalated = True
+                    _workspace_agent_intent = False
+                    logger.info("chat→agent auto-escalation: contextual browser/form follow-up")
+            if not workspace and isinstance(message, str):
+                _auto_workspace, _ = _resolve_workspace_from_message_path(request, message)
+                if _auto_workspace:
+                    workspace = _auto_workspace
+                    chat_mode = "agent"
+                    auto_escalated = True
+                    _workspace_agent_intent = True
+                    allow_bash = "true"
+                    logger.info("chat→agent auto-escalation: explicit path workspace=%s", workspace)
         except SessionNotFoundError as e:
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
@@ -750,7 +960,12 @@ def setup_chat_routes(
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
+        image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        if image_generation_session:
+            no_memory = True
+            use_rag = "false"
+            search_context = None
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
@@ -879,7 +1094,7 @@ def setup_chat_routes(
         # explicitly enable it.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
-        _explicit_web_intent = bool(_tool_intent and _tool_intent.category == "web")
+        _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
         if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
             disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
@@ -893,7 +1108,7 @@ def setup_chat_routes(
                 "create_document", "edit_document", "update_document",
                 "send_email", "reply_to_email",
                 "manage_notes", "manage_calendar", "manage_tasks",
-                "api_call", "builtin_browser",
+                "api_call",
             })
             if _search_enabled:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
@@ -909,6 +1124,11 @@ def setup_chat_routes(
                 "manage_memory",      # persistent memory store
                 "search_chats",       # past chat history
                 "manage_skills",      # skill presets tied to user
+                "create_session",
+                "list_sessions",
+                "manage_session",
+                "send_to_session",
+                "chat_with_model",
             })
 
         # Active email reader open → strip the tools that let the agent drift
@@ -935,7 +1155,7 @@ def setup_chat_routes(
             if not _privs.get("can_use_bash", True):
                 disabled_tools.update({"bash", "python", "read_file", "write_file"})
             if not _privs.get("can_use_browser", True):
-                disabled_tools.add("builtin_browser")
+                disabled_tools.update(_BROWSER_MCP_TOOLS)
             if not _privs.get("can_use_documents", True):
                 disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
             if not _privs.get("can_generate_images", True):
@@ -958,10 +1178,12 @@ def setup_chat_routes(
         # the heavy "do things on the computer" tools — otherwise the model
         # tries to shell out for a request that never needed it, then fails
         # (and looks broken when the shell is disabled).
-        if auto_escalated:
+        if auto_escalated and not _workspace_agent_intent:
             disabled_tools.update({
-                "bash", "python", "read_file", "write_file", "builtin_browser",
+                "bash", "python", "read_file", "write_file",
             })
+            if not _allow_browser_for_web_turn:
+                disabled_tools.update(_BROWSER_MCP_TOOLS)
 
         # Disable document tools in compare sessions — they break the pane UI
         if sess.name and sess.name.startswith("[CMP]"):
@@ -1195,7 +1417,7 @@ def setup_chat_routes(
                 _model_info["character_name"] = ctx.preset.character_name
             yield f'data: {json.dumps(_model_info)}\n\n'
 
-            if _is_image_generation_session(sess, owner=_user):
+            if image_generation_session:
                 from src.settings import get_setting
                 if tool_policy.blocks("generate_image"):
                     _blocked_msg = tool_policy.reason_for("generate_image")
@@ -1208,26 +1430,85 @@ def setup_chat_routes(
                     yield "data: [DONE]\n\n"
                     _active_streams.pop(session, None)
                     return
-                from src.ai_interaction import do_generate_image
+                from src.ai_interaction import do_edit_image, do_generate_image
                 _user_msg = message or ""
-                yield f'data: {json.dumps({"type": "tool_start", "tool": "generate_image", "command": _user_msg[:100]})}\n\n'
+                _image_upload = _first_image_attachment(chat_handler, att_ids, owner=_user)
+                _image_tool_name = "edit_image" if _image_upload else "generate_image"
+                yield f'data: {json.dumps({"type": "tool_start", "tool": _image_tool_name, "command": _user_msg[:100]})}\n\n'
                 yield ": heartbeat\n\n"
-                _img_result = await do_generate_image(f"{_user_msg}\n{sess.model}", session, owner=_user)
+                _progress_queue: asyncio.Queue = asyncio.Queue()
+
+                async def _image_progress_callback(progress: Dict[str, Any]):
+                    try:
+                        _progress_queue.put_nowait(progress)
+                    except Exception:
+                        pass
+
+                if _image_upload:
+                    _img_task = asyncio.create_task(do_edit_image(
+                        _user_msg,
+                        _image_upload.get("path", ""),
+                        model_spec=sess.model,
+                        session_id=session,
+                        owner=_user,
+                        size="1024x1024",
+                        progress_callback=_image_progress_callback,
+                    ))
+                else:
+                    _img_task = asyncio.create_task(do_generate_image(f"{_user_msg}\n{sess.model}\n512x512", session, owner=_user))
+                _img_started = time.time()
+                _img_tick = 0
+                while not _img_task.done():
+                    try:
+                        _progress = await asyncio.wait_for(_progress_queue.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        _progress = None
+                    _img_tick += 1
+                    _elapsed = int(time.time() - _img_started)
+                    _label = "Editing image" if _image_upload else "Generating image"
+                    yield ": image generation still running\n\n"
+                    _progress_data = {"type": "tool_progress", "tool": _image_tool_name, "message": f"{_label}… {_elapsed}s", "elapsed": _elapsed, "tick": _img_tick}
+                    if isinstance(_progress, dict) and _progress.get("total"):
+                        _step = int(_progress.get("step") or 0)
+                        _total = int(_progress.get("total") or 0)
+                        _percent = _progress.get("percent")
+                        _progress_data.update({
+                            "step": _step,
+                            "total": _total,
+                            "percent": _percent,
+                            "message": f"{_label}… {_step}/{_total}",
+                        })
+                    yield f'data: {json.dumps(_progress_data)}\n\n'
+                _img_result = await _img_task
                 _img_output = _img_result.get("results", _img_result.get("error", ""))
-                _img_tool_data = {"type": "tool_output", "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
+                _img_tool_data = {"type": "tool_output", "tool": _image_tool_name, "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
                 for _k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                     if _k in _img_result:
                         _img_tool_data[_k] = _img_result[_k]
+                if _image_upload:
+                    _img_tool_data["source_image"] = {
+                        "id": _image_upload.get("id"),
+                        "name": _image_upload.get("name") or _image_upload.get("original_name"),
+                    }
                 yield f'data: {json.dumps(_img_tool_data)}\n\n'
+                if _img_result.get("image_url"):
+                    _img_event = {"type": "generated_image", "url": _img_result.get("image_url")}
+                    for _k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
+                        if _img_result.get(_k):
+                            _img_event[_k] = _img_result[_k]
+                    yield f'data: {json.dumps(_img_event)}\n\n'
                 _desc = _img_result.get("results", _img_result.get("error", "Image generation complete"))
                 full_response = _desc
                 yield f'data: {json.dumps({"delta": _desc})}\n\n'
                 # Save to session history
                 if not incognito:
-                    _ev = {"round": 1, "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
+                    _ev = {"round": 1, "tool": _image_tool_name, "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
                     for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
                         if _img_result.get(_ek):
                             _ev[_ek] = _img_result[_ek]
+                    if _image_upload:
+                        _ev["source_image_id"] = _image_upload.get("id")
+                        _ev["source_image_name"] = _image_upload.get("name") or _image_upload.get("original_name")
                     sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
                     session_manager.save_sessions()
                 yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0}})}\n\n'
@@ -1292,8 +1573,10 @@ def setup_chat_routes(
                                         last_metrics["context_messages_after_trim"] = ctx.context_messages_after_trim
                                         last_metrics["context_tokens_before_trim"] = ctx.context_tokens_before_trim
                                         last_metrics["context_tokens_after_trim"] = ctx.context_tokens_after_trim
-                                    if ctx.context_length and last_metrics.get("input_tokens"):
-                                        pct = min(round((last_metrics["input_tokens"] / ctx.context_length) * 100, 1), 100.0)
+                                    request_context_tokens = ctx.context_tokens_after_trim or estimate_tokens(messages)
+                                    last_metrics["request_context_tokens"] = request_context_tokens
+                                    if ctx.context_length and request_context_tokens:
+                                        pct = min(round((request_context_tokens / ctx.context_length) * 100, 1), 100.0)
                                         last_metrics["context_percent"] = pct
                                         last_metrics["context_length"] = ctx.context_length
                                     # The frontend reads `tokens_per_second`; the raw usage event
@@ -1326,6 +1609,7 @@ def setup_chat_routes(
                                     "input_tokens": _est_in,
                                     "output_tokens": _est_out,
                                     "tokens_per_second": _tps,
+                                    "request_context_tokens": _est_in,
                                     "context_percent": _ctx_pct,
                                     "context_length": ctx.context_length,
                                     "model": _actual_model or _answered_by or _requested_model,
@@ -1360,7 +1644,7 @@ def setup_chat_routes(
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
-                    if full_response:
+                    if full_response and not incognito:
                         logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
                         _stopped_content, _stopped_md = clean_thinking_for_save(
                             full_response,
@@ -1371,8 +1655,7 @@ def setup_chat_routes(
                             },
                         )
                         sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
-                        if not incognito:
-                            session_manager.save_sessions()
+                        session_manager.save_sessions()
                     raise
                 finally:
                     _active_streams.pop(session, None)
@@ -1405,6 +1688,10 @@ def setup_chat_routes(
                     _forced_tools = None
                     if _search_enabled:
                         _forced_tools = set(WEB_TOOL_NAMES)
+                        if _explicit_browser_intent:
+                            _forced_tools |= set(_BROWSER_MCP_TOOLS)
+                    elif _explicit_browser_intent:
+                        _forced_tools = set(_BROWSER_MCP_TOOLS)
 
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
@@ -1529,7 +1816,7 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response:
+                        if full_response and not incognito:
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(
                                 full_response,
@@ -1540,8 +1827,7 @@ def setup_chat_routes(
                                 },
                             )
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
-                            if not incognito:
-                                session_manager.save_sessions()
+                            session_manager.save_sessions()
                     except Exception:
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise

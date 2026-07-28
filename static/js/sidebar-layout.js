@@ -34,6 +34,46 @@ export function initSidebarLayout(Storage, opts) {
   // ── Icon rail + sidebar toggle ──
   const iconRail = document.getElementById('icon-rail');
   const hamburgerBtn = document.getElementById('hamburger-btn');
+  const SIDEBAR_MODE_KEY = 'odysseus-sidebar-mode';
+
+  function _setSidebarModeClasses(mode) {
+    document.documentElement.classList.remove('ody-mobile-startup-sidebar-hidden');
+    document.documentElement.classList.toggle('ody-sidebar-mini', mode === 'mini');
+    document.documentElement.classList.toggle('ody-sidebar-off', mode === 'off');
+  }
+
+  function _saveSidebarMode(mode) {
+    try { localStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) {}
+    _setSidebarModeClasses(mode);
+  }
+
+  function _applyStoredSidebarMode() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    if (window.innerWidth < 768 && document.getElementById('app-loader')) {
+      sidebar.classList.add('hidden');
+      if (iconRail) {
+        iconRail.classList.add('rail-hidden');
+        iconRail.classList.remove('mobile-mini');
+        iconRail.style.cssText = '';
+      }
+      _setSidebarModeClasses('off');
+      return;
+    }
+    let mode = 'full';
+    try { mode = localStorage.getItem(SIDEBAR_MODE_KEY) || 'full'; } catch (_) {}
+    if (mode === 'mini') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    } else if (mode === 'off') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.add('rail-hidden');
+    } else {
+      sidebar.classList.remove('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    }
+    _setSidebarModeClasses(mode);
+  }
 
   function _syncRailSideCore() {
     const sidebar = document.getElementById('sidebar');
@@ -62,6 +102,7 @@ export function initSidebarLayout(Storage, opts) {
       document.body.classList.toggle('hamburger-left', !isRight);
       document.body.classList.toggle('hamburger-only', sidebarHidden && railHidden);
       document.body.classList.toggle('sidebar-collapsed', sidebarHidden);
+      _setSidebarModeClasses(!sidebarHidden ? 'full' : (railHidden ? 'off' : 'mini'));
     }
     // Keep incognito button clear of hamburger
     const incogBtn = document.getElementById('incognito-btn');
@@ -82,6 +123,7 @@ export function initSidebarLayout(Storage, opts) {
   if (Storage.get(Storage.KEYS.SIDEBAR_SIDE) === 'right') {
     document.getElementById('sidebar').classList.add('right-side');
   }
+  _applyStoredSidebarMode();
   syncRailSide();
 
   // In-sidebar toggle button — same behavior as hamburger
@@ -154,6 +196,7 @@ export function initSidebarLayout(Storage, opts) {
         if (isSidebarVisible) {
           // Closing sidebar
           sidebar.classList.add('hidden');
+          _saveSidebarMode('off');
           if (backdrop) backdrop.classList.remove('visible');
         } else {
           // Mobile: the hamburger always opens the sidebar from the RIGHT.
@@ -169,11 +212,13 @@ export function initSidebarLayout(Storage, opts) {
             // Wait for keyboard dismiss to settle, then open
             setTimeout(() => {
               sidebar.classList.remove('hidden');
+              _saveSidebarMode('full');
               if (backdrop) backdrop.classList.add('visible');
               syncRailSide();
             }, 250);
           } else {
             sidebar.classList.remove('hidden');
+            _saveSidebarMode('full');
             if (backdrop) backdrop.classList.add('visible');
           }
         }
@@ -184,10 +229,13 @@ export function initSidebarLayout(Storage, opts) {
       // Desktop: full sidebar ↔ mini (icon rail) — simple toggle
       if (isSidebarVisible) {
         sidebar.classList.add('hidden');
+        if (iconRail) iconRail.classList.remove('rail-hidden');
+        _saveSidebarMode('mini');
       } else {
         _wasAutoCollapsed = false;
         iconRail.classList.remove('rail-hidden');
         sidebar.classList.remove('hidden');
+        _saveSidebarMode('full');
       }
       syncRailSide();
     });
@@ -484,7 +532,7 @@ function _initChatSwipeToOpenSidebar() {
 
   // Areas where a horizontal drag means something else (their own scroll/drag).
   const EXCLUDE = [
-    '#sidebar', '#icon-rail', '.modal', '.input-bar', '#message',
+    '#sidebar', '#icon-rail', '.modal', '.input-bar', '.chat-input-bar', '#message',
     '#minimized-dock', '.minimized-dock-chip', '#dock-trash-zone',
     'pre', 'table', '.agent-tool-output', '.agent-thread-cmd',
     'input', 'textarea', 'select',

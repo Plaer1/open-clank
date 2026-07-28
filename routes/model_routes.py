@@ -472,7 +472,11 @@ def _endpoint_kind(ep: Any) -> str:
 
 
 def _endpoint_refresh_mode(ep: Any, endpoint_kind: str | None = None) -> str:
-    return _normalize_refresh_mode(getattr(ep, "model_refresh_mode", None), endpoint_kind or _endpoint_kind(ep))
+    return _normalize_endpoint_refresh_mode(
+        getattr(ep, "model_refresh_mode", None),
+        endpoint_kind or _endpoint_kind(ep),
+        getattr(ep, "base_url", ""),
+    )
 
 
 def _endpoint_refresh_interval(ep: Any, category: str) -> float:
@@ -851,6 +855,99 @@ def _ollama_model_names(data: Any) -> List[str]:
     return out
 
 
+def _is_google_api_base(base_url: str) -> bool:
+    try:
+        return (urlparse(base_url).hostname or "").lower() == "generativelanguage.googleapis.com"
+    except Exception:
+        return False
+
+
+def _normalize_endpoint_refresh_mode(value: Any, endpoint_kind: str = "auto", base_url: str = "") -> str:
+    if not str(value or "").strip() and _is_google_api_base(base_url):
+        return "manual"
+    return _normalize_refresh_mode(value, endpoint_kind)
+
+
+def _google_native_root(base_url: str) -> str:
+    """Return the Gemini native API root for a Google endpoint.
+
+    Chat calls may be configured against Google's OpenAI-compatible
+    `/openai` path, but model catalog reads should use the native Models API
+    so we get Google's current Model resource shape.
+    """
+    try:
+        parsed = urlparse(base_url)
+    except Exception:
+        return "https://generativelanguage.googleapis.com/v1beta"
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/openai"):
+        path = path[: -len("/openai")].rstrip("/")
+    if not path:
+        path = "/v1beta"
+    return urlunparse(parsed._replace(path=path, query="", fragment="")).rstrip("/")
+
+
+def _google_native_models_url(base_url: str) -> str:
+    return _google_native_root(base_url) + "/models"
+
+
+def _google_model_id_from_item(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    value = item.get("baseModelId") or item.get("name") or item.get("model") or ""
+    return str(value or "").strip().removeprefix("models/")
+
+
+def _google_model_supports_chat(item: Any) -> bool:
+    """Return whether a native Google Model resource supports chat generation."""
+    if not isinstance(item, dict):
+        return False
+    methods = item.get("supportedGenerationMethods")
+    if not isinstance(methods, list):
+        return False
+    chat_methods = {"generateContent", "generateMessage", "generateText", "generateAnswer"}
+    return any(method in chat_methods for method in methods)
+
+
+def _probe_google_models(base_url: str, api_key: str = None, timeout: int = 5, page_size: int = 1000) -> List[str]:
+    """Read Google's native paginated Models API.
+
+    This intentionally returns only provider-reported model IDs. Capability
+    mapping is handled by the model capability reader and must not infer from
+    names here.
+    """
+    url = _google_native_models_url(base_url)
+    try:
+        page_size = min(max(int(page_size or 1000), 1), 1000)
+    except Exception:
+        page_size = 1000
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["x-goog-api-key"] = api_key
+    params: Dict[str, Any] = {"pageSize": page_size}
+    models: List[str] = []
+    seen = set()
+    page_token = ""
+    for _ in range(20):
+        request_params = dict(params)
+        if page_token:
+            request_params["pageToken"] = page_token
+        r = httpx.get(url, headers=headers, params=request_params, timeout=timeout, verify=llm_verify())
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("models") or []:
+            if not _google_model_supports_chat(item):
+                continue
+            model_id = _google_model_id_from_item(item)
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                models.append(model_id)
+        page_token = str(data.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+    return models
+
+
 def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
@@ -862,6 +959,17 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         from src.chatgpt_subscription import fetch_available_models
         if api_key:
             return fetch_available_models(api_key, timeout=timeout)
+        return []
+    if _is_google_api_base(base):
+        try:
+            models = _probe_google_models(base, api_key, timeout=timeout)
+            if models:
+                return models
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else "unknown"
+            logger.warning(f"Google native models probe failed: HTTP {status}")
+        except Exception as e:
+            logger.warning(f"Google native models probe failed: {e}")
         return []
     if provider == "anthropic":
         # Try Anthropic's /v1/models endpoint first
@@ -1202,6 +1310,56 @@ def _visible_models(cached_models, hidden_models, pinned_models=None):
     return [m for m in merged if m not in hidden]
 
 
+def _picker_requires_pinning(base_url: str, kind: str) -> bool:
+    return _classify_endpoint(base_url, kind) == "api"
+
+
+def _has_explicit_pinned_models(ep) -> bool:
+    """Whether pinned_models was deliberately written for this endpoint.
+
+    API endpoints use pinned_models as an allow-list. An explicit empty JSON
+    list means "show no models"; it must not fall back to the old hidden-list
+    migration behavior.
+    """
+    raw = getattr(ep, "pinned_models", None)
+    return raw is not None and str(raw).strip() != ""
+
+
+def _legacy_visible_api_models(ep) -> List[str]:
+    """Return API models selected under the old hidden-list picker.
+
+    Before API endpoints switched to an explicit allow-list, selected models
+    were represented as cached_models minus hidden_models. Existing OpenRouter
+    rows can therefore have many checked models and an empty pinned_models
+    field. Treat that old state as the initial pinned list so settings and chat
+    agree after upgrade.
+    """
+    return _visible_models(
+        _cached_model_ids(ep),
+        getattr(ep, "hidden_models", None),
+        None,
+    )
+
+
+def _picker_models_for_endpoint(ep, base_url: str, kind: str):
+    """Return model IDs that should appear in the picker for an endpoint.
+
+    API providers expose remote inventory from /v1/models. Treat that cache as
+    inventory, not approval: only manually pinned API models should appear in
+    the picker. Local/self-hosted endpoints keep the older hide-list behavior.
+    """
+    pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+    if _picker_requires_pinning(base_url, kind):
+        if not _has_explicit_pinned_models(ep):
+            pinned = _legacy_visible_api_models(ep) if _hidden_model_ids(ep) else []
+        return pinned, pinned
+    return _visible_models(
+        _cached_model_ids(ep),
+        getattr(ep, "hidden_models", None),
+        pinned,
+    ), pinned
+
+
 def _api_key_fingerprint(api_key: Optional[str]) -> str:
     """Stable, non-secret label for distinguishing same-URL credentials."""
     key = (api_key or "").strip()
@@ -1400,24 +1558,18 @@ def setup_model_routes(model_discovery):
         for ep in endpoints:
             base = _normalize_base(ep.base_url)
             provider = _safe_detect_provider(base)
-            # Merge cached + pinned models, then filter out hidden ones
             ep_model_type = getattr(ep, "model_type", None) or "llm"
-            model_ids = _visible_models(
-                _cached_model_ids(ep),
-                ep.hidden_models,
-                getattr(ep, "pinned_models", None),
-            )
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
             category = _classify_endpoint(base, kind)
+            model_ids, pinned = _picker_models_for_endpoint(ep, base, kind)
 
             if model_ids:
                 curated_key = _match_provider_curated(base, None)
                 curated, extra = _curate_models(model_ids, curated_key)
                 # Pinned models are admin-selected — they always belong in the
                 # primary curated list, not buried in extras.
-                pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
                 for m in pinned:
                     if m not in curated:
                         curated.append(m)
@@ -1779,18 +1931,24 @@ def setup_model_routes(model_discovery):
                 _invalidate_models_cache()
             rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
             results = []
+            upgraded_legacy_pins = False
             for r in rows:
                 all_models = _cached_model_ids(r)
                 hidden = _hidden_model_ids(r)
                 pinned = _normalize_model_ids(getattr(r, "pinned_models", None))
-                visible = _visible_models(all_models, r.hidden_models, pinned)
                 # Keep the list route cache-only. It feeds Settings →
                 # Added Models and must render immediately; explicit
                 # Refresh/Probe endpoints do the network work.
-                status = "online" if (all_models or pinned) else ("empty" if r.is_enabled else "offline")
                 ping = None
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
+                visible, pinned = _picker_models_for_endpoint(r, base, kind)
+                if _picker_requires_pinning(base, kind) and pinned and not _has_explicit_pinned_models(r):
+                    r.pinned_models = json.dumps(pinned)
+                    upgraded_legacy_pins = True
+                model_inventory_count = len(_merge_model_ids(all_models, pinned))
+                picker_requires_pinning = _picker_requires_pinning(base, kind)
+                status = "online" if (all_models or visible or pinned) else ("empty" if r.is_enabled else "offline")
                 results.append({
                     "id": r.id,
                     "name": r.name,
@@ -1799,6 +1957,8 @@ def setup_model_routes(model_discovery):
                     "api_key_fingerprint": _api_key_fingerprint(r.api_key),
                     "is_enabled": r.is_enabled,
                     "models": visible,
+                    "model_count": model_inventory_count,
+                    "picker_requires_pinning": picker_requires_pinning,
                     "pinned_models": pinned,
                     "hidden_count": len(hidden),
                     "online": status != "offline",
@@ -1812,6 +1972,9 @@ def setup_model_routes(model_discovery):
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
                 })
+            if upgraded_legacy_pins:
+                db.commit()
+                _invalidate_models_cache()
             return results
         finally:
             db.close()
@@ -1854,7 +2017,7 @@ def setup_model_routes(model_discovery):
             name = base_url.replace("http://", "").replace("https://", "").split("/")[0]
 
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
-        refresh_mode = _normalize_refresh_mode(model_refresh_mode, requested_kind)
+        refresh_mode = _normalize_endpoint_refresh_mode(model_refresh_mode, requested_kind, base_url)
         refresh_interval = _parse_positive_int(model_refresh_interval, minimum=30, maximum=86400)
         refresh_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         require_model_list = _truthy(require_models)
@@ -1914,6 +2077,10 @@ def setup_model_routes(model_discovery):
                     changed = True
                 if refresh_timeout is not None:
                     existing.model_refresh_timeout = refresh_timeout
+                    changed = True
+                incoming_model_type = (model_type or "").strip() or "llm"
+                if incoming_model_type and (getattr(existing, "model_type", None) or "llm") != incoming_model_type:
+                    existing.model_type = incoming_model_type
                     changed = True
                 if api_key.strip() and not existing.api_key:
                     existing.api_key = api_key.strip()
@@ -2147,9 +2314,10 @@ def setup_model_routes(model_discovery):
                 raise HTTPException(404, "Endpoint not found")
             hidden = _hidden_model_ids(ep)
             all_models = _cached_model_ids(ep)
+            base = _normalize_base(ep.base_url)
+            kind = _effective_endpoint_kind(ep, base)
+            picker_requires_pinning = _picker_requires_pinning(base, kind)
             if refresh:
-                base = _normalize_base(ep.base_url)
-                kind = _effective_endpoint_kind(ep, base)
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
@@ -2168,6 +2336,8 @@ def setup_model_routes(model_discovery):
                     response.headers["X-Model-Refresh-Status"] = "failed"
                     response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+            if picker_requires_pinning and not _has_explicit_pinned_models(ep):
+                pinned = _legacy_visible_api_models(ep)
             pinned_set = set(pinned)
             return [
                 {
@@ -2175,6 +2345,7 @@ def setup_model_routes(model_discovery):
                     "display": m.split("/")[-1],
                     "is_hidden": m in hidden,
                     "is_pinned": m in pinned_set,
+                    "picker_requires_pinning": picker_requires_pinning,
                 }
                 for m in _merge_model_ids(all_models, pinned)
             ]
@@ -2203,11 +2374,28 @@ def setup_model_routes(model_discovery):
                 hidden = body.get("hidden")
                 if not isinstance(hidden, list):
                     raise HTTPException(400, "hidden must be a list of model IDs")
-                ep.hidden_models = json.dumps(hidden) if hidden else None
+                base = _normalize_base(ep.base_url)
+                kind = _effective_endpoint_kind(ep, base)
+                if _picker_requires_pinning(base, kind):
+                    # Compatibility for older/admin UI paths that still submit
+                    # the previous hide-list shape. API pickers are allow-lists:
+                    # convert "unchecked models" into an explicit pinned list so
+                    # Settings summary, /api/models, and chat agree.
+                    selected = _visible_models(_cached_model_ids(ep), hidden, None)
+                    ep.pinned_models = json.dumps(selected)
+                    ep.hidden_models = None
+                else:
+                    ep.hidden_models = json.dumps(hidden) if hidden else None
             # Accept either "pinned" or "pinned_models" for the manual IDs list.
             if "pinned_models" in body or "pinned" in body:
                 pinned = _normalize_model_ids(body.get("pinned_models", body.get("pinned")))
-                ep.pinned_models = json.dumps(pinned) if pinned else None
+                base = _normalize_base(ep.base_url)
+                kind = _effective_endpoint_kind(ep, base)
+                if _picker_requires_pinning(base, kind):
+                    ep.pinned_models = json.dumps(pinned)
+                    ep.hidden_models = None
+                else:
+                    ep.pinned_models = json.dumps(pinned) if pinned else None
             db.commit()
             _invalidate_models_cache()
             hidden_count = len(json.loads(ep.hidden_models)) if ep.hidden_models else 0
@@ -2360,11 +2548,21 @@ def setup_model_routes(model_discovery):
                     ep.model_type = body["model_type"].strip() or ep.model_type
                 if "pinned_models" in body:
                     _pinned = _normalize_model_ids(body["pinned_models"])
-                    ep.pinned_models = json.dumps(_pinned) if _pinned else None
+                    _base_for_pins = _normalize_base(ep.base_url)
+                    _kind_for_pins = _effective_endpoint_kind(ep, _base_for_pins)
+                    if _picker_requires_pinning(_base_for_pins, _kind_for_pins):
+                        ep.pinned_models = json.dumps(_pinned)
+                        ep.hidden_models = None
+                    else:
+                        ep.pinned_models = json.dumps(_pinned) if _pinned else None
                 if "endpoint_kind" in body:
                     ep.endpoint_kind = _normalize_endpoint_kind(body.get("endpoint_kind"))
                 if "model_refresh_mode" in body:
-                    ep.model_refresh_mode = _normalize_refresh_mode(body.get("model_refresh_mode"), _endpoint_kind(ep))
+                    ep.model_refresh_mode = _normalize_endpoint_refresh_mode(
+                        body.get("model_refresh_mode"),
+                        _endpoint_kind(ep),
+                        ep.base_url,
+                    )
                 if "model_refresh_interval" in body:
                     interval = _parse_positive_int(body.get("model_refresh_interval"), minimum=30, maximum=86400)
                     ep.model_refresh_interval = interval

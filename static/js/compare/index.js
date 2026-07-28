@@ -19,7 +19,7 @@ import { EVAL_PROMPTS, WAVE_FRAMES,
   SEND_SVG, VOTES_STORAGE_KEY,
 } from './icons.js';
 import { fetchModels, _persistSelections, _modelDisplayNames, getExcludedModels, setExcludedModels } from './models.js';
-import { showModelSelector, disableToolToggles, restoreToolToggles, _syncToolbarIndicator } from './selector.js';
+import { showModelSelector, disableToolToggles, restoreToolToggles, _syncToolbarIndicator } from './selector.js?v=20260723compareicon2';
 import { _checkUnprobed, _clearProbeWaves } from './probe.js';
 import { streamToPane, _renderSearchResults, _runSynthForPane, _formatMs, registerStreamActions } from './stream.js';
 import {
@@ -359,7 +359,7 @@ async function _buildCompareUI() {
   headerLeft.style.cssText = 'display:flex;align-items:center;min-width:0;';
   const headerIcon = document.createElement('span');
   headerIcon.style.cssText = 'display:inline-flex;flex-shrink:0;margin-right:6px;opacity:0.85;';
-  headerIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>';
+  headerIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>';
   headerLeft.appendChild(headerIcon);
   headerLeft.appendChild(headerLabel);
   headerBar.appendChild(headerLeft);

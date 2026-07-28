@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
   <title>Odysseus Chat</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%23e06c75'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%23e06c75' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%23e06c75' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="manifest" href="/static/manifest.json">
@@ -89,6 +90,18 @@
       try {
         var _us = localStorage.getItem('odysseus-ui-scale');
         if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
+      } catch(e){}
+      // Restore the sidebar mode before first paint. Otherwise the icon rail
+      // and full sidebar can both flash visible until sidebar-layout.js runs.
+      try {
+        var _mobileStartup = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+        if (_mobileStartup) {
+          document.documentElement.classList.add('ody-sidebar-off', 'ody-mobile-startup-sidebar-hidden');
+        } else {
+          var _sm = localStorage.getItem('odysseus-sidebar-mode') || 'full';
+          if (_sm === 'mini') document.documentElement.classList.add('ody-sidebar-mini');
+          else if (_sm === 'off') document.documentElement.classList.add('ody-sidebar-off');
+        }
       } catch(e){}
       // Apply background pattern on body once available
       if (t && t.bgPattern && t.bgPattern !== 'none') {
@@ -201,6 +214,22 @@
     @font-face { font-family: 'Inter'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-Regular.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 500; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-Medium.woff2') format('woff2'); }
     @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-SemiBold.woff2') format('woff2'); }
+    @media (max-width: 768px) {
+      html.ody-sidebar-off .sidebar,
+      html.ody-mobile-startup-sidebar-hidden .sidebar {
+        transform: translateX(-100%) !important;
+        pointer-events: none !important;
+        opacity: 0 !important;
+      }
+      html.ody-sidebar-off .sidebar.right-side,
+      html.ody-mobile-startup-sidebar-hidden .sidebar.right-side {
+        transform: translateX(100%) !important;
+      }
+      html.ody-sidebar-off .icon-rail,
+      html.ody-mobile-startup-sidebar-hidden .icon-rail {
+        display: none !important;
+      }
+    }
   </style>
   <!-- KaTeX CSS is loaded with media="print" so it doesn't block render,
        then flipped to "all" via JS after load. Mermaid init runs once the
@@ -219,29 +248,43 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260630mdfontsize">
-  <link rel="modulepreload" href="/static/app.js?v=20260630mdfontsize">
-  <link rel="modulepreload" href="/static/js/chat.js">
+  <link rel="stylesheet" href="/static/style.css?v=20260723tasksbulkfeedback1">
+  <link rel="modulepreload" href="/static/app.js?v=20260723tasksbulkfeedback1">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260722ctxheader4">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js">
+  <link rel="modulepreload" href="/static/js/sessions.js?v=20260722ctxheader4">
   <link rel="modulepreload" href="/static/js/markdown.js">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
 </head>
 <body>
   <!-- Loading overlay — hides all flashing until app is ready -->
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#282c34);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
-    <div id="loader-wave" style="color:var(--brand-color,var(--red,#e06c75));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
+    <div id="loader-wave" style="color:color-mix(in srgb, #9cdef2 62%, var(--brand-color,var(--red,#e06c75)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
   </div>
   <script nonce="{{CSP_NONCE}}">
   (function(){
     var el=document.getElementById('loader-wave');
     if(!el)return;
-    var frames=['▁▂▃','▂▃▄','▃▄▅','▄▅▆','▅▆▅','▆▅▄','▅▄▃','▄▃▂','▃▂▁'];
+    var frames=[
+      {wave:'▁▂▃',y:9},
+      {wave:'▂▃▄',y:7},
+      {wave:'▃▄▅',y:5},
+      {wave:'▄▅▆',y:3},
+      {wave:'▅▆▅',y:1},
+      {wave:'▆▅▄',y:3},
+      {wave:'▅▄▃',y:5},
+      {wave:'▄▃▂',y:7},
+      {wave:'▃▂▁',y:9}
+    ];
     var i=0;
+    function render(){
+      var f=frames[i%frames.length];
+      el.innerHTML='<span style="position:absolute;left:50%;top:0;transform:translate(-50%,'+f.y+'px);font-size:1.24em;line-height:1">•</span><span>'+f.wave+'</span>';
+      i++;
+    }
+    render();
     var iv=setInterval(function(){
       if(!document.getElementById('app-loader')){clearInterval(iv);return}
-      el.textContent=frames[i%frames.length];
-      i++;
+      render();
     },150);
     setTimeout(function(){var l=document.getElementById('app-loader');if(l){l.style.opacity='0';setTimeout(function(){l.remove()},300)}},5000);
   })();
@@ -474,11 +517,11 @@
     <!-- Tab: Browse themes -->
     <div id="theme-tab-browse" class="theme-tab-panel">
       <div class="admin-card">
-        <h2>Default Themes</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 0 0 0 20 4 4 0 0 1 0-8 4 4 0 0 0 0-8"/></svg>Default Themes</h2>
         <div class="theme-grid" id="themeGrid"></div>
       </div>
       <div class="admin-card" id="themeUserCard" style="display:none">
-        <h2>Your Themes</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Your Themes</h2>
         <div class="theme-grid" id="themeUserGrid"></div>
       </div>
     </div>
@@ -486,7 +529,7 @@
     <!-- Tab: Customize -->
     <div id="theme-tab-customize" class="theme-tab-panel" style="display:none">
       <div class="admin-card">
-        <h2>Colors</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M9.06 11.9l-3.5 3.5a2.85 2.85 0 1 0 4.03 4.03l8.49-8.49a4.5 4.5 0 1 0-6.36-6.36L3.18 12.62"/><path d="M14 7l3 3"/></svg>Colors</h2>
         <div class="theme-custom" id="themeCustom">
           <div class="color-row"><label>Background</label><input type="color" id="clr-bg"><button class="color-reset-btn" data-reset="bg" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
           <div class="color-row"><label>Text</label><input type="color" id="clr-fg"><button class="color-reset-btn" data-reset="fg" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
@@ -579,7 +622,7 @@
         <div id="harmony-preview" class="harmony-preview"></div>
       </div>
       <div class="admin-card">
-        <h2>Font & Layout</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>Font & Layout</h2>
         <div class="theme-fd-row">
           <div class="theme-fd-group">
             <label class="theme-fd-label">Font</label>
@@ -648,7 +691,7 @@
         </div>
       </div>
       <div class="admin-card" style="margin-top:8px;">
-        <h2>Save / Share</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save / Share</h2>
         <div class="theme-save-row" id="theme-save-row">
           <input type="text" id="theme-save-name" placeholder="Theme name..." maxlength="32">
           <button id="theme-save-go">Save</button>
@@ -686,7 +729,7 @@
     <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Documents" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
     <!-- Tool launchers — always visible, alphabetical -->
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
-    <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
+    <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
@@ -803,35 +846,6 @@
         </div>
       </div>
 
-      <div class="section" id="models-section">
-        <div class="section-header-flex">
-          <span class="section-title"> Models</span>
-          <div style="position:relative; display:inline-block;">
-            <button type="button" class="section-header-btn" id="model-sort-btn" title="Sort models">
-              <svg class="sort-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="4" y1="6" x2="20" y2="6"/>
-                <line x1="4" y1="12" x2="14" y2="12"/>
-                <line x1="4" y1="18" x2="9" y2="18"/>
-              </svg>
-            </button>
-            <div id="model-sort-dropdown" class="dropdown sort-dropdown" style="display:none;">
-              <div class="dropdown-item sort-option sort-dropdown-item" data-sort="alpha">A-Z</div>
-              <div class="dropdown-item sort-option sort-dropdown-item" data-sort="last-used">Last used</div>
-              <div class="dropdown-item sort-option sort-dropdown-item" data-sort="most-used">Most used</div>
-              <div class="dropdown-item rearrange-toggle sort-dropdown-item sort-dropdown-sep" id="model-rearrange-toggle">
-                &#8593;&#8595; Rearrange <span class="rearrange-check" style="float:right; opacity:0;">&#x2022;</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div id="models">
-          <div class="models-row">
-            <select id="model-select" aria-label="Select model" style="flex: 1; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--fg);"></select>
-            <button type="button" id="btn-model-chat" class="model-chat-btn" aria-label="Add model chat" style="transition: all 0.2s ease;"><span class="model-chat-btn-label">+ Chat</span></button>
-          </div>
-        </div>
-      </div>
-
       <div class="section" id="tools-section">
         <div class="section-header-flex">
           <span class="section-title"><svg class="section-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</span>
@@ -858,7 +872,7 @@
           <span class="grow">Calendar</span>
         </div>
         <div class="list-item" id="tool-compare-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>
           <span class="grow">Compare</span>
         </div>
         <div class="list-item" id="tool-cookbook-btn">
@@ -955,10 +969,10 @@
     <h1 class="a11y-visually-hidden">Odysseus</h1>
     <div class="chat-top-bar">
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
-      <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div></div></span></div>    </div>
+      <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
     <div id="welcome-screen">
       <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Odysseus</div>
-      <div class="welcome-sub" id="welcome-sub">Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.</div>
+      <div class="welcome-sub" id="welcome-sub">New chat ready.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">
         <svg class="eye-open" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -991,7 +1005,7 @@
       var tips = mobile ? phone : desktop;
       var el = document.getElementById('welcome-tip');
       if (el) {
-        el.textContent = 'Type /setup, then choose Local models or API.';
+        el.textContent = 'Pick a model if you want, or just type.';
       }
       fetch('/api/version').then(function(r){return r.json()}).then(function(d){
         if (d.version) window._appVersion = d.version;
@@ -1014,6 +1028,12 @@
       <div class="chat-input-top">
         <div id="message-ghost" class="ghost-text-overlay" aria-hidden="true"></div>
         <textarea id="message" placeholder="Message Odysseus..." required autocomplete="off" aria-label="Message input" rows="1" autofocus></textarea>
+        <div id="plan-mode-status" class="plan-mode-status" hidden>
+          <span class="plan-mode-status-label">Plan mode</span>
+          <button type="button" id="plan-mode-status-toggle" class="plan-mode-status-toggle" aria-label="Turn off plan mode" aria-pressed="true">
+            <span></span>
+          </button>
+        </div>
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
@@ -1032,6 +1052,30 @@
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
         </div>
+        <script nonce="{{CSP_NONCE}}">
+        (function(){
+          function applyDefault(dc) {
+            if (!dc || !dc.model) return false;
+            window.__odysseusDefaultChat = dc;
+            var label = document.getElementById('model-picker-label');
+            if (!label) return false;
+            label.textContent = String(dc.model).split('/').pop();
+            label.title = dc.model;
+            return true;
+          }
+          try {
+            var dc = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+            if (applyDefault(dc)) return;
+          } catch (_) {}
+          fetch('/api/default-chat', { credentials: 'same-origin' })
+            .then(function(r){ return r.ok ? r.json() : null; })
+            .then(function(dc){
+              if (!applyDefault(dc)) return;
+              try { localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc)); } catch (_) {}
+            })
+            .catch(function(){});
+        })();
+        </script>
       </div>
       <div id="pinned-tools-bar"></div>
       <div class="chat-input-bottom" style="visibility:hidden">
@@ -1102,7 +1146,7 @@
           </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <svg class="workspace-indicator-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
             <span style="font-size:11px;margin-left:2px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" id="workspace-indicator-name"></span>
             <svg class="tool-indicator-x" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
           </button>
@@ -1135,7 +1179,7 @@
           </button>
           <!-- Compare toolbar indicator (hidden until active) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Compare active — click to deactivate" id="compare-indicator-btn" style="display:none;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>
             <span style="font-size:11px;margin-left:2px;">Compare</span>
             <svg class="tool-indicator-x" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
           </button>
@@ -1154,6 +1198,7 @@
       <!-- Hidden checkboxes for state -->
       <input type="checkbox" id="web-toggle" style="display:none;">
       <input type="checkbox" id="bash-toggle" style="display:none;">
+      <input type="checkbox" id="plan-toggle" style="display:none;">
     </div>
     <form id="chat-form" autocomplete="off" action="javascript:void(0);" style="display:none;"></form>
 
@@ -1749,11 +1794,6 @@
                 <input type="checkbox" checked data-ui-key="email-section"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
-                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></span>
-                <span class="vis-label">Models <span class="vis-hint">Model selector &amp; quick-chat</span></span>
-                <input type="checkbox" checked data-ui-key="models-section"><span class="vis-switch"></span>
-              </label>
-              <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
                 <span class="vis-label">Tools <span class="vis-hint">Whole section (header + all tools)</span></span>
                 <input type="checkbox" checked data-ui-key="tools-section"><span class="vis-switch"></span>
@@ -1769,7 +1809,7 @@
                 <input type="checkbox" checked data-ui-key="tool-calendar"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
-                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></span>
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg></span>
                 <span class="vis-label">Compare</span>
                 <input type="checkbox" checked data-ui-key="tool-compare"><span class="vis-switch"></span>
               </label>
@@ -1963,6 +2003,14 @@
 
         <!-- ═══ EMAIL TAB ═══ -->
         <div data-settings-panel="email" class="hidden">
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V2a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>Email Settings</h2>
+            <div class="settings-row" style="align-items:center;">
+              <div class="admin-toggle-sub" style="margin:0;flex:1;">Auto reply, newsletter unsubscribe, and writing style live in the Email window.</div>
+              <button class="admin-btn-add" id="set-email-open-library-settings" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><path d="M9 18l6-6-6-6"/></svg>Open Email Settings</button>
+            </div>
+          </div>
+
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>Email Accounts</h2>
             <div class="settings-row" style="align-items:center;">
@@ -2236,7 +2284,7 @@
               <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
               </div>
-              <div id="adm-epList-local"><div class="admin-empty">Loading...</div></div>
+              <div id="adm-epList-local"><div class="admin-empty">No local endpoints yet.</div></div>
             </div>
             <div class="adm-ep-section" style="margin-top:18px;">
               <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
@@ -2354,7 +2402,7 @@
             <div id="adm-backupMsg" style="margin-top:6px;"></div>
           </div>
           <div class="admin-card admin-danger-card">
-            <h2 style="color:#e55;">Danger Zone</h2>
+            <h2 style="color:#e55;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.75"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Danger Zone</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Irreversible. Each wipe targets one category — pick exactly what you want gone.</div>
 
             <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -2456,36 +2504,34 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js"></script>
-<script type="module" src="/static/js/memory.js"></script>
+<script type="module" src="/static/js/sessions.js?v=20260722ctxheader4"></script>
+<script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js"></script>
 <script type="module" src="/static/js/voiceRecorder.js"></script>
-<script type="module" src="/static/js/models.js"></script>  <!-- This must come BEFORE app.js -->
+<script type="module" src="/static/js/models.js?v=20260715startupcalm2"></script>  <!-- This must come BEFORE app.js -->
 <script type="module" src="/static/js/rag.js"></script>
 <script type="module" src="/static/js/presets.js"></script>
 <script type="module" src="/static/js/search.js"></script>
 <script type="module" src="/static/js/spinner.js"></script>
 <script type="module" src="/static/js/tts-ai.js"></script>
-<script type="module" src="/static/js/document.js"></script>
-<script type="module" src="/static/js/gallery.js"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260630toolmetrics"></script>
+<script type="module" src="/static/js/document.js?v=20260722emailfastindex1"></script>
+<script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260722emailfastindex1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
-<script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260630toolmetrics"></script>
+<script type="module" src="/static/js/chatStream.js?v=20260722emailfastindex1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260722ctxheader4"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
-<script type="module" src="/static/js/compare/index.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js"></script>
-<script type="module" src="/static/js/admin.js"></script>
+<script type="module" src="/static/js/settings.js?v=20260723compareicon1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260630mdfontsize"></script>  <!-- app.js must be LAST -->
-<script type="module" src="/static/js/init.js"></script>
+<script type="module" src="/static/app.js?v=20260723tasksbulkfeedback1"></script>  <!-- app.js must be LAST -->
+  <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>

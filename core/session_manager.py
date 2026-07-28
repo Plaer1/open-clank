@@ -543,6 +543,12 @@ class SessionManager:
         """Permanently delete a session and all its messages."""
         db = SessionLocal()
         try:
+            try:
+                from src.session_image_cleanup import cleanup_session_images
+                cleanup_session_images(session_id, db=db)
+            except Exception as e:
+                logger.warning(f"Image cleanup failed while deleting session {session_id}: {e}")
+
             # Detach documents so they survive as orphans in the library
             db.query(DbDocument).filter(DbDocument.session_id == session_id).update(
                 {DbDocument.session_id: None}, synchronize_session=False

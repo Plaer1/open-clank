@@ -19,6 +19,7 @@ let _esc;          // HTML-escape function
 let _getDocs;      // () => Map of open docs
 let _isOpenFn;     // () => boolean — is doc panel open
 let _createDocument;
+let _newDocument;
 let _loadDocument;
 let _switchToDoc;
 let _openPanel;
@@ -31,6 +32,7 @@ export function initLibrary(config) {
   _getDocs        = config.getDocs;
   _isOpenFn       = config.isOpen;
   _createDocument = config.createDocument;
+  _newDocument = config.newDocument;
   _loadDocument   = config.loadDocument;
   _switchToDoc    = config.switchToDoc;
   _openPanel      = config.openPanel;
@@ -3224,16 +3226,16 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const createBtn = document.getElementById('doclib-create-btn');
     if (createBtn) {
       createBtn.addEventListener('click', async () => {
-        // Create a new session, then create a blank document in it
         try {
-          const sRes = await fetch('/api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Untitled Document' }) });
-          const sData = await sRes.json();
-          const sessionId = sData.session_id;
-          await _createDocument(sessionId);
-          // Close library and open the new session
+          if (_newDocument) {
+            await _newDocument();
+          } else {
+            const sessionId = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+            if (!sessionId) throw new Error('No active session');
+            await _createDocument(sessionId);
+          }
           closeLibrary();
-          if (window.sessionsModule) window.sessionsModule.loadSession(sessionId);
-          setTimeout(() => _openPanel(), 300);
+          setTimeout(() => _openPanel(), 50);
         } catch (e) {
           console.error('Failed to create document:', e);
           if (uiModule) uiModule.showError('Failed to create document');

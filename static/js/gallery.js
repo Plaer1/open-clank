@@ -3,7 +3,7 @@
  */
 
 import uiModule from './ui.js';
-import { openEditor, closeEditor, isEditorOpen } from './galleryEditor.js';
+import { openEditor, closeEditor, isEditorOpen } from './galleryEditor.js?v=20260708match1';
 import spinnerModule from './spinner.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';

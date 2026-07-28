@@ -33,6 +33,57 @@ def _validate_cookbook_ssh_target(remote_host: Any, ssh_port: Any = "") -> tuple
     return remote, sport
 
 
+def _cookbook_label_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _cookbook_is_exact_repo_id(value: Any) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(value or "").strip()))
+
+
+def _cookbook_match_saved_preset(query: str, presets: List[Any], host: str = "") -> Optional[Dict[str, Any]]:
+    """Resolve a user-facing model label to a saved serve preset.
+
+    The launch agent should be callable directly. If the model says
+    `repo_id="Qwen3.6-27B-AEON"` because the user used the short UI label, do
+    not force it through `list_serve_presets`; match the saved preset inside
+    the autopilot and let `do_serve_preset` reuse the known-good command.
+    """
+    q = _cookbook_label_key(query)
+    if not q:
+        return None
+    host = str(host or "")
+    exact_repo = _cookbook_is_exact_repo_id(query)
+    candidates: List[tuple[int, Dict[str, Any]]] = []
+    for p in presets or []:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "")
+        model = str(p.get("model") or p.get("modelId") or "")
+        phost = str(p.get("host") or p.get("remoteHost") or "")
+        haystacks = [_cookbook_label_key(name), _cookbook_label_key(model)]
+        if exact_repo:
+            # If the user gave a real HF repo, only reuse a preset that names
+            # that exact repo/label. A substring match here is dangerous:
+            # cyankiwi/Qwen3.5-122B-A10B-AWQ-8bit must not launch the saved
+            # generic Qwen/Qwen3.5-122B-A10B preset.
+            if not any(h and q == h for h in haystacks):
+                continue
+        else:
+            if not any(h and (q == h or q in h or h in q) for h in haystacks):
+                continue
+        score = 10
+        if host and phost == host:
+            score += 20
+        if q in haystacks:
+            score += 10
+        candidates.append((score, p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 async def _cookbook_servers() -> Dict[str, Any]:
     """Return the cookbook's configured servers + the currently-selected
     default host. Shape: {default_host, hosts: [{host, platform, env, envPath}]}.
@@ -200,7 +251,7 @@ async def _ensure_served_endpoint(
     port = _infer_serve_port(cmd)
     base_url = f"http://{endpoint_host}:{port}/v1"
     short_name = model.split("/")[-1] if "/" in model else model
-    is_image = "diffusion_server.py" in (cmd or "")
+    is_image = "diffusion_server.py" in (cmd or "") or "mlx_image_server.py" in (cmd or "")
     payload = {
         "name": short_name if not is_image else f"{short_name} (image)",
         "base_url": base_url,
@@ -315,6 +366,7 @@ async def _cookbook_register_task(
 _MODEL_PROCESS_PATTERNS = [
     ("vLLM",            ["vllm.entrypoints", "vllm serve", "/vllm/", "vllm-openai"]),
     ("SGLang",          ["sglang.launch_server", "sglang/launch_server"]),
+    ("MLX Image",       ["mlx_image_server.py", "mflux-generate-qwen", "mflux-generate"]),
     ("MLX",             ["mlx_lm.server", "mlx-lm"]),
     ("llama.cpp",       ["llama-server", "llama_cpp_server", "llamacppserver"]),
     ("Ollama",          ["ollama serve", "ollama runner", "/ollama "]),
@@ -356,6 +408,139 @@ def _cookbook_apply_retry_suggestion(cmd: str, suggestion: Dict[str, Any]) -> st
             return re.sub(rf"(^|\s){re.escape(flag)}(?:\s+\S+)?", lambda m: (m.group(1) or " ") + repl, cmd).strip()
         return f"{cmd.rstrip()} {repl}"
     return cmd
+
+
+def _cookbook_engine_from_model_info(repo_id: str, info: Optional[Dict[str, Any]], host_meta: Optional[Dict[str, Any]] = None) -> str:
+    """Choose a conservative serve engine from repo metadata and target host.
+
+    This is intentionally heuristic: the model card / file list tells us the
+    official repo and likely format, while the actual serve command still goes
+    through Cookbook and is diagnosed/retried after launch.
+    """
+    rid = (repo_id or "").lower()
+    info = info or {}
+    host_meta = host_meta or {}
+    platform = (host_meta.get("platform") or "").lower()
+    tags = {str(t).lower() for t in (info.get("tags") or []) if t is not None}
+    siblings = [str(s).lower() for s in (info.get("siblings") or []) if s is not None]
+    files = " ".join(siblings)
+    is_image = (
+        "diffusers" in tags
+        or "text-to-image" in tags
+        or "image-to-image" in tags
+        or any(k in rid for k in ("qwen-image", "z-image", "flux", "stable-diffusion", "sdxl", "hidream", "boogu", "krea-2"))
+    )
+    is_mlx_image = is_image and ("mlx" in tags or "mlx" in rid or "mlx-community/" in rid)
+    if is_mlx_image:
+        return "mlx_image"
+    if is_image:
+        return "diffusers"
+    if "mlx" in tags or "mlx" in rid or "mlx-community/" in rid or platform in {"macos", "darwin"}:
+        return "mlx"
+    if "gguf" in tags or "gguf" in rid or ".gguf" in files:
+        return "llama.cpp"
+    if "sglang" in tags or "sglang" in rid:
+        return "sglang"
+    if any(q in rid or q in files or q in tags for q in ("awq", "fp8", "gptq", "bnb", "bitsandbytes")):
+        return "vllm"
+    return "vllm"
+
+
+def _cookbook_default_launch_cmd(repo_id: str, engine: str, *, port: int = 8000, info: Optional[Dict[str, Any]] = None) -> str:
+    """Build a simple first-attempt command for a selected engine."""
+    engine = (engine or "vllm").lower()
+    port = int(port or 8000)
+    if engine in {"mlx", "mlx-lm", "mlx_lm"}:
+        return f"python3 -m mlx_lm.server --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"mlx_image", "mlx-image", "mflux"}:
+        return f"python3 scripts/mlx_image_server.py --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"diffusers", "diffusion", "image"}:
+        return f"python3 scripts/diffusion_server.py --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"sglang", "sgl"}:
+        return f"python3 -m sglang.launch_server --model-path {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"llama.cpp", "llamacpp", "llama"}:
+        siblings = [str(s) for s in ((info or {}).get("siblings") or []) if str(s).lower().endswith(".gguf")]
+        if siblings:
+            # llama-server accepts HF repo + filename separately on recent builds.
+            return f"llama-server -hf {repo_id} -hfr {siblings[0]} --host 0.0.0.0 --port {port}"
+        return f"llama-server -hf {repo_id} --host 0.0.0.0 --port {port}"
+    return f"vllm serve {repo_id} --host 0.0.0.0 --port {port}"
+
+
+async def _cookbook_hf_model_info(repo_id: str) -> Dict[str, Any]:
+    """Fetch lightweight official Hugging Face metadata for launch planning.
+
+    Uses the public HF API directly so this works even when huggingface_hub is
+    not installed in Odysseus. Failures return a structured warning rather than
+    blocking launch; cached/private/offline models can still be served.
+    """
+    import httpx
+    from routes.cookbook_helpers import load_stored_hf_token
+
+    repo_id = (repo_id or "").strip().strip("/")
+    if not repo_id:
+        return {"error": "repo_id is required"}
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    token = load_stored_hf_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"https://huggingface.co/api/models/{repo_id}"
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code >= 400:
+            return {
+                "repo_id": repo_id,
+                "url": f"https://huggingface.co/{repo_id}",
+                "error": f"HF metadata lookup returned HTTP {resp.status_code}",
+            }
+        data = resp.json() if resp.content else {}
+    except Exception as e:
+        return {
+            "repo_id": repo_id,
+            "url": f"https://huggingface.co/{repo_id}",
+            "error": f"HF metadata lookup failed: {e}",
+        }
+    siblings = []
+    for s in data.get("siblings") or []:
+        if isinstance(s, dict) and s.get("rfilename"):
+            siblings.append(s["rfilename"])
+    return {
+        "repo_id": repo_id,
+        "url": f"https://huggingface.co/{repo_id}",
+        "pipeline_tag": data.get("pipeline_tag") or "",
+        "library_name": data.get("library_name") or "",
+        "tags": data.get("tags") or [],
+        "sha": data.get("sha") or "",
+        "private": bool(data.get("private")),
+        "gated": data.get("gated"),
+        "siblings": siblings[:500],
+        "cardData": data.get("cardData") or {},
+    }
+
+
+def _cookbook_host_meta(host: str, servers: Dict[str, Any]) -> Dict[str, Any]:
+    for item in servers.get("hosts") or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("host") or "") == (host or ""):
+            return item
+    return {}
+
+
+def _cookbook_find_task(tasks: List[Dict[str, Any]], session_id: str) -> Optional[Dict[str, Any]]:
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("session_id") == session_id or task.get("sessionId") == session_id or task.get("id") == session_id:
+            return task
+    return None
+
+
+def _cookbook_phase(task: Optional[Dict[str, Any]]) -> str:
+    if not task:
+        return "unknown"
+    return str(task.get("phase") or task.get("status") or "unknown").lower()
 
 
 def _scan_running_model_processes() -> List[Dict[str, Any]]:

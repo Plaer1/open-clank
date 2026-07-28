@@ -157,6 +157,7 @@ def _package_installed_from_probe(name: str, probe: dict) -> bool:
     binaries = probe.get("binaries") if isinstance(probe.get("binaries"), dict) else {}
     dists = probe.get("dists") if isinstance(probe.get("dists"), dict) else {}
     modules = probe.get("modules") if isinstance(probe.get("modules"), dict) else {}
+    files = probe.get("files") if isinstance(probe.get("files"), dict) else {}
 
     if name == "vllm":
         return bool(binaries.get("vllm"))
@@ -166,9 +167,41 @@ def _package_installed_from_probe(name: str, probe: dict) -> bool:
         return bool(dists.get("sglang") or modules.get("sglang", {}).get("real_module"))
     if name == "mlx_lm":
         return bool(dists.get("mlx-lm") or modules.get("mlx_lm", {}).get("real_module"))
+    if name == "mflux":
+        return bool(
+            dists.get("mflux")
+            or modules.get("mflux", {}).get("real_module")
+            or binaries.get("mflux-generate-qwen")
+            or binaries.get("mflux-generate")
+        )
+    if name == "boogu_image_mlx":
+        return bool(
+            dists.get("boogu-image-mlx")
+            or modules.get("boogu_image_mlx", {}).get("real_module")
+        )
+    if name == "mlx_lama_swift":
+        return bool(
+            (binaries.get("odysseus-mlx-inpaint") or binaries.get("mlx-lama-serve"))
+            and (files.get("mlx.metallib") or files.get("default.metallib"))
+        )
+    if name == "mlx_ddcolor_swift":
+        return bool(
+            (binaries.get("odysseus-mlx-colorize") or binaries.get("mlx-ddcolor-serve"))
+            and (files.get("mlx.metallib") or files.get("default.metallib"))
+        )
     if name == "diffusers":
         return bool(
             (dists.get("diffusers") or modules.get("diffusers", {}).get("real_module"))
+            and (dists.get("torch") or modules.get("torch", {}).get("real_module"))
+        )
+    if name == "krea_diffusers":
+        return bool(
+            (dists.get("diffusers") or modules.get("diffusers", {}).get("real_module"))
+            and (dists.get("torch") or modules.get("torch", {}).get("real_module"))
+        )
+    if name == "sam_mask":
+        return bool(
+            (dists.get("transformers") or modules.get("transformers", {}).get("real_module"))
             and (dists.get("torch") or modules.get("torch", {}).get("real_module"))
         )
     if name == "hf_transfer":
@@ -183,6 +216,7 @@ def _package_status_note(name: str, probe: dict) -> str:
     binaries = probe.get("binaries") if isinstance(probe.get("binaries"), dict) else {}
     modules = probe.get("modules") if isinstance(probe.get("modules"), dict) else {}
     dists = probe.get("dists") if isinstance(probe.get("dists"), dict) else {}
+    files = probe.get("files") if isinstance(probe.get("files"), dict) else {}
     module = modules.get(name) if isinstance(modules.get(name), dict) else {}
     locations = module.get("locations") or []
     if name == "vllm":
@@ -212,10 +246,53 @@ def _package_status_note(name: str, probe: dict) -> str:
         if _package_installed_from_probe(name, probe):
             return f"diffusers {dists.get('diffusers', 'available')} with torch {dists.get('torch', 'available')}"
         return "Diffusers serving needs both diffusers and torch."
+    if name == "krea_diffusers":
+        if _package_installed_from_probe(name, probe):
+            return f"Latest Diffusers runtime: diffusers {dists.get('diffusers', 'available')} with torch {dists.get('torch', 'available')}. Use Update/Reinstall to pull latest Diffusers from Git."
+        return "Some newer image models need torch plus latest Diffusers from Git."
+    if name == "sam_mask":
+        if _package_installed_from_probe(name, probe):
+            return f"SAM object masks: transformers {dists.get('transformers', 'available')} with torch {dists.get('torch', 'available')}"
+        return "SAM click/object mask selection needs transformers and torch."
     if name == "mlx_lm":
         if _package_installed_from_probe(name, probe):
             return f"MLX LM {dists.get('mlx-lm', 'available')}"
         return "MLX serving needs mlx-lm on an Apple Silicon Mac."
+    if name == "mflux":
+        if _package_installed_from_probe(name, probe):
+            parts = []
+            if dists.get("mflux"):
+                parts.append(f"mflux {dists['mflux']}")
+            if binaries.get("mflux-generate-qwen"):
+                parts.append(f"Qwen CLI: {binaries['mflux-generate-qwen']}")
+            if binaries.get("mflux-generate"):
+                parts.append(f"Flux CLI: {binaries['mflux-generate']}")
+            return "; ".join(parts) if parts else "mflux available"
+        return "MLX image serving needs mflux on an Apple Silicon Mac."
+    if name == "boogu_image_mlx":
+        if _package_installed_from_probe(name, probe):
+            return f"Boogu MLX pipeline {dists.get('boogu-image-mlx', 'available')}"
+        return "Boogu image models need boogu-image-mlx on an Apple Silicon Mac."
+    if name == "mlx_lama_swift":
+        if _package_installed_from_probe(name, probe):
+            found = [
+                binaries.get("odysseus-mlx-inpaint"),
+                binaries.get("mlx-lama-serve"),
+            ]
+            return f"LaMa/MI-GAN Swift MLX runner: {next((p for p in found if p), 'available')}"
+        if binaries.get("odysseus-mlx-inpaint") or binaries.get("mlx-lama-serve"):
+            return "LaMa/MI-GAN Swift runner is installed, but mlx.metallib is missing next to the runner."
+        return "LaMa/MI-GAN inpainting models need an Odysseus-compatible mlx-lama-swift bridge on an Apple Silicon Mac."
+    if name == "mlx_ddcolor_swift":
+        if _package_installed_from_probe(name, probe):
+            found = [
+                binaries.get("odysseus-mlx-colorize"),
+                binaries.get("mlx-ddcolor-serve"),
+            ]
+            return f"DDColor Swift MLX runner: {next((p for p in found if p), 'available')}"
+        if binaries.get("odysseus-mlx-colorize") or binaries.get("mlx-ddcolor-serve"):
+            return "DDColor Swift runner is installed, but mlx.metallib is missing next to the runner."
+        return "DDColor colorization models need an Odysseus-compatible mlx-ddcolor-swift bridge on an Apple Silicon Mac."
     if name in dists:
         return f"{name} {dists[name]}"
     return ""
@@ -314,12 +391,22 @@ dist_names={{
     'llama_cpp':['llama-cpp-python'],
     'sglang':['sglang'],
     'mlx_lm':['mlx-lm'],
+    'mlx_vlm':['mlx-vlm'],
+    'mflux':['mflux'],
+    'boogu_image_mlx':['boogu-image-mlx'],
+    'mlx_lama_swift':[],
+    'mlx_ddcolor_swift':[],
     'diffusers':['diffusers','torch'],
+    'krea_diffusers':['diffusers','torch'],
+    'sam_mask':['transformers','torch'],
     'hf_transfer':['hf-transfer','hf_transfer'],
 }}
 bin_names={{
     'vllm':['vllm'],
     'llama_cpp':['llama-server'],
+    'mflux':['mflux-generate-qwen', 'mflux-generate'],
+    'mlx_lama_swift':['odysseus-mlx-inpaint', 'mlx-lama-serve'],
+    'mlx_ddcolor_swift':['odysseus-mlx-colorize', 'mlx-ddcolor-serve'],
     'tmux':['tmux'],
 }}
 
@@ -372,7 +459,19 @@ def probe(n):
         mods['torch'] = mod_status('torch')
     dists = dist_status(dist_names.get(n, [n]))
     bins = {{b: shutil.which(b) for b in bin_names.get(n, [])}}
-    return {{'modules': mods, 'dists': dists, 'binaries': bins}}
+    files = {{}}
+    if n in ('mlx_lama_swift', 'mlx_ddcolor_swift'):
+        for key in ('mlx.metallib', 'default.metallib'):
+            found = None
+            for b in bins.values():
+                if not b:
+                    continue
+                p = os.path.join(os.path.dirname(b), key)
+                if os.path.exists(p):
+                    found = p
+                    break
+            files[key] = found
+    return {{'modules': mods, 'dists': dists, 'binaries': bins, 'files': files}}
 
 print(json.dumps({{n: probe(n) for n in names}}))
 """
@@ -1088,6 +1187,8 @@ def setup_shell_routes() -> APIRouter:
         ssh_port: str | None = None,
         venv: str | None = None,
         backend: str | None = None,
+        platform: str | None = None,
+        model_hint: str | None = None,
     ):
         """Check which optional packages are installed.
 
@@ -1104,6 +1205,14 @@ def setup_shell_routes() -> APIRouter:
         import site
         import sys
 
+        platform_l = (platform or "").strip().lower()
+        model_hint_l = (model_hint or "").strip().lower()
+        has_krea_model = "krea" in model_hint_l
+        has_lama_mlx_model = any(
+            key in model_hint_l
+            for key in ("lama", "mi-gan", "migan", "inpainting-mlx")
+        )
+        has_ddcolor_mlx_model = "ddcolor" in model_hint_l
         _prepend_user_install_bins_to_path()
         importlib.invalidate_caches()
         try:
@@ -1158,7 +1267,7 @@ def setup_shell_routes() -> APIRouter:
                 "name": "hf_transfer",
                 "pip": "hf_transfer",
                 "desc": "Fast model downloads from HuggingFace",
-                "category": "LLM",
+                "category": "Tools",
                 "target": "remote",
             },
             {
@@ -1210,8 +1319,52 @@ def setup_shell_routes() -> APIRouter:
             # ── Image ── editor + diffusion model serving
             {
                 "name": "diffusers",
-                "pip": "diffusers[torch]",
-                "desc": "Image generation/editing pipelines (SD, Flux) with PyTorch",
+                "pip": "diffusers[torch] torchvision accelerate scipy python-multipart",
+                "desc": "Image generation/editing pipelines with PyTorch and Diffusers",
+                "category": "Image",
+                "target": "remote",
+            },
+            {
+                "name": "krea_diffusers",
+                "pip": "git+https://github.com/huggingface/diffusers.git torchvision accelerate scipy python-multipart",
+                "desc": "Latest Diffusers from Git for newly released image pipelines",
+                "category": "Image",
+                "target": "remote",
+            },
+            {
+                "name": "mflux",
+                "pip": "mflux",
+                "desc": "MLX image generation runtime for Apple Silicon models like Qwen Image",
+                "category": "Image",
+                "target": "remote",
+            },
+            {
+                "name": "boogu_image_mlx",
+                "pip": "git+https://github.com/xocialize/boogu-image-mlx.git",
+                "desc": "MLX image generation pipeline for Boogu Image models on Apple Silicon",
+                "category": "Image",
+                "target": "remote",
+            },
+            {
+                "name": "mlx_lama_swift",
+                "pip": "",
+                "desc": "Swift MLX runtime for LaMa / MI-GAN inpainting and object removal",
+                "category": "Image",
+                "target": "remote",
+                "install_hint": "Build an Odysseus-compatible mlx-lama-swift bridge on the selected Apple Silicon Mac and put odysseus-mlx-inpaint or mlx-lama-serve on PATH. Upstream currently ships Swift libraries plus smoke executables, not a stable image-edit CLI.",
+            },
+            {
+                "name": "mlx_ddcolor_swift",
+                "pip": "",
+                "desc": "Swift MLX runtime for DDColor automatic image colorization",
+                "category": "Image",
+                "target": "remote",
+                "install_hint": "Build an Odysseus-compatible mlx-ddcolor-swift bridge on the selected Apple Silicon Mac and put odysseus-mlx-colorize or mlx-ddcolor-serve on PATH. Upstream currently ships Swift libraries plus smoke executables, not a stable colorize CLI.",
+            },
+            {
+                "name": "mlx_vlm",
+                "pip": "mlx-vlm",
+                "desc": "MLX-VLM backbone used by HiDream image models on Apple Silicon",
                 "category": "Image",
                 "target": "remote",
             },
@@ -1221,6 +1374,13 @@ def setup_shell_routes() -> APIRouter:
                 "desc": "Hugging Face model components used by SD/Flux pipelines and image tools",
                 "category": "Image",
                 "target": "remote",
+            },
+            {
+                "name": "sam_mask",
+                "pip": "torch torchvision transformers accelerate pillow",
+                "desc": "Neutral click/box/object segmentation masks for the image editor",
+                "category": "Image",
+                "target": "local",
             },
             {
                 "name": "rembg",
@@ -1251,6 +1411,21 @@ def setup_shell_routes() -> APIRouter:
         for pkg in packages:
             pkg.setdefault("install_cmd", None)
             pkg.setdefault("update_cmd", None)
+        if not has_krea_model:
+            packages = [
+                p for p in packages
+                if p.get("name") not in {"krea_diffusers", "transformers"}
+            ]
+        if not has_lama_mlx_model:
+            packages = [
+                p for p in packages
+                if p.get("name") != "mlx_lama_swift"
+            ]
+        if not has_ddcolor_mlx_model:
+            packages = [
+                p for p in packages
+                if p.get("name") != "mlx_ddcolor_swift"
+            ]
         # Remote check: for remote-target packages, probe the selected server's
         # venv over SSH so a remote `pip install` actually reflects here.
         remote_status: dict = {}
@@ -1381,8 +1556,22 @@ def setup_shell_routes() -> APIRouter:
                 target_os_id = ""
             if sys.platform == "darwin":
                 target_os_id = "macos"
+        if not target_os_id and platform_l in {"darwin", "macos", "mac"}:
+            target_os_id = "macos"
 
         for pkg in packages:
+            if pkg.get("name") in {"mflux", "boogu_image_mlx", "mlx_vlm", "mlx_lama_swift", "mlx_ddcolor_swift"}:
+                is_apple_target = target_os_id == "macos" or (
+                    not host and IS_APPLE_SILICON
+                )
+                known_non_apple_target = bool(target_os_id and target_os_id != "macos") or (
+                    not host and not IS_APPLE_SILICON
+                )
+                pkg["applicable"] = is_apple_target
+                if known_non_apple_target:
+                    pkg["installed"] = None
+                    pkg["status_note"] = "Only relevant for Apple Silicon / MLX image serving."
+                    continue
             on_remote = bool(host and pkg.get("target") == "remote")
             probe = None
             if on_remote:
@@ -1588,6 +1777,10 @@ def setup_shell_routes() -> APIRouter:
             "sglang[all]",
             "diffusers",
             "diffusers[torch]",
+            "git+https://github.com/huggingface/diffusers.git",
+            "mflux",
+            "git+https://github.com/xocialize/boogu-image-mlx.git",
+            "mlx-vlm",
             "transformers",
             "TTS",
             "bark",

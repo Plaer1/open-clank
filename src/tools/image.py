@@ -32,8 +32,35 @@ async def do_edit_image(content: str, owner: Optional[str] = None) -> Dict:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(f"{_INTERNAL_BASE}/api/gallery/{action}", json=payload)
             data = resp.json()
-        if data.get("success") or data.get("id"):
-            return {"output": f"Image edited ({action}). New image ID: {data.get('id', '?')}", "exit_code": 0}
+        new_id = data.get("id") or data.get("image_id")
+        if data.get("success") or new_id:
+            result = {
+                "output": f"Image edited ({action}). New image ID: {new_id or '?'}",
+                "exit_code": 0,
+            }
+            if new_id:
+                result["image_id"] = new_id
+                try:
+                    from src.database import GalleryImage, SessionLocal
+                    db = SessionLocal()
+                    try:
+                        q = db.query(GalleryImage).filter(GalleryImage.id == new_id)
+                        if owner:
+                            q = q.filter(GalleryImage.owner == owner)
+                        img = q.first()
+                        if img and img.filename:
+                            result.update({
+                                "image_url": f"/api/generated-image/{img.filename}",
+                                "image_prompt": img.prompt or args.get("prompt") or action,
+                                "image_model": img.model or "edit_image",
+                                "image_size": img.size or "",
+                                "image_quality": img.quality or "",
+                            })
+                    finally:
+                        db.close()
+                except Exception:
+                    pass
+            return result
         return {"error": data.get("error", f"{action} failed"), "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}

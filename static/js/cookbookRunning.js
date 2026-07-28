@@ -9,6 +9,7 @@ import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis
 import { registerMenuDismiss } from './escMenuStack.js';
 import { computeProgressSignal } from './cookbookProgressSignal.js';
 import { portOf, nextFreePort } from './cookbookPorts.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 
 // Human-friendly badge label for a task's internal status. Avoids surfacing
 // the word "error" in the sidebar — a server the user stopped or one that
@@ -20,6 +21,18 @@ function _statusLabel(status, type) {
   return status || '';
 }
 
+function _downloadBadgeText(progress) {
+  const raw = String(progress || '').trim();
+  if (!raw) return 'downloading';
+  const pct = raw.match(/(\d+)%/);
+  if (pct) return pct[0];
+  if (/^(?:Downloading|Fetching|Resuming)\s+'[^']+'\s+to\s+'[^']+/i.test(raw)
+    || /^Downloading\s*\(incomplete\b/i.test(raw)) {
+    return 'downloading';
+  }
+  return raw;
+}
+
 // Single source of truth for what a task's status badge shows + its style class.
 // Crucially, a serve task that's still coming up shows its live phase
 // ("loading 45%", "warming up", …) rather than the generic "running" — they're
@@ -29,8 +42,7 @@ function _statusLabel(status, type) {
 function _taskBadge(task) {
   if (task._unreachable && task.status === 'running') return { text: 'unreachable', cls: 'cookbook-task-error' };
   if (task.type === 'download' && task.status === 'running') {
-    const progress = String(task.progress || '').trim();
-    return { text: progress || _statusLabel(task.status, task.type), cls: 'cookbook-task-downloading' };
+    return { text: _downloadBadgeText(task.progress), cls: 'cookbook-task-downloading' };
   }
   if (task.type === 'serve' && task.status === 'running' && task.progress) {
     // Same green "running" pill — just with dynamic phase text, so it doesn't
@@ -61,9 +73,12 @@ function _downloadNameFromPayload(name, payload) {
   const rawName = String(name || '').trim();
   // Defensive: failed/restarted downloads can inherit the wrapper executable
   // name if older state was saved from a command preview. The row title should
-  // always be the model/repo, never "bash" or "python".
+  // always be the model/repo, never "bash", "python", or a live HF progress
+  // line like "Downloading 'vae/...' to '/mnt/...".
   const looksLikeLauncher = /^(?:bash|sh|zsh|python|python3|pwsh|powershell|cmd|tmux)$/i.test(rawName);
-  const base = (!rawName || looksLikeLauncher)
+  const looksLikeProgressLine = /^(?:Downloading|Fetching|Resuming)\s+'[^']+'\s+to\s+'[^']+/i.test(rawName)
+    || /^Downloading\s*\(incomplete\b/i.test(rawName);
+  const base = (!rawName || looksLikeLauncher || looksLikeProgressLine)
     ? String(payload?.repo_id || payload?.repo || '').split('/').pop()
     : rawName;
   const include = payload?.include || '';
@@ -634,6 +649,11 @@ function _markServeEndpointMismatch(task, ep, host, port) {
 function _appendPinnedServeModel(fd, task) {
   const expected = _serveExpectedModel(task);
   if (expected) fd.append('pinned_models', expected);
+}
+
+function _isImageServeTask(task) {
+  const cmd = String(task?.payload?._cmd || '');
+  return cmd.includes('diffusion_server') || cmd.includes('mlx_image_server');
 }
 
 // ── Download queue — runs one at a time per server ──
@@ -1274,7 +1294,7 @@ function _autoSaveWorkingConfig(task) {
   if (task._autoSaved) return;
   const cmd = task.payload._cmd;
   // Diffusion/image servers aren't vLLM presets — skip them.
-  if (cmd.includes('diffusion_server')) { task._autoSaved = true; return; }
+  if (cmd.includes('diffusion_server') || cmd.includes('mlx_image_server')) { task._autoSaved = true; return; }
   const model = task.payload.repo_id || task.name;
   const presets = _loadPresets();
   const existing = presets.find(p => p.cmd === cmd);
@@ -1752,15 +1772,16 @@ function _promptEditServeCmd(currentCmd) {
 function _parseServeCmdToFields(cmd) {
   if (!cmd) return null;
   const ex = (re) => { const m = cmd.match(re); return m ? m[1] : ''; };
-  const fields = {
-    backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
+    const fields = {
+      backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
+      : cmd.includes('mlx_image_server') ? 'mlx_image'
       : cmd.includes('mlx_lm.server') ? 'mlx'
       : cmd.includes('diffusion_server') ? 'diffusers'
       : cmd.includes('sglang') ? 'sglang'
       : cmd.includes('ollama') ? 'ollama' : 'vllm',
     port: ex(/--port\s+(\d+)/) || '8000',
     tp: ex(/--tensor-parallel-size\s+(\d+)/) || '1',
-    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
+    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--context-length\s+(\d+)/) || ex(/--max-tokens\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
     gpu_mem: ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
     swap: ex(/--swap-space\s+(\d+)/) || '',
     dtype: ex(/--dtype\s+(\w+)/) || 'auto',
@@ -1796,7 +1817,7 @@ function _serveCmdNeedsGpuPreflight(cmd, repo) {
   const c = String(cmd || '').toLowerCase();
   const r = String(repo || '').toLowerCase();
   if (!c || /gpu-cleanup|sglang-kernel|mlx-lm|pip\s+install|python\d*\s+-m\s+pip/.test(`${r} ${c}`)) return false;
-  return /\b(vllm\s+serve|sglang(?:\.launch_server|\s+serve)|mlx_lm\.server|llama-server|llama_cpp\.server|text-generation-launcher|aphrodite|ollama\s+(?:serve|run))\b/.test(c);
+  return /\b(vllm\s+serve|sglang(?:\.launch_server|\s+serve)|mlx_lm\.server|mlx_image_server\.py|diffusion_server\.py|llama-server|llama_cpp\.server|text-generation-launcher|aphrodite|ollama\s+(?:serve|run))\b/.test(c);
 }
 
 function _selectedGpuIndexes(gpus) {
@@ -1900,6 +1921,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   const _serverMetaName = targetMeta?.serverName || _hsrv.name || (_host ? _host : 'Local');
   const _hplatform = _host ? (_hsrv.platform || '') : (_envState.hostPlatform || '');
   const _replaceTaskId = fields?._replaceTaskId || '';
+  const _launchAnyway = !!targetMeta?.launchAnyway;
   if (_replaceTaskId) {
     try {
       const _old = _loadTasks().find(t => t.sessionId === _replaceTaskId);
@@ -1917,7 +1939,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   // servers on one port, so re-serving (or retrying) should stop & remove the
   // old one instead of leaving a dead duplicate behind. (The retry buttons
   // already removed their own task, so this is a no-op for them.)
-  try {
+  if (!_launchAnyway) try {
     const _pm = cmd.match(/--port[=\s]+(\d+)/) || cmd.match(/(?:^|\s)-p[=\s]+(\d+)/);
     const _newPort = _pm ? _pm[1] : '';
     if (_newPort) {
@@ -2374,14 +2396,15 @@ export function _renderRunningTab() {
     const _bdg = _taskBadge(task);
     const _bdgTitle = (task._unreachable && task.status === 'running') ? ' title="Server not responding — it may have crashed"' : '';
     const displayName = _taskDisplayName(task);
+    const logoName = task.type === 'download' ? (task.payload?.repo_id || task.name) : task.name;
     el.innerHTML = `
       <div class="cookbook-task-header">
         <span class="cookbook-task-type${(task.status === 'done' && task.type === 'download') ? ' cookbook-task-type-done' : ''}" data-type="${esc(task.type)}">${esc((task.status === 'done' && task.type === 'download') ? 'finished' : task.type)}</span>
-        <span class="cookbook-task-name">${modelLogo(task.name)}${esc(displayName)}</span>
+        <span class="cookbook-task-name">${modelLogo(logoName)}${esc(displayName)}</span>
         <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? '<button type="button" class="cookbook-task-serve-btn" title="Open in Launch"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Launch</span></button>' : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}"><svg class="cookbook-task-check-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><svg class="cookbook-task-clear-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
         <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"/></svg><span>start now</span></button>
         <span class="cookbook-task-status ${_bdg.cls}"${_bdgTitle}>${esc(_bdg.text)}</span>
-        <button class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
+        <button type="button" class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
       </div>
       <div class="cookbook-task-sub"><span class="cookbook-task-session">${esc(task.sessionId)}</span><span class="cookbook-task-uptime" style="display:${((task.type === 'serve' || task.type === 'download') && task.status === 'running') ? '' : 'none'}"></span>${(task.type === 'download') ? `<span class="cookbook-task-dldir" title="Download destination" style="font-size:9px;color:var(--fg-muted);font-family:'Fira Code',monospace;opacity:0.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40ch;">Dir: ${esc(task.payload?.local_dir || '~/.cache/huggingface/hub')}</span>` : ''}</div>
       <div class="cookbook-output-wrap cookbook-task-collapsible${(_mobileCollapseDefault && !_shouldAutoExpandTaskOutput(task)) ? ' cookbook-task-collapsed' : ''}"><pre class="cookbook-output-pre">${esc(task.output || '')}</pre><button type="button" class="copy-code cookbook-output-copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
@@ -2572,8 +2595,10 @@ export function _renderRunningTab() {
       el.addEventListener('touchmove', _lpMove, { passive: true });
       el.addEventListener('touchend', _lpCancel, { passive: true });
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
-      menuBtn.addEventListener('click', (e) => {
+      let _lastTouchMenuOpenAt = 0;
+      const _openTaskMenu = (e) => {
         e.stopPropagation();
+        if (e.type === 'click' && Date.now() - _lastTouchMenuOpenAt < 550) return;
         const existing = document.querySelector('.cookbook-task-dropdown');
         if (existing && existing._anchor === menuBtn) {
           if (typeof existing._dismiss === 'function') existing._dismiss();
@@ -2646,7 +2671,7 @@ export function _renderRunningTab() {
               fd.append('name', task.name);
               fd.append('skip_probe', 'true');
               _appendCookbookEndpointScope(fd, task.remoteHost || '');
-              if (task.payload?._cmd?.includes('diffusion_server')) fd.append('model_type', 'image');
+              if (_isImageServeTask(task)) fd.append('model_type', 'image');
               const res = await fetch('/api/model-endpoints', { method: 'POST', credentials: 'same-origin', body: fd });
               if (res.ok) {
                 task._endpointAdded = true;
@@ -2764,6 +2789,7 @@ export function _renderRunningTab() {
 
         const rect = menuBtn.getBoundingClientRect();
         dropdown.style.position = 'fixed';
+        dropdown.style.zIndex = String(topPortalZ());
         dropdown.style.top = rect.bottom + 2 + 'px';
         dropdown.style.right = (window.innerWidth - rect.right) + 'px';
         document.body.appendChild(dropdown);
@@ -2811,7 +2837,13 @@ export function _renderRunningTab() {
           window.visualViewport?.addEventListener('scroll', scrollClose);
         }, 0);
         _unreg = registerMenuDismiss(_cleanup);
-      });
+      };
+      menuBtn.addEventListener('click', _openTaskMenu);
+      menuBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        _lastTouchMenuOpenAt = Date.now();
+        _openTaskMenu(e);
+      }, { passive: false });
     }
 
     // Hidden action buttons for menu dispatch
@@ -3619,7 +3651,7 @@ async function _reconnectTask(el, task) {
                 if (_ex && _ex.id && !(_ex.models || []).length) _probeEndpointUntilOnline(_ex.id, host, port);
                 return null;
               }
-              const _isDiffusion = task.payload?._cmd?.includes('diffusion_server');
+              const _isDiffusion = _isImageServeTask(task);
               const fd = new FormData();
               fd.append('base_url', baseUrl);
               fd.append('name', task.name);
@@ -4236,7 +4268,6 @@ async function _pollBackgroundStatus() {
     for (const t of readyServes) {
       const localTasks = _loadTasks();
       const localTask = localTasks.find(lt => lt.sessionId === t.session_id);
-      if (localTask && localTask._endpointAdded) continue;
 
       let host = _connectHostFromRemote(localTask?.remoteHost || t.remote);
       const portMatch = localTask?.payload?._cmd?.match(/--port\s+(\d+)/)
@@ -4249,9 +4280,9 @@ async function _pollBackgroundStatus() {
         const endpoint = _endpointFromAdvertisedUrl(ollamaUrlMatch[1], host, '11434');
         if (endpoint) ({ host, port, baseUrl } = endpoint);
       }
-      const _isDiffusion = localTask?.payload?._cmd?.includes('diffusion_server');
+      const _isDiffusion = _isImageServeTask(localTask);
 
-      _updateTask(t.session_id, { _serveReady: true, _endpointAdded: true });
+      _updateTask(t.session_id, { _serveReady: true });
       if (localTask) _autoSaveWorkingConfig(localTask);   // remember working settings (modal may be closed)
 
       // Auto-detect function-calling support from the serve cmd.
@@ -4273,6 +4304,7 @@ async function _pollBackgroundStatus() {
               _markServeEndpointMismatch(taskForMatch, existing, host, port);
               return null;
             }
+            _updateTask(t.session_id, { _endpointAdded: true });
             // Already registered — but it may be showing offline because
             // it was added while the server was still warming. Kick a
             // re-probe so it flips online without manual toggle.
@@ -4291,6 +4323,7 @@ async function _pollBackgroundStatus() {
         })
         .then(async (res) => {
           if (res && res.ok) {
+            _updateTask(t.session_id, { _endpointAdded: true });
             uiModule.showToast(`Model endpoint added: ${host}:${port}`);
             const data = await res.json().catch(() => ({}));
             // A just-started server often can't answer the 1s add-time
@@ -4328,12 +4361,8 @@ async function _pollBackgroundStatus() {
             statusEl.textContent = 'cooking';
           }
         } else {
-          var _dlProgress = '';
-          if (t.progress) {
-            var _pctMatch = t.progress.match(/(\d+)%/);
-            _dlProgress = _pctMatch ? ` ${_pctMatch[0]}` : '';
-          }
-          statusEl.textContent = `downloading${_dlProgress}`;
+          const _dlText = _downloadBadgeText(t.progress);
+          statusEl.textContent = _dlText === 'downloading' ? 'downloading' : `downloading ${_dlText}`;
         }
         statusEl.style.display = '';
       } else if (errorTasks.length > 0) {

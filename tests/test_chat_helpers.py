@@ -342,10 +342,10 @@ def test_clean_thinking_for_save_extracts_thought_tag():
     assert metadata["thinking"] == "internal reasoning"
 
 
-def test_save_assistant_response_preserves_actual_and_requested_model():
+def test_save_assistant_response_incognito_does_not_mutate_session_history():
     sess = _FakeSession("selected-model")
 
-    save_assistant_response(
+    saved_id = save_assistant_response(
         sess,
         session_manager=None,
         session_id="s1",
@@ -354,8 +354,24 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
         incognito=True,
     )
 
-    assert sess.history[-1].metadata["requested_model"] == "selected-model"
-    assert sess.history[-1].metadata["model"] == "actual-model"
+    assert saved_id is None
+    assert sess.history == []
+
+
+def test_add_user_message_incognito_does_not_mutate_session_history():
+    sess = _FakeSession("selected-model")
+    chat_handler = SimpleNamespace(update_session_name_if_needed=lambda *_args, **_kwargs: None)
+    preprocessed = PreprocessedMessage(
+        enhanced_message="secret",
+        user_content="secret",
+        text_for_context="secret",
+        youtube_transcripts=[],
+        attachment_meta=[],
+    )
+
+    chat_helpers.add_user_message(sess, chat_handler, preprocessed, incognito=True)
+
+    assert sess.history == []
 
 
 class _SpinMsg:

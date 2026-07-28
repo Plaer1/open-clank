@@ -16,7 +16,7 @@ import modelsModule from './models.js';
 import chatRenderer from './chatRenderer.js';
 import spinnerModule from './spinner.js';
 import themeModule from './theme.js';
-import documentModule from './document.js';
+import documentModule from './document.js?v=20260722emailfastindex1';
 import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
@@ -287,8 +287,14 @@ function _setupProviderPrompt() {
 // -----------------------------------------------------------------------
 
 /** Persist a message to the current session (fire-and-forget) */
-function _persistMsg(role, content, metadata) {
-  const sid = sessionModule.getCurrentSessionId();
+async function _persistMsg(role, content, metadata) {
+  let sid = sessionModule.getCurrentSessionId();
+  if (!sid && sessionModule.hasPendingChat?.()) {
+    try {
+      await sessionModule.materializePendingSession?.();
+      sid = sessionModule.getCurrentSessionId();
+    } catch (_) {}
+  }
   if (!sid || !content) return;
   const payload = { role, content };
   if (metadata) payload.metadata = metadata;
@@ -300,6 +306,7 @@ function _persistMsg(role, content, metadata) {
 }
 
 function slashReply(text) {
+  _hideWelcomeScreen();
   const chatBox = document.getElementById('chat-history');
   const div = document.createElement('div');
   div.className = 'msg msg-ai';
@@ -1262,7 +1269,7 @@ async function _cmdWorkspace(args, ctx) {
     // folder, sensitive dir, filesystem root).
     workspaceModule.vetAndSetWorkspace(rest).then(({ ok, path }) => {
       if (ok) slashReply(`Workspace set: <code>${uiModule.esc(path)}</code>`);
-      else slashReply(`Not a usable workspace folder: <code>${uiModule.esc(rest)}</code>. It must be an existing directory, not a filesystem root or sensitive path.`);
+      else slashReply(`Not a usable workspace folder on the Odysseus backend: <code>${uiModule.esc(rest)}</code>. If Odysseus is running in Docker, use the container path, usually <code>/app</code>, or use <code>/workspace pick</code>.`);
     });
     return true;
   }

@@ -15,6 +15,7 @@ let activeCategory = 'all';
 let sortOrder = 'newest';
 let selectMode = false;
 let selectedIds = new Set();
+let memoriesLoading = false;
 
 
 const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task'];
@@ -370,12 +371,16 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
 
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
+  memoriesLoading = true;
+  renderMemoryList();
+  updateMemoryCount();
   try {
     const response = await fetch(`${window.location.origin}/api/memory`);
 
     if (!response.ok) {
       console.error('Memory fetch failed with status:', response.status);
       memories = [];
+      memoriesLoading = false;
       buildCategoryChips();
       renderMemoryList();
       updateMemoryCount();
@@ -393,12 +398,14 @@ export async function loadMemories() {
       memories = [];
     }
 
+    memoriesLoading = false;
     buildCategoryChips();
     renderMemoryList();
     updateMemoryCount();
   } catch (error) {
     console.error('Failed to load memories:', error);
     memories = [];
+    memoriesLoading = false;
     buildCategoryChips();
     renderMemoryList();
     updateMemoryCount();
@@ -689,6 +696,12 @@ export function renderMemoryList() {
     const selectBtn = document.getElementById('memory-select-btn');
     if (selectBtn) selectBtn.disabled = true;
     if (selectMode) exitSelectMode();
+    if (memoriesLoading) {
+      const row = spinnerModule.createLoadingRow('Loading memories...', 14);
+      row.classList.add('memory-empty');
+      memoryList.replaceChildren(row);
+      return;
+    }
     const searchTerm = document.getElementById('memory-search')?.value?.trim() || '';
     const _smiley = '<span style="vertical-align:-3px;margin-left:6px;">' + uiModule.emptyStateIcon('smiley') + '</span>';
     if (searchTerm || activeCategory !== 'all') {
@@ -1065,6 +1078,11 @@ export function updateMemoryCount() {
   const h2Count = document.getElementById('memory-count-h2');
   const tabCount = document.getElementById('memory-count'); // optional (may be absent)
   if (!h2Count && !tabCount) return;
+  if (memoriesLoading) {
+    if (h2Count) h2Count.textContent = 'loading...';
+    if (tabCount) tabCount.textContent = '...';
+    return;
+  }
 
   const searchInput = document.getElementById('memory-search');
   const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';

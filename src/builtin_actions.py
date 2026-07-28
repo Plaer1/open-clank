@@ -77,6 +77,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         import json
         import re
+        from difflib import SequenceMatcher
         from src.constants import DATA_DIR
         from src.llm_core import llm_call_async_with_fallback
         from src.memory import MemoryManager
@@ -111,6 +112,64 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         removed_examples = []
         ai_reasons = []
         ai_used = False
+
+        def _normalized_memory_text(mem: dict) -> str:
+            text = (mem.get("text") or "").lower()
+            text = re.sub(r"[^a-z0-9@._+-]+", " ", text)
+            return " ".join(text.split())
+
+        def _memory_rank(mem: dict) -> tuple:
+            text = (mem.get("text") or "").strip()
+            return (
+                1 if mem.get("pinned") else 0,
+                1 if (mem.get("source") or "") == "user" else 0,
+                int(mem.get("uses") or 0),
+                -len(text),
+                int(mem.get("timestamp") or 0),
+            )
+
+        def _same_memory_fact(a: dict, b: dict) -> bool:
+            a_cat = (a.get("category") or "fact").strip().lower()
+            b_cat = (b.get("category") or "fact").strip().lower()
+            if a_cat != b_cat:
+                return False
+            a_text = _normalized_memory_text(a)
+            b_text = _normalized_memory_text(b)
+            if not a_text or not b_text:
+                return False
+            if a_text == b_text:
+                return True
+            shorter, longer = sorted((a_text, b_text), key=len)
+            if len(shorter) >= 24 and shorter in longer:
+                return True
+            return SequenceMatcher(None, a_text, b_text).ratio() >= 0.88
+
+        def _dedupe_group(group_memories: list) -> tuple[list, int]:
+            kept = []
+            removed = 0
+            for mem in group_memories:
+                text = (mem.get("text") or "").strip()
+                if not text:
+                    removed += 1
+                    if len(removed_examples) < 3:
+                        removed_examples.append("(empty)")
+                    continue
+                duplicate_idx = next(
+                    (idx for idx, kept_mem in enumerate(kept) if _same_memory_fact(mem, kept_mem)),
+                    None,
+                )
+                if duplicate_idx is None:
+                    kept.append(mem)
+                    continue
+                removed += 1
+                if _memory_rank(mem) > _memory_rank(kept[duplicate_idx]):
+                    if len(removed_examples) < 3:
+                        old_text = (kept[duplicate_idx].get("text") or "").strip()
+                        removed_examples.append(old_text[:60] + ("..." if len(old_text) > 60 else ""))
+                    kept[duplicate_idx] = mem
+                elif len(removed_examples) < 3:
+                    removed_examples.append(text[:60] + ("..." if len(text) > 60 else ""))
+            return kept, removed
 
         async def _try_ai_tidy_group(group_owner: str, group_memories: list) -> bool:
             nonlocal all_memories, total_removed, total_cleaned, total_scanned, ai_used
@@ -220,7 +279,6 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                                 kept_all.append(mem)
 
                             removed = sum(1 for m in group_memories if m.get("id") in drop_ids)
-                            total_scanned += len(group_memories)
                             if removed or changed_text:
                                 all_memories = kept_all
                                 total_removed += removed
@@ -237,12 +295,23 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             return False
 
         for group_owner, group_memories in memory_groups.items():
+            total_scanned += len(group_memories)
+            deduped_group, group_removed = _dedupe_group(group_memories)
+            if group_removed:
+                group_ref_ids = {id(m) for m in group_memories}
+                keep_ref_ids = {id(m) for m in deduped_group}
+                all_memories = [
+                    m for m in all_memories
+                    if id(m) not in group_ref_ids or id(m) in keep_ref_ids
+                ]
+                total_removed += group_removed
+                group_memories = deduped_group
+
             if await _try_ai_tidy_group(group_owner, group_memories):
                 continue
 
             seen = {}
             keep_refs = set()
-            total_scanned += len(group_memories)
             for mem in group_memories:
                 text = (mem.get("text") or "").strip()
                 key = " ".join(text.lower().split())
