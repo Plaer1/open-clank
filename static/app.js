@@ -2533,9 +2533,10 @@ function initializeEventListeners() {
     'sidebar-brand':       '.sidebar-brand-title',
     'sidebar-new-chat':    '#sidebar-new-chat-btn',
     'sidebar-search':      '#sidebar-search-btn',
-	    'sessions-section':    '#sessions-section',
-	    'email-section':       '#email-section',
-	    'tools-section':       '#tools-section',
+    'sessions-section':    '#sessions-section',
+    'email-section':       '#email-section',
+    'models-section':      '#models-section',
+    'tools-section':       '#tools-section',
     // Per-tool visibility — fine-grained control over which entries show
     // inside the Tools section in the sidebar.
     'tool-calendar':       '#tool-calendar-btn',
@@ -2565,7 +2566,7 @@ function initializeEventListeners() {
   };
 
   // Keys hidden by default on first run (no localStorage yet)
-	  const UI_VIS_DEFAULT_OFF = new Set(['rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
+  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);

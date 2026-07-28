@@ -1771,7 +1771,6 @@ export async function loadSessions() {
     // picker would still show the old model's name from cached state). See
     // the targetId resolution above (hash → currentSession → lastSessionId →
     // most-recent).
-    const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
     if (_isFirstLoad) {
       sessionStorage.setItem('ody-session-active', '1');
       if (!targetId) {
@@ -2334,79 +2333,14 @@ export async function materializePendingSession() {
 export function preMaterializePendingSession() {
   if (!_pendingChat || _pendingMaterializePromise) return;
   const incognitoChk = document.getElementById('incognito-toggle');
-  const isIncognito = incognitoChk && incognitoChk.checked;
-  const base = (pending.modelId || 'model').split('/').pop();
-  const name = isIncognito ? 'Nobody' : `${base} ${new Date().toLocaleTimeString()}`;
-
-  const fd = new FormData();
-  fd.append('name', name);
-  fd.append('endpoint_url', pending.url || '');
-  fd.append('model', pending.modelId || '');
-  if (pending.url && pending.modelId) {
-    fd.append('skip_validation', 'true');
-  }
-  if (pending.endpointId) {
-    fd.append('endpoint_id', pending.endpointId);
-  }
-  if (isIncognito) {
-    fd.append('incognito', 'true');
-  }
-
-  let res;
-  try {
-    res = await fetch(`${API_BASE}/api/session`, { method: 'POST', body: fd });
-  } catch (e) {
-    if (!_pendingChat) _pendingChat = pending;
-    updateModelPicker();
-    uiModule.showError('Failed to reach backend: ' + e);
-    return false;
-  }
-
-  let payload;
-  try {
-    payload = await res.json();
-  } catch {
-    payload = { detail: await res.text() };
-  }
-
-  if (!res.ok) {
-    if (!_pendingChat) _pendingChat = pending;
-    updateModelPicker();
-    uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
-    return false;
-  }
-
-  if (isIncognito && payload.id) {
-    _markIncognito(payload.id);
-  }
-
-  // Clear any leftover document text selection from the previous session
-  if (window.documentModule?.clearSelection) {
-    try { window.documentModule.clearSelection(); } catch {}
-  }
-  currentSessionId = payload.id;
-  const createdSession = {
-    ...payload,
-    id: payload.id,
-    model: payload.model || pending.modelId || '',
-    endpoint_url: payload.endpoint_url || pending.url || '',
-    endpoint_id: payload.endpoint_id || pending.endpointId || null,
-    archived: !!payload.archived,
-  };
-  const createdIndex = sessions.findIndex(s => s.id === payload.id);
-  if (createdIndex >= 0) sessions[createdIndex] = createdSession;
-  else sessions.unshift(createdSession);
-  document.dispatchEvent(new CustomEvent('odysseus:session-selected', { detail: { sessionId: payload.id } }));
-  Storage.set('lastSessionId', payload.id);
-  history.replaceState(null, '', '#' + payload.id);
-  updateModelPicker();
-
-  // Reload the sidebar in the background. Awaiting this used to block the first
-  // prompt in a new/pending chat behind startup fetches and slow /api/sessions
-  // calls, so the user's message could sit for 20s+ before streaming began.
-  _suppressNextSessionLoading = true;
-  loadSessions().catch(() => {});
-  return true;
+  if (incognitoChk && incognitoChk.checked) return;
+  setTimeout(() => {
+    const chk = document.getElementById('incognito-toggle');
+    if (chk && chk.checked) return;
+    if (_pendingChat && !_pendingMaterializePromise) {
+      materializePendingSession().catch(() => {});
+    }
+  }, 250);
 }
 
 export function hasPendingChat() { return !!_pendingChat; }

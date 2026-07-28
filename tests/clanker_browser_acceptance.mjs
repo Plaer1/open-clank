@@ -74,7 +74,23 @@ try {
       try { if (await evaluate(expression)) return; } catch {}
       await new Promise(resolve => setTimeout(resolve, 75));
     }
-    throw new Error(`Timed out waiting for ${label}`);
+    const state = await evaluate(`(() => {
+      const canvases = [...document.querySelectorAll('[data-background-effect-canvas]')];
+      return {
+        url: location.href,
+        ready: document.readyState,
+        viewport: [innerWidth, innerHeight],
+        bodyClasses: [...document.body.classList],
+        canvases: canvases.map(canvas => ({
+          id: canvas.id,
+          width: canvas.width,
+          height: canvas.height,
+          motion: canvas.dataset.motion,
+          runtime: canvas.dataset.backgroundRuntime,
+        })),
+      };
+    })()`).catch(error => ({ diagnosticError: String(error) }));
+    throw new Error(`Timed out waiting for ${label}: ${JSON.stringify(state)}`);
   };
   let reloadSequence = 0;
   const reloadAndWait = async (expression, label) => {

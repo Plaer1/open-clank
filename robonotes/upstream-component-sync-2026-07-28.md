@@ -66,3 +66,32 @@ Verification:
   41/41 in a clean run, and the memory test now explicitly clears live provider
   state.
 - MiMo changed-file suite: 434 passed, 2 skipped, 0 failed across 16 files.
+
+## Post-sync frontend repair
+
+The first browser refresh exposed merge damage in the authored frontend:
+
+- `chat.js` and `sessions.js` contained duplicate declarations, preventing the
+  browser from parsing the chat/session modules.
+- The viewport meta tag was dropped, so mobile rendered at a 980px layout
+  viewport.
+- The raw Models sidebar section was enabled by default and the account label
+  could remain at the HTML fallback `User`.
+- The service worker could serve cached HTML alongside the newly merged module
+  graph on the first refresh.
+
+The repair removed only the duplicate merge blocks, restored the viewport and
+Open Clank sidebar/auth defaults, and made root navigation network-first with a
+new cache generation.
+
+Verification:
+
+- Syntax check across every `static/**/*.js` module: passed.
+- Startup/i18n shell contracts: 8 passed.
+- Chat/session focused regressions: 19 passed.
+- Streaming invariant matrix: 113 passed.
+- Clanker browser acceptance, including the full pattern transition matrix,
+  mobile 390x844, DPR resize, and login surfaces: passed.
+- A 1536x1606 browser render at 125% UI scale showed the authenticated name,
+  hidden Models section, full-height chat/sidebar, and a canvas exactly matching
+  the viewport.

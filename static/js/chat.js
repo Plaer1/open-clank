@@ -888,7 +888,7 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     try { return localStorage.getItem(PLAN_STORAGE_KEY) || ''; } catch (_) { return ''; }
   }
 
-	  function _setStoredPlan(plan) {
+	  function _setApprovedPlan(plan) {
 	    const text = _extractPlanText(plan);
 	    if (!text) return;
 	    try { localStorage.setItem(PLAN_STORAGE_KEY, text); } catch (_) {}
@@ -3710,7 +3710,7 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
 		        try {
 		          const _endToggles = Storage.loadToggleState();
 		          if (_endToggles.plan_mode && accumulated) {
-		            _setStoredPlan(accumulated);
+		            _setApprovedPlan(accumulated);
 		            _attachPlanActions(footerTarget, accumulated);
 		          }
 		        } catch (_) {}

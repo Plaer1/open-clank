@@ -49,6 +49,8 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
     const data = await res.json().catch(() => ({}));
     const liveUser = (data && data.username) || '';
     if (!liveUser) return;
+    const userBarName = document.getElementById('user-bar-name');
+    if (userBarName) userBarName.textContent = liveUser;
     const KEY = 'odysseus-auth-user';
     const cachedUser = localStorage.getItem(KEY);
     bindModelStateOwner(liveUser, cachedUser || '');
