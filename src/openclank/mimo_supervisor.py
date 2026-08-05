@@ -35,6 +35,7 @@ from src.openclank.acp_bridge import (
     frankenmemory_child_env,
     register_client_callbacks,
 )
+from src.memory_scope import chat_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,17 @@ _OPEN_CLANK_DATA_DIR = (
     or str(REPO_ROOT / "data")
 )
 _OPEN_CLANK_SKILLS_DIR = str(Path(_OPEN_CLANK_DATA_DIR) / "skills")
+
+
+def _inject_skill_catalog(env: dict[str, str]) -> None:
+    """Point an isolated worker at the central, owner-filtered skill catalogue."""
+    env["OPEN_CLANK_CONTROL_DATA_DIR"] = _OPEN_CLANK_DATA_DIR
+    env["MIMOCODE_CONFIG_CONTENT"] = json.dumps({
+        "skills": {"paths": [_OPEN_CLANK_SKILLS_DIR]},
+        "memory": {"provider": "frankenmemory"},
+    })
+    env["OPEN_CLANK_SKILLS_DIR"] = _OPEN_CLANK_SKILLS_DIR
+
 
 # Restart backoff
 # Strips ANSI color/style sequences from mimo's stderr log lines.
@@ -142,6 +154,8 @@ def _mimo_child_environment() -> dict[str, str]:
         "LANG",
         "LANGUAGE",
         "NODE_EXTRA_CA_CERTS",
+        "OPEN_CLANK_SHELL_NETWORK",
+        "OPEN_CLANK_SHELL_SANDBOX",
         "PATH",
         "SHELL",
         "SSL_CERT_DIR",
@@ -155,6 +169,16 @@ def _mimo_child_environment() -> dict[str, str]:
         if name in allowed or name.startswith("LC_")
     }
     env.update(frankenmemory_child_env())
+    env["FM_WORKSPACE_ID"] = chat_workspace()
+    # Open Clank supplies credentials, config, skills, and account identity.
+    # Embedded workers must not discover state from a personal MiMo install.
+    env.update({
+        "MIMOCODE_DISABLE_PROVIDER_ENV": "1",
+        "MIMOCODE_DISABLE_PROJECT_CONFIG": "1",
+        "MIMOCODE_DISABLE_EXTERNAL_SKILLS": "1",
+        "MIMOCODE_DISABLE_REMOTE_SKILLS": "1",
+        "MIMOCODE_DISABLE_CLAUDE_CODE": "1",
+    })
     return env
 
 
@@ -417,31 +441,28 @@ class MimoSupervisor:
         # Inject Open Clank skills into the embedded agent engine.
         # MIMOCODE_CONFIG_CONTENT is loaded last in mimo's config chain
         # (config.ts L835) and merges on top of everything else.
-        # Phase 5: os.environ.copy() inherits all env vars including
-        # FM_DB_PATH — this is how the mimo child process converges on
-        # the same frankenmemory db as the thesius parent. All spawners
-        # (thesius-provider, mimo-capture, bridged-tool) share one db
-        # because they all fork from this inherited env.
+        # The child receives only the allowlisted runtime shape. Memory calls
+        # borrow its owner-scoped lifetools transport, which authenticates to
+        # the one app-owned fm-mcp broker instead of spawning another engine.
         env = _mimo_child_environment()
+        env["OPEN_CLANK_MANAGED"] = "1"
+        env["OPEN_CLANK_OWNER"] = str(self._owner or "")
+        env["OPEN_CLANK_PROJECT_POLICY_BRIDGE"] = "required"
         http_auth_fd: int | None = None
         provider_auth_fd: int | None = None
         # Server directory-containment check (middleware.ts:24-29): when no
         # server password is set, the server requires requested directories to
-        # be within its CWD. Change the child's CWD to /home/e so all user
-        # workspaces (~/sauce, ~/entities, ~/open-clank) are reachable.
+        # be within its CWD. Change the child's CWD to the host user's home so
+        # all user workspaces (~/sauce, ~/entities, ~/open-clank) are reachable.
+        _inject_skill_catalog(env)
         if os.path.isdir(_OPEN_CLANK_SKILLS_DIR) and not self._partitioned:
-            skills_config = json.dumps({
-                "skills": {"paths": [_OPEN_CLANK_SKILLS_DIR]},
-                "memory": {"provider": "frankenmemory"},
-            })
-            env["MIMOCODE_CONFIG_CONTENT"] = skills_config
             child_data_dir = str(Path(_OPEN_CLANK_SKILLS_DIR).parent)
             env["OPEN_CLANK_DATA_DIR"] = child_data_dir
             # Compatibility for the bundled runtime until all older builds
             # consume OPEN_CLANK_DATA_DIR.
             env["ODYSSEUS_DATA_DIR"] = child_data_dir
             logger.info("injected Open Clank skills path: %s", _OPEN_CLANK_SKILLS_DIR)
-        else:
+        elif not os.path.isdir(_OPEN_CLANK_SKILLS_DIR):
             logger.warning("Open Clank skills dir not found: %s", _OPEN_CLANK_SKILLS_DIR)
 
         # The embedded mimo must NEVER share state with a personal mimocode
@@ -479,10 +500,7 @@ class MimoSupervisor:
             child_data_dir = str(self._runtime_home / "open-clank")
             env["OPEN_CLANK_DATA_DIR"] = child_data_dir
             env["ODYSSEUS_DATA_DIR"] = child_data_dir
-            env["MIMOCODE_CONFIG_CONTENT"] = json.dumps({
-                "memory": {"provider": "frankenmemory"},
-                "skills": {"paths": []},
-            })
+            _inject_skill_catalog(env)
         elif "MIMOCODE_HOME" not in env:
             _agent_home = (
                 os.environ.get("OPEN_CLANK_AGENT_HOME")
@@ -501,13 +519,6 @@ class MimoSupervisor:
                     or str(REPO_ROOT / "data")
                 )
                 env["MIMOCODE_HOME"] = os.path.join(_data_dir, "runtime", "agent-engine")
-        # Open Clank supplies provider credentials, configuration, skills, and
-        # account identity explicitly. Never let the embedded runtime discover
-        # a personal install's environment, project config, or external skills.
-        env["MIMOCODE_DISABLE_PROVIDER_ENV"] = "1"
-        env["MIMOCODE_DISABLE_PROJECT_CONFIG"] = "1"
-        env["MIMOCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
-        env["MIMOCODE_DISABLE_CLAUDE_CODE"] = "1"
         self._mimocode_home = env["MIMOCODE_HOME"]
         self._reconcile_auth_store()
         snapshot = self.projection_snapshot
@@ -568,7 +579,7 @@ class MimoSupervisor:
                 # mid-turn. Size the buffer for real tool traffic.
                 "limit": ACP_STDOUT_LIMIT,
                 "env": env,
-                "cwd": "/home/e",
+                "cwd": str(Path.home()),
                 # Detach from the terminal's process group: Ctrl+C must reach
                 # only the server. Otherwise the child dies on the operator's
                 # SIGINT before the shutdown event runs, and the health
@@ -1183,6 +1194,38 @@ class MimoSupervisor:
             trust_env=False,
         )
 
+    async def session_http_request(
+        self,
+        session_id: str,
+        method: str,
+        suffix: str,
+        *,
+        owner: str,
+        payload: dict | None = None,
+        timeout: float = 20.0,
+    ) -> httpx.Response:
+        """Call one mapped session API through this worker's private client."""
+        if not self._bridge or not self.is_alive():
+            raise RuntimeError("mimo ACP is unavailable")
+        if session_id not in self._bridge.mapped_sessions():
+            await self._bridge.ensure_session(session_id, owner=owner)
+        mimo_session = self._bridge.mapped_session_id(session_id)
+        workspace = self._bridge.mapped_session_workspace(session_id)
+        try:
+            from src.openclank.transcript_projection import get_projection
+
+            projection = get_projection(session_id, owner=owner)
+            if projection and projection.get("mimo_session_id") == mimo_session:
+                workspace = str(projection.get("workspace") or workspace)
+        except KeyError:
+            pass
+        path = f"/session/{quote(mimo_session, safe='')}/{suffix.lstrip('/')}"
+        kwargs = {"params": {"directory": workspace}}
+        if payload is not None:
+            kwargs["json"] = payload
+        async with self.internal_http_client(timeout=timeout) as client:
+            return await client.request(method, path, **kwargs)
+
 
 class SupervisorAdmissionError(RuntimeError):
     def __init__(
@@ -1312,6 +1355,12 @@ class MimoSupervisorPool:
         self._agent_runtime_root = migrate_agent_runtime_root(root)
         self._owners_root = self._agent_runtime_root / "owners"
         self._grant_store = grant_store or GrantStore(str(root / "app.db"))
+        # Sync catalogue routes run in Starlette's worker threads, while the
+        # supervisor and its ACP child belong to the application event loop.
+        # Keep that loop so those routes can marshal owner startup back to the
+        # live loop instead of creating a short-lived asyncio.run() loop that
+        # leaves a second, orphaned worker behind on the next request.
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     @staticmethod
     def _key(owner: str | None) -> str:
@@ -1561,6 +1610,7 @@ class MimoSupervisorPool:
         task.add_done_callback(_discard)
 
     async def start(self) -> None:
+        self._event_loop = asyncio.get_running_loop()
         self._recover_generation_auth_caches()
         self._reclaim_retired_generations()
         if not self._auth_enabled:
@@ -1575,6 +1625,35 @@ class MimoSupervisorPool:
         if errors:
             await self.stop()
             raise errors[0]
+
+    def run_sync(self, coroutine, *, timeout: float | None = None):
+        """Run one supervisor coroutine on the application's event loop.
+
+        Model/catalogue endpoints that do not need streaming remain synchronous
+        for compatibility, but they must never run supervisor coroutines with
+        ``asyncio.run``.  The latter creates a new loop, binds locks/tasks and
+        the ACP child to it, then closes the loop as soon as the HTTP handler
+        returns.  That race was the source of duplicate owner workers and
+        hung resumed turns.  This bridge is intentionally narrow and only
+        accepts an already-created coroutine from a sync route.
+        """
+        loop = self._event_loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("Open Clank supervisor event loop is unavailable")
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            raise RuntimeError("run_sync cannot block the supervisor event loop")
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        wait_timeout = float(timeout if timeout is not None else max(self._readiness_budget + 5.0, 30.0))
+        try:
+            return future.result(timeout=wait_timeout)
+        except BaseException:
+            if not future.done():
+                future.cancel()
+            raise
 
     async def for_owner(self, owner: str | None) -> MimoSupervisor:
         key = self._key(owner)
@@ -2192,6 +2271,36 @@ class MimoSupervisorPool:
             if lease is not None:
                 await lease.release(successful_terminal=successful)
 
+    async def session_http_request(
+        self,
+        session_id: str,
+        method: str,
+        suffix: str,
+        *,
+        owner: str,
+        payload: dict | None = None,
+        timeout: float = 20.0,
+    ) -> httpx.Response:
+        worker, lease = await self._session_control_worker(
+            session_id,
+            owner=owner,
+        )
+        successful = False
+        try:
+            response = await worker.session_http_request(
+                session_id,
+                method,
+                suffix,
+                owner=owner,
+                payload=payload,
+                timeout=timeout,
+            )
+            successful = True
+            return response
+        finally:
+            if lease is not None:
+                await lease.release(successful_terminal=successful)
+
     async def set_session_config(
         self,
         session_id: str,
@@ -2502,7 +2611,12 @@ class MimoSupervisorPool:
                 if self._host_provider_owner == old_key:
                     self._host_provider_owner = new_key
                 try:
-                    from core.database import MimoAuthStore, MimoProjectionState, SessionLocal
+                    from core.database import (
+                        MimoAuthStore,
+                        MimoModelPref,
+                        MimoProjectionState,
+                        SessionLocal,
+                    )
                     db = SessionLocal()
                     try:
                         row = db.query(MimoAuthStore).filter(MimoAuthStore.owner == old_key).first()
@@ -2521,6 +2635,13 @@ class MimoSupervisorPool:
                                 .delete()
                             )
                             projection.owner_id = new_key
+                        db.query(MimoModelPref).filter(MimoModelPref.owner == new_key).delete()
+                        for pref in (
+                            db.query(MimoModelPref)
+                            .filter(MimoModelPref.owner == old_key)
+                            .all()
+                        ):
+                            pref.owner = new_key
                         db.commit()
                     finally:
                         db.close()
@@ -2541,7 +2662,12 @@ class MimoSupervisorPool:
                 if path.exists():
                     shutil.rmtree(path)
                 try:
-                    from core.database import MimoAuthStore, MimoProjectionState, SessionLocal
+                    from core.database import (
+                        MimoAuthStore,
+                        MimoModelPref,
+                        MimoProjectionState,
+                        SessionLocal,
+                    )
                     db = SessionLocal()
                     try:
                         db.query(MimoAuthStore).filter(MimoAuthStore.owner == key).delete()
@@ -2550,6 +2676,7 @@ class MimoSupervisorPool:
                             .filter(MimoProjectionState.owner_id == key)
                             .delete()
                         )
+                        db.query(MimoModelPref).filter(MimoModelPref.owner == key).delete()
                         db.commit()
                     finally:
                         db.close()
