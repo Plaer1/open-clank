@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
 import { Config } from "../../src/config"
@@ -7,10 +7,13 @@ import { Provider } from "../../src/provider"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
+import { MessageV2 } from "../../src/session/message-v2"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
 import { MessageID, type SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { ActorTool } from "../../src/tool/actor"
+import { spawnRef } from "../../src/actor/spawn-ref"
+import type { AgentOutcome, SpawnInput } from "../../src/actor/spawn"
 import { ActorRegistry } from "../../src/actor/registry"
 import { TaskRegistry } from "../../src/task/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
@@ -96,6 +99,11 @@ const inHouseInfo = ProviderTest.info(
 const twoModelProvider = ProviderTest.fake({
   model: visionModel,
   info: providerInfo,
+  resolveModelRef: Effect.fn("TwoModelProvider.resolveModelRef")((ref) => {
+    if (ref === visionRef) return Effect.succeed(visionModel)
+    if (ref === textRef) return Effect.succeed(textModel)
+    return Effect.die(new Error(`Unknown test model: ${ref}`))
+  }),
   list: Effect.fn("TwoModelProvider.list")(() =>
     Effect.succeed({ [providerInfo.id]: providerInfo, [inHouseInfo.id]: inHouseInfo }),
   ),
@@ -119,10 +127,10 @@ const it = testEffect(
   ),
 )
 
-function ctxFor(sessionID: SessionID) {
+function ctxFor(sessionID: SessionID, messageID: MessageID) {
   return {
     sessionID,
-    messageID: MessageID.ascending(),
+    messageID,
     agent: "build",
     abort: new AbortController().signal,
     extra: {},
@@ -132,7 +140,58 @@ function ctxFor(sessionID: SessionID) {
   }
 }
 
+function installCapturingSpawn(calls: SpawnInput[]) {
+  spawnRef.current = {
+    spawn: (input) => Effect.gen(function* () {
+      calls.push(input)
+      const outcome = yield* Deferred.make<AgentOutcome>()
+      yield* Deferred.succeed(outcome, { status: "success", finalText: "done" })
+      return { actorID: `child-${calls.length}`, sessionID: input.sessionID, outcome }
+    }),
+    cancel: () => Effect.void,
+    getForkContext: () => Effect.succeed(undefined),
+  }
+}
+
 describe("actor tool — models action", () => {
+  it.live(
+    "routes two children to distinct explicit models and rejects an unavailable ref before spawn",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "model-routing" })
+        const user = yield* sessions.updateMessage({
+          id: MessageID.ascending(), role: "user", sessionID: chat.id, agent: "build",
+          model: { providerID: visionModel.providerID, modelID: visionModel.id },
+          time: { created: Date.now() },
+        })
+        const assistant = yield* sessions.updateMessage({
+          id: MessageID.ascending(), role: "assistant", parentID: user.id, sessionID: chat.id,
+          mode: "build", agent: "build", cost: 0, path: { cwd: "/tmp", root: "/tmp" },
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: visionModel.id, providerID: visionModel.providerID, time: { created: Date.now() },
+        } as MessageV2.Assistant)
+        const calls: SpawnInput[] = []
+        installCapturingSpawn(calls)
+        const def = yield* (yield* ActorTool).init()
+        const execute = (model: string) => def.execute({ operation: { action: "run", description: "child", prompt: "work", subagent_type: "general", model } }, ctxFor(chat.id, assistant.id))
+
+        yield* execute(visionRef)
+        yield* execute(textRef)
+        expect(calls.map((call) => call.model)).toEqual([
+          { providerID: ProviderID.make("acme"), modelID: ModelID.make("vision-1") },
+          { providerID: ProviderID.make("acme"), modelID: ModelID.make("text-1") },
+        ])
+        expect(calls.map((call) => call.requestedModel)).toEqual([visionRef, textRef])
+
+        const before = calls.length
+        const rejected = yield* Effect.exit(execute("acme/revoked-model"))
+        expect(rejected._tag).toBe("Failure")
+        expect(calls).toHaveLength(before)
+      }),
+    ),
+  )
+
   it.live(
     "models lists all configured models (both refs, vision tagged)",
     provideTmpdirInstance(() =>
@@ -141,7 +200,7 @@ describe("actor tool — models action", () => {
         const chat = yield* sessions.create({ title: "chat" })
         const def = yield* (yield* ActorTool).init()
 
-        const result = yield* def.execute({ operation: { action: "models" } }, ctxFor(chat.id))
+        const result = yield* def.execute({ operation: { action: "models" } }, ctxFor(chat.id, MessageID.ascending()))
 
         expect(result.output).toContain(visionRef)
         expect(result.output).toContain(textRef)
@@ -160,7 +219,7 @@ describe("actor tool — models action", () => {
         const chat = yield* sessions.create({ title: "chat" })
         const def = yield* (yield* ActorTool).init()
 
-        const result = yield* def.execute({ operation: { action: "models", vision: true } }, ctxFor(chat.id))
+        const result = yield* def.execute({ operation: { action: "models", vision: true } }, ctxFor(chat.id, MessageID.ascending()))
 
         expect(result.output).toContain(visionRef)
         expect(result.output).toContain(inHouseVisionRef)
@@ -179,7 +238,7 @@ describe("actor tool — models action", () => {
         const chat = yield* sessions.create({ title: "chat" })
         const def = yield* (yield* ActorTool).init()
 
-        const result = yield* def.execute({ operation: { action: "models", vision: true } }, ctxFor(chat.id))
+        const result = yield* def.execute({ operation: { action: "models", vision: true } }, ctxFor(chat.id, MessageID.ascending()))
 
         // xiaomi/mimo-v2.5 sorts alphabetically AFTER acme/vision-1, but in-house
         // preference must list it first.
@@ -196,7 +255,7 @@ describe("actor tool — models action", () => {
         const chat = yield* sessions.create({ title: "chat" })
         const def = yield* (yield* ActorTool).init()
 
-        const result = yield* def.execute({ operation: { action: "models", limit: 1 } }, ctxFor(chat.id))
+        const result = yield* def.execute({ operation: { action: "models", limit: 1 } }, ctxFor(chat.id, MessageID.ascending()))
 
         expect(result.metadata.count).toBe(1)
         expect(result.metadata.total).toBe(3)

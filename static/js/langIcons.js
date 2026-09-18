@@ -141,10 +141,102 @@ const ICONS = {
     '<path d="M17 17v2 M7 17v3 M11 17v3"/>' +
     '<path d="M18 12c1 0 1.5-.7 1.5-1.5"/>' +
     '<circle cx="7" cy="11" r="0.6" fill="currentColor"/>',
+  // Mermaid — connected diagram nodes and directed edges.
+  mermaid:
+    '<rect x="3" y="4" width="7" height="5" rx="1"/>' +
+    '<rect x="14" y="15" width="7" height="5" rx="1"/>' +
+    '<path d="M10 7h4M17 9v6M14 12l3-3 3 3"/>',
   // Generic code fallback (used by toml/ini already; left as-is)
   code:
     '<polyline points="8 6 2 12 8 18"/>' +
     '<polyline points="16 6 22 12 16 18"/>',
+};
+
+// Neutral Open Clank filesystem/navigation glyphs. These are intentionally
+// platform-agnostic: the operating system may supply content-thumbnail pixels,
+// but it never supplies the Files chrome or file/folder icon language.
+const GLYPHS = {
+  file:
+    '<path d="M6 2h8l4 4v16H6z"/>' +
+    '<path d="M14 2v5h5"/>',
+  folder:
+    '<path d="M3 6.5h6l2 2H21v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>' +
+    '<path d="M3 10h18"/>',
+  'folder-open':
+    '<path d="M3 8V6.5h6l2 2h8a2 2 0 0 1 2 2v1"/>' +
+    '<path d="M4.5 11h17l-3 10h-17z"/>',
+  image:
+    '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+    '<circle cx="8.5" cy="8.5" r="1.5"/>' +
+    '<path d="m4 18 5-5 3 3 2-2 6 6"/>',
+  video:
+    '<rect x="3" y="5" width="18" height="14" rx="2"/>' +
+    '<path d="m10 9 5 3-5 3z"/>',
+  audio:
+    '<path d="M9 18V6l10-2v12"/>' +
+    '<circle cx="6" cy="18" r="3"/>' +
+    '<circle cx="16" cy="16" r="3"/>',
+  archive:
+    '<path d="M6 2h12v20H6z"/>' +
+    '<path d="M10 2v3h4V2M10 8h4M10 11h4M10 14h4"/>' +
+    '<rect x="10" y="17" width="4" height="3" rx=".5"/>',
+  text:
+    '<path d="M6 2h8l4 4v16H6z"/>' +
+    '<path d="M14 2v5h5M9 11h6M9 15h6M9 19h4"/>',
+  spreadsheet:
+    '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+    '<path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
+  presentation:
+    '<rect x="3" y="4" width="18" height="13" rx="2"/>' +
+    '<path d="M8 21h8M12 17v4M7 13l3-3 3 2 4-4"/>',
+  database:
+    '<ellipse cx="12" cy="5" rx="8" ry="3"/>' +
+    '<path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/>',
+  font:
+    '<path d="M5 20 11 4h2l6 16M7 15h10"/>',
+  executable:
+    '<rect x="3" y="4" width="18" height="16" rx="2"/>' +
+    '<path d="m7 9 3 3-3 3M13 15h4"/>',
+  volume:
+    '<path d="M4 5h16v14H4z"/>' +
+    '<path d="M4 15h16M8 18h.01M16 18h.01"/>',
+  workspace:
+    '<rect x="3" y="4" width="18" height="16" rx="2"/>' +
+    '<path d="M8 4v16M8 9h13"/>',
+  gallery:
+    '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+    '<path d="M8 3v18M3 9h18M8 15h13"/>',
+  library:
+    '<path d="M4 5h5v15H4zM10 5h5v15h-5zM16 4l4-1 2 15-4 1z"/>',
+  star:
+    '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/>',
+  'star-filled':
+    '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" fill="currentColor"/>',
+  'chevron-right': '<path d="m9 5 7 7-7 7"/>',
+  'chevron-down': '<path d="m5 9 7 7 7-7"/>',
+  up: '<path d="m6 10 6-6 6 6M12 4v16"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0 1 4"/><path d="M20 4v7h-7"/>',
+  restore: '<path d="M4 10a8 8 0 1 1 2 8"/><path d="M4 4v6h6"/><path d="M12 8v5l3 2"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/>',
+  download:
+    '<path d="M12 3v12M7 10l5 5 5-5"/>' +
+    '<path d="M4 19h16"/>',
+  'folder-plus':
+    '<path d="M3 6.5h6l2 2H21v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>' +
+    '<path d="M3 10h18M12 13v5M9.5 15.5h5"/>',
+  close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  symlink:
+    '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/>' +
+    '<path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/>',
+  unavailable:
+    '<path d="M6 2h8l4 4v16H6zM14 2v5h5"/>' +
+    '<path d="m8 16 8-8"/>',
+  error:
+    '<path d="M12 3 2.5 20h19z"/>' +
+    '<path d="M12 9v5M12 17h.01"/>',
+  loading:
+    '<path d="M20 12a8 8 0 1 1-2.3-5.7"/>' +
+    '<path d="M20 4v6h-6"/>',
 };
 
 const ALIASES = {
@@ -162,6 +254,17 @@ const ALIASES = {
   rb: 'ruby',
   toml: 'yaml',
   ini: 'yaml',
+  cjs: 'javascript',
+  mjs: 'javascript',
+  jsx: 'javascript',
+  tsx: 'typescript',
+  scss: 'css',
+  cc: 'cpp',
+  cs: 'csharp',
+  h: 'cpp',
+  hpp: 'cpp',
+  mmd: 'mermaid',
+  mermaid: 'mermaid',
 };
 
 /**
@@ -179,9 +282,131 @@ export function langIcon(lang, size = 14, opts = {}) {
   const style = (opts && opts.style) ? ` style="${opts.style}"` : '';
   return (
     `<svg${cls}${style} width="${size}" height="${size}" viewBox="0 0 24 24" ` +
-    `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ` +
+    `aria-hidden="true" focusable="false">` +
     `${inner}</svg>`
   );
 }
 
-export default { langIcon };
+function svgMarkup(inner, size, opts = {}) {
+  const cls = (opts && opts.className) ? ` class="${opts.className}"` : '';
+  const style = (opts && opts.style) ? ` style="${opts.style}"` : '';
+  return (
+    `<svg${cls}${style} width="${size}" height="${size}" viewBox="0 0 24 24" ` +
+    `fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ` +
+    `aria-hidden="true" focusable="false">` +
+    `${inner}</svg>`
+  );
+}
+
+/** Return one of the neutral Open Clank filesystem/navigation glyphs. */
+export function glyphIcon(name, size = 16, opts = {}) {
+  const inner = GLYPHS[String(name || '').toLowerCase()] || GLYPHS.file;
+  return svgMarkup(inner, size, opts);
+}
+
+const CODE_EXTENSIONS = new Set([
+  'c', 'cc', 'cjs', 'cpp', 'cs', 'css', 'go', 'h', 'hpp', 'htm', 'html', 'ini', 'java',
+  'js', 'json', 'jsx', 'md', 'mmd', 'mermaid', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql',
+  'svg', 'toml', 'ts', 'tsx', 'xml', 'yaml', 'yml', 'zsh',
+]);
+const IMAGE_EXTENSIONS = new Set(['avif', 'bmp', 'gif', 'heic', 'heif', 'ico', 'jpeg', 'jpg', 'png', 'tif', 'tiff', 'webp']);
+const VIDEO_EXTENSIONS = new Set(['avi', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'webm']);
+const AUDIO_EXTENSIONS = new Set(['aac', 'aiff', 'flac', 'm4a', 'mp3', 'ogg', 'opus', 'wav']);
+const ARCHIVE_EXTENSIONS = new Set(['7z', 'bz2', 'gz', 'rar', 'tar', 'tgz', 'xz', 'zip']);
+const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'odt', 'pages', 'rtf', 'txt']);
+const SHEET_EXTENSIONS = new Set(['numbers', 'ods', 'xls', 'xlsx']);
+const PRESENTATION_EXTENSIONS = new Set(['key', 'odp', 'ppt', 'pptx']);
+const DATABASE_EXTENSIONS = new Set(['db', 'redb', 'sqlite', 'sqlite3']);
+const FONT_EXTENSIONS = new Set(['eot', 'otf', 'ttc', 'ttf', 'woff', 'woff2']);
+const ROLE_ALIASES = {
+  favorite: 'star-filled',
+  favorites: 'star-filled',
+};
+const STATE_ALIASES = {
+  denied: 'unavailable',
+  failed: 'error',
+  offline: 'unavailable',
+  pending: 'loading',
+  revoked: 'unavailable',
+};
+const MIME_ICONS = {
+  'application/javascript': 'javascript',
+  'application/json': 'json',
+  'application/ld+json': 'json',
+  'application/sql': 'sql',
+  'application/typescript': 'typescript',
+  'application/xml': 'xml',
+  'application/x-yaml': 'yaml',
+  'image/svg+xml': 'svg',
+  'text/javascript': 'javascript',
+  'text/markdown': 'markdown',
+  'text/typescript': 'typescript',
+  'text/x-markdown': 'markdown',
+  'text/x-python': 'python',
+  'text/x-shellscript': 'bash',
+  'text/x-sql': 'sql',
+  'text/xml': 'xml',
+  'text/yaml': 'yaml',
+  'text/x-mermaid': 'mermaid',
+};
+
+function extensionOf(name) {
+  const value = String(name || '').toLowerCase().replace(/[\\/]+$/, '');
+  const leaf = value.split(/[\\/]/).pop() || '';
+  if (!leaf.includes('.') || leaf.startsWith('.') && leaf.indexOf('.', 1) < 0) return '';
+  return leaf.split('.').pop() || '';
+}
+
+/** Resolve a stable icon key without touching file contents or the operating system. */
+export function fileIconKey(descriptor = {}) {
+  const safe = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  const name = safe.name || safe.filename || safe.path || '';
+  const kind = safe.kind || safe.type || '';
+  const mimeType = safe.mimeType || safe.mime_type || safe.media_type || '';
+  const language = String(safe.language || '').trim().toLowerCase();
+  const role = String(safe.role || safe.navigationRole || safe.navigation_role || '').trim().toLowerCase();
+  const state = String(safe.state || safe.iconState || safe.icon_state || '').trim().toLowerCase();
+  const open = !!safe.open;
+  const normalizedKind = String(kind || '').trim().toLowerCase();
+  const mime = String(mimeType || '').split(';', 1)[0].trim().toLowerCase();
+  const roleKey = ROLE_ALIASES[role] || role;
+  const stateKey = STATE_ALIASES[state] || state;
+  if (GLYPHS[stateKey]) return stateKey;
+  if (GLYPHS[roleKey]) return roleKey;
+  if (normalizedKind.includes('directory') || normalizedKind === 'folder') return open ? 'folder-open' : 'folder';
+  if (normalizedKind.includes('volume') || normalizedKind === 'drive') return 'volume';
+  if (normalizedKind.includes('symlink') || normalizedKind === 'link') return 'symlink';
+  const kindState = STATE_ALIASES[normalizedKind] || normalizedKind;
+  if (['unavailable', 'error', 'loading'].includes(kindState)) return kindState;
+  const leaf = String(name || '').toLowerCase().split(/[\\/]/).pop() || '';
+  const extension = extensionOf(leaf);
+  const languageKey = ALIASES[language] || language;
+  if (ICONS[languageKey]) return languageKey;
+  if (extension === 'svg' || mime === 'image/svg+xml') return 'svg';
+  if (extension === 'csv' || mime.includes('csv')) return 'csv';
+  if (mime.startsWith('image/') || IMAGE_EXTENSIONS.has(extension)) return 'image';
+  if (mime.startsWith('video/') || VIDEO_EXTENSIONS.has(extension)) return 'video';
+  if (mime.startsWith('audio/') || AUDIO_EXTENSIONS.has(extension)) return 'audio';
+  if (mime.includes('zip') || mime.includes('archive') || ARCHIVE_EXTENSIONS.has(extension)) return 'archive';
+  if (extension === 'pdf' || mime === 'application/pdf') return 'pdf';
+  if (CODE_EXTENSIONS.has(extension) || ['dockerfile', 'makefile'].includes(leaf)) return ALIASES[extension] || extension || 'code';
+  if (SHEET_EXTENSIONS.has(extension) || mime.includes('spreadsheet')) return 'spreadsheet';
+  if (PRESENTATION_EXTENSIONS.has(extension) || mime.includes('presentation')) return 'presentation';
+  if (DATABASE_EXTENSIONS.has(extension) || mime.includes('database')) return 'database';
+  if (FONT_EXTENSIONS.has(extension) || mime.startsWith('font/')) return 'font';
+  const mimeKey = MIME_ICONS[mime] || ALIASES[mime] || mime;
+  if (ICONS[mimeKey] || GLYPHS[mimeKey]) return mimeKey;
+  if (DOCUMENT_EXTENSIONS.has(extension) || mime.startsWith('text/')) return 'text';
+  if (normalizedKind.includes('executable') || mime.includes('executable')) return 'executable';
+  return 'file';
+}
+
+/** Return a language icon when known, otherwise the neutral filetype glyph. */
+export function fileIcon(descriptor = {}, size = 16, opts = {}) {
+  const key = fileIconKey(descriptor);
+  if (ICONS[key] || ICONS[ALIASES[key]]) return langIcon(key, size, opts);
+  return glyphIcon(key, size, opts);
+}
+
+export default { langIcon, glyphIcon, fileIcon, fileIconKey };

@@ -40,6 +40,18 @@ def _patch_loop_basics(monkeypatch):
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    monkeypatch.setattr(
+        al,
+        "resolve_chat_route",
+        lambda **kwargs: SimpleNamespace(
+            provider_model_id=kwargs.get("model_id") or "test-model",
+            model_route_id="route-test",
+            provider_grant_id=None,
+            connection_id="connection-test",
+            runtime_model=f"connection-test/{kwargs.get('model_id') or 'test-model'}",
+            capabilities={"tools": True},
+        ),
+    )
 
 
 def test_detects_strong_guide_only_turns():
@@ -81,6 +93,60 @@ def test_normal_policy_preserves_existing_disabled_tools():
     assert not policy.blocks("bash")
 
 
+def test_strict_native_worker_stays_closed_while_rust_tools_are_projected(monkeypatch, tmp_path):
+    from src import tool_security
+    from src.openclank.filesystem_registry import FilesystemRootRegistry
+
+    blocked = tool_security.strict_native_agent_tools_blocked("alice")
+    assert tool_security.STRICT_NATIVE_MIMO_TOOLS.issubset(blocked)
+
+    registry_path = tmp_path / "roots.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = FilesystemRootRegistry(registry_path)
+    registry.add("alice", str(workspace), "recursive_directory", ["read", "write"])
+    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda _owner: True)
+
+    projected = tool_security.brokered_agent_file_tools("alice", str(workspace))
+    assert projected == {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}
+    unavailable = tool_security.unavailable_strict_agent_tools("alice", str(workspace))
+    # The 2026-08-14 owner ruling: process tools are admitted through the
+    # approval gates; only unbrokered scoped file tools stay unavailable.
+    assert "manage_files" in unavailable
+    assert {"bash", "python", "manage_bg_jobs"}.isdisjoint(unavailable)
+    assert projected.isdisjoint(unavailable)
+    # Direct OS aliases never become available merely because the Rust-backed
+    # lifetools projection is nonempty.
+    assert tool_security.STRICT_NATIVE_MIMO_TOOLS.issubset(
+        tool_security.strict_native_agent_tools_blocked("alice")
+    )
+
+
+def test_brokered_agent_tools_intersect_non_admin_visibility(monkeypatch, tmp_path):
+    from src import tool_security
+    from src.openclank.filesystem_registry import FilesystemRootRegistry
+
+    registry_path = tmp_path / "roots.json"
+    visible = tmp_path / "visible"
+    workspace = visible / "workspace"
+    workspace.mkdir(parents=True)
+    registry = FilesystemRootRegistry(registry_path)
+    ceiling = registry.add("admin", str(visible), "recursive_directory", ["read", "write"])
+    assignment = registry.assign_visibility("admin", "alice", ceiling["id"], ["read", "write"])
+    registry.add("alice", str(workspace), "recursive_directory", ["read", "write"])
+    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda _owner: False)
+
+    assert {"write_file", "edit_file"}.issubset(
+        tool_security.brokered_agent_file_tools("alice", str(workspace))
+    )
+    registry.update_visibility("admin", assignment["id"], capabilities=["read"])
+    assert tool_security.brokered_agent_file_tools("alice", str(workspace)) == {
+        "read_file", "ls", "glob", "grep",
+    }
+
+
 def test_web_search_enabled_for_turn_requires_explicit_enable():
     assert web_search_enabled_for_turn(None, None) is False
     assert web_search_enabled_for_turn("true", None) is True
@@ -106,7 +172,7 @@ def test_agent_loop_web_intent_preserves_disabled_web_tools(monkeypatch):
         yield _delta_chunk("ok")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     _collect(
         al.stream_agent_loop(
@@ -132,7 +198,7 @@ def test_agent_loop_forced_web_tools_filtered_by_disabled_tools(monkeypatch):
         yield _delta_chunk("ok")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     _collect(
         al.stream_agent_loop(
@@ -160,11 +226,17 @@ def test_agent_loop_policy_blocks_disabled_web_tool_call_before_execution(monkey
         return ("web_search", {"output": "ran", "exit_code": 0})
 
     async def _fake_stream(_candidates, messages, **kwargs):
-        yield _delta_chunk('```web_search\n{"query":"current CVEs"}\n```')
+        yield "data: " + json.dumps({
+            "type": "tool_calls",
+            "calls": [{
+                "name": "web_search",
+                "arguments": json.dumps({"query": "current CVEs"}),
+            }],
+        }) + "\n\n"
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     policy = build_effective_tool_policy(
         disabled_tools=WEB_TOOL_NAMES,
@@ -215,7 +287,7 @@ def test_agent_loop_blocks_guide_only_fenced_tool_before_start(monkeypatch):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     policy = build_effective_tool_policy(last_user_message="GUIDE-ONLY MODE. DO NOT USE TOOLS.")
     chunks = _collect(
@@ -246,7 +318,7 @@ def test_guide_only_hides_api_function_schemas(monkeypatch):
         yield _delta_chunk("ok")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
 
     _collect(
@@ -275,7 +347,7 @@ def test_guide_only_skips_tool_retrieval(monkeypatch):
     def _fail_tool_index():
         raise AssertionError("guide-only mode must not retrieve tool candidates")
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     monkeypatch.setitem(
         sys.modules,
         "src.tool_index",
@@ -304,7 +376,7 @@ def test_guide_only_blocks_document_prestream(monkeypatch):
         yield _delta_chunk("```create_document\nTitle\nmd\nBody\n```")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
     chunks = _collect(
         al.stream_agent_loop(
@@ -335,7 +407,7 @@ def test_guide_only_blocks_later_round_document_streaming(monkeypatch):
             yield _delta_chunk("```create_document\nTitle\nmd\nBody\n```")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
     chunks = _collect(
         al.stream_agent_loop(
@@ -360,7 +432,7 @@ def test_guide_only_skips_intent_without_action_nudge(monkeypatch):
         yield _delta_chunk("I will check the logs.")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
     chunks = _collect(
         al.stream_agent_loop(
@@ -385,7 +457,7 @@ def test_guide_only_suppresses_active_document_context(monkeypatch):
         yield _delta_chunk("ok")
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
     active_doc = SimpleNamespace(
         id="doc-1",
@@ -453,7 +525,7 @@ def test_guide_only_skips_teacher_escalation(monkeypatch):
         raise AssertionError("teacher escalation must not run in guide-only mode")
         yield ""
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
     monkeypatch.setitem(
         sys.modules,
         "src.teacher_escalation",

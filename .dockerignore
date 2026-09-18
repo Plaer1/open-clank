@@ -1,15 +1,23 @@
 venv/
 .venv/
 node_modules/
+.node_modules.bak-*/
 services/node_modules/
 __pycache__/
+.ruff_cache/
+.turbo/
 *.pyc
 *.pyo
 *.egg-info/
+*.tsbuildinfo
 dist/
 build/
+target/
 .env
 .env.bak.*
+# Local tunnel/platform environment variants must never enter image layers.
+.env.bak-*
+.env.*-source
 # Secrets: keep plaintext and every transient secrets.env variant out of
 # the build context. If an encrypted secrets.env is used, it is mounted
 # at runtime — never baked into the image. Mirrored in .gitignore.
@@ -21,16 +29,21 @@ secrets.env~
 **/#secrets.env#
 !secrets.env.example
 /data/
+/data.before-restore-*/
+/data.failed-restore-*/
+/backups/
 /logs/
 .git/
 .archive/
 .references/
 references/
-.futures/
-robonotes/
-.robonotes/
+**/.clanker/futures/
+**/.clankers/robonotes/
 .mimocode/
+.mimocode-test-fixtures-*/
 /bin/
+/cache/
+/libexec/
 .claude/
 .playwright-mcp/
 .pytest_cache/
@@ -42,6 +55,15 @@ docs/
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
 /reports/
 /research_data/
 tasks/
@@ -51,6 +73,11 @@ search_analytics.json
 **/search_analytics.json
 tests/
 api/
+/packages/Copal/.codebase-memory/
+/packages/Copal/.next/
+/packages/Copal/db/
+/packages/Copal/out/
+/packages/Copal/treehouse/
 *.log
 *.error.log
 chart.png

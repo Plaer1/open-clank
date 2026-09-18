@@ -21,6 +21,8 @@ from src.default_persona import (
     FACTORY_NAME,
     FACTORY_PROMPT,
     get_default_persona,
+    purge_default_persona_owner,
+    rename_default_persona_owner,
     reset_default_persona,
     set_default_persona,
     sync_from_assistant,
@@ -98,6 +100,31 @@ def test_partial_update_keeps_other_field(manager):
     record = get_default_persona("alice")
     assert record["name"] == "Nyx"
     assert record["system_prompt"] == "Speak plainly."
+
+
+def test_default_persona_owner_rename_and_purge_are_isolated(manager):
+    set_default_persona("alice", name="Nyx", system_prompt="Speak in riddles.")
+    set_default_persona("bob", name="Bobbot", system_prompt="Speak plainly.")
+
+    assert rename_default_persona_owner("ALICE", "alice2") is True
+    assert get_default_persona("alice")["is_factory"] is True
+    assert get_default_persona("alice2")["name"] == "Nyx"
+    assert get_default_persona("bob")["name"] == "Bobbot"
+
+    assert purge_default_persona_owner("ALICE2") is True
+    assert get_default_persona("alice2")["is_factory"] is True
+    assert get_default_persona("bob")["name"] == "Bobbot"
+
+
+def test_default_persona_rename_refuses_destination_state(manager):
+    set_default_persona("alice", name="Nyx", system_prompt="Speak in riddles.")
+    set_default_persona("bob", name="Bobbot", system_prompt="Speak plainly.")
+
+    with pytest.raises(ValueError, match="target persona owner"):
+        rename_default_persona_owner("alice", "bob")
+
+    assert get_default_persona("alice")["name"] == "Nyx"
+    assert get_default_persona("bob")["name"] == "Bobbot"
 
 
 def test_chat_turn_without_persona_speaks_as_default(manager):

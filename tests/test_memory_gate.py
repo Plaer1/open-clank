@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from src.memory_gate import (
     capture_allowed,
+    capture_mode,
     write_allowed,
     memory_mode,
     VALID_MODES,
@@ -85,13 +86,18 @@ class TestCaptureAllowed:
         # mode=off + auto_memory=True → capture blocked (mode wins)
         assert capture_allowed({PREF_KEY: "off", "auto_memory": True}) is False
 
+    def test_capture_mode_matches_legacy_capture_gate(self):
+        assert capture_mode({"auto_memory": True}) == "automatic"
+        assert capture_mode({"auto_memory": False}) == "off"
+        assert capture_mode({PREF_KEY: "manual", "auto_memory": True}) == "manual"
+
 
 # ─── Write gate ──────────────────────────────────────────────────────────
 
 class TestWriteAllowed:
-    def test_automatic_allows_write(self):
+    def test_missing_defaults_to_manual_and_automatic_allows_write(self):
         ok, _ = write_allowed({})
-        assert ok is True
+        assert ok is False
         ok, _ = write_allowed({PREF_KEY: "automatic"})
         assert ok is True
 
@@ -107,10 +113,9 @@ class TestWriteAllowed:
         assert "manual" in reason.lower()
 
     def test_write_allowed_ignores_auto_memory(self):
-        """auto_memory controls capture, not manual writes. Writes always allowed
-        when memory_mode is not set."""
+        """A legacy bit cannot silently grant new direct-write authority."""
         ok, _ = write_allowed({"auto_memory": False})
-        assert ok is True
+        assert ok is False
 
 
 # ─── Mode switching safety ──────────────────────────────────────────────
@@ -207,21 +212,20 @@ class TestTwoOwnerIsolation:
 # ─── Degradation ─────────────────────────────────────────────────────────
 
 class TestDegradation:
-    """Gate degrades safely: malformed prefs read as default (automatic),
-    never as a mode that blocks everything or allows everything silently."""
+    """Malformed prefs fail to review-first manual mode."""
 
     def test_none_prefs(self):
         assert capture_allowed(None) is True
-        assert write_allowed(None)[0] is True
+        assert write_allowed(None)[0] is False
 
     def test_empty_prefs(self):
         assert capture_allowed({}) is True
-        assert write_allowed({})[0] is True
+        assert write_allowed({})[0] is False
 
     def test_corrupted_mode_value(self):
         """Garbage in prefs doesn't crash — falls back to default."""
         assert capture_allowed({PREF_KEY: {"nested": "garbage"}}) is True
-        assert write_allowed({PREF_KEY: {"nested": "garbage"}})[0] is True
+        assert write_allowed({PREF_KEY: {"nested": "garbage"}})[0] is False
 
     def test_list_instead_of_string(self):
         assert capture_allowed({PREF_KEY: ["off"]}) is True  # not a valid mode str

@@ -629,15 +629,26 @@ function _restoreSavedSettings() {
 
 async function _loadEndpoints() {
   try {
-    const res = await fetch(`${_apiBase}/api/model-endpoints`, { credentials: 'same-origin' });
+    const res = await fetch(`${_apiBase}/api/models`, { credentials: 'same-origin' });
     if (!res.ok) return;
-    _endpoints = await res.json();
+    const data = await res.json();
+    _endpoints = (data.items || []).filter(item => (
+      (item.catalog || []).some(entry => (
+        (entry.operations || []).includes('chat.complete')
+      ))
+    )).map(item => ({
+      id: item.endpoint_id,
+      name: item.endpoint_name,
+      models: (item.catalog || [])
+        .filter(entry => (entry.operations || []).includes('chat.complete'))
+        .map(entry => entry.provider_model_id || entry.model_id),
+    }));
     const sel = document.getElementById('research-endpoint');
     if (!sel) return;
-    _endpoints.filter(e => e.is_enabled && e.model_type === 'llm').forEach(ep => {
+    _endpoints.forEach(ep => {
       const opt = document.createElement('option');
       opt.value = ep.id;
-      opt.textContent = ep.name || ep.base_url;
+      opt.textContent = ep.name || ep.id;
       sel.appendChild(opt);
     });
   } catch {}

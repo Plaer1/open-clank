@@ -1,4 +1,7 @@
 export * from "./gen/types.gen.js"
+// Public compatibility name: the wire contract intentionally omits provider
+// credentials, while existing SDK consumers import this shape as `Provider`.
+export type { PublicProvider as Provider } from "./gen/types.gen.js"
 
 import { createClient } from "./gen/client/client.gen.js"
 import { type Config } from "./gen/client/types.gen.js"

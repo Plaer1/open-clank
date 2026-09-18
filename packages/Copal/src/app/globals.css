@@ -5,8 +5,8 @@
 @source not "../../treehouse";
 @source not "../../.next.bak-*";
 @source not "../../.node_modules.bak-*";
-@source not "../../.robonotes";
-@source not "../../.futures";
+@source not "../../.clanker/futures";
+@source not "../../.clankers/robonotes";
 @source not "../../sample-vault";
 
 @custom-variant dark (&:is(.dark *));

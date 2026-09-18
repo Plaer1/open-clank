@@ -48,7 +48,8 @@ def rename_endpoint(monkeypatch, tmp_path):
     import core.database as cdb
 
     # Neutralize the DB owner-rename loop.
-    monkeypatch.setattr(cdb, "SessionLocal", lambda: MagicMock())
+    owner_db = MagicMock()
+    monkeypatch.setattr(cdb, "SessionLocal", lambda: owner_db)
     monkeypatch.setattr(cdb, "Base", SimpleNamespace(registry=SimpleNamespace(mappers=[])), raising=False)
     # Neutralize the JSON-prefs rename.
     pr = types.ModuleType("routes.prefs_routes")
@@ -67,6 +68,7 @@ def rename_endpoint(monkeypatch, tmp_path):
     am.get_username_for_token.return_value = "admin"
     am.users = {"alice": {}}
     am.rename_user.return_value = True
+    am._owner_db = owner_db
     return _route(ar.setup_auth_routes(am), "rename_user"), am, tmp_path
 
 
@@ -146,16 +148,26 @@ def _force_sql_owner_migration_failure(monkeypatch):
 # 1. In-memory session cache
 # ---------------------------------------------------------------------------
 
-def test_rename_updates_in_memory_session_owner(rename_endpoint):
+def _session_cache(sessions):
+    from core.session_manager import SessionManager
+
+    # Exercise the production invalidation contract without loading live DB
+    # sessions. Cached copies are evicted so the next read reloads SQL ownership.
+    manager = SessionManager.__new__(SessionManager)
+    manager.sessions = sessions
+    return manager
+
+
+def test_rename_invalidates_in_memory_session_owner(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
     # Build a fake session_manager with one session owned by alice.
     sess = SimpleNamespace(owner="alice")
-    sm = SimpleNamespace(sessions={"s1": sess})
+    sm = _session_cache({"s1": sess})
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm)))
 
-    assert sess.owner == "alice2", "in-memory session owner was not updated on rename"
+    assert "s1" not in sm.sessions, "stale owner cache must be evicted for SQL reload"
 
 
 def test_rename_session_owner_case_insensitive(rename_endpoint):
@@ -163,11 +175,11 @@ def test_rename_session_owner_case_insensitive(rename_endpoint):
     endpoint, _am, tmp_path = rename_endpoint
 
     sess = SimpleNamespace(owner="Alice")
-    sm = SimpleNamespace(sessions={"s1": sess})
+    sm = _session_cache({"s1": sess})
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path, sm)))
 
-    assert sess.owner == "bob"
+    assert "s1" not in sm.sessions
 
 
 def test_rename_leaves_other_sessions_untouched(rename_endpoint):
@@ -175,11 +187,12 @@ def test_rename_leaves_other_sessions_untouched(rename_endpoint):
 
     sess_alice = SimpleNamespace(owner="alice")
     sess_other = SimpleNamespace(owner="carol")
-    sm = SimpleNamespace(sessions={"s1": sess_alice, "s2": sess_other})
+    sm = _session_cache({"s1": sess_alice, "s2": sess_other})
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path, sm)))
 
-    assert sess_alice.owner == "alice2"
+    assert "s1" not in sm.sessions
+    assert sm.sessions["s2"] is sess_other
     assert sess_other.owner == "carol", "unrelated session owner was modified"
 
 
@@ -187,7 +200,7 @@ def test_rename_drains_provider_login_before_auth_mutation(
     rename_endpoint,
     monkeypatch,
 ):
-    import routes.mimo_provider_routes as provider_routes
+    import routes.provider_v1_routes as provider_routes
 
     endpoint, am, tmp_path = rename_endpoint
     events = []
@@ -226,6 +239,45 @@ def test_rename_no_session_manager_does_not_crash(rename_endpoint):
     )
     res = asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), req))
     assert res["ok"] is True
+
+
+def test_rename_wires_normalized_account_lifecycle(rename_endpoint):
+    import routes.auth_routes as ar
+
+    _endpoint, am, tmp_path = rename_endpoint
+    lifecycle = MagicMock()
+    endpoint = _route(
+        ar.setup_auth_routes(am, account_lifecycle=lifecycle),
+        "rename_user",
+    )
+
+    result = asyncio.run(
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path),
+        )
+    )
+
+    assert result["ok"] is True
+    lifecycle.rename_owner.assert_called_once_with("alice", "alice2")
+
+
+def test_rename_updates_mimo_projection_state_owner_id(rename_endpoint):
+    import core.database as cdb
+
+    endpoint, am, tmp_path = rename_endpoint
+
+    asyncio.run(
+        endpoint(
+            "alice",
+            SimpleNamespace(username="alice2"),
+            _request(tmp_path),
+        )
+    )
+
+    queried_models = [call.args[0] for call in am._owner_db.query.call_args_list]
+    assert any(model is cdb.MimoProjectionState for model in queried_models)
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +724,11 @@ def test_owner_migration_failure_rolls_back_auth_rename(monkeypatch, tmp_path):
     am = _auth_manager_for_rollback_test(monkeypatch, tmp_path)
     admin_token = am.create_session_trusted("admin")
     alice_token = am.create_session_trusted("alice")
-    endpoint = _route(ar.setup_auth_routes(am), "rename_user")
+    lifecycle = MagicMock()
+    endpoint = _route(
+        ar.setup_auth_routes(am, account_lifecycle=lifecycle),
+        "rename_user",
+    )
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
@@ -692,6 +748,7 @@ def test_owner_migration_failure_rolls_back_auth_rename(monkeypatch, tmp_path):
     saved_users = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))["users"]
     assert "alice" in saved_users
     assert "alice2" not in saved_users
+    lifecycle.rename_owner.assert_not_called()
 
 
 def test_self_rename_owner_migration_failure_rolls_back_auth_session(monkeypatch, tmp_path):

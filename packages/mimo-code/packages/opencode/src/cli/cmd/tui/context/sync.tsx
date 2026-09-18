@@ -18,6 +18,7 @@ import type {
   ProviderListResponse,
   ProviderAuthMethod,
   VcsInfo,
+  SessionGoalGetResponse,
 } from "@mimo-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "@tui/context/project"
@@ -112,7 +113,8 @@ export type GoalVerdict = {
 }
 
 export type SessionGoal = {
-  condition?: string
+  state?: SessionGoalGetResponse["state"]
+  analytics?: SessionGoalGetResponse["analytics"]
   verdicts: { [messageID: string]: GoalVerdict }
   lastMessageID?: string
 }
@@ -264,6 +266,21 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const event = useEvent()
     const project = useProject()
     const sdk = useSDK()
+
+    async function refreshGoal(sessionID: string) {
+      const response = await sdk.client.session.goal.get({ sessionID }).catch(() => undefined)
+      const data = response?.data
+      if (!data) return
+      setStore("session_goal", sessionID, (prev) => {
+        if (prev?.state && prev.state.revision > data.state.revision) return prev
+        return {
+          state: data.state,
+          analytics: data.analytics,
+          verdicts: prev?.verdicts ?? {},
+          lastMessageID: prev?.lastMessageID,
+        }
+      })
+    }
 
     const fullSyncedSessions = new Set<string>()
     let syncedWorkspace = project.workspace.current()
@@ -475,11 +492,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               lastMessageID = v.messageID
             }
             return {
-              condition: event.properties.goal?.condition,
+              state: prev?.state,
+              analytics: prev?.analytics,
               verdicts,
               lastMessageID,
             }
           })
+          void refreshGoal(event.properties.sessionID)
           break
         }
 
@@ -840,7 +859,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         async sync(sessionID: string) {
           if (fullSyncedSessions.has(sessionID)) return
-          const [session, messages, todo, diff, actors, task, children] = await Promise.all([
+          const [session, messages, todo, diff, actors, task, children, goalView] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
             sdk.client.session.messages({ sessionID, limit: 100, agent_id: "*" }),
             sdk.client.session.todo({ sessionID }),
@@ -853,6 +872,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             // hosts, ask-tool forks, workflow subagent sessions) — only peer
             // sessions the user should see are returned.
             sdk.client.session.children({ sessionID, visible: true }).catch(() => undefined),
+            sdk.client.session.goal.get({ sessionID }).catch(() => undefined),
           ])
           setStore(
             produce((draft) => {
@@ -885,6 +905,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
                 turn_count: row.turnCount ?? 0,
                 last_turn_time: row.lastTurnTime ?? null,
               }))
+              if (goalView?.data) {
+                const previous = draft.session_goal[sessionID]
+                draft.session_goal[sessionID] = {
+                  state: goalView.data.state,
+                  analytics: goalView.data.analytics,
+                  verdicts: previous?.verdicts ?? {},
+                  lastMessageID: previous?.lastMessageID,
+                }
+              }
             }),
           )
           fullSyncedSessions.add(sessionID)

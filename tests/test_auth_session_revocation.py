@@ -80,6 +80,32 @@ def test_password_change_allows_new_password_and_blocks_old_password(tmp_path):
     assert mgr.create_session("alice", "new-password") is not None
 
 
+def test_only_admin_manager_change_can_round_trip_through_empty_password(tmp_path):
+    mgr = _make_manager(tmp_path)
+    assert mgr.create_user("admin", "admin-password", is_admin=True)
+
+    assert mgr.change_password("alice", "old-password", "") is False
+    assert mgr.create_session("alice", "old-password") is not None
+    assert mgr.change_password("admin", "admin-password", "short") is False
+
+    assert mgr.change_password("admin", "admin-password", "") is True
+    assert mgr.create_session("admin", "admin-password") is None
+    empty_session = mgr.create_session("admin", "")
+    assert empty_session is not None
+
+    # Empty remains a real password value: second-factor policy is neither
+    # disabled nor bypassed, and password-confirmed 2FA management accepts it.
+    mgr._config["users"]["admin"]["totp_enabled"] = True
+    mgr._config["users"]["admin"]["totp_secret"] = "test-secret"
+    assert mgr.totp_enabled("admin") is True
+    assert mgr.totp_disable("admin", "") is True
+    assert mgr.totp_enabled("admin") is False
+
+    assert mgr.change_password("admin", "", "restored-password") is True
+    assert mgr.create_session("admin", "") is None
+    assert mgr.create_session("admin", "restored-password") is not None
+
+
 def test_create_session_trusted_rejects_username_renamed_after_verification(tmp_path):
     mgr = _make_manager(tmp_path)
     assert mgr.create_user("admin", "admin-password", is_admin=True)

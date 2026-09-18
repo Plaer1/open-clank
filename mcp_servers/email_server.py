@@ -26,13 +26,15 @@ import uuid
 from contextvars import ContextVar
 from urllib.parse import parse_qs, unquote, urlparse
 
-from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-server = Server("email")
+from src.openclank.mcp_tool_server import ToolServer
+
+
+server = ToolServer("email")
 EMAIL_SOCKET_TIMEOUT = float(os.environ.get("EMAIL_SOCKET_TIMEOUT", "20"))
 from src.constants import DATA_DIR as _DATA_DIR, APP_DB, EMAIL_CACHE_DB, SETTINGS_FILE as _SETTINGS_FILE, MAIL_ATTACHMENTS_DIR
 DATA_DIR = Path(_DATA_DIR)
@@ -58,6 +60,7 @@ def _uid_fetch_rows(data) -> list:
 
 _ACCOUNT_CACHE: dict = {}  # key = normalized account selector -> config dict
 _MCP_OWNER_ARG = "_odysseus_owner"
+_MCP_ROOT_OPERATION_ARG = "_open_clank_root_operation_id"
 _CURRENT_OWNER: ContextVar[str | None] = ContextVar("email_mcp_owner", default=None)
 _OWNER_ENV_KEYS = ("ODYSSEUS_MCP_EMAIL_OWNER", "ODYSSEUS_EMAIL_OWNER")
 _OWNER_SCOPE_ERROR = (
@@ -1777,7 +1780,14 @@ def _draft_reply_to_email(uid, body, folder="INBOX", reply_all=False, account=No
     )
 
 
-async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account=None, title=None):
+async def _ai_draft_reply_to_email(
+    uid,
+    folder="INBOX",
+    reply_all=False,
+    account=None,
+    title=None,
+    root_operation_id=None,
+):
     """Generate a reply with Odysseus' AI-reply prompt/style, then create a compose doc."""
     read_result = _read_email(uid=uid, folder=folder, account=account)
     if "error" in read_result:
@@ -1797,14 +1807,8 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
             _EMAIL_REPLY_SYS_PROMPT_BASE,
             _apply_email_style_mechanics,
             _extract_reply,
-            _load_settings,
         )
-        from src.endpoint_resolver import (
-            resolve_endpoint,
-            resolve_utility_fallback_candidates,
-            resolve_chat_fallback_candidates,
-        )
-        from src.llm_core import llm_call_async_with_fallback
+        from src.openclank.modality_facade import complete_text
     except Exception as exc:
         return {"error": f"AI reply helpers unavailable: {exc}"}
 
@@ -1819,54 +1823,27 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
         "Draft a reply. Return only the reply body text."
     )
 
-    candidates = []
-    seen = set()
     owner = _current_owner() or None
 
-    def _add(url, model, headers):
-        key = (url or "", model or "")
-        if not url or not model or key in seen:
-            return
-        seen.add(key)
-        candidates.append((url, model, headers))
-
     try:
-        _add(*resolve_endpoint("utility", owner=owner))
-    except Exception:
-        pass
-    try:
-        _add(*resolve_endpoint("default", owner=owner))
-    except Exception:
-        pass
-    try:
-        utility_fallbacks = resolve_utility_fallback_candidates(owner=owner) or []
-    except TypeError:
-        utility_fallbacks = resolve_utility_fallback_candidates() or []
-    for cand in utility_fallbacks:
-        _add(*cand)
-    try:
-        chat_fallbacks = resolve_chat_fallback_candidates(owner=owner) or []
-    except TypeError:
-        chat_fallbacks = resolve_chat_fallback_candidates() or []
-    for cand in chat_fallbacks:
-        _add(*cand)
-
-    if not candidates:
-        return {"error": "No LLM endpoint configured for AI reply"}
-
-    try:
-        raw_reply = await llm_call_async_with_fallback(
-            candidates,
+        raw_reply = await complete_text(
+            owner=owner or "local-installation",
+            purpose="utility",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.7,
-            max_tokens=1024,
-            timeout=60,
+            max_output_tokens=1024,
+            root_operation_id=(str(root_operation_id or "").strip() or None),
         )
     except Exception as exc:
-        return {"error": f"AI reply generation failed: {exc}"}
+        return {
+            "error": (
+                "AI reply generation failed through the managed Utility route "
+                f"({type(exc).__name__})"
+            )
+        }
 
     reply = _apply_email_style_mechanics(_extract_reply(raw_reply or ""))
     if not reply:
@@ -2464,6 +2441,10 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     arguments = dict(arguments) if isinstance(arguments, dict) else {}
     owner = str(arguments.pop(_MCP_OWNER_ARG, "") or "").strip()
+    root_operation_id = (
+        str(arguments.pop(_MCP_ROOT_OPERATION_ARG, "") or "").strip()
+        or None
+    )
     owner_token = _CURRENT_OWNER.set(owner or None)
     try:
         all_db_accounts = _read_accounts_from_db()
@@ -2813,6 +2794,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 reply_all=bool(arguments.get("reply_all", False)),
                 account=acct,
                 title=arguments.get("title"),
+                root_operation_id=root_operation_id,
             )
             if "error" in result:
                 return [TextContent(type="text", text=f"Error: {result['error']}")]

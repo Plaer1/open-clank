@@ -1,0 +1,74 @@
+{
+  "schema": "openclank.kimi-reference-fixtures.v1",
+  "purpose": "Reference-only provenance for generic Open Clank fixtures; this is not a Kimi runtime or compatibility contract.",
+  "source": {
+    "repository": "https://github.com/MoonshotAI/kimi-code.git",
+    "commit": "44a6c70e66762ea9e122f8dceae16dc759086a7c",
+    "license": "MIT",
+    "checkout_policy": ".references/kimi-code (ignored; never required by build/test)",
+    "extraction_command": "git show 44a6c70e66762ea9e122f8dceae16dc759086a7c:<path> | sha256sum",
+    "extraction_tool": "git 2.39+ and sha256sum/shasum -a 256",
+    "network_required_for_validation": false,
+    "private_web_source_used": false,
+    "dist_web_decompiled": false,
+    "paths": [
+      {
+        "path": "packages/protocol/src/ws-control.ts",
+        "sha256": "9d25d28cafc3f087524d4035fd345bd13a0d219e00af50819e2e2c1d1a7c4185",
+        "lesson": "typed control frames and terminal separation"
+      },
+      {
+        "path": "packages/transcript/src/ops/operation.ts",
+        "sha256": "4c78be2ef4baf6d8c531635c030df85bb4aed9484fe9e6165531495cb3630bdf",
+        "lesson": "idempotent transcript operation vocabulary"
+      },
+      {
+        "path": "packages/transcript/src/ops/apply.ts",
+        "sha256": "0a5ae6c70abfa1044f3b473b0d43dd21da9da2fd273d3044ba460a7147a27860",
+        "lesson": "single convergence reducer"
+      },
+      {
+        "path": "packages/kap-server/src/start.ts",
+        "sha256": "ab251e6a254fa53be4702534f5f5f924437e09f7ff46925a2fc6217a675d376a",
+        "lesson": "authenticated REST/WS composition and origin policy"
+      },
+      {
+        "path": "packages/kap-server/src/transport/ws/v1/wsConnectionV1.ts",
+        "sha256": "1999e6fee3edcd4be10874cd2bbe19a8c4f211705d07dad3332e75ee532899fe",
+        "lesson": "heartbeat, batching, replay cursor, and bounded backpressure patterns"
+      },
+      {
+        "path": "apps/kimi-code/src/tui/controllers/session-event-handler.ts",
+        "sha256": "b5bc124e8532e49347d99cbc517f77ae713602c12b07a67b46cce9eb06f66504",
+        "lesson": "semantic TUI projection is separate from browser/PTY rendering"
+      },
+      {
+        "path": "packages/klient/test/e2e/legacy/terminal.test.ts",
+        "sha256": "c0d02a5f7aa4ad457350536ae32d0fb2efb4551523d7729d618421590d4172cf",
+        "lesson": "terminal attach/input/resize behavior is a separate test lane"
+      }
+    ]
+  },
+  "openclank_fixtures": [
+    {
+      "path": "contracts/openclank/agent-supervisor-v1/fixtures/compatibility-v1.json",
+      "sha256": "419bdd3cd8f69ae45f3e4a708139adfe18d232608df3f39903b5d4a871026840",
+      "kind": "generic compatibility characterization"
+    },
+    {
+      "path": "contracts/openclank/agent-supervisor-v1/semantic-event-v1.schema.json",
+      "sha256": "01450025dcfe9211e877344436083da07d55958addc66f6f894a7b546048fcd9",
+      "kind": "generic semantic event schema"
+    },
+    {
+      "path": "contracts/openclank/agent-supervisor-v1/semantic-snapshot-v1.schema.json",
+      "sha256": "eeb621e5de9f1bafc24a953e5c116abb57c3d38bb9e265fbff60bc66b5c3d39d",
+      "kind": "generic semantic snapshot schema"
+    },
+    {
+      "path": "contracts/openclank/agent-supervisor-v1/terminal-control-v1.schema.json",
+      "sha256": "a79b562eedc4f8f9a2a6ce2fa634f082b164e5e3c700c39882f5cf740c22670d",
+      "kind": "generic terminal control schema"
+    }
+  ]
+}

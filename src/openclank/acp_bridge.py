@@ -4,9 +4,11 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -15,6 +17,7 @@ from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optiona
 
 from src.memory_scope import chat_workspace, memory_owner
 from src.openclank.acp_client import ACPClient, RPCError, TransportError
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 from src.openclank.permission_grants import derive_pattern
 
 logger = logging.getLogger(__name__)
@@ -33,19 +36,69 @@ _LIFETOOLS_SERVER = Path(__file__).resolve().parent / "lifetools_server.py"
 
 # Path to the fm-mcp binary (frankenmemory)
 _FM_MCP_COMMAND = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
+_MEMORY_BROKER_URL = ""
+_MEMORY_BROKER_TOKEN = ""
+_COPAL_BROKER_URL = ""
+_COPAL_BROKER_TOKEN = ""
+
+
+def configure_frankenmemory_broker(url: str, token: str) -> None:
+    """Configure the private app-owned memory transport inherited by lifetools.
+
+    The token is held in process memory and projected only into the scoped
+    lifetools descriptor; it is never put in the host-wide environment.
+    """
+    global _MEMORY_BROKER_URL, _MEMORY_BROKER_TOKEN
+    _MEMORY_BROKER_URL = str(url or "").strip()
+    _MEMORY_BROKER_TOKEN = str(token or "").strip()
+    if bool(_MEMORY_BROKER_URL) != bool(_MEMORY_BROKER_TOKEN):
+        raise ValueError("memory broker URL and token must be configured together")
+
+
+def configure_copal_broker(url: str, token: str) -> None:
+    """Configure the private app-owned Copal transport inherited by lifetools."""
+    global _COPAL_BROKER_URL, _COPAL_BROKER_TOKEN
+    _COPAL_BROKER_URL = str(url or "").strip()
+    _COPAL_BROKER_TOKEN = str(token or "").strip()
+    if bool(_COPAL_BROKER_URL) != bool(_COPAL_BROKER_TOKEN):
+        raise ValueError("Copal broker URL and token must be configured together")
+
+
+def copal_broker_token(master_token: str, owner: str, workspace: str) -> str:
+    owner = str(owner or "").strip()
+    workspace = str(workspace or "").strip()
+    if not master_token or not owner or not workspace:
+        raise ValueError("Copal broker scope is incomplete")
+    payload = f"open-clank-copal-broker-v1\0{owner}\0{workspace}".encode()
+    return hmac.new(master_token.encode(), payload, hashlib.sha256).hexdigest()
+
+
+def frankenmemory_broker_token(
+    master_token: str, owner: str, workspace_id: str
+) -> str:
+    owner = str(owner or "").strip()
+    workspace_id = str(workspace_id or "").strip()
+    if not master_token or not owner or not workspace_id:
+        raise ValueError("memory broker scope is incomplete")
+    payload = f"open-clank-memory-broker-v1\0{owner}\0{workspace_id}".encode()
+    return hmac.new(master_token.encode(), payload, hashlib.sha256).hexdigest()
 
 
 def frankenmemory_child_env(*, command: str | None = None) -> dict[str, str]:
     """Project only Frankenmemory runtime configuration into child processes."""
+    from src.constants import FM_DB_PATH
+
     env = {
         name: value
         for name, value in os.environ.items()
         if value
-        and (
-            name in {"FM_DB_PATH", "FM_DB_ID"}
-            or name.startswith("FM_EMBED_")
-        )
+        and name in {"FM_DB_PATH", "FM_DB_ID"}
     }
+    # Children must share the exact store path even when the parent relies on
+    # the compiled-in default: broker-mode providers gate direct sqlite v2
+    # reads on an explicit FM_DB_PATH, and an implicit default could drift
+    # from the broker's store.
+    env.setdefault("FM_DB_PATH", str(FM_DB_PATH))
     db_path = env.get("FM_DB_PATH")
     if db_path and not os.path.isabs(db_path):
         raise ValueError("FM_DB_PATH must be absolute")
@@ -64,27 +117,77 @@ def lifetools_mcp_descriptor(
     owner: str = "",
     session_id: str = "",
     workspace: str = "",
+    authority_workspace_id: str = "",
     memory_enabled: bool = True,
+    copal_workspace: str = "default",
 ) -> dict:
     """Build the MCP server descriptor for the life-tools bridge.
 
     Returns a dict matching the ACP McpServerStdio shape:
     {name, command, args, env:[{name,value}]}
     """
+    skill_owner = str(owner or "").strip()
     owner = memory_owner(owner)
+    workspace_id = chat_workspace()
+    authority_workspace_id = str(authority_workspace_id or "").strip()
+    copal_workspace = str(copal_workspace or "default").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", copal_workspace):
+        raise ValueError("invalid Copal workspace for lifetools descriptor")
     scope = hashlib.sha256(
-        f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
+        f"{owner}\0{session_id}\0{workspace}\0{authority_workspace_id}\0{copal_workspace}".encode("utf-8")
     ).hexdigest()[:12]
     child_env = {
         "OWNER": owner,
+        "OPEN_CLANK_SKILL_OWNER": skill_owner,
         "SESSION_ID": session_id,
         "WORKSPACE": workspace,
+        "OPEN_CLANK_AUTHORITY_WORKSPACE_ID": authority_workspace_id,
         "FM_SCOPE_AUTHORITY": "trusted-caller",
         "FM_OWNER": owner,
-        "FM_WORKSPACE_ID": chat_workspace(),
+        "FM_WORKSPACE_ID": workspace_id,
+        "COPAL_WORKSPACE": copal_workspace,
         "FM_MEMORY_ENABLED": "1" if memory_enabled else "0",
         **frankenmemory_child_env(command=_FM_MCP_COMMAND),
     }
+    # The managed engine and its lifetools process use an owner-private data
+    # directory. Stable Workspace authority, however, lives in the app's
+    # canonical policy/auth stores. Project their paths explicitly so the
+    # trusted bridge can re-resolve the current immutable owner + Workspace on
+    # every tool call instead of trusting the baked physical cwd.
+    from src.constants import APP_DB, AUTH_FILE
+
+    child_env.update(
+        {
+            "OPEN_CLANK_AUTHORITY_DB_PATH": os.path.abspath(APP_DB),
+            "OPEN_CLANK_AUTHORITY_AUTH_PATH": os.path.abspath(AUTH_FILE),
+        }
+    )
+    # The lifetools process owns its Copal adapter, so carry the app's
+    # partitioned store into that process as well.  Without this, a
+    # disposable/partitioned app falls back to the repository default and
+    # collides with another running Copal bridge before the first tool call.
+    copal_data_dir = os.environ.get("COPAL_DATA_DIR", "").strip()
+    if copal_data_dir:
+        child_env["COPAL_DATA_DIR"] = copal_data_dir
+    if _COPAL_BROKER_URL:
+        child_env.update(
+            {
+                "OPEN_CLANK_COPAL_BROKER_URL": _COPAL_BROKER_URL,
+                "OPEN_CLANK_COPAL_BROKER_TOKEN": copal_broker_token(
+                    _COPAL_BROKER_TOKEN, owner, copal_workspace
+                ),
+                "OPEN_CLANK_COPAL_BROKER_WORKSPACE": copal_workspace,
+            }
+        )
+    if _MEMORY_BROKER_URL:
+        child_env.update(
+            {
+                "OPEN_CLANK_MEMORY_BROKER_URL": _MEMORY_BROKER_URL,
+                "OPEN_CLANK_MEMORY_BROKER_TOKEN": frankenmemory_broker_token(
+                    _MEMORY_BROKER_TOKEN, owner, workspace_id
+                ),
+            }
+        )
     return {
         "name": f"lifetools_{scope}",
         "command": sys.executable,
@@ -310,11 +413,13 @@ class ACPBridge:
         permission_handler: Optional[Callable[[dict], Coroutine[Any, Any, dict]]] = None,
         memory_provider: Any = None,
         session_map_path: Optional[Path] = None,
+        managed_provider_context: Any = None,
     ) -> None:
         self._client = client
         self._cwd = cwd
         self._owner = owner
         self._memory_provider = memory_provider
+        self._managed_provider_context = managed_provider_context
         self._delete_session_callback = None
         # Per-session turn state (only one active turn per session at a time)
         self._turns: Dict[str, _TurnState] = {}
@@ -420,6 +525,7 @@ class ACPBridge:
             "meta": result.get("_meta") or previous.get("meta") or {},
             "current": self._current_config(config_options),
             "desired": previous.get("desired", {}),
+            "last_root_operation_id": previous.get("last_root_operation_id"),
         }
 
     def _bind_canonical_session(
@@ -555,7 +661,10 @@ class ACPBridge:
                 and selected == options[0].get("label")
             )
             if approved and state.get("plan_state"):
-                state["plan_state"]["approved_revision"] = req.plan_revision
+                plan_state = state["plan_state"]
+                plan_state["approved_revision"] = req.plan_revision
+                plan_state["approved_digest"] = plan_state.get("digest")
+                plan_state["status"] = "approved"
             state.pop("pending_question", None)
             self._persist_session_state(req.mimo_session_id)
 
@@ -577,19 +686,24 @@ class ACPBridge:
         extra_mcp_servers: Optional[list[dict]] = None,
         with_agent_tools: bool = True,
         with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
     ) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
         Also stores the available models from mimo's handshake so the bridge
         can match thesius model names to mimo model IDs later.
         """
-        target_cwd = cwd or self._cwd
+        requested_workspace = str(cwd or "").strip()
+        target_cwd = requested_workspace or self._cwd
         mcp_servers = ([
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
-                workspace=target_cwd,
+                workspace=requested_workspace,
+                authority_workspace_id=authority_workspace_id,
                 memory_enabled=with_memory,
+                copal_workspace=copal_workspace,
             ),
         ] + list(extra_mcp_servers or [])) if with_agent_tools else []
         result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
@@ -613,6 +727,8 @@ class ACPBridge:
         owner: Optional[str] = None,
         extra_mcp_servers: Optional[list[dict]] = None,
         with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
     ) -> str:
         """Load the mimo session into the ACP agent's memory.
 
@@ -631,6 +747,8 @@ class ACPBridge:
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
                 with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
             self._session_map[odysseus_session] = new_id
             self._bind_canonical_session(
@@ -648,8 +766,10 @@ class ACPBridge:
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
-                workspace=cwd or self._cwd,
+                workspace=str(cwd or "").strip(),
+                authority_workspace_id=authority_workspace_id,
                 memory_enabled=with_memory,
+                copal_workspace=copal_workspace,
             ),
             *(extra_mcp_servers or []),
         ]
@@ -669,6 +789,8 @@ class ACPBridge:
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
                 with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
             self._session_map[odysseus_session] = new_id
             self._bind_canonical_session(
@@ -705,6 +827,8 @@ class ACPBridge:
         mimo_session_id: str,
         *,
         with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
     ) -> None:
         """Re-establish a session after a crash/restart.
 
@@ -715,8 +839,10 @@ class ACPBridge:
             lifetools_mcp_descriptor(
                 owner=self._owner,
                 session_id=odysseus_session,
-                workspace=self._cwd,
+                workspace="",
+                authority_workspace_id=authority_workspace_id,
                 memory_enabled=with_memory,
+                copal_workspace=copal_workspace,
             ),
         ]
         await self._client.resume_session(mimo_session_id, self._cwd, mcp_servers=mcp_servers)
@@ -764,6 +890,13 @@ class ACPBridge:
 
     def mapped_session_id(self, odysseus_session: str) -> str:
         return self._session_map.get(odysseus_session, odysseus_session)
+
+    def mapped_session_workspace(self, odysseus_session: str) -> str:
+        mimo_session = self.mapped_session_id(odysseus_session)
+        return str(
+            self._session_context.get(mimo_session, {}).get("workspace")
+            or self._cwd
+        )
 
     def mapped_sessions(self) -> dict[str, str]:
         return dict(self._session_map)
@@ -863,6 +996,20 @@ class ACPBridge:
         if odysseus_session in self._session_map and self._delete_session_callback:
             await self._delete_session_callback(odysseus_session)
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
+        authority_workspace_id = str(
+            envelope.get("authority_workspace_id") or ""
+        ).strip()
+        if authority_workspace_id and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", authority_workspace_id
+        ):
+            yield f"event: error\ndata: {json.dumps({'code': 'INVALID_AUTHORITY_WORKSPACE', 'error': 'The Workspace authority identity is invalid', 'status': 409, 'retryable': False})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        copal_workspace = str(envelope.get("copal_workspace") or "default").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", copal_workspace):
+            yield f"event: error\ndata: {json.dumps({'code': 'INVALID_COPAL_WORKSPACE', 'error': 'Copal workspace is invalid', 'status': 400, 'retryable': False})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         incognito = bool(envelope.get("incognito"))
         auxiliary = envelope.get("lane") == "auxiliary"
         memory_read_allowed = bool(envelope.get("memory_read_allowed", True))
@@ -877,11 +1024,14 @@ class ACPBridge:
                 odysseus_session=odysseus_session,
                 with_agent_tools=not auxiliary,
                 with_memory=False,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
             self._session_context[mimo_session] = {
                 "odysseus_session_id": odysseus_session,
                 "owner": owner if owner is not None else self._owner,
                 "workspace": cwd or self._cwd,
+                "authority_workspace_id": authority_workspace_id,
                 "incognito": True,
                 "auxiliary": auxiliary,
                 "is_admin": bool(envelope.get("is_admin")),
@@ -894,15 +1044,38 @@ class ACPBridge:
                 owner=owner,
                 extra_mcp_servers=extra_mcp_servers,
                 with_memory=memory_read_allowed,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
             self._session_context.setdefault(mimo_session, {}).update({
                 "workspace": cwd or self._cwd,
+                "authority_workspace_id": authority_workspace_id,
                 "incognito": False,
                 "is_admin": bool(envelope.get("is_admin")),
                 "interaction_policy": envelope.get("interaction_policy", "interactive"),
+                "copal_workspace": copal_workspace,
             })
-        turn_id = _turn_source_id(messages)
+        metadata_root = _message_root_operation_id(messages)
+        supplied_root = str(envelope.get("root_operation_id") or "").strip()
+        if metadata_root and supplied_root and metadata_root != supplied_root:
+            yield f'event: error\ndata: {json.dumps({"code": "ROOT_OPERATION_MISMATCH", "error": "The persisted turn operation identity did not match the execution envelope", "status": 409, "retryable": False})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
+        turn_id = metadata_root or supplied_root or _turn_source_id(messages)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,191}", turn_id):
+            yield f'event: error\ndata: {json.dumps({"code": "INVALID_ROOT_OPERATION", "error": "The turn operation identity is invalid", "status": 409, "retryable": False})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
+        envelope["root_operation_id"] = turn_id
         envelope["root_turn_id"] = turn_id
+        # Host-side tool callbacks resolve this nonsecret context rather than
+        # inventing an operation identity from the long-lived session ID.
+        self._session_context.setdefault(mimo_session, {}).update({
+            "root_operation_id": turn_id,
+            "provider_grant_id": (
+                str(envelope.get("provider_grant_id") or "").strip() or None
+            ),
+        })
         if not incognito and not auxiliary and not turn_id.startswith("turn-"):
             from src.agent_actor_accounting import begin_agent_turn
 
@@ -912,6 +1085,9 @@ class ACPBridge:
                 yield "data: [DONE]\n\n"
                 return
         control_state = self._session_state.get(mimo_session, {})
+        if not auxiliary and control_state is not None:
+            control_state["last_root_operation_id"] = turn_id
+            self._persist_session_state(mimo_session)
         try:
             if auxiliary:
                 raise KeyError("auxiliary turns have no transcript projection")
@@ -925,8 +1101,8 @@ class ACPBridge:
                 snapshot,
                 mimo_session_id=mimo_session,
                 workspace=cwd or self._cwd,
-                endpoint_url="mimo://acp",
-                model=model or "mimo",
+                endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+                model=model or "openclank-engine",
                 turn_id=turn_id,
                 mode_config_revision=int(control_state.get("revision") or 0),
             )
@@ -938,22 +1114,31 @@ class ACPBridge:
         self._turns[mimo_session] = state
 
         desired = control_state.get("desired", {})
-        desired_mode = desired.get("mode")
-        if desired_mode:
-            try:
-                await self.set_config_option(
-                    odysseus_session,
-                    "mode",
-                    desired_mode,
-                    cwd=cwd,
-                    owner=owner,
-                )
-            except (ValueError, RPCError) as exc:
-                logger.warning("Open Clank agent mode restore failed (%s): %s", desired_mode, exc)
-                yield f'data: {json.dumps({"type": "config_error", "config": "mode", "requested": desired_mode, "error": str(exc)})}\n\n'
-                yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
-                yield "data: [DONE]\n\n"
-                return
+        # The Open Clank interaction mode is the authority for this turn.
+        # Persisted ACP state is only a negotiated cache and must never let a
+        # stale provider-native mode override a newly captured Chat/Plan/Agent
+        # choice.  Chat and Agent both use ACP's internal build mode.
+        desired_mode = str(
+            envelope.get("provider_mode")
+            or ("plan" if envelope.get("mode") == "plan" else "build")
+        ).strip().lower()
+        if desired_mode not in {"build", "plan"}:
+            desired_mode = "build"
+        selected_runtime_model = str(desired.get("model") or model or "")
+        try:
+            await self.set_config_option(
+                odysseus_session,
+                "mode",
+                desired_mode,
+                cwd=cwd,
+                owner=owner,
+            )
+        except (ValueError, RPCError) as exc:
+            logger.warning("Open Clank agent mode negotiation failed (%s): %s", desired_mode, exc)
+            yield f'data: {json.dumps({"type": "config_error", "config": "mode", "requested": desired_mode, "error": str(exc)})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
 
         # Tell mimo which model to use. The thesius model name (e.g. "deepseek-v4-pro")
         # may not match mimo's provider/model format ("deepseek/deepseek-v4-pro").
@@ -970,6 +1155,7 @@ class ACPBridge:
                 result = await self._client.set_session_config_option(
                     mimo_session, "model", model_id
                 )
+                selected_runtime_model = model_id
                 self._capture_handshake(mimo_session, result)
                 self._session_state[mimo_session].setdefault("desired", {})[
                     "model"
@@ -1018,6 +1204,32 @@ class ACPBridge:
         )
         prompt_meta = {"odysseus": envelope}
         prompt_meta["odysseus"]["tools"] = _mimo_tool_policy(envelope)
+        if self._managed_provider_context is not None:
+            try:
+                route_context = await self._managed_provider_context(
+                    selected_runtime_model,
+                    grant_id=(str(envelope.get("provider_grant_id") or "").strip() or None),
+                )
+                managed_wire = route_context.to_wire(
+                    root_operation_id=turn_id,
+                )
+                for source, target in (
+                    ("preferred_provider_account_id", "preferredAccountID"),
+                    ("inherited_provider_account_id", "inheritedAccountID"),
+                ):
+                    value = str(envelope.get(source) or "").strip()
+                    if value:
+                        managed_wire[target] = value
+                prompt_meta["openclankProvider"] = managed_wire
+            except Exception as exc:
+                logger.warning(
+                    "managed provider route resolution rejected model %r: %s",
+                    selected_runtime_model,
+                    exc,
+                )
+                yield f'event: error\ndata: {json.dumps({"code": "MANAGED_PROVIDER_ROUTE_UNAVAILABLE", "error": str(exc), "status": 409, "retryable": False})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
 
         # Fire the prompt request (blocks until stopReason, notifications arrive concurrently)
         prompt_task = asyncio.ensure_future(
@@ -1073,7 +1285,7 @@ class ACPBridge:
             elapsed = time.time() - state.turn_start
             metrics = {
                 "response_time": round(elapsed, 2),
-                "model": model or "mimo",
+                "model": model or "openclank-engine",
                 "stop_reason": state.stop_reason,
                 "root_turn_id": turn_id,
                 **state.metrics,
@@ -1134,7 +1346,7 @@ class ACPBridge:
         combined = {
             key: value
             for key, value in previous.items()
-            if key not in ("digest", "revision", "approved_revision")
+            if key not in ("digest", "revision", "approved_revision", "approved_digest")
         }
         combined.update(payload)
         material = json.dumps(combined, ensure_ascii=False, sort_keys=True, default=str)
@@ -1148,6 +1360,11 @@ class ACPBridge:
             "revision": revision,
             "approved_revision": (
                 previous.get("approved_revision")
+                if previous.get("digest") == digest
+                else None
+            ),
+            "approved_digest": (
+                previous.get("approved_digest")
                 if previous.get("digest") == digest
                 else None
             ),
@@ -1327,13 +1544,27 @@ def _content_text(content: Any) -> str:
     return str(content or "")
 
 
-def _turn_source_id(messages: list) -> str:
+def _message_root_operation_id(messages: list) -> str:
+    """Return the server-persisted root identity on the latest user turn."""
+
     for message in reversed(messages):
         if message.get("role") != "user":
             continue
         metadata = message.get("metadata") or {}
+        if metadata.get("root_operation_id"):
+            return str(metadata["root_operation_id"])
         if metadata.get("_db_id"):
             return str(metadata["_db_id"])
+    return ""
+
+
+def _turn_source_id(messages: list) -> str:
+    persisted = _message_root_operation_id(messages)
+    if persisted:
+        return persisted
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
         material = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str)
         return f"turn-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
     return f"turn-{hashlib.sha256(json.dumps(messages, default=str).encode('utf-8')).hexdigest()[:24]}"
@@ -1586,6 +1817,23 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
             continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {name}):
             policy.setdefault(alias, True)
+    # Native OpenCode file/search/process tools are never the authority lane.
+    # Server-minted brokered_file_tools selectively re-enable only the private
+    # lifetools adapters after current AgentScope projection.
+    from src.tool_security import SCOPED_FILE_TOOLS, STRICT_NATIVE_MIMO_TOOLS
+
+    for native_name in STRICT_NATIVE_MIMO_TOOLS:
+        policy[native_name] = False
+    brokered = set(map(str, envelope.get("brokered_file_tools") or ())) & set(SCOPED_FILE_TOOLS)
+    explicitly_disabled = set(map(str, envelope.get("disabled_tools") or ()))
+    explicitly_allowed = None if allowed is None else set(map(str, allowed or ()))
+    for public_name in SCOPED_FILE_TOOLS:
+        enabled = (
+            public_name in brokered
+            and public_name not in explicitly_disabled
+            and (explicitly_allowed is None or public_name in explicitly_allowed)
+        )
+        policy[f"lifetools_*_{public_name}"] = enabled
     policy["frankenmemory_*"] = False
     return policy
 
@@ -1756,6 +2004,16 @@ class QuestionHandler:
             or context.get("interaction_policy") == "fail_on_interaction"
         ):
             return {"rejected": True}
+        # Permission mode "auto": questions never block the turn — the worker
+        # gets the standard rejection and proceeds on its own judgment.
+        try:
+            from src.permission_mode import suppresses_questions
+
+            if suppresses_questions(owner):
+                logger.info("question suppressed by owner permission mode (auto)")
+                return {"rejected": True}
+        except Exception:
+            pass
         projection = {}
         if not incognito:
             from src.openclank.transcript_projection import get_projection
@@ -1839,6 +2097,7 @@ class PermissionRequest:
     __slots__ = (
         "request_id", "tool_call", "raw_input", "options", "title",
         "session_id", "odysseus_session_id", "owner", "workspace",
+        "authority_workspace_id",
         "turn_id", "revision", "_future",
     )
 
@@ -1853,6 +2112,7 @@ class PermissionRequest:
         odysseus_session_id: str = "",
         owner: str = "",
         workspace: str = "",
+        authority_workspace_id: str = "",
         turn_id: str = "",
         revision: int = 0,
     ) -> None:
@@ -1865,12 +2125,13 @@ class PermissionRequest:
         self.odysseus_session_id = odysseus_session_id
         self.owner = owner
         self.workspace = workspace
+        self.authority_workspace_id = authority_workspace_id
         self.turn_id = turn_id
         self.revision = revision
         self._future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
 
     async def wait(self, timeout: Optional[float] = None) -> str:
-        """Wait for the human's choice. Returns 'once', 'always', or 'reject'.
+        """Wait for the human's choice.
 
         C1 (e's ruling): no timeout by default — the prompt waits forever
         and the turn blocks until answered.
@@ -1953,13 +2214,16 @@ class PermissionHandler:
         tool_call = params.get("toolCall", {})
         title = tool_call.get("title", "unknown tool")
         raw_input = tool_call.get("rawInput", {})
-        options = params.get("options", ["once", "always", "reject"])
+        options = params.get("options", ["once", "chat", "workspace", "always", "reject"])
         session_id = params.get("sessionId", "")
         filepath = raw_input.get("filepath", "") if isinstance(raw_input, dict) else ""
         context = self._context_resolver(session_id) if self._context_resolver else {}
         owner = str(context.get("owner") or "")
         odysseus_session = str(context.get("odysseus_session_id") or "")
         workspace = str(context.get("workspace") or "")
+        authority_workspace_id = str(
+            context.get("authority_workspace_id") or ""
+        )
         incognito = bool(context.get("incognito"))
         is_admin = bool(context.get("is_admin"))
 
@@ -1972,7 +2236,11 @@ class PermissionHandler:
         # Any request whose target file is inside a configured safe dir is
         # approved immediately so the always-on assistant doesn't block on
         # known workspaces.
-        allowed_roots = [] if incognito else ([workspace] if workspace else self._safe_dirs)
+        # A selected Workspace is authority narrowing, not operation consent.
+        # Only explicit installation safe directories retain this legacy
+        # convenience; canonical Workspace requests continue to the durable
+        # grant matcher or human prompt below.
+        allowed_roots = [] if incognito or authority_workspace_id else self._safe_dirs
         if filepath and allowed_roots and any(
             _path_within(filepath, root) for root in allowed_roots
         ):
@@ -1980,15 +2248,46 @@ class PermissionHandler:
             return self._approve()
 
         # ── stored durable grants ──
+        if not incognito:
+            try:
+                from src.openclank.operation_approvals import (
+                    match_operation_approval,
+                )
+
+                if match_operation_approval(
+                    owner=owner,
+                    permission_type=title,
+                    filepath=filepath or "",
+                    session_id=odysseus_session,
+                    workspace_id=authority_workspace_id,
+                    workspace_path=workspace,
+                ):
+                    logger.info("auto-approved %s: %s (canonical grant)", title, filepath or "*")
+                    return self._approve()
+            except Exception:
+                pass
         if not incognito and self._grant_store is not None and self._grant_store.match(
             title,
             filepath=filepath or None,
             owner=owner,
             session_id=odysseus_session,
             workspace=workspace,
+            workspace_id=authority_workspace_id,
         ):
             logger.info("auto-approved %s: %s (stored grant)", title, filepath or "*")
             return self._approve()
+
+        # ── owner permission mode (yolo/auto) ──
+        # Approve with once semantics — no durable grant, no UI wait. The
+        # fail_on_interaction and non-admin rejects above stay authoritative.
+        try:
+            from src.permission_mode import auto_approves
+
+            if auto_approves(owner):
+                logger.info("auto-approved %s: %s (permission mode)", title, filepath or "*")
+                return self._approve("once")
+        except Exception:
+            pass
 
         # ── surface to the UI and wait (forever) for the human ──
         if self._on_request is None:
@@ -2015,6 +2314,7 @@ class PermissionHandler:
             odysseus_session_id=odysseus_session,
             owner=owner,
             workspace=workspace,
+            authority_workspace_id=authority_workspace_id,
             turn_id=str(projection.get("active_turn_id") or ""),
             revision=int(projection.get("transcript_revision") or 0),
         )
@@ -2028,22 +2328,65 @@ class PermissionHandler:
                 return self._approve("reject")
 
             option_id = await req.wait()
-            if incognito and option_id == "always":
+            if incognito and option_id in {"chat", "workspace", "always"}:
                 option_id = "once"
 
-            if not incognito and option_id == "always" and self._grant_store is not None:
+            if not incognito and option_id in {"chat", "workspace", "always"} and self._grant_store is not None:
                 from src.openclank.permission_grants import derive_pattern
+                from src.openclank.permission_grants import grant_scope_for_lifetime
                 pattern = derive_pattern(raw_input)
-                self._grant_store.add(
-                    title,
-                    pattern,
-                    owner=owner,
+                (
+                    grant_session,
+                    grant_workspace,
+                    grant_workspace_id,
+                ) = grant_scope_for_lifetime(
+                    option_id,
                     session_id=odysseus_session,
                     workspace=workspace,
+                    workspace_id=authority_workspace_id,
                 )
-                logger.info("stored durable grant: (%s, %s)", title, pattern)
+                if (
+                    option_id == "always"
+                    or grant_session
+                    or grant_workspace
+                    or grant_workspace_id
+                ):
+                    from src.openclank.operation_approvals import (
+                        record_operation_approval,
+                    )
 
-            return self._approve(option_id)
+                    persisted = record_operation_approval(
+                        owner=owner,
+                        permission_type=title,
+                        pattern=pattern,
+                        lifetime=option_id,
+                        session_id=grant_session,
+                        workspace_id=grant_workspace_id,
+                        target_path=filepath or workspace,
+                    )
+                    if not persisted:
+                        self._grant_store.add(
+                            title,
+                            pattern,
+                            owner=owner,
+                            session_id=grant_session,
+                            workspace=grant_workspace,
+                            workspace_id=grant_workspace_id,
+                        )
+                        logger.info("stored %s grant: (%s, %s)", option_id, title, pattern)
+                    else:
+                        logger.info("stored canonical %s grant: (%s, %s)", option_id, title, pattern)
+                else:
+                    # There is no stable scope to persist against; preserve
+                    # the safe Once semantics instead of minting an account-
+                    # wide approval under a misleading label.
+                    option_id = "once"
+
+            # ACP/OpenCode only understands its wire-level allow-once and
+            # allow-always outcomes. Chat/workspace are Open Clank's durable
+            # scope refinements; they are persisted above and sent upstream
+            # as the ordinary allow-always decision for this request.
+            return self._approve("always" if option_id in {"chat", "workspace"} else option_id)
         finally:
             self.pending_requests.pop(request_id, None)
 
@@ -2052,7 +2395,7 @@ class PermissionHandler:
 
         Args:
             request_id: the permission request ID
-            option_id: 'once', 'always', or 'reject'
+            option_id: 'once', 'chat', 'workspace', 'always', or 'reject'
 
         Returns True if the request was found and resolved, False otherwise.
         """
@@ -2061,6 +2404,51 @@ class PermissionHandler:
             req.resolve(option_id)
             return True
         return False
+
+    def reject_scope(
+        self,
+        *,
+        session_id: str = "",
+        workspace: str = "",
+        authority_workspace_id: str = "",
+        all_pending: bool = False,
+    ) -> int:
+        """Reject pending approvals covered by a reset domain.
+
+        Canonical Location/All-agent resets cannot safely map every legacy raw
+        pending filepath back to a stable Location yet, so their fail-closed
+        behavior is to reject all pending requests for this owner.
+        """
+        if (
+            not session_id
+            and not workspace
+            and not authority_workspace_id
+            and not all_pending
+        ):
+            return 0
+        rejected = 0
+        for req in list(self.pending_requests.values()):
+            if req._future.done():
+                continue
+            if not all_pending and session_id and req.odysseus_session_id != session_id:
+                continue
+            if not all_pending and workspace and authority_workspace_id:
+                if (
+                    req.authority_workspace_id != authority_workspace_id
+                    and req.workspace != workspace
+                ):
+                    continue
+            elif not all_pending and workspace and req.workspace != workspace:
+                continue
+            elif (
+                not all_pending
+                and authority_workspace_id
+                and req.authority_workspace_id != authority_workspace_id
+            ):
+                continue
+            req.resolve("reject")
+            rejected += 1
+        return rejected
 
     def resolve_for(
         self,

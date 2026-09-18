@@ -1,156 +1,233 @@
-"""Owner-scope regression for /api/research/start endpoint resolution.
+"""Managed-provider regressions for Deep Research route selection.
 
-`research_start()` resolves a CALLER-SUPPLIED `endpoint_id` (and, with nothing
-configured, a bare first-enabled fallback) to a `ModelEndpoint` whose *decrypted*
-api_key + base_url then drive the research LLM calls
-(`start_research(llm_endpoint=, llm_headers=)`). Both lookups must be
-exact-owner scoped, with legacy null-owner rows reserved for unauthenticated
-single-user mode, so a research-privileged user can't bind a research run
-to ANOTHER user's PRIVATE endpoint and silently spend that owner's API key /
-reach whatever internal base_url they configured. Mirrors the
-webhook `_first_enabled_endpoint` (#1045) and session `_owned_endpoint` fixes.
+Research used to resolve ``ModelEndpoint`` rows and pass decrypted transport
+details into the background handler.  The route layer now projects only stable
+normalized identities; the managed operation router resolves provider authority
+again at execution time under the authenticated owner.
 """
 
-import sys
-import types
+import asyncio
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-# The helper resolves `from src.database import ModelEndpoint` at call time.
-# Stub the module so we can hand it a fake declarative class whose column
-# comparisons return inspectable predicates (the real one is a SQLAlchemy
-# class, MagicMock'd to oblivion by conftest). owner_filter stays REAL.
-_sd = types.ModuleType("src.database")
-_sd.ModelEndpoint = MagicMock()
-sys.modules.setdefault("src.database", _sd)
+import pytest
 
-from routes.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime  # noqa: E402
+from routes.research import research_routes
+from src import deep_research as deep_research_module
+from src import research_handler as research_handler_module
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
 
-class _Predicate:
-    def __init__(self, check):
-        self._check = check
-
-    def __call__(self, row):
-        return self._check(row)
-
-    def __or__(self, other):
-        return _Predicate(lambda row: self(row) or other(row))
-
-
-class _Column:
-    def __init__(self, name):
-        self.name = name
-
-    def __eq__(self, value):
-        return _Predicate(lambda row: getattr(row, self.name) == value)
+def _managed_summary(**kwargs):
+    assert kwargs == {
+        "owner": "alice",
+        "purpose": "research",
+        "operation": "chat.complete",
+    }
+    return {
+        "model_route_id": "pmr_research",
+        "model_id": "research-model",
+        "model_name": "Research Model",
+        "connection_id": "pcn_research",
+    }
 
 
-class _ModelEndpoint:
-    id = _Column("id")
-    is_enabled = _Column("is_enabled")
-    owner = _Column("owner")
+def _request():
+    return SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(current_user="alice", api_token=False),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=SimpleNamespace(
+                    is_configured=True,
+                    get_privileges=lambda _owner: {},
+                ),
+            ),
+        ),
+    )
 
 
-class _Query:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def filter(self, *predicates):
-        self._rows = [r for r in self._rows if all(p(r) for p in predicates)]
-        return self
-
-    def first(self):
-        return self._rows[0] if self._rows else None
+def _route(router, path, method):
+    return next(
+        route.endpoint
+        for route in router.routes
+        if route.path == path and method in route.methods
+    )
 
 
-class _DB:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def query(self, model):
-        assert model is _ModelEndpoint
-        return _Query(self._rows)
-
-
-def _ep(eid, owner, *, is_enabled=True):
-    return SimpleNamespace(id=eid, owner=owner, is_enabled=is_enabled, api_key="sk-secret")
-
-
-def _resolve(rows, owner, endpoint_id=None):
-    sys.modules["src.database"].ModelEndpoint = _ModelEndpoint
-    return _owned_enabled_endpoint(_DB(rows), owner, endpoint_id)
+def _body(**overrides):
+    values = {
+        "query": "What changed?",
+        "max_rounds": 3,
+        "search_provider": None,
+        "endpoint_id": None,
+        "model": None,
+        "max_time": 300,
+        "extraction_timeout": None,
+        "extraction_concurrency": None,
+        "category": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
-# --- explicit endpoint_id (POST /api/research/start, body.endpoint_id) --------
+def test_chat_compat_projection_is_managed_and_credential_free(monkeypatch):
+    calls = []
 
-def test_endpoint_id_rejects_another_owners_private_endpoint():
-    # bob's private endpoint exists, but alice asking for it by id resolves None
-    # → the route raises 404 ("Endpoint not found or disabled"), never builds
-    #   headers from bob's key.
-    rows = [_ep("ep-bob", "bob"), _ep("ep-alice", "alice")]
-    assert _resolve(rows, "alice", "ep-bob") is None
+    def summary(**kwargs):
+        calls.append(kwargs)
+        return _managed_summary(**kwargs)
 
-
-def test_endpoint_id_returns_callers_own_endpoint():
-    rows = [_ep("ep-bob", "bob"), _ep("ep-alice", "alice")]
-    ep = _resolve(rows, "alice", "ep-alice")
-    assert ep is not None and ep.id == "ep-alice"
-
-
-def test_endpoint_id_rejects_legacy_null_owner_row_for_authenticated_user():
-    rows = [_ep("ep-shared", None)]
-    assert _resolve(rows, "alice", "ep-shared") is None
-
-
-def test_endpoint_id_skips_disabled_even_when_owned():
-    rows = [_ep("ep-alice", "alice", is_enabled=False)]
-    assert _resolve(rows, "alice", "ep-alice") is None
-
-
-# --- bare first-enabled fallback (no endpoint_id, nothing configured) ---------
-
-def test_fallback_never_picks_another_owners_endpoint():
-    # Alice must borrow neither Bob's endpoint nor the legacy ownerless row.
-    rows = [_ep("ep-bob", "bob"), _ep("ep-shared", None)]
-    assert _resolve(rows, "alice") is None
-
-
-def test_fallback_returns_none_when_only_others_endpoints():
-    rows = [_ep("ep-bob", "bob"), _ep("ep-carol", "carol")]
-    assert _resolve(rows, "alice") is None
-
-
-# --- legacy single-user / unresolved owner: null-owner rows only -------------
-
-def test_null_owner_only_resolves_legacy_null_owner_row():
-    rows = [_ep("ep-x", "bob"), _ep("ep-y", None)]
-    assert _resolve(rows, None, "ep-x") is None
-    ep = _resolve(rows, None, "ep-y")
-    assert ep is not None and ep.id == "ep-y"
-
-
-def test_runtime_resolution_uses_provider_auth_for_chatgpt_subscription(monkeypatch):
-    ep = SimpleNamespace(
-        id="ep-chatgpt",
+    monkeypatch.setattr(research_routes, "managed_route_summary", summary)
+    sess = SimpleNamespace(
         owner="alice",
-        base_url="https://chatgpt.com/backend-api/codex",
-        api_key=None,
-        provider_auth_id="auth-1",
-        cached_models='["gpt-5.5"]',
-        hidden_models=None,
+        endpoint_url="https://legacy.invalid/v1",
+        model="legacy-model",
+        headers={"Authorization": "must-not-project"},
     )
 
+    endpoint, model, headers = research_routes._resolve_research_endpoint(sess)
+
+    assert endpoint == MANAGED_ENGINE_PUBLIC_URL
+    assert model == "Research Model"
+    assert headers == {}
+    assert calls[0]["owner"] == "alice"
+
+
+def test_exact_panel_selection_resolves_only_normalized_owner_identity(monkeypatch):
+    selected = SimpleNamespace(
+        model_route_id="pmr_selected",
+        provider_model_id="selected-model",
+        provider_grant_id="psg_selected",
+        operations=("chat.complete",),
+    )
+    calls = []
+
+    def resolve(**kwargs):
+        calls.append(kwargs)
+        return selected
+
+    monkeypatch.setattr(research_routes, "resolve_chat_route", resolve)
+
+    result = research_routes._requested_research_route(
+        "alice",
+        "share:psg_selected",
+        "selected-model",
+    )
+
+    assert result is selected
+    assert calls == [{
+        "owner": "alice",
+        "endpoint_id": "share:psg_selected",
+        "model_id": "selected-model",
+    }]
+
+
+def test_research_start_uses_owner_purpose_binding_without_transport(monkeypatch):
+    handler = MagicMock()
+    handler._active_tasks = {}
+    monkeypatch.setattr(research_routes, "managed_route_summary", _managed_summary)
     monkeypatch.setattr(
-        "src.chatgpt_subscription.resolve_runtime_credentials",
-        lambda auth_id, owner=None: {
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "fresh-access-token",
-        },
+        "src.auth_helpers.require_privilege",
+        lambda _request, privilege: "alice" if privilege == "can_use_research" else None,
+    )
+    router = research_routes.setup_research_routes(handler)
+    endpoint = _route(router, "/api/research/start", "POST")
+
+    result = asyncio.run(endpoint(body=_body(), request=_request()))
+
+    assert result["status"] == "running"
+    kwargs = handler.start_research.call_args.kwargs
+    assert kwargs["owner"] == "alice"
+    assert kwargs["llm_model"] == "research-model"
+    assert kwargs["model_route_id"] is None
+    assert kwargs["grant_id"] is None
+    assert kwargs["root_operation_id"] == result["session_id"]
+    assert "llm_endpoint" not in kwargs
+    assert "llm_headers" not in kwargs
+
+
+def test_research_start_preserves_explicit_route_and_share_grant(monkeypatch):
+    handler = MagicMock()
+    handler._active_tasks = {}
+    selected = SimpleNamespace(
+        model_route_id="pmr_shared",
+        provider_model_id="shared-model",
+        provider_grant_id="psg_shared",
+    )
+    monkeypatch.setattr(
+        research_routes,
+        "_requested_research_route",
+        lambda *_args: selected,
+    )
+    monkeypatch.setattr(
+        "src.auth_helpers.require_privilege",
+        lambda _request, _privilege: "alice",
+    )
+    router = research_routes.setup_research_routes(handler)
+    endpoint = _route(router, "/api/research/start", "POST")
+
+    asyncio.run(endpoint(
+        body=_body(endpoint_id="share:psg_shared", model="shared-model"),
+        request=_request(),
+    ))
+
+    kwargs = handler.start_research.call_args.kwargs
+    assert kwargs["llm_model"] == "shared-model"
+    assert kwargs["model_route_id"] == "pmr_shared"
+    assert kwargs["grant_id"] == "psg_shared"
+
+
+def test_research_route_source_has_no_retired_provider_transport():
+    source = inspect.getsource(research_routes)
+    for retired in (
+        "llm_call_async",
+        "ModelEndpoint",
+        "ProviderAuthSession",
+        "api_key",
+        "base_url",
+        "resolve_endpoint_runtime",
+    ):
+        assert retired not in source
+
+
+def test_research_completion_sources_have_no_direct_llm_transport():
+    for source in (
+        inspect.getsource(deep_research_module),
+        inspect.getsource(research_handler_module),
+    ):
+        assert "llm_call_async" not in source
+        assert "ModelEndpoint" not in source
+        assert "complete_text(" in source
+        assert 'purpose="research"' in source or "purpose=self.purpose" in source
+
+
+@pytest.mark.parametrize("blocked", [True, False])
+def test_research_start_enforces_model_privileges(monkeypatch, blocked):
+    handler = MagicMock()
+    handler._active_tasks = {}
+    monkeypatch.setattr(research_routes, "managed_route_summary", _managed_summary)
+    monkeypatch.setattr(
+        "src.auth_helpers.require_privilege",
+        lambda _request, _privilege: "alice",
+    )
+    request = _request()
+    request.app.state.auth_manager.get_privileges = lambda _owner: (
+        {"block_all_models": True}
+        if blocked
+        else {"allowed_models_restricted": True, "allowed_models": ["pmr_research"]}
+    )
+    endpoint = _route(
+        research_routes.setup_research_routes(handler),
+        "/api/research/start",
+        "POST",
     )
 
-    url, model, headers = _resolve_endpoint_runtime(ep, owner="alice", model="")
-
-    assert url == "https://chatgpt.com/backend-api/codex/responses"
-    assert model == "gpt-5.5"
-    assert headers["Authorization"] == "Bearer fresh-access-token"
+    if blocked:
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(endpoint(body=_body(), request=request))
+        assert getattr(exc_info.value, "status_code", None) == 403
+    else:
+        asyncio.run(endpoint(body=_body(), request=request))
+        handler.start_research.assert_called_once()

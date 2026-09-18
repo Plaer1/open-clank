@@ -8,6 +8,7 @@ cannot cover/push away the card.  The same payload must be persisted inside
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import src.agent_loop as agent_loop
 
@@ -43,6 +44,18 @@ def test_ask_user_is_emitted_last_and_persisted(monkeypatch):
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+    monkeypatch.setattr(
+        agent_loop,
+        "resolve_chat_route",
+        lambda **kwargs: SimpleNamespace(
+            provider_model_id=kwargs.get("model_id") or "gpt-4o",
+            model_route_id="route-test",
+            provider_grant_id=None,
+            connection_id="connection-test",
+            runtime_model=f"connection-test/{kwargs.get('model_id') or 'gpt-4o'}",
+            capabilities={"tools": True},
+        ),
+    )
 
     async def fake_stream(_candidates, messages, **kwargs):
         call = {"name": "ask_user", "arguments": json.dumps(payload, ensure_ascii=False)}
@@ -60,7 +73,7 @@ def test_ask_user_is_emitted_last_and_persisted(monkeypatch):
             },
         )
 
-    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(agent_loop, "stream_agent_target", fake_stream, raising=False)
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute, raising=False)
 
     chunks = _collect(

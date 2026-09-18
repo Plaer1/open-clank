@@ -1,0 +1,27 @@
+[package]
+name = "lore-telemetry"
+edition = "2024"
+version.workspace = true
+publish = false
+description = "Telemetry and observability utilities for Lore"
+
+[dependencies]
+axum = { workspace = true }
+http = { workspace = true }
+lore-error-set = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pin-project = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

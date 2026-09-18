@@ -1,0 +1,17 @@
+title = "Open Clank secret-scanning exceptions"
+
+[extend]
+useDefault = true
+
+# Translation catalog records use words such as "api" and "key" as schema
+# labels.  Admit only the exact label shapes and dotted translation identifiers;
+# arbitrary values and every other path remain under the default rules.
+[[allowlists]]
+description = "Structured translation catalogue labels"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)static/i18n/[^/]+\.json$''']
+regexes = [
+  '''^\s*"ui\.api(\.key)?":\s*"[^"\r\n]*",?\s*$''',
+  '''^\s*"key":\s*"[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+",?\s*$''',
+]

@@ -8,20 +8,24 @@ def _src(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_registered_manual_compaction_uses_session_owner_for_utility_endpoint():
+def test_registered_manual_compaction_uses_session_owner_for_managed_utility_route():
     session_src = _src("routes/session_routes.py")
 
     assert 'owner = getattr(session, "owner", None) or effective_user(request)' in session_src
-    assert 'resolve_endpoint("utility", owner=owner)' in session_src
+    assert 'owner=owner or "local-installation"' in session_src
+    assert 'purpose="utility"' in session_src
+    assert "complete_text(" in session_src
+    assert "resolve_endpoint(" not in session_src
 
 
-def test_task_name_generation_uses_owner_scoped_session_endpoint():
+def test_task_name_generation_uses_owner_scoped_managed_route():
     src = _src("routes/task_routes.py")
 
     assert "async def _generate_task_name(prompt: str, owner: Optional[str] = None)" in src
     assert "q = q.filter(DbSession.owner == owner)" in src
-    assert "headers = recent.headers or {}" in src
-    assert "headers=headers" in src
+    assert "DbSession.provider_model_route_id.isnot(None)" in src
+    assert "model_route_id=model_route_id" in src
+    assert 'purpose="tasks"' in src
     assert "await _generate_task_name(req.prompt, owner=user)" in src
 
 
@@ -31,39 +35,49 @@ def test_auto_compaction_utility_endpoint_keeps_chat_owner():
 
     assert "owner=user" in helper_src
     assert "owner: Optional[str] = None" in compact_src
-    assert 'resolve_endpoint("utility", owner=owner)' in compact_src
+    assert 'from src.openclank.modality_facade import complete_text' in compact_src
+    assert 'purpose="utility"' in compact_src
+    assert "owner=completion_owner or \"\"" in compact_src
+    assert "root_operation_id=root_operation_id" in compact_src
+    assert "llm_call_async" not in compact_src
 
 
-def test_background_session_sort_uses_owner_task_endpoint():
+def test_background_session_sort_uses_owner_managed_utility_route():
     src = _src("src/session_actions.py")
 
-    assert "resolve_task_endpoint(owner=owner or None)" in src
+    assert "complete_text(" in src
+    assert 'owner=owner or "local-installation"' in src
+    assert 'purpose="utility"' in src
+    assert "resolve_task_endpoint" not in src
 
 
-def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
+def test_scheduler_task_execution_uses_normalized_managed_routes():
     src = _src("src/task_scheduler.py")
 
     assert "resolve_task_candidates(" not in src
-    assert "No registered model endpoint configured for research" in src
-    assert "from src.auth_helpers import owner_filter" in src
-    assert 'owner_filter(\n                    query, ModelEndpoint, task.owner or "", include_shared=False\n                )' in src
-    assert "resolve_endpoint_runtime(endpoint, owner=task.owner or None)" in src
+    assert 'purpose="tasks"' in src
+    assert "_resolve_managed_task_route" in src
+    assert "ProviderRouteBinding" not in src
+    assert "db2.query(ModelEndpoint)" not in src
 
 
-def test_research_routes_fallbacks_are_owner_scoped():
+def test_agent_tool_free_fallbacks_use_managed_completion():
+    src = _src("src/agent_loop.py")
+
+    assert src.count("complete_text(") >= 2
+    assert 'purpose="utility"' in src
+    assert 'purpose="chat"' in src
+    assert "from src.llm_core import llm_call_async" not in src
+
+
+def test_research_routes_use_owner_scoped_managed_bindings():
     src = _src("routes/research/research_routes.py")
 
-    assert 'resolve_endpoint("research", owner=user)' in src
-    assert 'resolve_endpoint("utility", owner=user)' in src
-    assert 'resolve_endpoint("default", owner=user)' in src
-    assert 'resolve_endpoint("chat", owner=user)' in src
-    assert '_merge(*resolve_endpoint("chat", owner=user))' in src
-    assert '_merge(*resolve_endpoint("research", owner=user))' in src
-    assert '_merge(*resolve_endpoint("utility", owner=user))' in src
-    assert "ep = _owned_enabled_endpoint(db, user)" in src
-    assert "db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).first()" not in src
-    # _resolve_research_endpoint derives the scope from the session owner. The
-    # rebased code generalized this to honor an explicit `owner` argument first
-    # (``owner = owner or getattr(sess, "owner", None) or None``), so assert on
-    # the stable session-derivation substring rather than the exact line.
-    assert 'getattr(sess, "owner", None) or None' in src
+    assert "managed_route_summary(" in src
+    assert 'purpose="research"' in src
+    assert 'operation="chat.complete"' in src
+    assert 'owner=owner or getattr(sess, "owner", None) or ""' in src
+    assert "resolve_chat_route(" in src
+    assert "ModelEndpoint" not in src
+    assert "resolve_endpoint_runtime" not in src
+    assert "llm_call_async" not in src

@@ -44,10 +44,15 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "body.bg-pattern-clanker-sweep" not in style
     assert "function _initClankerRoutefield()" in theme
     assert "id: 'clanker-routefield-canvas'" in theme
-    assert "canvas.dataset.motion = motion.matches ? 'reduced' : 'active'" in theme
     assert "canvas.dataset.backgroundEffectCanvas = 'true'" in theme
     assert "window.requestAnimationFrame(frame)" in theme
     assert "window.cancelAnimationFrame(animationFrame)" in theme
+    assert "const samePattern = _activeBgPattern() === p" in theme
+    assert "const _BACKGROUND_OWNER_KEY = '__openClankBackgroundOwner'" in theme
+    assert "_isCurrentBgPatternHealthy" not in theme
+    assert "__backgroundFrameCount" not in theme
+    assert "__backgroundResizeCount" not in theme
+    assert "__backgroundScene" not in theme
     assert not re.search(r"previousFrame\s*&&\s*time\s*-\s*previousFrame\s*<", theme)
     assert "animationTime += Math.min(Math.max(time - previousFrame, 0), 34)" in theme
     assert "paint(motion.matches ? 0 : animationTime, motion.matches)" in theme
@@ -57,6 +62,15 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "const outer = [...upper, ...lower.slice(0, -1).reverse()];" in theme
     assert "return { paths, junctions, snakePoints, maxSnakeStep:" in theme
     assert "const tail = [];" in theme
+    for control in (
+        "splashQuantity", "splashRainSpeed", "splashRainFlicker", "splashRainSpread",
+        "splashRainDown", "splashRainReverseChance", "splashRainWaves",
+        "splashCharVariety", "splashMinOpacity", "splashMaxOpacity", "splashSizeVariance",
+        "splashColorVarianceEnabled",
+        "splashColorVariance", "splashBounce", "splashGravity", "splashCollisionForce",
+        "splashEmojiMix", "splashEmojiRarity",
+    ):
+        assert control in theme
     assert "const progress = phase - cycle;" not in theme
     assert "window.matchMedia('(prefers-reduced-motion: reduce)')" in theme
     assert "@keyframes clanker-lcars-status-sweep" in style
@@ -72,6 +86,8 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
         ("clanker-radar", "_initClankerRadar", "clanker-radar-canvas"),
         ("clanker-gem-drift", "_initClankerGemDrift", "clanker-gem-drift-canvas"),
         ("clanker-emoji-drift", "_initClankerEmojiDrift", "clanker-emoji-drift-canvas"),
+        ("clanker-matrix-rain", "_initClankerMatrixRain", "clanker-matrix-rain-canvas"),
+        ("clanker-emoji-rain", "_initClankerEmojiRain", "clanker-emoji-rain-canvas"),
     ):
         assert f"'{pattern}': {function_name}" in theme
         assert f"id: '{canvas_id}'" in theme
@@ -94,6 +110,10 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "body.bg-pattern-synapse {\n  background-image: none;" in style
     assert "body.bg-pattern-clanker-gem-drift," in style
     assert "body.bg-pattern-clanker-emoji-drift," in style
+    assert "body.bg-pattern-clanker-matrix-rain," in style
+    assert "body.bg-pattern-clanker-emoji-rain," in style
+    assert "'.tour-hint'" in theme
+    assert "'[class*=\"popup\"]:not(.hidden)'" in theme
 
 
 def test_background_effect_controls_are_dynamic_and_persisted():
@@ -105,6 +125,7 @@ def test_background_effect_controls_are_dynamic_and_persisted():
     assert "bgEffectControls" in theme
     assert 'id="theme-bg-effect-controls"' in index
     for key in (
+        "advancedSettings",
         "snakeCount",
         "snakeLengthVariation",
         "snakeLifetimeVariation",
@@ -121,7 +142,11 @@ def test_background_effect_controls_are_dynamic_and_persisted():
     ):
         assert key in theme
     assert "max: 999, step: 1, default: 100" in theme
-    assert "registerBackgroundEffectControls('clanker-emoji-drift', _CLANKER_DRIFT_CONTROLS)" in theme
+    assert "registerBackgroundEffectControls('clanker-emoji-drift', _withClankerAdvancedSettings(_CLANKER_DRIFT_CONTROLS))" in theme
+    assert "label: 'Advanced settings'" in theme
+    assert "default: false" in theme
+    assert "if (control.key !== 'advancedSettings' && control.advanced && !advancedSettings) continue;" in theme
+    assert "splashRainBounceSides" not in theme
     assert '"Noto Color Emoji"' in theme
 
 
@@ -147,6 +172,7 @@ def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
     assert "backdrop-filter: blur(6px) saturate(1.06)" in style
     assert "body.theme-clanker-dark .agent-tool-output summary" in style
     assert "backdrop-filter: blur(7px) saturate(1.08)" in style
+    assert "background: linear-gradient(90deg, var(--clanker-gold) 0 25%, var(--clanker-coral) 25% 50%, var(--clanker-pink) 50% 75%, var(--clanker-lilac) 75%)" in style
     base_agent_thread = style.split("body.theme-clanker-dark .agent-thread,", 1)[1].split("body.theme-clanker-dark .agent-thread-header,", 1)[0]
     assert "backdrop-filter" not in base_agent_thread
 

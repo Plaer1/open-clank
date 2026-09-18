@@ -21,6 +21,7 @@ render_split call and injected together, so the card sentinel dedups the
 pair.
 """
 
+import re
 from typing import Any, Dict, Optional, Tuple
 
 DIGEST_SENTINEL = "[Memory Index]"
@@ -159,11 +160,19 @@ def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
     if questions:
         lines.append("Open questions the user wants answered:")
         for q in questions:
-            lines.append(f"- {str(q.get('content')).strip()}")
+            question_id = str(q.get("id") or "").strip()
+            id_label = (
+                f"`{question_id[:80]}` — "
+                if re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", question_id)
+                else ""
+            )
+            lines.append(f"- {id_label}{str(q.get('content')).strip()}")
         lines.append(
             "If the conversation naturally touches one of these, weave the "
-            "question in and listen for the answer. Never interrogate and "
-            "never force one into an unrelated exchange."
+            "question in and listen for the answer. If your own work finds an "
+            "answer, use the displayed memory ID and the answer text to resolve "
+            "that same memory block. Never interrogate and never force one into "
+            "an unrelated exchange."
         )
 
     if not lines:

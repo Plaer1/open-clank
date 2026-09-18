@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "request_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "owner_subject_id": "subject-1",
+  "session_id": "session-1",
+  "runtime_id": "runtime-1",
+  "runtime_epoch": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "runtime_generation": 2,
+  "command": "activate",
+  "payload": {
+    "registration_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "callback_endpoint": "/tmp/openclank-callback.sock",
+    "callback_nonce": "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+    "callback_binding_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

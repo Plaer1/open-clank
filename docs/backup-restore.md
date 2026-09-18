@@ -7,7 +7,11 @@ snapshots that directory into a single gzip tarball and restores it later.
 
 Snapshots are safe to take while the app is running: SQLite databases are copied
 through SQLite's own `.backup` API rather than a raw file copy, so an in-flight
-write can't corrupt the snapshot.
+write can't corrupt the snapshot. Each published archive is first staged,
+checksummed, reopened, and SQLite-validated; a failed snapshot never replaces
+an existing output. SQLite may create its normal WAL locking sidecars while a
+WAL-mode source is opened, but those runtime sidecars are not archived beside
+the coherent database copy.
 
 > **A snapshot contains your secrets.** The tarball includes the Fernet
 > encryption key (`data/.app_key`), the vault, sessions, and any stored
@@ -29,8 +33,8 @@ Run the tool from the repository root:
 # Check a tarball's integrity without extracting it
 ./scripts/odysseus-backup verify backups/odysseus-backup-20260101-120000.tar.gz
 
-# Restore (destructive — see the warning below)
-./scripts/odysseus-backup restore backups/odysseus-backup-20260101-120000.tar.gz --yes
+# Restore only after every Open Clank process is stopped (destructive)
+./scripts/odysseus-backup restore backups/odysseus-backup-20260101-120000.tar.gz --yes --app-stopped
 ```
 
 The script depends only on the Python standard library, so any `python3` on your
@@ -69,23 +73,51 @@ time.
 
 ### `verify PATH`
 
-Opens the tarball read-only and walks every member to confirm it is intact and
-safe to restore. Nothing is extracted. Use this before relying on an old backup
-or after copying one across machines.
+Opens the tarball read-only, extracts it into a private temporary directory,
+checks its member layout and manifest, and runs SQLite integrity and foreign-key
+checks. Nothing is published to `data/`, and the temporary candidate is removed
+after verification. Use this before relying on an old backup or after copying
+one across machines.
 
-### `restore PATH --yes`
+### `restore PATH --yes --app-stopped`
 
-Overwrites `data/` from a tarball.
+Validates and atomically replaces `data/` from a tarball.
 
-> **Restore is destructive.** It replaces the current `data/` directory. `--yes`
-> is required so a mistyped command can't wipe your live state.
+> **Restore is destructive and requires a stopped app.** Stop every Open Clank
+> process that can hold a database or data-file handle. `--yes` confirms the
+> replacement; `--app-stopped` asserts that the writers are quiesced. The tool
+> cannot verify that assertion for you. An already-open SQLite handle can keep
+> writing the old inode after a filesystem swap and create split state.
 
-Restore is not a blind delete: before extracting, the tool **renames your current
-`data/` to `data.before-restore-<timestamp>`** in the repository root. If a
-restore turns out to be wrong, your previous state is still there — delete the
-restored `data/` and rename the stashed directory back. The restore path is also
-validated entry-by-entry: archives containing absolute paths, `..` segments,
-symlinks, or anything outside `data/` are rejected.
+Restore is not a blind delete. The archive is fully extracted and validated in
+a private same-filesystem directory before the current tree is touched. On
+Darwin and Linux, the tool atomically exchanges the validated candidate with
+the current `data/`, then preserves the exact previous tree at a unique
+`data.before-restore-<timestamp>-<id>` path. If publication or validation fails,
+the old directory identity is restored. A failed/new tree that already crossed
+the publication boundary is preserved at
+`data.failed-restore-<timestamp>-<id>` for diagnosis; a candidate that never
+crossed that boundary is discarded from private staging. A platform or
+filesystem without atomic directory exchange fails before publication. Both
+recovery-tree patterns are excluded from Git and Docker build contexts because
+they contain the same secrets as `data/`.
+
+If the filesystem also refuses or interrupts the rollback operations
+themselves, the tool does not let temporary-directory cleanup erase the only
+prior copy. It reports and retains that exact tree under the hidden
+`.open-clank-restore-<id>/data` staging path beside the repository. Resolve the
+underlying filesystem problem and move that directory back into place before
+retrying. This is an emergency failure mode, not a successful restore.
+
+Archives are validated entry-by-entry: absolute paths, `..` segments,
+backslash traversal, symlinks/hardlinks, special files, duplicate or
+case/Unicode-colliding paths, manifest drift, corrupt SQLite, and independently
+published live sidecars are rejected. Version-1 manifests describe a closed
+set of files, so undeclared directory members are rejected as well. Safe
+pre-manifest archives remain
+readable; when they contain a valid primary plus WAL/SHM, the staged copy is
+consolidated through SQLite before publication so committed WAL-only state is
+not discarded.
 
 ## Scheduling offsite backups
 
@@ -113,17 +145,11 @@ where you run it matters:
   recommended, because `backups/` is not a mounted volume and the tarball would
   be lost when the container is recreated.
 
-> **ChromaDB caveat (Docker only).** In the Docker setup, ChromaDB stores its
-> vectors in a separate Compose-managed volume (declared as `chromadb-data`),
-> **not** under `./data`. `odysseus-backup` therefore does not capture the Docker
-> ChromaDB store. Back it up separately if you need it. Compose prefixes the
-> volume with the project name, so find the real name first
-> (`docker volume ls | grep chromadb`), then archive it — for example:
+> **Legacy Chroma caveat.** The default install no longer starts ChromaDB and
+> Frankenmemory's SQLite database is covered by the normal snapshot. If you
+> explicitly run the optional legacy Chroma backend, its separate store is not
+> part of the canonical backup; export or archive it separately before relying
+> on that compatibility path.
 >
-> ```bash
-> docker run --rm -v <project>_chromadb-data:/data -v "$PWD":/backup \
->   alpine tar czf /backup/chromadb.tar.gz -C /data .
-> ```
->
-> On native installs ChromaDB lives at `data/chroma/` and is included in the
-> snapshot normally.
+> The canonical restore path is the SQLite `data/frankenmemory.db` snapshot;
+> no Chroma restore is required for normal operation.

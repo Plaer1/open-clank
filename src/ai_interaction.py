@@ -1,14 +1,14 @@
 """
 ai_interaction.py
 
-AI-to-AI interaction tools: pipeline and manage_memory, plus shared model
-resolution (_resolve_model), the session-manager singleton, and dispatch_ai_tool.
+AI-to-AI interaction tools: pipeline and manage_memory, plus the shared
+session-manager singleton and dispatch_ai_tool.
 
 As part of the tool -> registry migration (#3629), chat_with_model, ask_teacher
 and list_models moved to src/agent_tools/model_interaction_tools.py, and
 create_session, list_sessions, send_to_session and manage_session moved to
-src/agent_tools/session_tools.py. Those modules reuse get_session_manager /
-_resolve_model / AI_CHAT_TIMEOUT from here.
+src/agent_tools/session_tools.py. Those modules reuse get_session_manager from
+here while model selection stays in the normalized provider control plane.
 
 These are agent tools — the LLM writes fenced code blocks and they execute
 through the standard agent_tools.py pipeline.
@@ -21,11 +21,15 @@ import uuid
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
-from src.constants import GENERATED_IMAGES_DIR
+from src.generated_images import (
+    discard_staged_gallery_image,
+    gallery_owner_key,
+    publish_staged_gallery_image,
+    stage_gallery_image_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
-AI_CHAT_TIMEOUT = 120  # seconds for a single LLM call
 MAX_DEBATE_ROUNDS = 5
 MAX_PIPELINE_STEPS = 10
 
@@ -38,6 +42,7 @@ _session_manager = None
 _memory_manager = None
 _memory_vector = None
 _memory_provider = None
+_memory_lifecycle = None
 _rag_manager = None
 _personal_docs_manager = None
 
@@ -55,176 +60,18 @@ def get_session_manager():
     return _session_manager
 
 
-def set_memory_manager(mgr, vector=None, provider=None):
-    global _memory_manager, _memory_vector, _memory_provider
+def set_memory_manager(mgr, vector=None, provider=None, lifecycle=None):
+    global _memory_manager, _memory_vector, _memory_provider, _memory_lifecycle
     _memory_manager = mgr
     _memory_vector = vector
     _memory_provider = provider
+    _memory_lifecycle = lifecycle
 
 
 def set_rag_manager(rag_mgr, personal_docs_mgr=None):
     global _rag_manager, _personal_docs_manager
     _rag_manager = rag_mgr
     _personal_docs_manager = personal_docs_mgr
-
-
-# ---------------------------------------------------------------------------
-# Model resolution
-# ---------------------------------------------------------------------------
-
-from src.endpoint_resolver import (
-    ResolvedModelTarget,
-    build_chat_url,
-    build_headers,
-    build_models_url,
-    resolve_endpoint_runtime,
-    resolve_model_target,
-)
-from src.image_model_ids import looks_like_image_generation_model, model_id_leaf
-
-
-def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[str] = None) -> Tuple[str, str, Dict]:
-    """Resolve a model specifier to (endpoint_url, model_id, headers).
-
-    Accepts:
-      "model_name"              — searches all configured endpoints
-      "model_name@endpoint_name" — looks up specific endpoint by display name
-
-    Raises ValueError if model not found.
-    """
-    target = _resolve_model_target(spec, owner=owner)
-    return target.endpoint_url, target.model_id, dict(target.headers)
-
-
-def _resolve_model_target(spec: str, owner: Optional[str] = None) -> ResolvedModelTarget:
-    """Resolve a model specifier while retaining its registered endpoint ID."""
-    import httpx
-    from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
-    from src.auth_helpers import owner_filter
-
-    spec = spec.strip()
-    target_endpoint_name = None
-
-    if "@" in spec:
-        model_name, target_endpoint_name = spec.rsplit("@", 1)
-        model_name = model_name.strip()
-        target_endpoint_name = target_endpoint_name.strip()
-    else:
-        model_name = spec
-
-    def _json_list(value) -> list[str]:
-        try:
-            data = json.loads(value or "[]")
-        except Exception:
-            return []
-        if not isinstance(data, list):
-            return []
-        return [str(x) for x in data if isinstance(x, (str, int, float)) and str(x)]
-
-    def _image_like(name: str) -> bool:
-        n = (name or "").lower()
-        if looks_like_image_generation_model(n):
-            return True
-        return any(k in n for k in (
-            "qwen-image", "qwen/image", "z-image", "flux", "stable-diffusion",
-            "sdxl", "hidream", "boogu", "krea-2", "image-edit",
-        ))
-
-    db = SessionLocal()
-    try:
-        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        if model_type:
-            query = query.filter(ModelEndpoint.model_type == model_type)
-        if target_endpoint_name:
-            query = query.filter(ModelEndpoint.name.ilike(f"%{target_endpoint_name}%"))
-        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
-        endpoints = query.all()
-
-        if not endpoints:
-            raise ValueError("No enabled endpoints found" +
-                             (f" matching '{target_endpoint_name}'" if target_endpoint_name else ""))
-
-        for ep in endpoints:
-            try:
-                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-            except Exception:
-                continue
-            provider = _detect_provider(base)
-            headers = build_headers(api_key, base)
-
-            def _target(selected_model: str) -> ResolvedModelTarget:
-                return resolve_model_target(
-                    build_chat_url(base),
-                    selected_model,
-                    headers,
-                    endpoint_id=str(ep.id),
-                    provider_id=f"ody-{ep.id}",
-                )
-
-            if provider == "anthropic":
-                # Anthropic: match against hardcoded model list
-                matched = None
-                for am in ANTHROPIC_MODELS:
-                    if model_name.lower() in am.lower() or am.lower() in model_name.lower():
-                        matched = am
-                        break
-                if matched:
-                    return _target(matched)
-            else:
-                # OpenAI-compatible and native Ollama: probe the provider's model list.
-                endpoint_reachable = False
-                try:
-                    models_url = build_models_url(base)
-                    if models_url:
-                        r = httpx.get(models_url, headers=headers, timeout=5)
-                        r.raise_for_status()
-                        endpoint_reachable = True
-                        data = r.json()
-                        items = data if isinstance(data, list) else (data.get("data") or [])
-                        model_ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
-                        if not model_ids:
-                            model_ids = [
-                                m.get("name") or m.get("model")
-                                for m in (data.get("models") or [])
-                                if m.get("name") or m.get("model")
-                            ]
-                    else:
-                        endpoint_reachable = True
-                        model_ids = json.loads(ep.cached_models or "[]")
-                except Exception:
-                    model_ids = []
-
-                # Manual/local image endpoints are often registered with pinned
-                # model ids, while /models may return a runtime alias or only the
-                # served internal id. Include pinned/cached ids in the match set
-                # so chat sessions using the HF repo id still resolve. Do not use
-                # stale cached aliases when the endpoint itself is unreachable.
-                if model_type == "image" and endpoint_reachable:
-                    for extra in _json_list(getattr(ep, "pinned_models", None)) + _json_list(getattr(ep, "cached_models", None)):
-                        if extra not in model_ids:
-                            model_ids.append(extra)
-
-                # Exact match first
-                for mid in model_ids:
-                    if mid.lower() == model_name.lower():
-                        return _target(mid)
-
-                # Partial match
-                for mid in model_ids:
-                    if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
-                        return _target(mid)
-
-                # Last resort for local image endpoints: if the requested model
-                # name is clearly an image model, use the endpoint's first known
-                # image model id. This prevents a harmless alias mismatch from
-                # blocking image generation.
-                if model_type == "image" and _image_like(model_name) and model_ids:
-                    return build_chat_url(base), model_ids[0], headers
-
-        raise ValueError(f"Model '{spec}' not found on any configured endpoint")
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +87,12 @@ async def stream_ai_tool(tool: str, content: str, session_id: Optional[str] = No
     yield {"_final": True, "desc": desc, "result": result}
 
 
-async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def do_pipeline(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+) -> Dict:
     """Execute a multi-step pipeline where each model's output feeds the next.
 
     Content format (JSON):
@@ -255,7 +107,8 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
       Line 2: step2_model | step2_instruction
       ...
     """
-    from src.llm_core import llm_call_async
+    from src.openclank.chat_routing import resolve_chat_model_spec
+    from src.openclank.modality_facade import complete_text
 
     # Try JSON parse first
     steps = None
@@ -294,8 +147,12 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         if not model_spec or not instruction:
             return {"error": f"Step {i + 1}: both 'model' and 'instruction' are required"}
         try:
-            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
-            resolved.append((url, model, headers, instruction))
+            route = await asyncio.to_thread(
+                resolve_chat_model_spec,
+                owner=owner,
+                model_spec=model_spec,
+            )
+            resolved.append((route, instruction))
         except ValueError as e:
             return {"error": f"Step {i + 1}: {e}"}
 
@@ -304,7 +161,7 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
     previous_output = None
 
     try:
-        for i, (url, model, headers, instruction) in enumerate(resolved):
+        for i, (route, instruction) in enumerate(resolved):
             if previous_output:
                 user_content = (
                     f"Previous step's output:\n\n{previous_output}\n\n"
@@ -318,19 +175,18 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
                 {"role": "user", "content": user_content},
             ]
 
-            response = await llm_call_async(
-                url,
-                model,
-                messages,
-                headers=headers,
-                timeout=AI_CHAT_TIMEOUT,
-                owner=owner,
-                session_id=session_id,
+            response = await complete_text(
+                owner=owner or "local-installation",
+                purpose="utility",
+                messages=messages,
+                model_route_id=route.model_route_id,
+                grant_id=route.provider_grant_id,
+                root_operation_id=root_operation_id,
             )
 
             step_outputs.append({
                 "step": i + 1,
-                "model": model,
+                "model": route.provider_model_id,
                 "instruction": instruction,
                 "output": response[:5000] if len(response) > 5000 else response,
             })
@@ -404,13 +260,18 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     except Exception:
         prefs = {}
 
+    handler_label = _resolve_handler_label(owner)
+
+    def _render(text) -> str:
+        return _render_memory_text(text, handler_label)
+
     def _line(record) -> str:
         kind = getattr(record, "kind", "") or getattr(record, "category", "")
         if kind == "unknown":
             # A pulled question must read as a question, not as a fact
             # of unknown provenance.
             kind = "open question"
-        return f"- [{kind}] {record.text}"
+        return f"- [{kind}] {_render(record.text)}"
 
     endorsed = [r for r in records if trusted(r, prefs)]
     reference = [r for r in records if r not in endorsed]
@@ -435,6 +296,30 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
             logger.debug("recall_memory access accounting failed", exc_info=True)
 
     return {"results": "\n\n".join(sections)}
+
+
+def _resolve_handler_label(owner) -> str:
+    """Owner-scoped Handler label for read-time %USER% rendering (fail-safe)."""
+    try:
+        from services.memory.principal_context import resolve_handler_display_label
+
+        return resolve_handler_display_label(owner)
+    except Exception:
+        return "Handler"
+
+
+def _render_memory_text(text, handler_label: str) -> str:
+    """Read-time identity rendering for model-facing memory text.
+
+    Stored claims keep the %USER% token; only this output projection shows
+    the Handler label.
+    """
+    try:
+        from services.memory.principal_context import render_identity_template
+
+        return render_identity_template(str(text or ""), handler_label=handler_label)
+    except Exception:
+        return str(text or "")
 
 
 def _normalize_question(text: str) -> str:
@@ -463,9 +348,9 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
       edit                    — line 2: memory_id, line 3: new text
       delete                  — line 2: memory_id
       search                  — line 2: query
-      resolve                 — line 2: question memory_id, optional line 3:
-                                answering memory_id. Closes an open question
-                                with provenance; never a plain delete.
+      resolve                 — line 2: question memory_id, remaining lines:
+                                the answer. Revises the same knowledge block;
+                                never creates a second fact or deletes it.
     """
     if not _memory_provider:
         return {"error": "Memory provider not available"}
@@ -497,7 +382,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 for r in records:
                     cat = r.category
                     mid = r.id[:8]
-                    text = r.text
+                    text = _render_memory_text(r.text, _resolve_handler_label(owner))
                     if len(text) > 150:
                         text = text[:150] + "..."
                     result_lines.append(f"- [{cat}] `{mid}` — {text}")
@@ -521,7 +406,10 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             try:
                 record = await _memory_provider.remember(
                     text, owner=owner, session_id=session_id,
-                    category=category, source="ai_agent",
+                    category=category,
+                    # Open questions are user-authored requests by contract.
+                    # Agent-discovered answers remain AI-attributed facts.
+                    source="user" if category == "unknown" else "ai_agent",
                     capture_mode="review_only" if review_only else "manual",
                 )
                 if review_only:
@@ -562,8 +450,15 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             display_id = lines[1].strip()
             try:
                 memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
-                deleted = await _memory_provider.delete(memory_id, owner=owner)
-                if not deleted:
+                if _memory_lifecycle is None:
+                    return {
+                        "error": "Coordinated memory deletion is unavailable"
+                    }
+                deleted = await _memory_lifecycle.delete(
+                    memory_id,
+                    owner=owner or "",
+                )
+                if deleted is None:
                     return {"error": f"Memory '{display_id}' not found"}
                 return {"action": "delete", "memory_id": memory_id,
                         "results": f"Memory '{memory_id}' deleted"}
@@ -582,7 +477,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 for h in hits:
                     cat = h.memory.category
                     mid = h.memory.id[:8]
-                    text = h.memory.text
+                    text = _render_memory_text(h.memory.text, _resolve_handler_label(owner))
                     result_lines.append(f"- [{cat}] `{mid}` — {text}")
                 return {"results": "\n".join(result_lines)}
             except Exception as e:
@@ -592,16 +487,21 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             if len(lines) < 2:
                 return {"error": "Resolve needs line 2: question memory_id"}
             display_id = lines[1].strip()
-            answer_display_id = lines[2].strip() if len(lines) > 2 and lines[2].strip() else None
+            answer_value = "\n".join(lines[2:]).strip() if len(lines) > 2 else ""
             try:
                 memory_id = await _memory_provider.resolve_id(display_id, owner=owner)
                 resolved_by = None
-                if answer_display_id:
+                answer = answer_value
+                if answer_value.startswith("memory_id:"):
                     resolved_by = await _memory_provider.resolve_id(
-                        answer_display_id, owner=owner
+                        answer_value.split(":", 1)[1].strip(), owner=owner
                     )
+                    answer = None
                 resolved = await _memory_provider.resolve_question(
-                    memory_id, resolved_by=resolved_by, owner=owner
+                    memory_id,
+                    resolved_by=resolved_by,
+                    answer=answer or None,
+                    owner=owner,
                 )
                 if not resolved:
                     return {"error": (
@@ -609,7 +509,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                         "open questions (category unknown) resolve"
                     )}
                 return {"action": "resolve", "memory_id": memory_id,
-                        "results": f"Open question '{memory_id}' resolved"}
+                        "results": f"Open question '{memory_id}' answered in place"}
             except Exception as e:
                 return {"error": f"Provider resolve failed: {e}"}
 
@@ -626,7 +526,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 # RAG management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
+async def do_manage_rag(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage RAG indexed documents: list, add_directory, remove_directory.
 
     Content format:
@@ -682,7 +582,7 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
             return {"error": "RAG manager not available"}
 
         try:
-            result = _rag_manager.index_personal_documents(directory)
+            result = _rag_manager.index_personal_documents(directory, owner=owner)
             indexed = result.get("indexed", 0) if isinstance(result, dict) else 0
             return {"action": "add_directory", "directory": directory,
                     "results": f"Directory '{directory}' added to RAG index ({indexed} files indexed)"}
@@ -703,7 +603,10 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
                 # unconditional _rag_manager.rebuild_index() here wiped the whole
                 # collection on every remove (even for untracked dirs) and has
                 # been removed.
-                _personal_docs_manager.remove_directory(directory)
+                try:
+                    _personal_docs_manager.remove_directory(directory, owner=owner)
+                except TypeError:
+                    _personal_docs_manager.remove_directory(directory)
             return {"action": "remove_directory", "directory": directory,
                     "results": f"Directory '{directory}' removed from RAG index"}
         except Exception as e:
@@ -779,7 +682,12 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 
         # Resolve the model to validate it exists
         try:
-            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+            from src.openclank.chat_routing import (
+                MANAGED_ENGINE_PUBLIC_URL,
+                resolve_chat_model_spec,
+            )
+
+            route = resolve_chat_model_spec(owner=owner, model_spec=model_spec)
         except ValueError as e:
             return {"error": str(e)}
 
@@ -790,24 +698,29 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             try:
                 db_s = db2.query(DbSess2).filter(DbSess2.id == session_id).first()
                 if db_s:
-                    db_s.endpoint_url = url
-                    db_s.model = model_id
+                    db_s.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+                    db_s.endpoint_id = route.public_endpoint_id
+                    db_s.provider_model_route_id = route.model_route_id
+                    db_s.model = route.provider_model_id
+                    db_s.headers = {}
                     db2.commit()
             finally:
                 db2.close()
 
             sess = _session_manager.get_session(session_id)
             if sess:
-                sess.endpoint_url = url
-                sess.model = model_id
-                if headers:
-                    sess.headers = headers
+                sess.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+                sess.endpoint_id = route.public_endpoint_id
+                sess.provider_model_route_id = route.model_route_id
+                sess.model = route.provider_model_id
+                sess.headers = {}
 
         return {
             "ui_event": "switch_model",
-            "model": model_id,
-            "endpoint_url": url,
-            "results": f"Model switched to '{model_id}'",
+            "model": route.provider_model_id,
+            "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+            "model_route_id": route.model_route_id,
+            "results": f"Model switched to '{route.provider_model_id}'",
         }
 
     elif action == "set_theme":
@@ -1028,250 +941,185 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 # Image generation
 # ---------------------------------------------------------------------------
 
-async def do_generate_image(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """Generate an image using an image-capable model (e.g. gpt-image-1).
+def _managed_image_suffix(media_type: str) -> str:
+    return {
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }.get(str(media_type or "").split(";", 1)[0].lower(), ".png")
 
-    Content format:
-      Line 1: prompt describing the image
-      Line 2: model name (optional, default auto-detects: prefers gpt-image-1.5 > gpt-image-1)
-      Line 3: size (optional, defaults to 1024x1024)
-      Line 4: quality (optional, defaults to medium — options: low, medium, high, auto)
+
+def _save_managed_gallery_image(
+    *,
+    image_bytes: bytes,
+    media_type: str,
+    prompt: str,
+    model_route_id: str,
+    size: str,
+    quality: str,
+    session_id: Optional[str],
+    owner: Optional[str],
+) -> tuple[str, str]:
+    """Persist a managed image artifact and its stable route provenance."""
+
+    import hashlib
+
+    owner_key = gallery_owner_key(owner)
+    if owner_key is None:
+        raise RuntimeError("Gallery image owner provenance is unavailable")
+    filename = f"{uuid.uuid4().hex[:12]}{_managed_image_suffix(media_type)}"
+    staged = stage_gallery_image_bytes(image_bytes)
+    image_id = str(uuid.uuid4())
+    try:
+        from src.database import GalleryImage, Session as DbSession, SessionLocal
+
+        width = None
+        height = None
+        try:
+            import io
+            from PIL import Image
+
+            with Image.open(io.BytesIO(image_bytes)) as decoded:
+                width, height = decoded.size
+        except Exception:
+            pass
+
+        with SessionLocal() as db:
+            scoped_session_id = None
+            if session_id:
+                scoped_session = db.query(DbSession.id).filter(
+                    DbSession.id == session_id,
+                    DbSession.owner == owner_key,
+                ).first()
+                if scoped_session is not None:
+                    scoped_session_id = session_id
+            image = GalleryImage(
+                id=image_id,
+                filename=filename,
+                prompt=prompt,
+                model=model_route_id,
+                size=size,
+                quality=quality,
+                session_id=scoped_session_id,
+                owner=owner_key,
+                file_hash=hashlib.sha256(image_bytes).hexdigest(),
+                file_size=len(image_bytes),
+                width=width,
+                height=height,
+            )
+            db.add(image)
+            db.commit()
+            try:
+                publish_staged_gallery_image(staged, filename)
+            except Exception:
+                try:
+                    db.delete(image)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Failed to retract unpublished managed image metadata"
+                    )
+                raise
+    except Exception:
+        logger.warning(
+            "Failed to publish managed image with Gallery provenance",
+            exc_info=True,
+        )
+        raise
+    finally:
+        discard_staged_gallery_image(staged)
+
+    return f"/api/generated-image/{filename}", image_id
+
+
+def _managed_image_error(action: str, exc: Exception) -> Dict[str, str]:
+    """Return a controlled error without reflecting provider details."""
+
+    from src.openclank.operation_router import (
+        ManagedOperationDenied,
+        ManagedOperationUnavailable,
+    )
+
+    logger.warning("Managed image %s failed (%s)", action, type(exc).__name__)
+    if isinstance(exc, ManagedOperationDenied):
+        return {"error": f"The selected image route cannot perform {action}."}
+    if isinstance(exc, ManagedOperationUnavailable):
+        return {
+            "error": (
+                "No managed image route is available. "
+                "Configure an Images route in Settings → Providers."
+            )
+        }
+    return {"error": f"Image {action} failed."}
+
+
+async def do_generate_image(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    grant_id: Optional[str] = None,
+) -> Dict:
+    """Generate an image through MiMo's typed operation router.
+
+    Line 2, when present, is a stable normalized model-route ID. Provider model
+    names and endpoint aliases are deliberately not execution selectors after
+    the provider hard cut.
     """
-    import base64
-    import httpx
-    import os
-    from pathlib import Path
-    from src.url_safety import check_outbound_url
 
-    lines = content.strip().split("\n")
+    from src.openclank.modality_facade import generate_image as managed_generate_image
+
+    lines = (content or "").strip().split("\n")
     prompt = lines[0].strip() if lines else ""
-    model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
+    model_route_id = (
+        lines[1].strip()
+        if len(lines) > 1 and lines[1].strip()
+        else None
+    )
     size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
     quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
 
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
+    if not __import__("re").fullmatch(r"(?:auto|\d{2,5}x\d{2,5})", size):
+        size = "1024x1024"
+    if quality not in {"low", "medium", "high", "auto"}:
+        quality = "medium"
 
-    # Load this user's image defaults.
     try:
-        from src.settings import get_user_setting
-        _settings = {
-            "image_model": get_user_setting("image_model", owner or "", ""),
-            "image_quality": get_user_setting("image_quality", owner or "", "medium"),
+        image_bytes, media_type, result = await managed_generate_image(
+            owner=owner or "",
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            model_route_id=model_route_id,
+            grant_id=grant_id,
+            root_operation_id=root_operation_id,
+            idempotency_key=idempotency_key,
+        )
+        image_url, image_id = _save_managed_gallery_image(
+            image_bytes=image_bytes,
+            media_type=media_type,
+            prompt=prompt,
+            model_route_id=result.model_route_id,
+            size=size,
+            quality=quality,
+            session_id=session_id,
+            owner=owner,
+        )
+        return {
+            "results": f"Generated image for: {prompt[:100]}",
+            "image_url": image_url,
+            "image_id": image_id,
+            "image_prompt": prompt,
+            "image_model": result.model_route_id,
+            "image_size": size,
+            "image_quality": quality,
         }
-    except Exception:
-        _settings = {}
-
-    # Use admin-configured model/quality if not specified by the tool call
-    if not model_spec:
-        model_spec = _settings.get("image_model", "")
-    if quality == "medium" and _settings.get("image_quality"):
-        quality = _settings["image_quality"]
-
-    # Auto-detect best available image model if still not set
-    if not model_spec:
-        for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
-            try:
-                await asyncio.to_thread(_resolve_model, candidate, owner=owner)
-                model_spec = candidate
-                break
-            except ValueError:
-                continue
-        # Fallback: find any locally registered image-type endpoint
-        if not model_spec:
-            try:
-                from src.database import SessionLocal, ModelEndpoint
-                from src.auth_helpers import owner_filter
-                import httpx as _req
-                _idb = SessionLocal()
-                try:
-                    _img_q = _idb.query(ModelEndpoint).filter(
-                        ModelEndpoint.is_enabled == True,
-                        ModelEndpoint.model_type == "image",
-                    )
-                    _img_q = owner_filter(
-                        _img_q, ModelEndpoint, owner or "", include_shared=False
-                    )
-                    _img_eps = _img_q.all()
-                    for _iep in _img_eps:
-                        _ibase = _iep.base_url.rstrip("/")
-                        if not _ibase.endswith("/v1"):
-                            _ibase += "/v1"
-                        try:
-                            _r = _req.get(_ibase + "/models", timeout=3)
-                            _r.raise_for_status()
-                            _data = _r.json()
-                            _ditems = _data if isinstance(_data, list) else (_data.get("data") or [])
-                            _mids = [m.get("id") for m in _ditems if isinstance(m, dict) and m.get("id")]
-                            if _mids:
-                                model_spec = _mids[0]
-                                break
-                        except Exception:
-                            continue
-                finally:
-                    _idb.close()
-            except Exception:
-                pass
-        if not model_spec:
-            return {"error": "No image model found. Configure one in Admin → Image Generation."}
-
-    async def _resolve_image_model(model_name: str):
-        def _call():
-            try:
-                return _resolve_model(model_name, owner=owner, model_type="image")
-            except TypeError as exc:
-                if "model_type" not in str(exc):
-                    raise
-                return _resolve_model(model_name, owner=owner)
-        return await asyncio.to_thread(_call)
-
-    # Resolve the model to find the right endpoint
-    try:
-        try:
-            url, model_id, headers = await _resolve_image_model(model_spec)
-        except ValueError:
-            _lower_model_spec = model_spec.lower()
-            if not (
-                any(_name in _lower_model_spec for _name in ("gpt-image", "dall-e"))
-                or looks_like_image_generation_model(_lower_model_spec)
-            ):
-                raise
-            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
-    except ValueError:
-        return {"error": f"No endpoint found with image model '{model_spec}'. "
-                "Configure an OpenAI-compatible endpoint with image generation support."}
-
-    # Detect if this is a GPT image model vs DALL-E vs local diffusion
-    _model_leaf = model_id_leaf(model_id)
-    is_gpt_image = _model_leaf.startswith("gpt-image") or (_model_leaf.startswith("gpt-") and "-image" in _model_leaf)
-    is_dalle = _model_leaf.startswith("dall-e")
-    is_local_diffusion = not is_gpt_image and not is_dalle
-
-    # Build the images endpoint URL from the chat completions URL
-    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
-    images_url = base_url + "/images/generations"
-
-    # Validate size for cloud image models (local diffusion accepts any WxH)
-    valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
-    valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
-    if is_gpt_image and size not in valid_gpt_sizes:
-        size = "1024x1024"
-    elif is_dalle and size not in valid_dalle3_sizes:
-        size = "1024x1024"
-
-    payload = {
-        "model": model_id,
-        "prompt": prompt,
-        "n": 1,
-        "size": size,
-    }
-
-    # GPT image models and local diffusion support quality; DALL-E does not
-    if is_gpt_image or is_local_diffusion:
-        if quality in ("low", "medium", "high", "auto"):
-            payload["quality"] = quality
-        else:
-            payload["quality"] = "medium"
-
-    logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={prompt[:80]}")
-
-    try:
-        # GPT image models can take 30-120s+ depending on quality
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
-            resp = await client.post(images_url, json=payload, headers=headers)
-
-            if resp.status_code != 200:
-                error_text = resp.text[:500]
-                try:
-                    err_json = resp.json()
-                    error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
-                except Exception:
-                    pass
-                return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
-
-            data = resp.json()
-            images = data.get("data", [])
-            if not images:
-                return {"error": "No images returned from API"}
-
-            img = images[0]
-            image_url = None
-            image_id = None
-
-            def _save_to_gallery(filename: str) -> str:
-                """Insert a GalleryImage row and return the new id (or '')."""
-                try:
-                    from src.database import SessionLocal as _GallerySL, GalleryImage
-                    new_id = str(uuid.uuid4())
-                    _gdb = _GallerySL()
-                    _gdb.add(GalleryImage(
-                        id=new_id,
-                        filename=filename,
-                        prompt=prompt,
-                        model=model_id,
-                        size=size,
-                        quality=payload.get("quality", "medium"),
-                        session_id=session_id,
-                        owner=owner,
-                    ))
-                    _gdb.commit()
-                    _gdb.close()
-                    return new_id
-                except Exception as _ge:
-                    logger.warning(f"Failed to save gallery record: {_ge}")
-                    return ""
-
-            # GPT image models always return b64_json; DALL-E may return url
-            if img.get("b64_json"):
-                img_dir = Path(GENERATED_IMAGES_DIR)
-                img_dir.mkdir(parents=True, exist_ok=True)
-                filename = f"{uuid.uuid4().hex[:12]}.png"
-                img_path = img_dir / filename
-                img_path.write_bytes(base64.b64decode(img.get("b64_json")))
-                image_url = f"/api/generated-image/{filename}"
-                image_id = _save_to_gallery(filename)
-
-            elif img.get("url"):
-                # Download external URL and save locally (DALL-E returns temp URLs)
-                result_url = img["url"]
-                ok, reason = check_outbound_url(
-                    result_url,
-                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-                )
-                if not ok:
-                    return {"error": f"Image API returned unsafe image URL: {reason}"}
-                try:
-                    dl_resp = httpx.get(result_url, timeout=60)
-                    if dl_resp.status_code == 200:
-                        img_dir = Path(GENERATED_IMAGES_DIR)
-                        img_dir.mkdir(parents=True, exist_ok=True)
-                        filename = f"{uuid.uuid4().hex[:12]}.png"
-                        img_path = img_dir / filename
-                        img_path.write_bytes(dl_resp.content)
-                        image_url = f"/api/generated-image/{filename}"
-                        image_id = _save_to_gallery(filename)
-                    else:
-                        image_url = result_url  # fallback to external URL
-                except Exception as _dl_e:
-                    logger.warning(f"Failed to download DALL-E image: {_dl_e}")
-                    image_url = result_url  # fallback to external URL
-            else:
-                return {"error": "Image API returned unexpected format (no b64_json or url)"}
-
-            return {
-                "results": f"Generated image for: {prompt[:100]}",
-                "image_url": image_url,
-                "image_id": image_id,
-                "image_prompt": prompt,
-                "image_model": model_id,
-                "image_size": size,
-                "image_quality": payload.get("quality", "medium"),
-            }
-
-    except httpx.TimeoutException:
-        return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
-    except Exception as e:
-        return {"error": f"Image generation error: {str(e)}"}
+    except Exception as exc:
+        return _managed_image_error("generation", exc)
 
 
 async def do_edit_image(
@@ -1283,14 +1131,16 @@ async def do_edit_image(
     size: str = "1024x1024",
     quality: str = "medium",
     progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    root_operation_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    grant_id: Optional[str] = None,
 ) -> Dict:
-    """Edit an uploaded image using the configured image endpoint."""
-    import base64
-    import httpx
+    """Edit one image through the managed engine, without protocol fallback."""
+
     import mimetypes
-    import os
     from pathlib import Path
-    from src.url_safety import check_outbound_url
+
+    from src.openclank.modality_facade import transform_image
 
     prompt = (prompt or "").strip()
     if not prompt:
@@ -1298,241 +1148,68 @@ async def do_edit_image(
     path = Path(image_path)
     if not path.exists() or not path.is_file():
         return {"error": "Attached image file was not found"}
+    if not __import__("re").fullmatch(r"(?:auto|\d{2,5}x\d{2,5})", size):
+        size = "1024x1024"
+    if quality not in {"low", "medium", "high", "auto"}:
+        quality = "medium"
+    model_route_id = str(model_spec or "").strip() or None
+    media_type = mimetypes.guess_type(path.name)[0] or "image/png"
 
+    if progress_callback:
+        await progress_callback(
+            {
+                "status": "running",
+                "message": "Editing image through the managed image route",
+                "step": 0,
+                "total": 1,
+            }
+        )
     try:
-        from src.settings import load_settings
-        _settings = load_settings()
-    except Exception:
-        _settings = {}
-
-    if not model_spec:
-        model_spec = _settings.get("image_model", "")
-    if quality == "medium" and _settings.get("image_quality"):
-        quality = _settings["image_quality"]
-    if not model_spec:
-        return {"error": "No image model selected for image editing"}
-
-    try:
-        try:
-            def _call():
-                try:
-                    return _resolve_model(model_spec, owner=owner, model_type="image")
-                except TypeError as exc:
-                    if "model_type" not in str(exc):
-                        raise
-                    return _resolve_model(model_spec, owner=owner)
-            url, model_id, headers = await asyncio.to_thread(_call)
-        except ValueError:
-            url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
-    except ValueError:
-        return {"error": f"No endpoint found with image model '{model_spec}'."}
-
-    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
-    edits_url = base_url + "/images/edits"
-    mime = mimetypes.guess_type(str(path))[0] or "image/png"
-    payload = {
-        "model": model_id,
-        "prompt": prompt,
-        "n": "1",
-        "size": size,
-        "quality": quality if quality in ("low", "medium", "high", "auto") else "medium",
-        "response_format": "b64_json",
-    }
-    request_id = uuid.uuid4().hex
-    payload["request_id"] = request_id
-
-    logger.info("Image edit: model=%s, size=%s, quality=%s, image=%s, prompt=%s", model_id, size, quality, path.name, prompt[:80])
-
-    def _save_edited_image_to_gallery(filename: str) -> str:
-        try:
-            from src.database import SessionLocal as _GallerySL, GalleryImage
-            new_id = str(uuid.uuid4())
-            _gdb = _GallerySL()
-            _gdb.add(GalleryImage(
-                id=new_id,
-                filename=filename,
-                prompt=prompt,
-                model=model_id,
-                size=size,
-                quality=payload.get("quality", "medium"),
-                session_id=session_id,
-                owner=owner,
-            ))
-            _gdb.commit()
-            _gdb.close()
-            return new_id
-        except Exception as _ge:
-            logger.warning("Failed to save edited image gallery record: %s", _ge)
-            return ""
-
-    def _save_image_bytes(image_bytes: bytes, suffix: str = ".png") -> tuple[str, str]:
-        img_dir = Path(GENERATED_IMAGES_DIR)
-        img_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{uuid.uuid4().hex[:12]}{suffix}"
-        (img_dir / filename).write_bytes(image_bytes)
-        return f"/api/generated-image/{filename}", _save_edited_image_to_gallery(filename)
-
-    async def _try_local_img2img_fallback(client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
-        """Try Odysseus' local diffusion img2img endpoint.
-
-        Some self-hosted SD/SDXL endpoints expose text-to-image plus
-        `/images/harmonize`/img2img, but not OpenAI's multipart
-        `/images/edits`. For chat uploads ("image + prompt"), this gives the
-        expected instruction-edit behavior instead of stopping at a 400.
-        """
-        harmonize_url = base_url + "/images/harmonize"
-        try:
-            image_bytes = path.read_bytes()
-            image_b64 = base64.b64encode(image_bytes).decode()
-            fallback_payload = {
-                "image": image_b64,
+        image_bytes, output_media_type, result = await transform_image(
+            owner=owner or "",
+            operation="image.edit",
+            image=path.read_bytes(),
+            media_type=media_type,
+            input={
                 "prompt": prompt,
-                "strength": 0.35,
-                "steps": 0,
-                "max_side": 1024,
-            }
-            if progress_callback:
-                await progress_callback({
-                    "status": "running",
-                    "message": "Trying image-to-image fallback",
-                    "step": 0,
-                    "total": 0,
-                })
-            fallback_resp = await client.post(harmonize_url, json=fallback_payload, headers=headers)
-            if fallback_resp.status_code == 404:
-                return None
-            if fallback_resp.status_code != 200:
-                error_text = fallback_resp.text[:500]
-                try:
-                    err_json = fallback_resp.json()
-                    error_text = err_json.get("detail") or err_json.get("error") or error_text
-                except Exception:
-                    pass
-                return {"error": f"Image edit fallback failed ({fallback_resp.status_code}): {error_text}"}
-            fallback_data = fallback_resp.json()
-            image_b64 = fallback_data.get("image")
-            if not image_b64:
-                return {"error": "Image edit fallback returned no image"}
-            image_url, image_id = _save_image_bytes(base64.b64decode(image_b64))
-            return {
-                "results": f"Edited image for: {prompt[:100]}",
-                "image_url": image_url,
-                "image_id": image_id,
-                "image_prompt": prompt,
-                "image_model": model_id,
-                "image_size": size,
-                "image_quality": payload.get("quality", "medium"),
-                "edit_route": "img2img",
-            }
-        except httpx.TimeoutException:
-            return {"error": "Image edit fallback timed out. The model may still be loading or overloaded."}
-        except Exception as fallback_error:
-            logger.warning("Image edit fallback failed: %s", fallback_error)
-            return {"error": f"Image edit fallback error: {fallback_error}"}
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=600.0, write=60.0, pool=30.0)) as client:
-            progress_task = None
-            if progress_callback:
-                progress_url = base_url + f"/images/progress/{request_id}"
-
-                async def _poll_progress():
-                    last_sig = None
-                    while True:
-                        try:
-                            pr = await client.get(progress_url, headers=headers, timeout=5.0)
-                            if pr.status_code == 404:
-                                return
-                            if pr.status_code == 200:
-                                data = pr.json()
-                                sig = (data.get("status"), data.get("step"), data.get("total"), data.get("percent"))
-                                if sig != last_sig:
-                                    last_sig = sig
-                                    await progress_callback(data)
-                                if data.get("status") in {"done", "error"}:
-                                    return
-                        except Exception:
-                            return
-                        await asyncio.sleep(1)
-
-                progress_task = asyncio.create_task(_poll_progress())
-            try:
-                with path.open("rb") as f:
-                    files = {"image": (path.name, f, mime)}
-                    resp = await client.post(edits_url, data=payload, files=files, headers=headers)
-            finally:
-                if progress_task:
-                    progress_task.cancel()
-                    try:
-                        await progress_task
-                    except asyncio.CancelledError:
-                        pass
-
-            if resp.status_code != 200:
-                error_text = resp.text[:500]
-                try:
-                    err_json = resp.json()
-                    err = err_json.get("error")
-                    error_text = (
-                        err.get("message", error_text)
-                        if isinstance(err, dict)
-                        else str(err or err_json.get("detail") or error_text)
-                    )
-                except Exception:
-                    pass
-                if resp.status_code in (400, 404, 405, 422):
-                    fallback = await _try_local_img2img_fallback(client)
-                    if fallback:
-                        return fallback
-                    if resp.status_code == 404:
-                        return {
-                            "error": (
-                                f"Image model '{model_id}' is reachable, but this endpoint does not expose image editing. "
-                                "Use it without an attached image for text-to-image generation, or serve an edit/img2img "
-                                "model for attached-image prompts."
-                            )
-                        }
-                return {"error": f"Image edit failed ({resp.status_code}): {error_text}"}
-
-            data = resp.json()
-            images = data.get("data", [])
-            if not images:
-                return {"error": "No image returned from edit API"}
-
-            img = images[0]
-            image_url = None
-            image_id = None
-
-            if img.get("b64_json"):
-                image_url, image_id = _save_image_bytes(base64.b64decode(img.get("b64_json")))
-            elif img.get("url"):
-                result_url = img["url"]
-                ok, reason = check_outbound_url(
-                    result_url,
-                    block_private=os.getenv("IMAGE_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-                )
-                if not ok:
-                    return {"error": f"Image edit API returned unsafe image URL: {reason}"}
-                dl_resp = httpx.get(result_url, timeout=60)
-                if dl_resp.status_code != 200:
-                    return {"error": f"Could not download edited image ({dl_resp.status_code})"}
-                image_url, image_id = _save_image_bytes(dl_resp.content)
-            else:
-                return {"error": "Image edit API returned unexpected format (no b64_json or url)"}
-
-            return {
-                "results": f"Edited image for: {prompt[:100]}",
-                "image_url": image_url,
-                "image_id": image_id,
-                "image_prompt": prompt,
-                "image_model": model_id,
-                "image_size": size,
-                "image_quality": payload.get("quality", "medium"),
-            }
-    except httpx.TimeoutException:
-        return {"error": "Image edit timed out. The model may still be loading or overloaded."}
-    except Exception as e:
-        return {"error": f"Image edit error: {str(e)}"}
+                "size": size,
+                "quality": quality,
+            },
+            model_route_id=model_route_id,
+            grant_id=grant_id,
+            root_operation_id=root_operation_id,
+            idempotency_key=idempotency_key,
+        )
+        image_url, image_id = _save_managed_gallery_image(
+            image_bytes=image_bytes,
+            media_type=output_media_type,
+            prompt=prompt,
+            model_route_id=result.model_route_id,
+            size=size,
+            quality=quality,
+            session_id=session_id,
+            owner=owner,
+        )
+        if progress_callback:
+            await progress_callback(
+                {
+                    "status": "done",
+                    "message": "Image edit complete",
+                    "step": 1,
+                    "total": 1,
+                }
+            )
+        return {
+            "results": f"Edited image for: {prompt[:100]}",
+            "image_url": image_url,
+            "image_id": image_id,
+            "image_prompt": prompt,
+            "image_model": result.model_route_id,
+            "image_size": size,
+            "image_quality": quality,
+        }
+    except Exception as exc:
+        return _managed_image_error("editing", exc)
 
 
 # ---------------------------------------------------------------------------

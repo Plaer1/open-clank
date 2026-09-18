@@ -47,7 +47,7 @@ def _run_stream(model, lines, monkeypatch):
 
     async def _go():
         out = []
-        async for chunk in llm_core.stream_llm(
+        async for chunk in llm_core._legacy_stream_llm(
             "http://nim-nano:8000/v1/chat/completions",
             model,
             [{"role": "user", "content": "hi"}],

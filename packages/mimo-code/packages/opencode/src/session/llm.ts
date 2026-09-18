@@ -33,10 +33,19 @@ import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 type Result = Awaited<ReturnType<typeof streamText>>
+
+/** Host projection metadata is an internal routing contract, not an upstream
+ * provider option.  Keep it available on the catalog model for adapter
+ * selection, then remove it from the request option bag before the AI SDK
+ * serializes providerOptions. */
+export function stripManagedProjectionOptions(options: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(Object.entries(options).filter(([key]) => !key.startsWith("_openclank")))
+}
 
 /**
  * Match transient errors that the PERSISTENT_RETRY layer should retry.
@@ -313,6 +322,9 @@ const live: Layer.Layer<
     })
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      const managedScope = ManagedProvider.enabled()
+        ? ManagedProvider.requireScope(input.sessionID)
+        : undefined
       const l = log
         .clone()
         .tag("providerID", input.model.providerID)
@@ -328,16 +340,24 @@ const live: Layer.Layer<
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
-          provider.getLanguage(input.model),
+          provider.getLanguage(input.model, managedScope),
           config.get(),
           provider.getProvider(input.model.providerID),
-          auth.get(input.model.providerID),
+          managedScope?.credential
+            ? Effect.succeed(managedScope.credential)
+            : auth.get(input.model.providerID),
         ],
         { concurrency: "unbounded" },
       )
 
-      // TODO: move this to a proper hook
-      const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
+      const managedMetadata = managedScope ? Provider.managedAdapterMetadata(item, input.model) : undefined
+
+      // ChatGPT subscription uses the Codex Responses transport, whose system
+      // prompt belongs in `instructions`. Runtime provider IDs are normalized
+      // connection IDs, so managed mode must classify it from host metadata.
+      const isOpenaiOauth = managedMetadata
+        ? managedMetadata.familyID === "openai" && managedMetadata.billingLane === "subscription" && info?.type === "oauth"
+        : item.id === "openai" && info?.type === "oauth"
 
       const system =
         input.prebuiltSystem ??
@@ -361,12 +381,13 @@ const live: Layer.Layer<
             sessionID: input.sessionID,
             providerOptions: item.options,
           })
-      const options: Record<string, any> = pipe(
+      const mergedOptions: Record<string, any> = pipe(
         base,
         mergeDeep(input.model.options),
         mergeDeep(input.agent.options),
         mergeDeep(variant),
       )
+      const options = managedMetadata ? stripManagedProjectionOptions(mergedOptions) : mergedOptions
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
       }
@@ -453,7 +474,8 @@ const live: Layer.Layer<
       // during compaction), inject a stub tool to satisfy the validation requirement.
       // The stub description explicitly tells the model not to call it.
       if (
-        (isLiteLLMProxy || input.model.providerID.includes("github-copilot")) &&
+        (isLiteLLMProxy ||
+          (managedMetadata ? managedMetadata.adapterID === "copilot-chat" : input.model.providerID.includes("github-copilot"))) &&
         activeTools.length === 0 &&
         hasToolCalls(input.messages)
       ) {
@@ -664,7 +686,10 @@ const live: Layer.Layer<
         // VISIBLE processor-level SessionRetry.policy own long-haul resilience —
         // it publishes `type: "retry"` so the `[retrying attempt #N]` banner
         // shows, and its per-attempt delay is capped at 30s.
-        maxRetries: input.retries ?? 2,
+        // Managed mode centralizes retry/failover in the account-aware
+        // processor. An SDK-internal retry is invisible and would reuse a
+        // credential after the host has cooled or revoked that account.
+        maxRetries: ManagedProvider.enabled() ? 0 : (input.retries ?? 2),
         messages,
         model: wrapLanguageModel({
           model: language,
@@ -738,12 +763,14 @@ const live: Layer.Layer<
                 })
               )
 
-              const result = yield* streamWithTelemetry.pipe(
-                Effect.retry({
-                  while: isTransientCapacityError,
-                  schedule: persistentRetrySchedule,
-                }),
-              )
+              const result = ManagedProvider.enabled()
+                ? yield* streamWithTelemetry
+                : yield* streamWithTelemetry.pipe(
+                    Effect.retry({
+                      while: isTransientCapacityError,
+                      schedule: persistentRetrySchedule,
+                    }),
+                  )
 
               // Structurally identical to the pre-guard stream: a bare scoped
               // stream over the provider's fullStream. No per-event combinator, no

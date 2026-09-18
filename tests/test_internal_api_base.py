@@ -15,8 +15,8 @@ def _base(monkeypatch, **env):
     return cc.internal_api_base()
 
 
-def test_default_is_legacy_7000(monkeypatch):
-    assert _base(monkeypatch) == "http://127.0.0.1:7000"
+def test_default_is_7777(monkeypatch):
+    assert _base(monkeypatch) == "http://127.0.0.1:7777"
 
 
 def test_app_port_is_honored(monkeypatch):
@@ -49,4 +49,4 @@ def test_no_hardcoded_loopback_left_in_call_sites():
             stripped = ln.strip()
             if stripped.startswith("#"):
                 continue
-            assert "localhost:7000" not in ln, f"{rel}: hardcoded loopback URL: {ln.strip()}"
+            assert "localhost:7777" not in ln, f"{rel}: hardcoded loopback URL: {ln.strip()}"

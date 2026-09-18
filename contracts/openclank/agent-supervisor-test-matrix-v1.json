@@ -1,0 +1,306 @@
+{
+  "schema": "openclank.agent-supervisor-test-matrix.v1",
+  "deliverables": [
+    {
+      "id": "RAS-D01",
+      "status": "passed",
+      "argv": ["./venv/bin/python", "-m", "pytest", "-q", "tests/test_agent_supervisor_contract.py", "tests/test_agent_supervisor_facade.py"],
+      "paths": ["tests/test_agent_supervisor_contract.py", "tests/test_agent_supervisor_facade.py"]
+    },
+    {
+      "id": "RAS-D02",
+      "status": "passed",
+      "argv": ["./venv/bin/python", "-m", "pytest", "-q", "tests/test_agent_supervisor_facade.py"],
+      "paths": ["tests/test_agent_supervisor_facade.py"]
+    },
+    {
+      "id": "RAS-D03",
+      "status": "passed",
+      "argv": ["./venv/bin/python", "-m", "pytest", "-q", "tests/test_model_dispatch.py::test_pool_rolls_back_sibling_when_multi_owner_start_fails"],
+      "paths": ["tests/test_model_dispatch.py", "src/model_dispatch.py"]
+    },
+    {
+      "id": "RAS-D04",
+      "status": "passed",
+      "argv": ["python3", "-m", "py_compile", "src/model_dispatch.py", "routes/session_routes.py"],
+      "paths": ["src/model_dispatch.py", "routes/session_routes.py"]
+    },
+    {
+      "id": "RAS-D05",
+      "status": "passed",
+      "argv": ["./venv/bin/python", "-m", "pytest", "-q", "tests/test_agent_supervisor_contract.py::test_neutral_contract_has_no_backend_imports"],
+      "paths": ["tests/test_agent_supervisor_contract.py", "src/openclank/agent_supervisor.py"]
+    }
+,
+    {
+      "id": "RAS-D06",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml"],
+      "paths": ["packages/openclank-agent-supervisor/Cargo.toml", "packages/openclank-agent-supervisor/proto/openclank_agent_supervisor_v1.proto"]
+    },
+    {
+      "id": "RAS-D07",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "bounded_round_trip_and_replay_fence"],
+      "paths": ["packages/openclank-agent-supervisor/src/bootstrap.rs"]
+    },
+    {
+      "id": "RAS-D08",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "health_does_not_claim_turn_readiness"],
+      "paths": ["packages/openclank-agent-supervisor/src/lib.rs"]
+    },
+    {
+      "id": "RAS-D09",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "same_runtime_root_is_exclusive_and_manifest_is_safe"],
+      "paths": ["packages/openclank-agent-supervisor/src/instance_registry.rs"]
+    },
+    {
+      "id": "RAS-D10",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D11",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "terminal_ring::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/terminal_ring.rs"]
+    },
+    {
+      "id": "RAS-D12",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "semantic::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/semantic.rs"]
+    },
+    {
+      "id": "RAS-D13",
+      "status": "passed",
+      "argv": ["./venv/bin/python", "-m", "pytest", "-q", "tests/test_agent_supervisor_schemas.py"],
+      "paths": ["tests/test_agent_supervisor_schemas.py", "contracts/openclank/agent-supervisor-v1/semantic-event-v1.schema.json", "contracts/openclank/agent-supervisor-v1/terminal-control-v1.schema.json"]
+    },
+    {
+      "id": "RAS-D14",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "terminal_control::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/terminal_control.rs", "contracts/openclank/agent-supervisor-v1/terminal-control-v1.schema.json"]
+    },
+    {
+      "id": "RAS-D15",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "terminal_frame::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/terminal_frame.rs"]
+    },
+    {
+      "id": "RAS-D16",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "driver::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/driver.rs"]
+    },
+    {
+      "id": "RAS-D17",
+      "status": "passed",
+      "argv": ["cargo", "test", "--locked", "--manifest-path", "packages/openclank-agent-supervisor/Cargo.toml", "driver_wire::tests"],
+      "paths": ["packages/openclank-agent-supervisor/src/driver_wire.rs", "contracts/openclank/agent-driver-v1.schema.json"]
+    },
+    {
+      "id": "RAS-D18",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D19",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D20",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D21",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D22",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D23",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D24",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D25",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D26",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D27",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D28",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D29",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D30",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D31",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D32",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D33",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D34",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D35",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D36",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D37",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D38",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D39",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D40",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D41",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D42",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D43",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D44",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D45",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D46",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D47",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D48",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D49",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    },
+    {
+      "id": "RAS-D50",
+      "status": "planned",
+      "argv": ["<owner-defined>", "<owner-defined>"],
+      "paths": []
+    }
+  ]
+}

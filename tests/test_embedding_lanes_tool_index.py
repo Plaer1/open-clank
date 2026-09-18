@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.skip(reason="legacy Chroma tool embedding lanes are retired")
+
 from src.embedding_lanes import (
     EmbeddingLane,
     LANE_CUSTOM,
@@ -23,9 +25,9 @@ def test_tool_index_indexes_and_retrieves_from_available_lanes(monkeypatch):
     monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
-    from src.tool_index import ToolIndex
+    from src.tool_index import LegacyChromaToolIndex
 
-    index = ToolIndex()
+    index = LegacyChromaToolIndex()
     index.index_builtin_tools()
 
     assert fake.collections["odysseus_tool_index_custom"].count() > 0
@@ -55,9 +57,9 @@ def test_tool_index_builtin_indexing_fails_when_all_lanes_fail():
         fingerprint="fast",
     )
 
-    from src.tool_index import ToolIndex
+    from src.tool_index import LegacyChromaToolIndex
 
-    index = ToolIndex.__new__(ToolIndex)
+    index = LegacyChromaToolIndex.__new__(LegacyChromaToolIndex)
     index._lanes = [custom_lane, fast_lane]
     index._healthy = True
 
@@ -108,9 +110,9 @@ def test_tool_index_retrieval_continues_when_custom_lane_query_fails():
         fingerprint="fast",
     )
 
-    from src.tool_index import ToolIndex
+    from src.tool_index import LegacyChromaToolIndex
 
-    index = ToolIndex.__new__(ToolIndex)
+    index = LegacyChromaToolIndex.__new__(LegacyChromaToolIndex)
     index._lanes = [custom_lane, fast_lane]
 
     assert index.retrieve("run shell", k=5) == ["bash"]
@@ -170,9 +172,9 @@ def test_tool_index_merges_fallback_tool_results_before_limit():
         fingerprint="fast",
     )
 
-    from src.tool_index import ToolIndex
+    from src.tool_index import LegacyChromaToolIndex
 
-    index = ToolIndex.__new__(ToolIndex)
+    index = LegacyChromaToolIndex.__new__(LegacyChromaToolIndex)
     index._lanes = [custom_lane, fast_lane]
 
     assert index.retrieve("current mcp", k=2) == ["current_mcp", "one"]

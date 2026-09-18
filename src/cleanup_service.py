@@ -137,6 +137,13 @@ async def cleanup_old_sessions(session_manager, owner: Optional[str] = None) -> 
 
         session_ids = [session.id for session in sessions_to_delete]
         if session_ids:
+            from src import bg_jobs
+
+            for session in sessions_to_delete:
+                bg_jobs.delete_for_session_owner(
+                    session_id=str(session.id),
+                    owner=str(getattr(session, "owner", None) or ""),
+                )
             db.query(DbSession).filter(DbSession.id.in_(session_ids)).delete(synchronize_session=False)
             deleted_count = len(session_ids)
             db.commit()

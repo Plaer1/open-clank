@@ -5,7 +5,8 @@
 #
 # Installs everything Odysseus needs via Homebrew, sets up a local Python
 # environment, and launches the app — so a generic Mac user can run it without
-# knowing anything about venvs, pip, or uvicorn. Safe to re-run; it skips work
+# knowing anything about venvs, pip, or the managed-engine bootstrap. Safe to
+# re-run; it skips work
 # that's already done.
 #
 # Why native (not Docker): Cookbook serves models on whatever machine Odysseus
@@ -32,7 +33,7 @@ fi
 
 # Shell overrides (ODYSSEUS_PORT / ODYSSEUS_HOST) take top priority, then .env
 # values (APP_PORT / APP_BIND), then built-in defaults.
-PORT="${ODYSSEUS_PORT:-${APP_PORT:-7860}}"   # 7860, not 7000 — macOS AirPlay Receiver holds 7000.
+PORT="${ODYSSEUS_PORT:-${APP_PORT:-7777}}"
 HOST="${ODYSSEUS_HOST:-${APP_BIND:-127.0.0.1}}" # Set APP_BIND=0.0.0.0 in .env for LAN/Tailscale access.
 PROBE_HOST="$HOST"
 if [ "$PROBE_HOST" = "0.0.0.0" ] || [ "$PROBE_HOST" = "::" ]; then
@@ -148,15 +149,6 @@ else
   echo "▶ Python packages up to date — skipping install"
 fi
 
-# chromadb-client (HTTP-only) conflicts with the full chromadb package. If
-# it got installed (e.g., from an older requirements-optional.txt), remove
-# it to prevent ChromaDB from silently failing in HTTP-only mode.
-if "$VENV_PY" -m pip show chromadb-client >/dev/null 2>&1; then
-    echo "▶ Cleaning up conflicting chromadb-client package…"
-    "$VENV_PY" -m pip uninstall -y chromadb-client
-    "$VENV_PY" -m pip install --force-reinstall chromadb
-fi
-
 # 4. First-run setup: creates data dirs and prints an initial admin password
 #    the first time (idempotent — does nothing if already set up). Suppress its
 #    manual run hint — we launch the server ourselves just below.
@@ -183,34 +175,7 @@ else
     echo "▶ Non-ARM macOS detected; skipping Apfel server bootstrap."
 fi
 
-# ChromaDB backs the tool index and vector RAG. chromadb ships in the venv, so
-# start a local server before launching. Skip when one is already reachable, or
-# when CHROMADB_HOST points at a remote host.
-CHROMA_PID=""
-CHROMA_HOST="${CHROMADB_HOST:-localhost}"   # what the app connects to
-CHROMA_PORT="${CHROMADB_PORT:-8100}"
-# Bind + probe on IPv4 loopback: the app's "localhost" resolves to 127.0.0.1,
-# but binding chroma to the literal "localhost" can land on IPv6 ::1, which the
-# app can't then reach. Pin both to 127.0.0.1.
-CHROMA_BIN="$(dirname "$VENV_PY")/chroma"
-case "$CHROMA_HOST" in
-    localhost|127.0.0.1) CHROMA_BIND="127.0.0.1" ;;
-    0.0.0.0)             CHROMA_BIND="0.0.0.0" ;;
-    *)                   CHROMA_BIND="" ;;   # remote host - don't start locally
-esac
-if (exec 3<>"/dev/tcp/127.0.0.1/$CHROMA_PORT") 2>/dev/null; then
-    echo "▶ ChromaDB already running on 127.0.0.1:$CHROMA_PORT - using it."
-elif [ -z "$CHROMA_BIND" ]; then
-    echo "▶ CHROMADB_HOST=$CHROMA_HOST is remote - not starting a local ChromaDB."
-elif [ -x "$CHROMA_BIN" ]; then
-    CHROMA_LOG="${TMPDIR:-/tmp}/odysseus-chromadb.log"
-    echo "▶ Starting ChromaDB in the background on $CHROMA_BIND:$CHROMA_PORT…"
-    echo "  logging to $CHROMA_LOG"
-    nohup "$CHROMA_BIN" run --host "$CHROMA_BIND" --port "$CHROMA_PORT" --path "$PWD/data/chroma" >"$CHROMA_LOG" 2>&1 &
-    CHROMA_PID=$!
-else
-    echo "▶ ChromaDB CLI not found in venv; skipping (tool index will be degraded)."
-fi
+echo "▶ Frankenmemory is the canonical memory and RAG backend."
 
 # 5. Launch. Bind to loopback by default; opt into LAN/Tailscale with
 #    ODYSSEUS_HOST=0.0.0.0.
@@ -254,7 +219,7 @@ fi
 # Setup is done — drop the setup-failure handler, and clean up the background
 # opener when the server exits or the user presses Ctrl+C.
 trap - ERR
-trap '[ -n "$POLLER_PID" ] && kill "$POLLER_PID" 2>/dev/null; [ -n "$APFEL_PID" ] && kill "$APFEL_PID" 2>/dev/null; [ -n "$CHROMA_PID" ] && kill "$CHROMA_PID" 2>/dev/null' EXIT INT TERM
+trap '[ -n "$POLLER_PID" ] && kill "$POLLER_PID" 2>/dev/null; [ -n "$APFEL_PID" ] && kill "$APFEL_PID" 2>/dev/null' EXIT INT TERM
 
 echo
 echo "▶ Starting Odysseus — it will open in your browser at $URL"
@@ -263,4 +228,4 @@ if [ -n "$TAILSCALE_URL" ]; then
 fi
 echo "  (this takes a few seconds; press Ctrl+C here to stop)"
 echo
-"$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
+exec "$VENV_PY" scripts/openclank_bootstrap.py serve --host "$HOST" --port "$PORT"

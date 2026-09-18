@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.skip(reason="legacy Chroma embedding lanes are retired")
+
 from tests.helpers.embedding_lanes import (
     FakeChroma,
     FakeEmbedder,

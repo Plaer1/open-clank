@@ -116,18 +116,28 @@ def test_unauthenticated_still_403(monkeypatch):
 
 def test_manager_deletes_memory_only_ghost(monkeypatch):
     # No DB row, but the session is in memory -> delete it and report success.
+    from src import bg_jobs
+
+    cleanup = MagicMock(return_value=0)
+    monkeypatch.setattr(bg_jobs, "delete_for_session_owner", cleanup)
     fake_db = MagicMock()
     fake_db.query.return_value.filter.return_value.first.return_value = None
     monkeypatch.setattr(SM, "SessionLocal", MagicMock(return_value=fake_db))
     mgr = _manager_with({"ghost": SimpleNamespace(id="ghost", owner="alice")})
     assert mgr.delete_session("ghost") is True
     assert "ghost" not in mgr.sessions
+    cleanup.assert_called_once_with(session_id="ghost", owner="alice")
 
 
 def test_manager_delete_unknown_returns_false(monkeypatch):
     # Nothing in the DB and nothing in memory -> nothing deleted.
+    from src import bg_jobs
+
+    cleanup = MagicMock(return_value=0)
+    monkeypatch.setattr(bg_jobs, "delete_for_session_owner", cleanup)
     fake_db = MagicMock()
     fake_db.query.return_value.filter.return_value.first.return_value = None
     monkeypatch.setattr(SM, "SessionLocal", MagicMock(return_value=fake_db))
     mgr = _manager_with({})
     assert mgr.delete_session("nope") is False
+    cleanup.assert_not_called()

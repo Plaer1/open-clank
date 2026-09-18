@@ -1,22 +1,5 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingRequest {
-    pub input: String,
-    pub model: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingResponse {
-    pub data: Vec<EmbeddingData>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingData {
-    pub embedding: Vec<f32>,
-}
 
 #[async_trait]
 pub trait EmbeddingClient: Send + Sync {
@@ -26,12 +9,44 @@ pub trait EmbeddingClient: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
+    #[error("embedding lane unavailable: {0}")]
+    Unavailable(String),
     #[error("http error: {0}")]
     Http(String),
     #[error("dimension mismatch: expected {expected}, got {actual}")]
     DimMismatch { expected: usize, actual: usize },
     #[error("cache miss (internal)")]
     CacheMiss,
+}
+
+/// Fail-closed production client used until curated-memory rows carry an
+/// immutable managed route/adapter/dimension generation identity.
+///
+/// The document RAG schema already has that metadata and uses Open Clank's
+/// managed operation router.  Frankenmemory's legacy curated/raw vector
+/// columns do not, so writing provider vectors there would allow incompatible
+/// owners, models, or dimensions to mix.
+pub struct DisabledEmbeddingClient {
+    dims: usize,
+}
+
+impl DisabledEmbeddingClient {
+    pub fn new(dims: usize) -> Self {
+        Self { dims }
+    }
+}
+
+#[async_trait]
+impl EmbeddingClient for DisabledEmbeddingClient {
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+        Err(EmbedError::Unavailable(
+            "curated-memory vector generations are not fingerprinted".into(),
+        ))
+    }
+
+    fn dims(&self) -> usize {
+        self.dims
+    }
 }
 
 #[async_trait]
@@ -70,110 +85,6 @@ impl EmbeddingClient for NoopEmbeddingClient {
             }
         }
         Ok(emb)
-    }
-
-    fn dims(&self) -> usize {
-        self.dims
-    }
-}
-
-#[cfg(feature = "http-embed")]
-pub struct HttpEmbeddingClient {
-    client: reqwest::Client,
-    api_base: String,
-    model: String,
-    dims: usize,
-    api_key: Option<String>,
-    cache: std::sync::Mutex<lru::LruCache<String, Vec<f32>>>,
-}
-
-#[cfg(feature = "http-embed")]
-impl HttpEmbeddingClient {
-    // Works against any OpenAI-compatible /embeddings endpoint. Verified
-    // live against local ollama (qwen3-embedding:8b). Gemini's OpenAI-compat
-    // layer (generativelanguage.googleapis.com/v1beta/openai, model
-    // gemini-embedding-001, bearer key via FM_EMBED_API_KEY) is wired to the
-    // best of the author's ability but UNTESTED — the author had no Gemini
-    // API key at implementation time. Watch for: the "dimensions" body field
-    // may be ignored or rejected by some compat layers.
-    pub fn new(api_base: &str, model: &str, dims: usize, cache_size: usize) -> Self {
-        Self::with_api_key(api_base, model, dims, cache_size, None)
-    }
-
-    pub fn with_api_key(
-        api_base: &str,
-        model: &str,
-        dims: usize,
-        cache_size: usize,
-        api_key: Option<String>,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            api_base: api_base.trim_end_matches('/').to_string(),
-            model: model.to_string(),
-            dims,
-            api_key,
-            cache: std::sync::Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(cache_size).unwrap(),
-            )),
-        }
-    }
-}
-
-#[cfg(feature = "http-embed")]
-#[async_trait]
-impl EmbeddingClient for HttpEmbeddingClient {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-        // Check cache
-        {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(cached) = cache.get(text) {
-                return Ok(cached.clone());
-            }
-        }
-
-        let url = format!("{}/embeddings", self.api_base);
-        let body = serde_json::json!({
-            "input": text,
-            "model": self.model,
-            "dimensions": self.dims,
-        });
-
-        let mut req = self.client.post(&url).json(&body);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| EmbedError::Http(e.to_string()))?;
-
-        let resp: EmbeddingResponse = resp
-            .json()
-            .await
-            .map_err(|e| EmbedError::Http(e.to_string()))?;
-
-        let embedding = resp
-            .data
-            .into_iter()
-            .next()
-            .ok_or_else(|| EmbedError::Http("no embedding data".into()))?
-            .embedding;
-
-        if embedding.len() != self.dims {
-            return Err(EmbedError::DimMismatch {
-                expected: self.dims,
-                actual: embedding.len(),
-            });
-        }
-
-        // Cache
-        {
-            let mut cache = self.cache.lock().unwrap();
-            cache.put(text.to_string(), embedding.clone());
-        }
-
-        Ok(embedding)
     }
 
     fn dims(&self) -> usize {

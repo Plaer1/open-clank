@@ -99,7 +99,7 @@ export const PermissionRoutes = lazy(() =>
       describeRoute({
         summary: "Set skip-all state",
         description:
-          "Enable or disable runtime auto-allow for permission asks. Applies instance-wide, so subagents inherit it. Explicit deny rules and forced-ask permissions (e.g. bash_delete) still apply.",
+          "Enable or disable runtime auto-allow for permission asks. Applies instance-wide, so subagents inherit it. Explicit deny rules and forced-ask permissions (e.g. bash_destructive) still apply.",
         operationId: "permission.setSkipAll",
         responses: {
           200: {

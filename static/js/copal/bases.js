@@ -23,18 +23,74 @@ function clone(value) {
 export function updateViewSort(definition, viewId, property, additive = false) {
   const next = clone(definition);
   const view = next.views.find((item) => item.id === viewId) || next.views[0];
-  const existing = view.sorts.find((item) => item.property === property);
+  const canonical = canonicalSourceProperty(property);
+  const existingIndex = view.sorts.findIndex((item) => canonicalSourceProperty(item.property) === canonical);
+  const existing = existingIndex >= 0 ? view.sorts[existingIndex] : null;
   let direction = 'asc';
   if (existing?.direction === 'asc') direction = 'desc';
   else if (existing?.direction === 'desc') direction = null;
-  const retained = (view.sorts || []).filter((item) => item.property !== property);
-  view.sorts = additive ? retained : [];
-  if (direction) view.sorts.push({ property, direction });
+  if (additive) {
+    if (existing) {
+      if (direction) existing.direction = direction;
+      else view.sorts.splice(existingIndex, 1);
+    } else if (direction) view.sorts.push({ property:canonical, direction });
+  } else {
+    view.sorts = direction ? [{ property:canonical, direction }] : [];
+  }
   return next;
+}
+
+export function canonicalSourceProperty(property) {
+  const value = String(property || '').trim();
+  if (value.startsWith('note.') || value.startsWith('properties.')) return value.slice(value.indexOf('.') + 1);
+  return value;
 }
 
 export function serializeBase(definition) {
   return `${JSON.stringify(definition, null, 2)}\n`;
+}
+
+/** Update one Markdown frontmatter key while keeping every other source byte. */
+export function setFrontmatterProperty(source, property, value, { clear = false } = {}) {
+  const text = String(source ?? '');
+  const key = String(property || '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(key) || key.startsWith('file.')) throw new TypeError('That sheet property is read-only.');
+  const lines = text.match(/.*(?:\r\n|\n|\r|$)/g)?.filter((line, index, all) => index < all.length - 1 || line) || [];
+  const body = (line) => line.replace(/(?:\r\n|\n|\r)$/, '');
+  const ending = (line) => line.slice(body(line).length);
+  if (!lines.length || body(lines[0]).trim() !== '---') {
+    if (clear) return text;
+    const eol = text.includes('\r\n') ? '\r\n' : '\n';
+    return `---${eol}${key}: ${JSON.stringify(value)}${eol}---${eol}${text}`;
+  }
+  const end = lines.findIndex((line, index) => index > 0 && body(line).trim() === '---');
+  if (end < 0) throw new TypeError('The note has unterminated frontmatter.');
+  const index = lines.findIndex((line, itemIndex) => itemIndex > 0 && itemIndex < end && body(line).split(':', 1)[0].trim() === key);
+  if (index < 0) {
+    if (clear) return text;
+    const eol = ending(lines[Math.max(0, end - 1)]) || ending(lines[end]) || '\n';
+    lines.splice(end, 0, `${key}: ${JSON.stringify(value)}${eol}`);
+    return lines.join('');
+  }
+  if (clear) { lines.splice(index, 1); return lines.join(''); }
+  const current = body(lines[index]);
+  let quote = null; let escaped = false; let comment = '';
+  for (let i = 0; i < current.length; i += 1) {
+    const char = current[i];
+    if (quote === '"' && escaped) { escaped = false; continue; }
+    if (quote === '"' && char === '\\') { escaped = true; continue; }
+    if (quote && char === quote) quote = null;
+    else if (!quote && (char === '"' || char === "'")) quote = char;
+    else if (!quote && char === '#' && (i === 0 || /\s/.test(current[i - 1]))) { comment = current.slice(i); break; }
+  }
+  const colon = current.indexOf(':');
+  if (comment) {
+    let start = current.indexOf(comment);
+    while (start > colon + 1 && /\s/.test(current[start - 1])) start -= 1;
+    comment = current.slice(start);
+  }
+  lines[index] = `${current.slice(0, colon + 1)} ${JSON.stringify(value)}${comment}${ending(lines[index])}`;
+  return lines.join('');
 }
 
 export function formatBaseCell(value) {

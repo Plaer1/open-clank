@@ -1,5 +1,5 @@
 //! Graph memory overlay — types and identity (design:
-//! .futures/frankenmemory-update/graph-memory-design.md §2.1).
+//! .clanker/futures/frankenmemory-update/graph-memory-design.md §2.1).
 //!
 //! Nodes carry deterministic UUIDv5 identity over `"{kind}:{norm_name}"`,
 //! so re-capturing the same entity dedups/merges for free and recapture is

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "request_id": "00000000000000000000000000000003",
+  "ok": true,
+  "event": "session_closed",
+  "payload": {
+    "session_closed": true
+  }
+}

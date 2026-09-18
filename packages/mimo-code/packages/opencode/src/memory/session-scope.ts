@@ -1,4 +1,8 @@
 import type { McpServer } from "@agentclientprotocol/sdk"
+import {
+  bindMemorySessionClient,
+  unbindMemorySessionClient,
+} from "./mcp-client"
 
 /** Canonical workspace for conversational memory — the engine's own default
  * scope. The embedder's MCP descriptor may override it per session; nothing
@@ -17,21 +21,29 @@ export type MemorySessionScope = {
 const scopes = new Map<string, MemorySessionScope>()
 
 export function registerMemorySessionScope(sessionID: string, servers: McpServer[], cwd: string) {
-  const server =
-    servers.find((item) => item.name === "lifetools" || item.name.startsWith("lifetools_")) ??
-    servers.find((item) => item.name === "frankenmemory" || item.name.startsWith("frankenmemory_"))
+  const server = servers.find((item) => item.name === "lifetools" || item.name.startsWith("lifetools_"))
   if (!server || !("env" in server)) {
     unregisterMemorySessionScope(sessionID)
     return
   }
   const env = Object.fromEntries(server.env.map((item) => [item.name, item.value]))
-  if (env.FM_MEMORY_ENABLED === "0") {
-    unregisterMemorySessionScope(sessionID)
-    return
-  }
   const owner = env.FM_OWNER?.trim()
   const workspaceId = env.FM_WORKSPACE_ID?.trim()
-  if (!owner || !workspaceId) throw new Error("frankenmemory MCP descriptor requires owner and workspace")
+  if (!owner || !workspaceId) {
+    unregisterMemorySessionScope(sessionID)
+    // A disabled-memory descriptor carries no tenant obligation: there is
+    // nothing to bind and nothing to scope, so session creation must not
+    // fail over owner/workspace it never needed.
+    if (env.FM_MEMORY_ENABLED === "0") return
+    throw new Error("frankenmemory MCP descriptor requires owner and workspace")
+  }
+  // Lifetools also carries trusted project-policy admission. Keep its scoped
+  // transport available even when conversational memory is disabled.
+  bindMemorySessionClient(sessionID, server.name, owner, workspaceId)
+  if (env.FM_MEMORY_ENABLED === "0") {
+    scopes.delete(sessionID)
+    return
+  }
   scopes.set(sessionID, {
     owner,
     workspaceId,
@@ -46,16 +58,24 @@ export function memorySessionScope(sessionID: string) {
   return scopes.get(sessionID)
 }
 
-// Scope for session-less maintenance work (reconcile-time ingest). Every
-// session in a child shares one owner — the embedder partitions runtimes
-// per owner — so any registered scope carries the right identity.
-export function anyMemorySessionScope(): MemorySessionScope | undefined {
-  return scopes.values().next().value
+// Scope for session-less maintenance work (reconcile-time ingest). Runtime
+// partitioning should keep one tenant per process, but that is an assertion to
+// verify here, not a reason to trust whichever Map entry happened to be first.
+export function uniqueMemorySessionScope(): MemorySessionScope | undefined {
+  let selected: MemorySessionScope | undefined
+  for (const scope of scopes.values()) {
+    if (!selected) {
+      selected = scope
+      continue
+    }
+    if (scope.owner !== selected.owner || scope.workspaceId !== selected.workspaceId) {
+      throw new Error("session-less memory work requires one owner and workspace per runtime")
+    }
+  }
+  return selected
 }
 
 export function unregisterMemorySessionScope(sessionID: string) {
   scopes.delete(sessionID)
-  if (scopes.size === 0) {
-    void import("./mcp-client").then((module) => module.closeSharedMcpClient())
-  }
+  unbindMemorySessionClient(sessionID)
 }

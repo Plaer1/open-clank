@@ -1,81 +1,373 @@
 {
-  "version": 1,
+  "version": 2,
   "default_locale": "en",
   "locales": {
     "en": {
       "name": "English",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "en"
     },
     "zh-Hans": {
       "name": "简体中文",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "zh-Hans"
     },
     "ja": {
       "name": "日本語",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "ja"
     },
     "ko": {
       "name": "한국어",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "ko"
     },
     "es": {
       "name": "Español",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "es"
     },
     "hi": {
       "name": "हिन्दी",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "hi"
     },
     "ar": {
       "name": "العربية",
-      "dir": "rtl"
+      "dir": "rtl",
+      "catalog": "ar"
     },
     "ru": {
       "name": "Русский",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "ru"
     },
     "pt": {
       "name": "Português",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "pt"
     },
     "id": {
       "name": "Bahasa Indonesia",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "id"
     },
     "pa-Guru": {
       "name": "ਪੰਜਾਬੀ",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "pa-Guru"
     },
     "bn": {
       "name": "বাংলা",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "bn"
     },
     "sw": {
       "name": "Kiswahili",
-      "dir": "ltr"
+      "dir": "ltr",
+      "catalog": "sw"
     },
     "ur": {
       "name": "اردو",
-      "dir": "rtl"
+      "dir": "rtl",
+      "catalog": "ur"
     },
     "fa": {
       "name": "فارسی",
-      "dir": "rtl"
+      "dir": "rtl",
+      "catalog": "fa"
+    },
+    "zh-Hant": {
+      "name": "繁體中文",
+      "dir": "ltr",
+      "catalog": "zh-Hant"
+    },
+    "es-419": {
+      "name": "Español latinoamericano",
+      "dir": "ltr",
+      "catalog": "es-419"
+    },
+    "pt-BR": {
+      "name": "Português (Brasil)",
+      "dir": "ltr",
+      "catalog": "pt-BR"
+    },
+    "pa-Arab": {
+      "name": "پنجابی",
+      "dir": "rtl",
+      "catalog": "en"
+    },
+    "de": {
+      "name": "Deutsch",
+      "dir": "ltr",
+      "catalog": "de"
+    },
+    "fr": {
+      "name": "Français",
+      "dir": "ltr",
+      "catalog": "fr"
+    },
+    "da": {
+      "name": "Dansk",
+      "dir": "ltr",
+      "catalog": "da"
+    },
+    "pl": {
+      "name": "Polski",
+      "dir": "ltr",
+      "catalog": "pl"
+    },
+    "uk": {
+      "name": "Українська",
+      "dir": "ltr",
+      "catalog": "uk"
+    },
+    "bs": {
+      "name": "Bosanski",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "no": {
+      "name": "Norsk",
+      "dir": "ltr",
+      "catalog": "no"
+    },
+    "th": {
+      "name": "ไทย",
+      "dir": "ltr",
+      "catalog": "th"
+    },
+    "tr": {
+      "name": "Türkçe",
+      "dir": "ltr",
+      "catalog": "tr"
+    },
+    "nl": {
+      "name": "Nederlands",
+      "dir": "ltr",
+      "catalog": "nl"
+    },
+    "vi": {
+      "name": "Tiếng Việt",
+      "dir": "ltr",
+      "catalog": "vi"
+    },
+    "it": {
+      "name": "Italiano",
+      "dir": "ltr",
+      "catalog": "it"
+    },
+    "az": {
+      "name": "Azərbaycan dili",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "fi": {
+      "name": "Suomi",
+      "dir": "ltr",
+      "catalog": "fi"
+    },
+    "sv": {
+      "name": "Svenska",
+      "dir": "ltr",
+      "catalog": "sv"
+    },
+    "am": {
+      "name": "አማርኛ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "bg": {
+      "name": "Български",
+      "dir": "ltr",
+      "catalog": "bg"
+    },
+    "ca": {
+      "name": "Català",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "cs": {
+      "name": "Čeština",
+      "dir": "ltr",
+      "catalog": "cs"
+    },
+    "dv": {
+      "name": "ދިވެހި",
+      "dir": "rtl",
+      "catalog": "en"
+    },
+    "dz": {
+      "name": "རྫོང་ཁ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "el": {
+      "name": "Ελληνικά",
+      "dir": "ltr",
+      "catalog": "el"
+    },
+    "et": {
+      "name": "Eesti",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "fo": {
+      "name": "Føroyskt",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "hr": {
+      "name": "Hrvatski",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "hu": {
+      "name": "Magyar",
+      "dir": "ltr",
+      "catalog": "hu"
+    },
+    "hy": {
+      "name": "Հայերեն",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "is": {
+      "name": "Íslenska",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "ka": {
+      "name": "ქართული",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "km": {
+      "name": "ខ្មែរ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "lo": {
+      "name": "ລາວ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "lt": {
+      "name": "Lietuvių",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "lv": {
+      "name": "Latviešu",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "mk": {
+      "name": "Македонски",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "mn": {
+      "name": "Монгол",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "ms": {
+      "name": "Bahasa Melayu",
+      "dir": "ltr",
+      "catalog": "ms"
+    },
+    "my": {
+      "name": "မြန်မာ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "ne": {
+      "name": "नेपाली",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "ro": {
+      "name": "Română",
+      "dir": "ltr",
+      "catalog": "ro"
+    },
+    "si": {
+      "name": "සිංහල",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "sk": {
+      "name": "Slovenčina",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "sl": {
+      "name": "Slovenščina",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "sq": {
+      "name": "Shqip",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "sr": {
+      "name": "Српски",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "tg": {
+      "name": "Тоҷикӣ",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "tk": {
+      "name": "Türkmençe",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "uz": {
+      "name": "O‘zbekcha",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "af": {
+      "name": "Afrikaans",
+      "dir": "ltr",
+      "catalog": "en"
+    },
+    "ga": {
+      "name": "Gaeilge",
+      "dir": "ltr",
+      "catalog": "en"
     }
   },
   "aliases": {
     "zh": "zh-Hans",
     "zh-CN": "zh-Hans",
     "zh-SG": "zh-Hans",
+    "zh-TW": "zh-Hant",
+    "zh-HK": "zh-Hant",
+    "zh-MO": "zh-Hant",
+    "zht": "zh-Hant",
     "in": "id",
-    "pa-IN": "pa-Guru"
+    "ja-JP": "ja",
+    "pa-IN": "pa-Guru",
+    "pa": "pa-Arab",
+    "pa-PK": "pa-Arab",
+    "nb": "no",
+    "nn": "no",
+    "nb-NO": "no",
+    "nn-NO": "no",
+    "pt-PT": "pt",
+    "br": "pt-BR",
+    "es-ES": "es",
+    "es-MX": "es-419",
+    "es-AR": "es-419",
+    "es-CL": "es-419",
+    "es-CO": "es-419",
+    "es-US": "es-419"
   },
-  "do_not_auto_map": [
-    "zh-TW",
-    "zh-HK",
-    "zh-MO",
-    "zh-Hant",
-    "pa-PK",
-    "pa-Arab"
-  ]
+  "do_not_auto_map": []
 }

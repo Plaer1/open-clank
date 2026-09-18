@@ -1,37 +1,34 @@
-<!-- henxels:begin -->
-## The contract (henxels)
+<!-- openclank-hexes:begin -->
+## The contract (Open Clank Hexes)
 
-_Auto-generated from `henxels.yaml` by `henxels sync`. Do not edit by hand._
+_Generated from `.clankers/hexes/contract.yaml` by `openclank hex sync`; edit the canonical contract, not this block._
 
-Each bullet is a **henxel** (a rule). To disobey one, change `henxels.yaml` —
-that is the only sanctioned escape. Run `henxels explain <path>` before creating
-a file to see what governs that spot.
-
-Only use `git commit --no-verify` in a genuine emergency: it bypasses the hooks that run this contract, the safety mechanism meant to protect the repository. Prefer `henxels bless <action>` or editing `henxels.yaml` — both keep the deviation visible.
+Before creating or changing a file, run `openclank hex explain <path>`.
+The exact activated contract hash is the authority for project mutations.
 
 ### Rules
 
-- Plans live in .futures/ and are markdown (in ./.futures/*)
-- Clanker sidecar notes (test instructions, run records, audits) live in robonotes/ and are markdown — never in .claude/ (in ./.robonotes/*)
-- Reference clones stay out of git (.references/ is study material, not product)
-- Claude is never attributed in commits — no AI co-author, generated-with, or session trailers
-- No credentials in first-party code (in ./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*) _(warn)_
-- Glue/memory code changes update plans or robonotes (write it down as you go) _(warn)_
-- Canvas backgrounds retain one running scene when an unchanged pattern is reapplied (in ./static/js/theme.js, ./tests/clanker_browser_acceptance.mjs)
-  ↳ A duplicate animation loop or canvas remount presents as flicker and can be reintroduced by innocent theme-control changes.
+- Plans live in .clanker/futures/ and are Markdown: metaplan at .clanker/futures/<metaplan>.md and slices below the same canonical root. (in ./.clanker/futures/*)
+- Clanker sidecar notes and audit evidence are Markdown under .clankers/robonotes/<topic>/, with subfolders and focused slices organized by domain, question, or decision. (in ./.clankers/robonotes/*)
+  ↳ Keep the robonotes root for navigation. Continue older flat notes in the appropriate topic folder, linking back to historical evidence.
+- Each robonotes topic keeps a concise index linking its slices and any related .clanker/futures/ plan; read the index and relevant slices on demand. (in ./.clankers/robonotes/*)
+  ↳ Indexes orient the next session with current status, key decisions, and next steps; detailed evidence belongs in the linked slices. Do not load entire note collections into context.
+- Slice robonotes at meaningful conceptual boundaries using judgment, without hard size limits; split when distinct concerns or accumulated detail make selective reading difficult. (in ./.clankers/robonotes/*)
+  ↳ Keep each slice coherent and independently useful. Summarize findings and link sources or artifacts instead of accumulating raw logs, transcripts, inventories, or repeated evidence.
+- Canonical Clanker paths reject legacy and singular/plural typo namespaces. (in ./*)
+- Reference clones stay out of git (.references/ is study material). (in ./*)
+- Process confinement is the OS boundary — no in-app sandbox broker or process-confinement gate. (in ./*)
+- Claude is never attributed in commits — no AI co-author, generated-with, or session trailers. (in ./*)
+- No credentials in first-party code. (in ./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*) _(warn)_
+- Glue and memory code changes update canonical plans or robonotes. (in ./*) _(warn)_
+- Canvas backgrounds retain one running owner when an unchanged pattern is reapplied. (in ./static/js/theme.js, ./tests/clanker_browser_acceptance.mjs)
+  ↳ A duplicate animation loop or canvas remount presents as flicker.
 
 ### Behaviours
 
-- deleting files / removing many lines is blocked until `henxels bless delete`
+- deleting files or removing many lines requires an explicit consume-once blessing
 
-### Custom henxels & contributing
-
-**Before writing a custom check, run `henxels catalogue` and use the built-in that
-matches your intent — don't reinvent one.** Never name a custom check after a built-in
-or a setting (e.g. `warn_about_large_files` is a setting, not a check).
-
-Need a check that genuinely doesn't exist? `henxels create-new-statement <name>` scaffolds a local check
-(auto-loaded from `henxels_checks.py`). **If your check is reusable** — useful in
-other repos, not tied to this one — contribute it upstream with `henxels contribute`.
-We're in the agentic era: send a ready-to-merge PR instead of opening an issue.
-<!-- henxels:end -->
+Custom checks live in `.clankers/hexes/checks/*.py` and may not
+replace built-ins. Activated runtime mutations execute them in the contained
+policy worker; explicit local checks/hooks execute repository-owned checks.
+<!-- openclank-hexes:end -->

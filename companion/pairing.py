@@ -24,9 +24,9 @@ def default_port() -> int:
     """Best guess at the port the server is reachable on. Callers that know the
     real request port should pass it explicitly."""
     try:
-        return int(os.environ.get("APP_PORT", "7000"))
+        return int(os.environ.get("APP_PORT", "7777"))
     except ValueError:
-        return 7000
+        return 7777
 
 
 def lan_ip_candidates() -> list[str]:

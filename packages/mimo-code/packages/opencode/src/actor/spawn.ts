@@ -144,6 +144,10 @@ export interface SpawnInput {
   context: ContextMode
   tools: ToolWhitelist
   model?: { providerID: ProviderID; modelID: ModelID }
+  /** User/config request before resolving groups and inheritance. */
+  requestedModel?: string
+  /** Existing actor ID for an explicit continuation. */
+  actorID?: string
   background: boolean
   parentActorID?: string
   task_id?: string // Spec ②: bound user-task ID for postStop progress.md validation
@@ -699,6 +703,8 @@ export const layer = Layer.effect(
         background: input.background,
         lifecycle: input.lifecycle ?? "persistent",
         tools: input.tools,
+        requestedModel: input.requestedModel,
+        effectiveModel: input.model,
       })
       if (input.forkContext) {
         forkContexts.set(child.id, input.forkContext) // peer's actorID === child.id
@@ -723,23 +729,38 @@ export const layer = Layer.effect(
     })
 
     const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: SpawnInput) {
-      const actorID = yield* actorReg.allocateActorID(input.sessionID, input.agentType)
+      const actorID = input.actorID ?? (yield* actorReg.allocateActorID(input.sessionID, input.agentType))
 
-      const watermark = input.context === "full" ? yield* session.lastMainMessageID(input.sessionID) : undefined
+      const existing = input.actorID ? yield* actorReg.get(input.sessionID, input.actorID) : undefined
+      if (input.actorID && !existing) {
+        return yield* Effect.die(new Error(`Cannot resume unknown actor ${input.actorID}`))
+      }
+      if (existing && existing.status === "running") {
+        return yield* Effect.die(new Error(`Cannot resume running actor ${input.actorID}`))
+      }
 
-      yield* actorReg.register({
-        sessionID: input.sessionID,
-        actorID,
-        mode: "subagent",
-        parentActorID: input.parentActorID,
-        agent: input.agentType,
-        description: input.description ?? input.agentType,
-        contextMode: input.context,
-        contextWatermark: watermark,
-        background: input.background,
-        lifecycle: input.lifecycle ?? "ephemeral",
-        tools: input.tools,
-      })
+      if (existing) {
+        yield* actorReg.updateModel(input.sessionID, actorID, input.requestedModel, input.model)
+      }
+
+      if (!existing) {
+        const watermark = input.context === "full" ? yield* session.lastMainMessageID(input.sessionID) : undefined
+        yield* actorReg.register({
+          sessionID: input.sessionID,
+          actorID,
+          mode: "subagent",
+          parentActorID: input.parentActorID,
+          agent: input.agentType,
+          description: input.description ?? input.agentType,
+          contextMode: input.context,
+          contextWatermark: watermark,
+          background: input.background,
+          lifecycle: input.lifecycle ?? "ephemeral",
+          tools: input.tools,
+          requestedModel: input.requestedModel,
+          effectiveModel: input.model,
+        })
+      }
 
       // The actor now EXISTS in the registry. Hand the caller its id before the
       // work fiber detaches below, so a concurrent reclaim can see it (MR104 #2).

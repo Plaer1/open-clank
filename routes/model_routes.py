@@ -12,7 +12,7 @@ import time as _time
 import logging
 import httpx
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
 from pydantic import BaseModel, Field
@@ -27,6 +27,10 @@ from core.database import (
 )
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
+from core.mimo_model_prefs import (
+    owner_hidden_mimo_model_ids as _owner_hidden_mimo_model_ids,
+    set_owner_hidden_mimo_models as _set_owner_hidden_mimo_models,
+)
 from src.constants import COOKBOOK_STATE_FILE
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
 from src.tls_overrides import llm_verify
@@ -45,6 +49,18 @@ from src.model_catalog import build_model_catalog
 from src.chatgpt_subscription import is_chatgpt_subscription_base
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 from src.openclank.mimo_projection import public_native_model_id
+from src.openclank.chat_routing import (
+    ChatRouteUnavailable,
+    MANAGED_ENGINE_PUBLIC_URL,
+    group_chat_routes,
+    list_chat_routes,
+    normalized_provider_owner,
+)
+from src.openclank.provider_store import (
+    ProviderStore,
+    ProviderStoreError,
+    provider_family_display_name,
+)
 from src.model_shares import SharedModelAccess, own_native_auth, shared_endpoint_id
 
 logger = logging.getLogger(__name__)
@@ -90,6 +106,7 @@ _SPEECH_ENDPOINT_SETTINGS = (
 _ENDPOINT_SETTING_FIELDS = {
     "default_endpoint_id":  ("default_model",  "Default Model"),
     "utility_endpoint_id":  ("utility_model",   "Utility Model"),
+    "memory_endpoint_id":   ("memory_model",    "Memory Model"),
     "research_endpoint_id": ("research_model",  "Deep Research"),
     "task_endpoint_id":     ("task_model",       "Background Tasks"),
 }
@@ -97,6 +114,7 @@ _ENDPOINT_SETTING_FIELDS = {
 _ENDPOINT_FALLBACK_FIELDS = {
     "default_model_fallbacks": "Default Model Fallbacks",
     "utility_model_fallbacks": "Utility Model Fallbacks",
+    "memory_model_fallbacks": "Memory Model Fallbacks",
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
 
@@ -811,11 +829,19 @@ def _connected_mimo_provider_ids(owner: str | None) -> set[str]:
 def _public_mimo_model_ids(
     supervisor,
     owner: str | None = None,
+    include_owner_hidden: bool = False,
 ) -> list[str]:
-    """Return models backed by this user's connected provider accounts."""
+    """Return models backed by this user's connected provider accounts.
+
+    Owner-hidden models (Settings toggles on provider accounts) are dropped
+    unless ``include_owner_hidden`` — inventory counting needs the full set,
+    display surfaces need the visible set."""
     models: list[str] = []
     seen: set[str] = set()
     connected = _connected_mimo_provider_ids(owner)
+    hidden_by_owner = (
+        set() if include_owner_hidden else _owner_hidden_mimo_model_ids(owner)
+    )
     for item in _supervisor_available_models(supervisor, owner):
         if not isinstance(item, dict):
             continue
@@ -826,6 +852,8 @@ def _public_mimo_model_ids(
         if provider.startswith(DIRECT_ENDPOINT_PROVIDER_PREFIX):
             continue
         model_id = public_native_model_id(model_id)
+        if model_id in hidden_by_owner:
+            continue
         public_provider = _canonical_mimo_provider_id(
             model_id.split("/", 1)[0] if "/" in model_id else ""
         )
@@ -837,6 +865,36 @@ def _public_mimo_model_ids(
     return models
 
 
+def _mimo_model_relations(
+    supervisor,
+    owner: str | None,
+    model_ids: Iterable[str],
+) -> dict[str, dict[str, str]]:
+    """Keep ACP's explicit model/preset/variant hierarchy for visible models."""
+    visible = set(model_ids)
+    relations: dict[str, dict[str, str]] = {}
+    for item in _supervisor_available_models(supervisor, owner):
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("modelId")
+        if not isinstance(model_id, str):
+            continue
+        model_id = public_native_model_id(model_id)
+        if model_id not in visible or model_id in relations:
+            continue
+        relation: dict[str, str] = {}
+        base_model_id = item.get("baseModelId")
+        if isinstance(base_model_id, str) and base_model_id.strip():
+            relation["base_model_id"] = public_native_model_id(base_model_id)
+        for wire_key in ("preset", "variant"):
+            value = item.get(wire_key)
+            if isinstance(value, str) and value.strip():
+                relation[wire_key] = value.strip()
+        if relation:
+            relations[model_id] = relation
+    return relations
+
+
 def ensure_owner_mimo_worker(supervisor, owner: str | None = None) -> bool:
     """Synchronously start a cold owner worker for sync catalogue routes."""
     if supervisor is None or _supervisor_available_models(supervisor, owner):
@@ -844,6 +902,21 @@ def ensure_owner_mimo_worker(supervisor, owner: str | None = None) -> bool:
     starter = getattr(supervisor, "for_owner", None)
     if not callable(starter):
         return True
+    runner = getattr(supervisor, "run_sync", None)
+    if callable(runner):
+        # MimoSupervisorPool owns a long-lived ACP event loop.  Sync FastAPI
+        # routes execute in a thread, so marshal the coroutine back there;
+        # never use asyncio.run() against the live supervisor.
+        pending = starter(owner)
+        try:
+            runner(pending)
+            return True
+        except Exception as exc:
+            close = getattr(pending, "close", None)
+            if callable(close):
+                close()
+            logger.warning("Could not start model worker for owner %r: %s", owner, exc)
+            return False
     try:
         import asyncio
 
@@ -858,6 +931,7 @@ def mimo_connection_model_ids(
     supervisor,
     owner: str | None,
     endpoint_id: Any,
+    include_owner_hidden: bool = False,
 ) -> list[str]:
     """Return chat models reachable through one canonical native connection."""
     is_mimo, provider = _mimo_endpoint_provider(endpoint_id)
@@ -865,7 +939,9 @@ def mimo_connection_model_ids(
         return []
     models = [
         model_id
-        for model_id in _public_mimo_model_ids(supervisor, owner)
+        for model_id in _public_mimo_model_ids(
+            supervisor, owner, include_owner_hidden=include_owner_hidden
+        )
         if _is_chat_model(model_id)
     ]
     hidden = {
@@ -1002,7 +1078,10 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
     what it actually serves, and exact overlaps served directly."""
     if supervisor is None:
         return []
-    model_ids = _public_mimo_model_ids(supervisor, owner)
+    # Full inventory (including models the owner hid via Settings) so the
+    # provider cards can show "K/N models enabled"; visibility filtering
+    # happens per owner below.
+    model_ids = _public_mimo_model_ids(supervisor, owner, include_owner_hidden=True)
     chat_model_ids = [
         model_id for model_id in model_ids if _is_chat_model(model_id)
     ]
@@ -1017,8 +1096,13 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
             for model_id in chat_model_ids
             if model_id not in hidden and model_id.rsplit("/", 1)[0] not in hidden
         ]
+    owner_hidden = _owner_hidden_mimo_model_ids(owner)
     chat_model_set = set(chat_model_ids)
-    covered = _covered_direct_models(chat_model_ids, owner)
+    visible_chat_models = [
+        model_id for model_id in chat_model_ids if model_id not in owner_hidden
+    ]
+    visible_chat_set = set(visible_chat_models)
+    covered = _covered_direct_models(visible_chat_models, owner)
     prefixes: dict[str, dict] = {}
     for model_id in model_ids:
         if "/" not in model_id:
@@ -1026,12 +1110,14 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
         prefix = model_id.split("/", 1)[0]
         stats = prefixes.setdefault(
             prefix,
-            {"models": 0, "chat_models": 0, "active_chat_models": 0},
+            {"models": 0, "chat_models": 0, "active_chat_models": 0, "hidden": 0},
         )
         stats["models"] += 1
         if model_id in chat_model_set:
             stats["chat_models"] += 1
-            if model_id not in covered:
+            if model_id in owner_hidden:
+                stats["hidden"] += 1
+            elif model_id not in covered:
                 stats["active_chat_models"] += 1
     families = _mimo_model_families([f"{prefix}/x" for prefix in prefixes])
     breakdown = []
@@ -1041,13 +1127,18 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
             for model_id in chat_model_ids
             if model_id.split("/", 1)[0] == prefix
         ]
+        hidden_models = [
+            model_id for model_id in provider_models if model_id in owner_hidden
+        ]
         active_models = [
-            model_id for model_id in provider_models if model_id not in covered
+            model_id
+            for model_id in provider_models
+            if model_id not in covered and model_id not in owner_hidden
         ]
         covered_routes = [
             covered[model_id]
             for model_id in provider_models
-            if model_id in covered
+            if model_id in covered and model_id in visible_chat_set
         ]
         active = prefixes[prefix]["active_chat_models"] > 0
         served_by = covered_routes[0] if covered_routes and not active else None
@@ -1057,6 +1148,8 @@ def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]
             "models": prefixes[prefix]["models"],
             "chat_models": prefixes[prefix]["chat_models"],
             "model_ids": active_models,
+            "hidden_model_ids": hidden_models,
+            "hidden_count": len(hidden_models),
             "active": active,
             "served_by": served_by,
         })
@@ -1085,6 +1178,7 @@ def _mimo_catalog(supervisor, owner: str | None = None):
 def _mimo_provider_catalogs(supervisor, owner: str | None = None) -> list[dict]:
     """Partition the native catalog into the real provider connections."""
     models, _base, _variants, _hidden_count = _mimo_catalog(supervisor, owner)
+    relations = _mimo_model_relations(supervisor, owner, models)
     grouped: dict[str, list[str]] = {}
     for model_id in models:
         provider = model_id.split("/", 1)[0] if "/" in model_id else "auto"
@@ -1108,6 +1202,11 @@ def _mimo_provider_catalogs(supervisor, owner: str | None = None) -> list[dict]:
             "base": base,
             "variants": variants,
             "displays": _mimo_display_names(base, variants),
+            "relations": {
+                model_id: relations[model_id]
+                for model_id in provider_models
+                if model_id in relations
+            },
         })
     return sorted(catalogs, key=lambda item: item["name"].casefold())
 
@@ -1144,6 +1243,17 @@ def _filter_catalog_for_allowed_models(result: dict, allowed: Optional[frozenset
         return result
     visible_items = []
     for item in result.get("items") or []:
+        allowed_records = [
+            record for record in (item.get("catalog") or [])
+            if record.get("model_id") in allowed
+            or record.get("provider_model_route_id") in allowed
+            or record.get("_provider_model_route_id") in allowed
+        ]
+        allowed_public_ids = {
+            str(record.get("model_id"))
+            for record in allowed_records
+            if record.get("model_id")
+        }
         for ids_key, names_key in (
             ("models", "models_display"),
             ("models_extra", "models_extra_display"),
@@ -1151,12 +1261,9 @@ def _filter_catalog_for_allowed_models(result: dict, allowed: Optional[frozenset
             ids = item.get(ids_key) or []
             names = item.get(names_key) or []
             pairs = [(model_id, names[index] if index < len(names) else model_id) for index, model_id in enumerate(ids)]
-            item[ids_key] = [model_id for model_id, _ in pairs if model_id in allowed]
-            item[names_key] = [name for model_id, name in pairs if model_id in allowed]
-        item["catalog"] = [
-            record for record in (item.get("catalog") or [])
-            if record.get("model_id") in allowed
-        ]
+            item[ids_key] = [model_id for model_id, _ in pairs if model_id in allowed_public_ids]
+            item[names_key] = [name for model_id, name in pairs if model_id in allowed_public_ids]
+        item["catalog"] = allowed_records
         if item["catalog"] or item.get("models") or item.get("models_extra"):
             visible_items.append(item)
     result["items"] = visible_items
@@ -1991,6 +2098,57 @@ def _model_display_name(model_id: str) -> str:
     return str(model_id or "").split("/")[-1]
 
 
+async def revoke_shared_model_workers(
+    request: Request,
+    revocations: list[tuple[str, str, str]],
+) -> None:
+    """Stop only the recipient/share runtime partitions being revoked."""
+    supervisor = getattr(getattr(request, "app", None), "state", None)
+    supervisor = getattr(supervisor, "mimo_supervisor", None)
+    revoke = getattr(supervisor, "revoke_shared_access", None)
+    if not callable(revoke) or not revocations:
+        return
+    results = await asyncio.gather(
+        *(
+            revoke(recipient, share_id)
+            for recipient, share_id, _model_id in set(revocations)
+        ),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("trusted-share worker revoke failed: %s", result)
+
+
+def notify_shared_model_removals(
+    revocations: list[tuple[str, str, str]],
+    *,
+    shared_by: str,
+) -> None:
+    """Queue recipient-scoped UI notices without exposing source credentials."""
+    if not revocations:
+        return
+    from src.event_bus import get_task_scheduler
+
+    scheduler = get_task_scheduler()
+    add_notification = getattr(scheduler, "add_notification", None)
+    if not callable(add_notification):
+        return
+    for recipient, share_id, model_id in set(revocations):
+        model_name = _model_display_name(model_id) or "a model"
+        add_notification(
+            "Shared model removed",
+            "success",
+            task_id=f"model-share:{share_id}",
+            owner=recipient,
+            body=(
+                f"{shared_by} stopped sharing {model_name} with you. "
+                "Choose another model for any open chat that used it."
+            ),
+            kind="model_share",
+        )
+
+
 def _visible_models(cached_models, hidden_models, pinned_models=None):
     """Merge cached + pinned model IDs, then filter out hidden ones.
 
@@ -2059,6 +2217,71 @@ def _picker_models_for_endpoint(ep, base_url: str, kind: str):
         getattr(ep, "hidden_models", None),
         pinned,
     ), pinned
+
+
+def _api_pin_seed(ep, cached_ids=None) -> Optional[List[str]]:
+    """Seed that makes an untouched API row visible in chat by default.
+
+    Vanilla Odysseus semantics are opt-out: every connected model appears in
+    the chat picker until the owner hides it. API-class pickers enforce the
+    allow-list ("cache is inventory, not approval"), so a row whose pins were
+    never written renders nothing. Returns the chat-capable inventory as the
+    seed, or None when the row must not be touched: no inventory, not
+    API-class, pins already written (an explicit empty list means "show
+    nothing"), a legacy hidden list carrying older owner intent, or an
+    ownerless row while auth is configured (legacy/unclaimed data).
+    """
+    if cached_ids is None:
+        cached_ids = _cached_model_ids(ep)
+    if not cached_ids:
+        return None
+    if not (getattr(ep, "owner", None) or "").strip() and not _auth_disabled():
+        return None
+    base = _normalize_base(ep.base_url)
+    kind = _effective_endpoint_kind(ep, base)
+    if not _picker_requires_pinning(base, kind):
+        return None
+    if _has_explicit_pinned_models(ep):
+        return None
+    if _hidden_model_ids(ep):
+        return None
+    from src.endpoint_resolver import chat_capable_models
+
+    return chat_capable_models(cached_ids) or None
+
+
+def _seed_api_pins_if_missing(db, ep) -> bool:
+    """Persist the vanilla pin seed for one row; True when the row changed.
+
+    Read-time repair: endpoint listings and catalogue fetches heal rows that
+    predate pin seeding, so visibility repair never relies solely on the
+    add-a-model interaction. The caller commits.
+    """
+    seed = _api_pin_seed(ep)
+    if seed is None:
+        return False
+    row = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep.id).first()
+    if row is None or _has_explicit_pinned_models(row) or _hidden_model_ids(row):
+        return False
+    row.pinned_models = json.dumps(seed)
+    if row is not ep:
+        ep.pinned_models = row.pinned_models
+    return True
+
+
+def backfill_api_endpoint_pins(db) -> int:
+    """Startup repair pass for rows created before pin seeding existed.
+
+    Idempotent; rows carrying explicit pins or a legacy hidden list are left
+    alone. Returns the number of rows healed (caller owns the session).
+    """
+    healed = 0
+    for ep in db.query(ModelEndpoint).all():
+        if _seed_api_pins_if_missing(db, ep):
+            healed += 1
+    if healed:
+        db.commit()
+    return healed
 
 
 def _api_key_fingerprint(api_key: Optional[str]) -> str:
@@ -2159,26 +2382,6 @@ def setup_model_routes(model_discovery):
         except RuntimeError:
             logger.debug("no running loop; mimo reprojection deferred to next spawn")
 
-    async def _revoke_share_workers(
-        request: Request,
-        revocations: list[tuple[str, str]],
-    ) -> None:
-        supervisor = getattr(getattr(request, "app", None), "state", None)
-        supervisor = getattr(supervisor, "mimo_supervisor", None)
-        revoke = getattr(supervisor, "revoke_shared_access", None)
-        if not callable(revoke) or not revocations:
-            return
-        results = await asyncio.gather(
-            *(
-                revoke(recipient, share_id)
-                for recipient, share_id in set(revocations)
-            ),
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning("trusted-share worker revoke failed: %s", result)
-
     def _direct_share_source(db, owner: str, endpoint_id: str, model_id: str):
         endpoint = db.query(ModelEndpoint).filter(
             ModelEndpoint.id == endpoint_id,
@@ -2193,14 +2396,29 @@ def setup_model_routes(model_discovery):
             else None
         )
 
-    def _share_display_name(share: ModelShare, endpoint=None) -> str:
+    def _share_provider_metadata(share: ModelShare, endpoint=None) -> tuple[str | None, str]:
+        """Return explicit provider metadata for legacy share rows.
+
+        Native rows can identify a family from their selected ``mimo:<family>``
+        connection. ``mimo:auto`` intentionally remains unresolved because its
+        historical row has no family column; a model ID is ambiguous and must
+        never be used as a substitute. Direct rows use the endpoint's detected
+        provider, which is connection metadata rather than model naming.
+        """
+        provider_id = None
         if share.source_kind == "native":
-            provider = share.model_id.split("/", 1)[0]
-            return _MIMO_FAMILY_NAMES.get(provider, provider.replace("-", " ").title())
-        detected = _safe_detect_provider(getattr(endpoint, "base_url", "") or "")
-        if detected and detected not in {"openai", "custom"}:
-            return detected.replace("-", " ").title()
-        return "API model"
+            connection_id = normalize_mimo_connection_id(share.source_id)
+            if connection_id and connection_id.startswith("mimo:"):
+                provider_id = connection_id.split(":", 1)[1] or None
+        else:
+            detected = _safe_detect_provider(getattr(endpoint, "base_url", "") or "")
+            if detected and detected not in {"custom", "openai-compatible"}:
+                provider_id = _DIRECT_PROVIDER_TO_MIMO.get(detected, detected)
+        return provider_id, provider_family_display_name(provider_id) or "Unknown provider"
+
+    def _share_display_name(share: ModelShare, endpoint=None) -> str:
+        """Return the safe explicit provider label used by legacy projections."""
+        return _share_provider_metadata(share, endpoint)[1]
 
     def _share_users(request: Request, owner: str) -> list[str]:
         manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
@@ -2265,7 +2483,10 @@ def setup_model_routes(model_discovery):
                     continue
                 tools_enabled = source_tools_enabled(db, access)
                 endpoint_id = shared_endpoint_id(share.id)
-                provider_name = _share_display_name(share, source_endpoint)
+                provider_family_id, provider_name = _share_provider_metadata(
+                    share,
+                    source_endpoint,
+                )
                 catalog = build_model_catalog(
                     endpoint_id=endpoint_id,
                     endpoint_url="mimo://acp",
@@ -2304,6 +2525,8 @@ def setup_model_routes(model_discovery):
                     "shared": True,
                     "share_id": share.id,
                     "shared_by": share.owner,
+                    "provider_family_id": provider_family_id,
+                    "provider_display_name": provider_name,
                 })
             return items
         finally:
@@ -2503,6 +2726,18 @@ def setup_model_routes(model_discovery):
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
             category = _classify_endpoint(base, kind)
+            if _api_pin_seed(ep) is not None:
+                # Rows here are detached (the session closed after the query),
+                # so persist the vanilla seed through a fresh session. Healing
+                # on this read path means the FIRST catalogue fetch after a
+                # row loses/gains visibility already shows the right models.
+                _heal_db = SessionLocal()
+                try:
+                    if _seed_api_pins_if_missing(_heal_db, ep):
+                        _heal_db.commit()
+                        _invalidate_models_cache(owner)
+                finally:
+                    _heal_db.close()
             model_ids, pinned = _picker_models_for_endpoint(ep, base, kind)
 
             if model_ids:
@@ -2566,9 +2801,14 @@ def setup_model_routes(model_discovery):
 
     @router.get("/models")
     def api_models(request: Request, refresh: bool = False, background: bool = False):
-        """Get the caller's model catalogue, cached per owner for 30 seconds."""
-        # Require auth; "" is unconfigured single-user mode and only sees
-        # legacy ownerless endpoints.
+        """Return a read-only projection of normalized managed chat routes.
+
+        ``refresh`` and ``background`` remain accepted for wire compatibility,
+        but this endpoint never probes providers or wakes a worker. Catalog
+        discovery and credential semantics belong to the managed engine.
+        """
+        # Require auth; "" is unconfigured single-user mode and resolves to
+        # the normalized local-installation principal.
         try:
             if getattr(request.state, "api_token", False):
                 scopes = set(getattr(request.state, "api_token_scopes", []) or [])
@@ -2588,68 +2828,99 @@ def setup_model_routes(model_discovery):
         except Exception as e:
             logger.error("Auth gate error in GET /api/models, failing closed: %s", e)
             raise HTTPException(status_code=500, detail="Internal error")
-        _allowed_models = _allowed_model_ids(request, owner)
-        _sup = getattr(request.app.state, "mimo_supervisor", None)
-        _mimo_ready = ensure_owner_mimo_worker(_sup, owner)
-        now = _time.time()
-        _cache_key = (
-            model_catalogue_revision(owner),
-            owner,
-            None if _allowed_models is None else tuple(sorted(_allowed_models)),
-        )
-        cache_entry = _models_cache.get(_cache_key)
-        if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
-            return cache_entry["data"]
-        result = _fetch_models(owner=owner)
-        # Provider-account models use the same API category as direct API
-        # endpoints. The runtime remains an implementation detail.
-        for _provider in _mimo_provider_catalogs(_sup, owner):
-            _connection_id = f"mimo:{_provider['id']}"
-            result["items"].append({
-                "host": "custom",
-                "port": 0,
-                "url": "mimo://acp",
-                "models": _provider["base"],
-                "models_display": [
-                    _provider["displays"][model_id]
-                    for model_id in _provider["base"]
-                ],
-                "models_extra": _provider["variants"],
-                "models_extra_display": [
-                    _provider["displays"][model_id]
-                    for model_id in _provider["variants"]
-                ],
-                "catalog": build_model_catalog(
-                    endpoint_id=_connection_id,
-                    endpoint_url="mimo://acp",
-                    model_ids=_provider["models"],
-                    primary_ids=_provider["base"],
-                    extra_ids=_provider["variants"],
-                    display_names=_provider["displays"],
-                    families=_mimo_model_families(_provider["models"]),
+        try:
+            own_routes, shared_routes = list_chat_routes(owner)
+        except Exception as exc:
+            logger.error("Normalized provider catalogue failed closed: %s", exc)
+            raise HTTPException(503, "Provider catalogue is unavailable") from exc
+
+        def _project_group(endpoint_id: str, routes: list) -> dict:
+            first = routes[0]
+            model_ids = [route.provider_model_id for route in routes]
+            displays = [route.display_name for route in routes]
+            catalog = []
+            for route in routes:
+                capabilities = dict(route.capabilities or {})
+                capabilities["chat"] = True
+                record = build_model_catalog(
+                    endpoint_id=endpoint_id,
+                    endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+                    model_ids=[route.provider_model_id],
+                    primary_ids=[route.provider_model_id],
+                    display_names={route.provider_model_id: route.display_name},
+                    families={
+                        route.provider_model_id: (
+                            None if route.shared else route.family_id
+                        )
+                    },
                     discovered=True,
                     entitled=True,
-                    capabilities={"chat": True, "tools": True, "vision": None},
+                    capabilities=capabilities,
+                )[0]
+                record.update({
+                    "provider_model_id": route.provider_model_id,
+                    "operations": list(route.operations),
+                })
+                if not route.shared:
+                    record["provider_model_route_id"] = route.model_route_id
+                else:
+                    # Private filtering aid removed before the response leaves
+                    # this function. Shared source route IDs are not public UI
+                    # selectors; the accepted grant is.
+                    record["_provider_model_route_id"] = route.model_route_id
+                catalog.append(record)
+
+            endpoint_name = first.share_label or first.connection_label
+            if first.disclosed_owner:
+                endpoint_name = f"{endpoint_name} · shared by {first.disclosed_owner}"
+            item = {
+                "host": "managed",
+                "port": 0,
+                "url": MANAGED_ENGINE_PUBLIC_URL,
+                "models": model_ids,
+                "models_display": displays,
+                "models_extra": [],
+                "models_extra_display": [],
+                "catalog": catalog,
+                "endpoint_id": endpoint_id,
+                "endpoint_name": endpoint_name,
+                "category": (
+                    "api"
+                    if first.shared
+                    else ("local" if first.connection_kind == "local" else "api")
                 ),
-                "endpoint_id": _connection_id,
-                "endpoint_name": _provider["name"],
-                "category": "api",
-                "endpoint_kind": "api",
+                "endpoint_kind": "shared" if first.shared else first.connection_kind,
                 "model_type": "llm",
                 "virtual": True,
                 "read_only": True,
                 "actions": ["configure_providers"],
-                "settings_tab": "added-models",
-            })
-        result["items"].extend(_subscribed_shared_catalog(owner))
-        result = _filter_catalog_for_allowed_models(result, _allowed_models)
-        if _mimo_ready:
-            _models_cache[_cache_key] = {"data": result, "time": now}
-        # Kick off background refresh to update caches from live endpoints.
-        # Page boot can opt out with background=false so opening Open Clank does
-        # not start endpoint probes against slow/offline model servers.
-        if background or refresh:
-            _refresh_caches_bg(owner=owner, force=refresh)
+                "settings_tab": "providers",
+            }
+            if first.shared:
+                item.update({
+                    "shared": True,
+                    "share_id": first.provider_grant_id,
+                })
+                if first.disclosed_owner:
+                    item["shared_by"] = first.disclosed_owner
+            else:
+                item["connection_id"] = first.connection_id
+                item["billing_lane"] = first.billing_lane
+                item["family_id"] = first.family_id
+            return item
+
+        result = {"hosts": [], "items": []}
+        for endpoint_id, routes in sorted(group_chat_routes(own_routes).items()):
+            result["items"].append(_project_group(endpoint_id, routes))
+        for endpoint_id, routes in sorted(group_chat_routes(shared_routes).items()):
+            result["items"].append(_project_group(endpoint_id, routes))
+        result = _filter_catalog_for_allowed_models(
+            result,
+            _allowed_model_ids(request, owner),
+        )
+        for item in result["items"]:
+            for record in item.get("catalog") or ():
+                record.pop("_provider_model_route_id", None)
         return result
 
     # Brief cache for local-probe results so picker-open doesn't hammer
@@ -3009,12 +3280,18 @@ def setup_model_routes(model_discovery):
                     continue
                 elif source_native_auth(db, access) is None:
                     continue
+                provider_family_id, provider_name = _share_provider_metadata(
+                    share,
+                    source_endpoint,
+                )
                 received.append({
                     "share_id": share.id,
                     "endpoint_id": shared_endpoint_id(share.id),
                     "model_id": share.model_id,
                     "model_name": _model_display_name(share.model_id),
-                    "provider": _share_display_name(share, source_endpoint),
+                    "provider": provider_name,
+                    "provider_family_id": provider_family_id,
+                    "provider_display_name": provider_name,
                     "shared_by": share.owner,
                     "enabled": bool(grant.enabled),
                     "tools": source_tools_enabled(db, access),
@@ -3117,7 +3394,7 @@ def setup_model_routes(model_discovery):
             if not payload.shared:
                 if existing is not None:
                     revocations = [
-                        (grant.subscriber, existing.id)
+                        (grant.subscriber, existing.id, existing.model_id)
                         for grant in db.query(ModelShareSubscription).filter(
                             ModelShareSubscription.share_id == existing.id,
                             ModelShareSubscription.enabled == True,  # noqa: E712
@@ -3130,7 +3407,8 @@ def setup_model_routes(model_discovery):
                     db.commit()
                     _invalidate_models_cache()
                     _schedule_mimo_reprojection(request)
-                    await _revoke_share_workers(request, revocations)
+                    await revoke_shared_model_workers(request, revocations)
+                    notify_shared_model_removals(revocations, shared_by=owner)
                 return {"shared": False}
             created = existing is None
             if created:
@@ -3153,7 +3431,7 @@ def setup_model_routes(model_discovery):
             }
             changed_recipients = set(current) != recipients
             revocations = [
-                (username, existing.id)
+                (username, existing.id, existing.model_id)
                 for username, grant in current.items()
                 if username not in recipients and grant.enabled
             ]
@@ -3172,7 +3450,8 @@ def setup_model_routes(model_discovery):
                 db.commit()
                 _invalidate_models_cache()
                 _schedule_mimo_reprojection(request)
-                await _revoke_share_workers(request, revocations)
+                await revoke_shared_model_workers(request, revocations)
+                notify_shared_model_removals(revocations, shared_by=owner)
             return {
                 "shared": True,
                 "share_id": existing.id,
@@ -3215,9 +3494,9 @@ def setup_model_routes(model_discovery):
                 db.commit()
                 _invalidate_models_cache(owner)
                 _schedule_mimo_reprojection(request)
-                await _revoke_share_workers(
+                await revoke_shared_model_workers(
                     request,
-                    [(owner, share.id)],
+                    [(owner, share.id, share.model_id)],
                 )
                 return {"enabled": False}
             subscription.enabled = True
@@ -3359,6 +3638,8 @@ def setup_model_routes(model_discovery):
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
+                if _seed_api_pins_if_missing(db, r):
+                    upgraded_legacy_pins = True
                 visible, pinned = _picker_models_for_endpoint(r, base, kind)
                 if _picker_requires_pinning(base, kind) and pinned and not _has_explicit_pinned_models(r):
                     r.pinned_models = json.dumps(pinned)
@@ -3436,8 +3717,24 @@ def setup_model_routes(model_discovery):
             _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(
                 _sup, owner
             )
+            # The aggregate drops owner-hidden models with the rest; report
+            # how many were hidden so selector totals stay truthful.
+            _owner_hidden_ids = _owner_hidden_mimo_model_ids(owner)
+            _mimo_owner_hidden_count = 0
+            if _owner_hidden_ids:
+                _mimo_inventory = set(
+                    _public_mimo_model_ids(_sup, owner, include_owner_hidden=True)
+                )
+                _mimo_owner_hidden_count = len([
+                    model_id
+                    for model_id in _owner_hidden_ids
+                    if model_id in _mimo_inventory and _is_chat_model(model_id)
+                ])
             if _mimo_models:
                 _mimo_displays = _mimo_display_names(_base, _variants)
+                _mimo_relations = _mimo_model_relations(
+                    _sup, owner, _mimo_models
+                )
                 results.append({
                     "id": "mimo:auto",
                     "name": "Automatic",
@@ -3461,12 +3758,13 @@ def setup_model_routes(model_discovery):
                         extra_ids=_variants,
                         display_names=_mimo_displays,
                         families=_mimo_model_families(_mimo_models),
+                        relations=_mimo_relations,
                         discovered=True,
                         entitled=True,
                         capabilities={"chat": True, "tools": True, "vision": None},
                     ),
                     "pinned_models": [],
-                    "hidden_count": 0,
+                    "hidden_count": _mimo_owner_hidden_count,
                     "online": True,
                     "status": "online",
                     "ping_error": None,
@@ -3638,6 +3936,21 @@ def setup_model_routes(model_discovery):
                     if probed_models:
                         existing.cached_models = json.dumps(probed_models)
                         changed = True
+                # Repair API rows created before pin seeding existed: with no
+                # explicit pins they are invisible in the chat picker even
+                # though enabled. Rows with a legacy hidden list already render
+                # via the legacy fallback, so only heal rows with neither.
+                if (
+                    not _incoming_pinned
+                    and not _has_explicit_pinned_models(existing)
+                    and not _hidden_model_ids(existing)
+                    and _picker_requires_pinning(base_url, existing_kind_for_probe)
+                ):
+                    from src.endpoint_resolver import chat_capable_models
+                    _seed = chat_capable_models(_cached_model_ids(existing))
+                    if _seed:
+                        existing.pinned_models = json.dumps(_seed)
+                        changed = True
                 if changed:
                     _db_dedup.commit()
                     _invalidate_models_cache(_owner)
@@ -3688,6 +4001,17 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             _pinned = _normalize_model_ids(pinned_models)
+            # API-class pickers treat pinned_models as an allow-list; a row
+            # stored without pins is invisible in chat even though it probes
+            # fine. Seed every probed chat model so a freshly added connection
+            # works immediately (pre-sync behavior: what you add shows up).
+            if (
+                not _pinned
+                and model_ids
+                and _picker_requires_pinning(base_url, requested_kind)
+            ):
+                from src.endpoint_resolver import chat_capable_models
+                _pinned = chat_capable_models(model_ids) or []
             ep = ModelEndpoint(
                 id=ep_id,
                 name=name.strip(),
@@ -3874,14 +4198,21 @@ def setup_model_routes(model_discovery):
         if _is_mimo:
             supervisor = getattr(request.app.state, "mimo_supervisor", None)
             ensure_owner_mimo_worker(supervisor, owner)
-            models = mimo_connection_model_ids(supervisor, owner, ep_id)
+            # Full inventory with per-model visibility: hiding a model must
+            # not erase it from the panel, or it could never be re-enabled.
+            models = mimo_connection_model_ids(
+                supervisor, owner, ep_id, include_owner_hidden=True
+            )
+            _hidden = (
+                _owner_hidden_mimo_model_ids(owner, _mimo_pid) if _mimo_pid else set()
+            )
             return [
                 {
                     "id": model_id,
                     "display": model_id.split("/", 1)[-1],
-                    "is_hidden": False,
+                    "is_hidden": model_id in _hidden,
                     "is_pinned": False,
-                    "read_only": True,
+                    "read_only": not _mimo_pid,
                 }
                 for model_id in models
             ]
@@ -3946,8 +4277,24 @@ def setup_model_routes(model_discovery):
         without clobbering the other.
         """
         owner = _require_endpoint_owner(request)
-        if _mimo_endpoint_provider(ep_id)[0]:
-            raise HTTPException(409, "Model visibility for this provider is managed by its connection")
+        _is_mimo_ep, _mimo_provider_id = _mimo_endpoint_provider(ep_id)
+        if _is_mimo_ep:
+            if not _mimo_provider_id:
+                raise HTTPException(
+                    409,
+                    "Automatic routing has no per-model visibility; "
+                    "manage the provider accounts instead",
+                )
+            body = await request.json()
+            if not isinstance(body, dict) or not isinstance(body.get("hidden"), list):
+                raise HTTPException(
+                    400, "Body must be a JSON object with a hidden list of model IDs"
+                )
+            hidden_count = _set_owner_hidden_mimo_models(
+                owner, _mimo_provider_id, body["hidden"]
+            )
+            _invalidate_models_cache(owner)
+            return {"id": ep_id, "hidden_count": hidden_count}
         db = SessionLocal()
         try:
             ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
@@ -3993,181 +4340,47 @@ def setup_model_routes(model_discovery):
 
     @router.get("/default-chat")
     def get_default_chat(request: Request):
-        _user = _model_owner(request)
-        settings = _load_settings()
-        if _user:
-            from routes.prefs_routes import _load_for_user
-            user_prefs = _load_for_user(_user) or {}
-            ep_id = str(user_prefs.get("default_endpoint_id") or "").strip()
-            model = str(user_prefs.get("default_model") or "").strip()
-            fallbacks = user_prefs.get("default_model_fallbacks") or []
-            if (
-                not ep_id
-                and not model
-                and (
-                    settings.get("share_defaults_with_users", False)
-                    or _request_is_admin(request, _user)
-                )
-            ):
-                ep_id = str(settings.get("default_endpoint_id") or "").strip()
-                model = str(settings.get("default_model") or "").strip()
-                fallbacks = settings.get("default_model_fallbacks") or []
-        else:
-            ep_id = str(settings.get("default_endpoint_id") or "").strip()
-            model = str(settings.get("default_model") or "").strip()
-            fallbacks = settings.get("default_model_fallbacks") or []
-
-        supervisor = getattr(request.app.state, "mimo_supervisor", None)
-        ensure_owner_mimo_worker(supervisor, _user)
-        allowed = _allowed_model_ids(request, _user)
-
-        def native_default(connection_id: str, desired_model: str):
-            canonical_id = normalize_mimo_connection_id(connection_id)
-            if canonical_id is None:
-                return None
-            models = mimo_connection_model_ids(
-                supervisor,
-                _user,
-                canonical_id,
-            )
-            if allowed is not None:
-                models = [item for item in models if item in allowed]
-            if not models:
-                return None
-            if desired_model in models:
-                selected = desired_model
-            else:
-                model_set = set(models)
-                base_models = [
-                    item
-                    for item in models
-                    if "/" not in item or item.rsplit("/", 1)[0] not in model_set
-                ]
-                pool = sorted(base_models or models)
-                selected = next(
-                    (
-                        item
-                        for item in pool
-                        if item.rsplit("/", 1)[-1] in {"mimo-auto", "auto"}
-                    ),
-                    pool[0],
-                )
-            return {
-                "endpoint_id": canonical_id,
-                "endpoint_url": "mimo://acp",
-                "model": selected,
-            }
-
-        candidates = [{"endpoint_id": ep_id, "model": model}]
-        candidates.extend(
-            item for item in fallbacks if isinstance(item, dict)
-        )
-
-        db = SessionLocal()
+        user = _model_owner(request)
+        owner = normalized_provider_owner(user)
+        allowed = _allowed_model_ids(request, user)
         try:
-            endpoints = _owned_endpoint_query(db, request).filter(
-                ModelEndpoint.is_enabled == True
-            ).all()
-            endpoints_by_id = {
-                str(getattr(endpoint, "id", "")): endpoint
-                for endpoint in endpoints
+            own_routes, shared_routes = list_chat_routes(user)
+            routes = [*own_routes, *shared_routes]
+            by_route_id = {route.model_route_id: route for route in routes}
+            bindings = [
+                binding
+                for binding in ProviderStore().list_route_bindings(owner=owner)
+                if binding.purpose == "chat"
+            ]
+        except (ProviderStoreError, ChatRouteUnavailable) as exc:
+            logger.error("Normalized default chat lookup failed: %s", exc)
+            raise HTTPException(503, "Default provider route is unavailable") from exc
+
+        ordered = []
+        seen = set()
+        for binding in bindings:
+            if not binding.enabled:
+                continue
+            route = by_route_id.get(binding.model_route_id)
+            if route is None or route.model_route_id in seen:
+                continue
+            ordered.append(route)
+            seen.add(route.model_route_id)
+        ordered.extend(
+            route for route in routes if route.model_route_id not in seen
+        )
+        for route in ordered:
+            if allowed is not None and (
+                route.provider_model_id not in allowed
+                and route.model_route_id not in allowed
+            ):
+                continue
+            return {
+                "endpoint_id": route.public_endpoint_id,
+                "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+                "model": route.provider_model_id,
             }
-
-            for candidate in candidates:
-                candidate_id = str(candidate.get("endpoint_id") or "").strip()
-                candidate_model = str(candidate.get("model") or "").strip()
-                from src.model_shares import (
-                    resolve_shared_model_access,
-                    runtime_model_for_access,
-                    share_id_from_endpoint,
-                )
-
-                if share_id_from_endpoint(candidate_id) is not None:
-                    access = resolve_shared_model_access(
-                        db,
-                        actor_owner=_user,
-                        endpoint_id=candidate_id,
-                        model_id=candidate_model or None,
-                    )
-                    if (
-                        access is not None
-                        and (allowed is None or access.model_id in allowed)
-                        and runtime_model_for_access(db, access) is not None
-                    ):
-                        return {
-                            "endpoint_id": candidate_id,
-                            "endpoint_url": "mimo://acp",
-                            "model": access.model_id,
-                        }
-                    continue
-                native = native_default(candidate_id, candidate_model)
-                if native is not None:
-                    return native
-                endpoint = endpoints_by_id.get(candidate_id)
-                if endpoint is None:
-                    continue
-                visible = _endpoint_visible_model_ids(endpoint)
-                if candidate_model and visible and candidate_model not in visible:
-                    continue
-                selected_model = candidate_model or (visible[0] if visible else "")
-                return {
-                    "endpoint_id": endpoint.id,
-                    "endpoint_url": build_chat_url(_normalize_base(endpoint.base_url)),
-                    "model": selected_model,
-                }
-
-            preferred_model = model
-            endpoint = _stable_endpoint_choice(
-                [
-                    candidate
-                    for candidate in endpoints
-                    if preferred_model
-                    and preferred_model in _endpoint_visible_model_ids(candidate)
-                ],
-                preferred_model,
-            )
-            if endpoint is not None:
-                return {
-                    "endpoint_id": endpoint.id,
-                    "endpoint_url": build_chat_url(_normalize_base(endpoint.base_url)),
-                    "model": preferred_model,
-                }
-
-            if preferred_model:
-                all_native = mimo_connection_model_ids(
-                    supervisor,
-                    _user,
-                    "mimo:auto",
-                )
-                if allowed is not None:
-                    all_native = [item for item in all_native if item in allowed]
-                if preferred_model in all_native:
-                    provider = (
-                        preferred_model.split("/", 1)[0]
-                        if "/" in preferred_model
-                        else "auto"
-                    )
-                    return {
-                        "endpoint_id": f"mimo:{provider}",
-                        "endpoint_url": "mimo://acp",
-                        "model": preferred_model,
-                    }
-
-            endpoint = _stable_endpoint_choice(endpoints)
-            if endpoint is not None:
-                visible = _endpoint_visible_model_ids(endpoint)
-                return {
-                    "endpoint_id": endpoint.id,
-                    "endpoint_url": build_chat_url(_normalize_base(endpoint.base_url)),
-                    "model": visible[0] if visible else "",
-                }
-
-            native = native_default("mimo:auto", "")
-            if native is not None:
-                return native
-            return {"endpoint_id": "", "endpoint_url": "", "model": ""}
-        finally:
-            db.close()
+        return {"endpoint_id": "", "endpoint_url": "", "model": ""}
 
     @router.get("/model-endpoints/{ep_id}/capabilities")
     def get_model_capabilities(ep_id: str, request: Request):
@@ -4450,7 +4663,7 @@ def setup_model_routes(model_discovery):
         return {"dependents": _settings_using_endpoint(ep_id, request)}
 
     @router.delete("/model-endpoints/{ep_id}")
-    def delete_model_endpoint(ep_id: str, request: Request):
+    async def delete_model_endpoint(ep_id: str, request: Request):
         owner = _require_endpoint_owner(request)
         if _mimo_endpoint_provider(ep_id)[0]:
             raise HTTPException(409, "Disconnect this provider instead of deleting it")
@@ -4467,15 +4680,22 @@ def setup_model_routes(model_discovery):
             cleared_sessions = _clear_sessions_for_endpoint(db, ep.base_url, ep.owner)
             cleared_loaded_sessions = _clear_loaded_sessions_for_endpoint(ep.base_url, ep.owner)
             auth_id = getattr(ep, "provider_auth_id", None)
-            share_ids = [
-                row.id
-                for row in db.query(ModelShare).filter(
-                    ModelShare.owner == owner,
-                    ModelShare.source_kind == "endpoint",
-                    ModelShare.source_id == ep_id,
-                ).all()
-            ]
+            shares = db.query(ModelShare).filter(
+                ModelShare.owner == owner,
+                ModelShare.source_kind == "endpoint",
+                ModelShare.source_id == ep_id,
+            ).all()
+            share_ids = [row.id for row in shares]
+            share_models = {row.id: row.model_id for row in shares}
+            revocations = []
             if share_ids:
+                revocations = [
+                    (grant.subscriber, grant.share_id, share_models[grant.share_id])
+                    for grant in db.query(ModelShareSubscription).filter(
+                        ModelShareSubscription.share_id.in_(share_ids),
+                        ModelShareSubscription.enabled == True,  # noqa: E712
+                    ).all()
+                ]
                 db.query(ModelShareSubscription).filter(
                     ModelShareSubscription.share_id.in_(share_ids)
                 ).delete(synchronize_session=False)
@@ -4487,6 +4707,8 @@ def setup_model_routes(model_discovery):
             db.commit()
             _invalidate_models_cache(None if share_ids else owner)
             _schedule_mimo_reprojection(request)
+            await revoke_shared_model_workers(request, revocations)
+            notify_shared_model_removals(revocations, shared_by=owner)
             _local_probe_cache.clear()
             return {
                 "deleted": True,
@@ -4503,15 +4725,78 @@ def setup_model_routes(model_discovery):
     # ── Tool management ──
 
     @router.get("/tools")
-    def list_tools():
+    async def list_tools(request: Request):
         """List all available tools with their enabled/disabled status."""
         from src.agent_tools import TOOL_TAGS
         settings = _load_settings()
         disabled = set(settings.get("disabled_tools", []))
         tools = []
         for tag in sorted(TOOL_TAGS):
-            tools.append({"id": tag, "enabled": tag not in disabled})
-        return {"tools": tools}
+            requested = tag not in disabled
+            tools.append({
+                "id": tag,
+                "source": "first-party-adapter",
+                "enabled": requested,
+                "requested_enabled": requested,
+                "effective_enabled": requested,
+                "availability": "disabled" if not requested else "available",
+                "reason": "Disabled by administrator" if not requested else "Registered first-party adapter",
+            })
+        native_ids = []
+        native_metadata = {}
+        native_status = "engine-stopped"
+        supervisor = getattr(getattr(request, "app", None), "state", None)
+        supervisor = getattr(supervisor, "mimo_supervisor", None)
+        try:
+            owner = str(effective_user(request) or "").strip().lower()
+            worker = supervisor.worker_for_owner(owner) if supervisor is not None else None
+            if worker is not None and worker.is_alive():
+                async with worker.internal_http_client(timeout=2.0) as client:
+                    response = await client.get("/experimental/tool/metadata")
+                    if response.is_success:
+                        payload = response.json()
+                        rows = payload if isinstance(payload, list) else payload.get("tools", [])
+                        native_metadata = {str(item.get("id")): item for item in rows if isinstance(item, dict) and str(item.get("id", "")).strip()}
+                        native_ids = sorted(native_metadata)
+                        native_status = "fresh"
+                    else:
+                        # Older managed workers expose IDs only; keep their
+                        # projection truthful while marking metadata unavailable.
+                        response = await client.get("/experimental/tool/ids")
+                        if response.is_success:
+                            payload = response.json()
+                            native_ids = sorted({str(item) for item in (payload if isinstance(payload, list) else payload.get("ids", [])) if str(item).strip()})
+                            native_status = "ids-only"
+                        else:
+                            native_status = "engine-query-failed"
+        except Exception:
+            native_status = "engine-query-unavailable"
+        known = {item["id"] for item in tools}
+        for tag in native_ids:
+            if tag in known:
+                continue
+            requested = tag not in disabled
+            metadata = native_metadata.get(tag, {})
+            registered = metadata.get("registered", True)
+            effective = bool(requested and registered)
+            tools.append({
+                "id": tag,
+                "source": metadata.get("source", "native-registry"),
+                "enabled": requested,
+                "requested_enabled": requested,
+                "effective_enabled": effective,
+                "availability": "disabled" if not requested else "available" if registered else "unavailable",
+                "reason": "Disabled by administrator" if not requested else metadata.get("reason", "Registered by the running native engine") if registered else "Not registered by the running native engine",
+            })
+        tools.sort(key=lambda item: item["id"])
+        return {
+            "tools": tools,
+            "catalog": {
+                "source": "native-registry+first-party-adapter",
+                "freshness": native_status,
+                "native_registry": "engine-owned; IDs are queried from the running managed engine",
+            },
+        }
 
     class ToolsUpdate(BaseModel):
         disabled: list = []

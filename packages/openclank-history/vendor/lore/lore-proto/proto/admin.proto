@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package urc.rpc;
+
+import "model.proto";
+
+service AdminService {
+  rpc ServerInfo(urc.rpc.ServerInfoRequest)
+    returns (urc.rpc.ServerInfoResponse);
+    rpc Obliterate(urc.model.ObliterateRequest) returns (urc.model.ObliterateResponse);
+}
+
+message ServerInfoRequest {}
+
+message HostInfo {
+  string arch = 1;
+  string cpu = 2;
+  string ram = 3;
+  string hostname = 4;
+  string environment = 5;
+}
+
+message ServerInfoResponse {
+  string version = 1;
+  repeated string features = 2;
+  map<string, string> settings = 3;
+  HostInfo host = 4;
+}

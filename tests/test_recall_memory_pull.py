@@ -131,12 +131,14 @@ class TestLaneRegistration:
         assert "recall_memory" in BUILTIN_TOOL_DESCRIPTIONS
         assert "recall_memory" in known_tool_names()
 
-    def test_no_generic_chat_branch_survives(self):
+    def test_chat_mode_is_read_only_not_a_generic_lane(self):
         import pathlib
 
         source = pathlib.Path("routes/chat_routes.py").read_text()
-        assert 'requested_mode == "chat"' in source
-        assert 'Chat mode was removed' in source
+        # Chat mode returned as a read-only lane (QOL-pass slice 3) — it
+        # shares plan mode's fail-closed tool gate; the old generic chat
+        # branch with its own tool subsetting stays gone.
+        assert "chat_mode_disabled_tools" in source
         assert 'relevant_tools={"recall_memory"}' not in source
 
     def test_memory_pull_remains_a_registered_read_only_agent_tool(self):

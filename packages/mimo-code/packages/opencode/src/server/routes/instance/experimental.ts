@@ -157,6 +157,35 @@ export const ExperimentalRoutes = lazy(() =>
         }),
     )
     .get(
+      "/tool/metadata",
+      describeRoute({
+        summary: "List authoritative tool metadata",
+        description: "Return registry-owned IDs, source and registration state for Settings projection.",
+        operationId: "tool.metadata",
+        responses: {
+          200: {
+            description: "Tool metadata",
+            content: {
+              "application/json": {
+                schema: resolver(z.array(z.object({
+                  id: z.string(),
+                  source: z.enum(["builtin", "extension"]),
+                  registered: z.boolean(),
+                  reason: z.string(),
+                }))),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      async (c) =>
+        jsonRequest("ExperimentalRoutes.tool.metadata", c, function* () {
+          const registry = yield* ToolRegistry.Service
+          return yield* registry.metadata()
+        }),
+    )
+    .get(
       "/tool",
       describeRoute({
         summary: "List tools",

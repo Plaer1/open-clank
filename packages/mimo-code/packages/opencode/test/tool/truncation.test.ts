@@ -243,7 +243,7 @@ describe("Truncate", () => {
   describe("cleanup", () => {
     const DAY_MS = 24 * 60 * 60 * 1000
 
-    it.live("deletes files older than 7 days and preserves recent files", () =>
+    it.live("deletes expired and orphaned files while preserving recent owned files", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const fs = yield* FileSystem.FileSystem
@@ -251,14 +251,97 @@ describe("Truncate", () => {
         yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
 
         const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
-        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        const orphan = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        const corrupt = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now()))
+        const recent = yield* svc.write("recent content", {
+          owner: "local",
+          workspace: ROOT,
+          sessionID: "recent-session",
+        })
 
         yield* writeFileStringScoped(old, "old content")
-        yield* writeFileStringScoped(recent, "recent content")
+        yield* writeFileStringScoped(orphan, "orphan content")
+        yield* writeFileStringScoped(corrupt, "corrupt pair")
+        yield* writeFileStringScoped(corrupt + ".meta.json", "{not-json")
         yield* svc.cleanup()
 
         expect(yield* fs.exists(old)).toBe(false)
+        expect(yield* fs.exists(orphan)).toBe(false)
         expect(yield* fs.exists(recent)).toBe(true)
+        expect(yield* fs.exists(corrupt)).toBe(false)
+        expect(yield* fs.exists(corrupt + ".meta.json")).toBe(false)
+      }),
+    )
+  })
+
+  describe("ownership and deletion", () => {
+    it.live("writes atomic owner, workspace, and session metadata", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const fs = yield* FileSystem.FileSystem
+        const workspace = path.join(ROOT, "test-workspace")
+        const output = yield* svc.write("retained output", {
+          owner: "Alice",
+          workspace,
+          sessionID: "session-owned",
+          callID: "call-owned",
+        })
+
+        expect(yield* fs.exists(output)).toBe(true)
+        expect(yield* fs.exists(output + ".meta.json")).toBe(true)
+        const metadata = JSON.parse(yield* fs.readFileString(output + ".meta.json"))
+        expect(metadata).toMatchObject({
+          version: 1,
+          output: path.basename(output),
+          owner: "alice",
+          workspace: path.resolve(workspace),
+          sessionID: "session-owned",
+          callID: "call-owned",
+        })
+
+        expect(
+          yield* svc.remove(output, {
+            owner: "bob",
+            sessionID: "session-owned",
+          }),
+        ).toBe(false)
+        expect(yield* fs.exists(output)).toBe(true)
+        expect(
+          yield* svc.remove(output, {
+            owner: "alice",
+            sessionID: "session-owned",
+          }),
+        ).toBe(true)
+        expect(yield* fs.exists(output)).toBe(false)
+        expect(yield* fs.exists(output + ".meta.json")).toBe(false)
+      }),
+    )
+
+    it.live("session cleanup removes only the exact owner scope", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const fs = yield* FileSystem.FileSystem
+        const alice = yield* svc.write("alice output", {
+          owner: "alice",
+          workspace: ROOT,
+          sessionID: "session-cleanup",
+        })
+        const bob = yield* svc.write("bob output", {
+          owner: "bob",
+          workspace: ROOT,
+          sessionID: "session-cleanup",
+        })
+
+        expect(yield* svc.removeSession("session-cleanup", "alice")).toBe(1)
+        expect(yield* fs.exists(alice)).toBe(false)
+        expect(yield* fs.exists(alice + ".meta.json")).toBe(false)
+        expect(yield* fs.exists(bob)).toBe(true)
+        expect(
+          yield* svc.remove(bob, {
+            owner: "bob",
+            sessionID: "session-cleanup",
+          }),
+        ).toBe(true)
       }),
     )
   })

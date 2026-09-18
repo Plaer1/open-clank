@@ -9,10 +9,47 @@ for an orchestrator readiness probe (200 only when every critical check passes).
 import os
 import uuid
 from datetime import datetime
-from typing import Dict
+from typing import Any, Callable, Dict
 
 
-def check_readiness() -> Dict[str, object]:
+def _engine_readiness(engine_verifier: Callable[[], Any] | None = None) -> Dict[str, object]:
+    try:
+        if engine_verifier is None:
+            from core.constants import APP_VERSION
+            from src.openclank.engine_build import source_fingerprint, verify_install
+            from pathlib import Path
+
+            repository = Path(__file__).resolve().parents[1]
+            vendor = repository / "packages" / "mimo-code"
+            # Source installs bind readiness to the tracked vendor tree. Frozen
+            # packages do not ship that build tree: the pre-app portable
+            # checksum/provenance gate binds the exact source fingerprint before
+            # this lighter in-process readiness check runs.
+            source = source_fingerprint(vendor) if vendor.is_dir() else None
+            verification = verify_install(
+                expected_version=APP_VERSION,
+                expected_source_sha256=source,
+                run_smoke=False,
+                acp_smoke=False,
+            )
+        else:
+            verification = engine_verifier()
+        return {
+            "ok": bool(getattr(verification, "ok", False)),
+            "version": getattr(verification, "version", None),
+            "target": getattr(verification, "target", None),
+            "source_sha256": getattr(verification, "source_sha256", None),
+            "errors": list(getattr(verification, "errors", ()) or ()),
+        }
+    except Exception as exc:
+        return {"ok": False, "errors": [str(exc)]}
+
+
+def check_readiness(
+    *,
+    engine_verifier: Callable[[], Any] | None = None,
+    supervisor: Any | None = None,
+) -> Dict[str, object]:
     """Run the readiness checks and return a JSON-serialisable report.
 
     ``ready`` is True only when every critical check (database, data_dir) passes.
@@ -24,6 +61,11 @@ def check_readiness() -> Dict[str, object]:
     from sqlalchemy import text as sql_text
 
     checks: Dict[str, Dict[str, object]] = {}
+
+    # The managed engine is an installation invariant, not an optional model
+    # integration.  Hash/version/schema checks are repeated here without
+    # spawning another ACP child; startup performs the full handshake smoke.
+    checks["engine"] = _engine_readiness(engine_verifier)
 
     # Database reachable — the simplest honest probe that the engine is live.
     try:
@@ -51,6 +93,18 @@ def check_readiness() -> Dict[str, object]:
         or "127.0.0.1" in DATABASE_URL
     )
     checks["local_first"] = {"ok": True, "local": local_first}
+
+    if supervisor is None:
+        checks["engine_supervisor"] = {
+            "ok": False,
+            "error": "managed engine supervisor is not initialized",
+        }
+    else:
+        try:
+            snapshot = supervisor.readiness()
+            checks["engine_supervisor"] = dict(snapshot)
+        except Exception as exc:
+            checks["engine_supervisor"] = {"ok": False, "error": str(exc)}
 
     ready = all(bool(c.get("ok")) for c in checks.values())
     return {

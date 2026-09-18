@@ -1,32 +1,38 @@
 """lifetools_server.py — MCP bridge exposing Open Clank life-tools.
 
 Per-session spawned server (env-baked context). Exposes all FUNCTION_TOOL_SCHEMAS
-minus the Phase 2 exclusion set (9 coding-overlap + web_search/web_fetch/ask_user/
-update_plan). Tools surface as lifetools:<tool> in mimo via the sanitized namespace.
+minus direct process/unbrokered native overlaps and ACP-internal tools. File
+read/write/edit/list/search are the Rust-backed AgentScope lane and surface as
+lifetools:<tool>; mimo's direct OS implementations stay disabled.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
+from typing import Any
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
-
-# Add the Open Clank source root for tool_schemas/tool_execution imports.
+# This file is launched directly by the per-session MCP descriptor.  In that
+# mode Python adds ``src/openclank`` (not the repository root) to sys.path, so
+# every ``src.*`` import below would fail unless the root is installed first.
 _OPEN_CLANK_ROOT = Path(__file__).resolve().parents[2]
-if _OPEN_CLANK_ROOT.exists():
+if _OPEN_CLANK_ROOT.exists() and str(_OPEN_CLANK_ROOT) not in sys.path:
     sys.path.insert(0, str(_OPEN_CLANK_ROOT))
+
+from mcp.server.stdio import stdio_server
+from mcp.types import CallToolResult, Tool, TextContent
+
+from src.openclank.mcp_tool_server import ToolServer
 
 from src.tool_schemas import (
     FUNCTION_TOOL_SCHEMAS,
     OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS,
     function_call_to_tool_block,
 )
+from src.frankenmemory_provider import BROKER_MEMORY_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -44,27 +50,95 @@ _ALL_EXCLUDED = OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS | _BRIDGE_EXTRA_EXCLUDED
 # Session context from env (baked at spawn time)
 _SESSION_ID = os.environ.get("SESSION_ID", "")
 _OWNER = os.environ.get("OWNER", "")
+_SKILL_OWNER = (
+    os.environ.get("OPEN_CLANK_SKILL_OWNER", "").strip()
+    if "OPEN_CLANK_SKILL_OWNER" in os.environ
+    else _OWNER.strip()
+)
 _WORKSPACE = os.environ.get("WORKSPACE", "")
+_AUTHORITY_WORKSPACE_ID = os.environ.get(
+    "OPEN_CLANK_AUTHORITY_WORKSPACE_ID", ""
+).strip()
+_COPAL_WORKSPACE = os.environ.get("COPAL_WORKSPACE", "default").strip() or "default"
 _MEMORY_PROVIDER = None
+_MEMORY_LIFECYCLE = None
 _MEMORY_PROVIDER_LOCK = None
+_MEMORY_RECONCILE_LOCK = None
+_MEMORY_RECONCILED_LIFECYCLE = None
 
-# Skill usage sidecar — direct write to Open Clank's _usage.json.
-# Open Clank and this MCP server share the filesystem. Open Clank reads
-# _usage.json on every load; we just append. JSON isn't safe for
-# concurrent writes, but the risk is a lost increment (not corruption)
-# because odysseus reads with json.load which is atomic-enough on small
-# files. Best-effort, fail-open.
-_USAGE_FILE = str(
-    Path(
+_PROJECT_MUTATION_POLICY_TOOL = "project_mutation_policy"
+
+_EXPLICIT_SKILLS_DIR = os.getenv("OPEN_CLANK_SKILLS_DIR", "").strip()
+_DATA_DIR = str(
+    Path(_EXPLICIT_SKILLS_DIR).parent
+    if _EXPLICIT_SKILLS_DIR
+    else Path(
         os.getenv("OPEN_CLANK_DATA_DIR")
         or os.getenv("ODYSSEUS_DATA_DIR")
         or _OPEN_CLANK_ROOT / "data"
     )
-    / "skills"
-    / "_usage.json"
 )
 
-server = Server("lifetools")
+server = ToolServer("lifetools")
+
+
+def _render_search_identity(result: Any, *, owner: str, workspace_id: str) -> None:
+    """Render reserved identity tokens in a search projection, never storage.
+
+    MiMo consumes the private broker's ``search`` wire directly.  Keep a raw
+    companion for diagnostics/edit round-trips while making the ordinary
+    snippet say the Handler's current reviewed name instead of ``%USER%``.
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        return
+    try:
+        from services.memory.principal_context import (
+            render_identity_template,
+            resolve_handler_display_label,
+        )
+
+        label_kwargs: dict[str, Any] = {"workspace_id": workspace_id or None}
+        configured_db = os.environ.get("FM_DB_PATH", "").strip()
+        if configured_db:
+            label_kwargs["db_path"] = configured_db
+        label = resolve_handler_display_label(owner, **label_kwargs)
+    except Exception:
+        logger.debug("lifetools search identity rendering unavailable", exc_info=True)
+        return
+    for hit in result["results"]:
+        record = hit.get("record") if isinstance(hit, dict) else None
+        if not isinstance(record, dict):
+            continue
+        content = record.get("content")
+        if not isinstance(content, str) or "%" not in content:
+            continue
+        rendered = render_identity_template(content, handler_label=label)
+        if rendered != content:
+            record["raw_content"] = content
+            record["content"] = rendered
+
+
+async def _ensure_memory_lifecycle_reconciled() -> None:
+    """Reconcile shared lifecycle journals once per installed coordinator."""
+    global _MEMORY_RECONCILE_LOCK, _MEMORY_RECONCILED_LIFECYCLE
+
+    lifecycle = _MEMORY_LIFECYCLE
+    if lifecycle is None or _MEMORY_RECONCILED_LIFECYCLE is lifecycle:
+        return
+    if _MEMORY_RECONCILE_LOCK is None:
+        _MEMORY_RECONCILE_LOCK = asyncio.Lock()
+    async with _MEMORY_RECONCILE_LOCK:
+        lifecycle = _MEMORY_LIFECYCLE
+        if lifecycle is None or _MEMORY_RECONCILED_LIFECYCLE is lifecycle:
+            return
+        reconcile = getattr(lifecycle, "reconcile", None)
+        if callable(reconcile):
+            counts = await reconcile()
+            if isinstance(counts, dict) and int(counts.get("errors") or 0):
+                raise RuntimeError(
+                    "memory lifecycle reconciliation has unresolved errors"
+                )
+        _MEMORY_RECONCILED_LIFECYCLE = lifecycle
 
 
 def _build_tool_list() -> list[Tool]:
@@ -114,28 +188,49 @@ _RECALL_MEMORY_TOOL = Tool(
 # A1.3: dedicated usage-recording tool — not from FUNCTION_TOOL_SCHEMAS.
 _RECORD_USAGE_TOOL = Tool(
     name="record_skill_usage",
-    description="Record that a skill was loaded/used. Called by mimo's skill tool after loading a skill body. Best-effort; failures are silently ignored.",
+    description="Validate and record an exact active Open Clank skill revision.",
     inputSchema={
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "The skill name (slug)"},
-            "owner": {"type": "string", "description": "The skill owner (optional)"},
+            "skill_id": {"type": "string"},
+            "revision": {"type": "integer", "minimum": 1},
+            "content_hash": {"type": "string"},
         },
-        "required": ["name"],
+        "required": ["name", "skill_id", "revision", "content_hash"],
     },
 )
 
-
+# Internal memory contract used by MiMo's memory layer. These names are
+# intentionally absent from list_tools(): the model sees the friendly
+# recall/manage tools, while trusted runtime plumbing reuses the already
+# connected lifetools transport instead of spawning another fm-mcp process.
 async def _ensure_memory_provider():
     """Install one owner-scoped Frankenmemory provider in this MCP process."""
-    global _MEMORY_PROVIDER, _MEMORY_PROVIDER_LOCK
+    global _MEMORY_LIFECYCLE, _MEMORY_PROVIDER, _MEMORY_PROVIDER_LOCK
 
     if not _OWNER.strip():
         raise RuntimeError("lifetools memory requires an authenticated owner")
     if _MEMORY_PROVIDER is not None:
+        if _MEMORY_LIFECYCLE is None:
+            from services.memory.forget_coordinator import (
+                MemoryLifecycleCoordinator,
+            )
+            from services.memory.skills import SkillsManager
+
+            _MEMORY_LIFECYCLE = MemoryLifecycleCoordinator(
+                _MEMORY_PROVIDER,
+                SkillsManager(_DATA_DIR),
+                skill_owner=_SKILL_OWNER,
+            )
         from src.ai_interaction import set_memory_manager
 
-        set_memory_manager(None, provider=_MEMORY_PROVIDER)
+        set_memory_manager(
+            None,
+            provider=_MEMORY_PROVIDER,
+            lifecycle=_MEMORY_LIFECYCLE,
+        )
+        await _ensure_memory_lifecycle_reconciled()
         return _MEMORY_PROVIDER
 
     if _MEMORY_PROVIDER_LOCK is None:
@@ -165,10 +260,25 @@ async def _ensure_memory_provider():
             )
             await provider.initialize()
             _MEMORY_PROVIDER = provider
+            from services.memory.forget_coordinator import (
+                MemoryLifecycleCoordinator,
+            )
+            from services.memory.skills import SkillsManager
+
+            _MEMORY_LIFECYCLE = MemoryLifecycleCoordinator(
+                provider,
+                SkillsManager(_DATA_DIR),
+                skill_owner=_SKILL_OWNER,
+            )
 
         from src.ai_interaction import set_memory_manager
 
-        set_memory_manager(None, provider=_MEMORY_PROVIDER)
+        set_memory_manager(
+            None,
+            provider=_MEMORY_PROVIDER,
+            lifecycle=_MEMORY_LIFECYCLE,
+        )
+        await _ensure_memory_lifecycle_reconciled()
         return _MEMORY_PROVIDER
 
 
@@ -189,25 +299,55 @@ def _structured_memory_block(name: str, arguments: dict):
     raise ValueError(f"Unsupported structured memory tool: {name}")
 
 
-def _record_usage(name: str, owner: str = "") -> None:
-    """Best-effort write to odysseus _usage.json sidecar."""
+def _record_usage(
+    name: str,
+    *,
+    skill_id: str = "",
+    revision: int | None = None,
+    content_hash: str = "",
+) -> dict:
+    """Record usage through the owner-scoped immutable lifecycle contract."""
     try:
-        usage = {}
-        if os.path.exists(_USAGE_FILE):
-            with open(_USAGE_FILE, encoding="utf-8") as f:
-                usage = json.load(f)
-            if not isinstance(usage, dict):
-                usage = {}
-        key = f"{owner}::{name}" if owner else name
-        entry = usage.setdefault(key, {"uses": 0, "last_used": None})
-        entry["uses"] = int(entry.get("uses", 0)) + 1
-        entry["last_used"] = int(time.time())
-        tmp = _USAGE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(usage, f, indent=2)
-        os.replace(tmp, _USAGE_FILE)
+        if not _OWNER.strip() or not str(name or "").strip():
+            return {"ok": False}
+        from services.memory.skills import SkillsManager
+
+        manager = SkillsManager(_DATA_DIR)
+        requested = str(name).strip()
+        expected_id = str(skill_id or "").strip()
+        expected_hash = str(content_hash or "").strip()
+        if not expected_id or revision is None or not expected_hash:
+            return {"ok": False}
+        skill = next(
+            (
+                row for row in manager.load_published(owner=_SKILL_OWNER)
+                if requested in (
+                    str(row.get("name") or ""),
+                    str(row.get("skill_id") or ""),
+                )
+            ),
+            None,
+        )
+        if skill is None:
+            return {"ok": False}
+        if (
+            expected_id != str(skill.get("skill_id") or "")
+        ) or (
+            int(revision) != int(skill["revision"])
+        ) or (
+            expected_hash != str(skill.get("content_hash") or "")
+        ):
+            return {"ok": False}
+        result = manager.record_active_use(
+            str(skill.get("skill_id") or skill["name"]),
+            owner=_SKILL_OWNER,
+            revision=int(revision),
+            content_hash=expected_hash,
+        )
+        return result or {"ok": False}
     except Exception as e:
         logger.debug("record_skill_usage failed (non-fatal): %s", e)
+        return {"ok": False}
 
 
 @server.list_tools()
@@ -216,11 +356,257 @@ async def list_tools() -> list[Tool]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def call_tool(
+    name: str, arguments: dict
+) -> list[TextContent] | CallToolResult:
+    # Private runtime bridge used by MiMo's native mutators.  It is deliberately
+    # absent from list_tools(): the model cannot select scope or invoke policy;
+    # the session-bound tool implementations submit exact candidate bytes.
+    if name == _PROJECT_MUTATION_POLICY_TOOL:
+        try:
+            if not _OWNER.strip() or not _WORKSPACE.strip():
+                raise PermissionError(
+                    "project policy requires an authenticated owner and workspace"
+                )
+            mode = str((arguments or {}).get("mode") or "").strip()
+            from src.constants import FM_DB_PATH
+
+            if mode == "files":
+                from src.project_hex import validate_registered_project_candidates
+
+                rows = (arguments or {}).get("candidates")
+                if not isinstance(rows, list) or not rows:
+                    raise ValueError("file policy requires exact candidates")
+                candidates = {}
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError("file policy candidate must be an object")
+                    path = str(row.get("path") or "").strip()
+                    if not path or path in candidates:
+                        raise ValueError("file policy candidate path is missing or duplicated")
+                    if row.get("deleted") is True:
+                        if row.get("content_base64") is not None:
+                            raise ValueError("deleted candidate cannot include content")
+                        candidates[path] = None
+                        continue
+                    encoded = row.get("content_base64")
+                    if not isinstance(encoded, str):
+                        raise ValueError("file policy candidate content is missing")
+                    candidates[path] = base64.b64decode(encoded, validate=True)
+                result = validate_registered_project_candidates(
+                    owner=_OWNER.strip(),
+                    workspace=_WORKSPACE,
+                    db_path=FM_DB_PATH,
+                    candidates=candidates,
+                )
+            elif mode == "shell":
+                from src.project_hex import inspect_registered_project_mutation_policy
+
+                result = inspect_registered_project_mutation_policy(
+                    owner=_OWNER.strip(),
+                    workspace=_WORKSPACE,
+                    db_path=FM_DB_PATH,
+                )
+                result = {
+                    **result,
+                    "allowed": not bool(result.get("enforced")),
+                    "reason": (
+                        "active project policy blocks MiMo shell execution; use native file tools"
+                        if result.get("enforced")
+                        else ""
+                    ),
+                }
+            else:
+                raise ValueError("project policy mode must be files or shell")
+            from src.project_hex import global_policy_context
+
+            # This is a policy/system projection, never a memory or RAG hit.
+            # Keep it alongside the private mutation response so the agent can
+            # explain the canonical boundary without being able to alter it.
+            result = {
+                **result,
+                "policy_context": global_policy_context(
+                    owner=_OWNER.strip(),
+                    workspace=_WORKSPACE,
+                    db_path=FM_DB_PATH,
+                ),
+            }
+        except Exception as exc:
+            logger.error("lifetools project policy dispatch failed: %s", exc)
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"error": "project policy unavailable", "exit_code": 1}
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+        return [TextContent(type="text", text=json.dumps(result))]
+
     # A1.3: handle usage recording directly (not via execute_tool_block)
     if name == "record_skill_usage":
-        _record_usage(arguments.get("name", ""), arguments.get("owner", _OWNER))
-        return [TextContent(type="text", text=json.dumps({"ok": True}))]
+        result = _record_usage(
+            arguments.get("name", ""),
+            skill_id=arguments.get("skill_id", ""),
+            revision=arguments.get("revision"),
+            content_hash=arguments.get("content_hash", ""),
+        )
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if name in BROKER_MEMORY_TOOLS:
+        try:
+            provider = await _ensure_memory_provider()
+            scoped = dict(arguments or {})
+            requested_owner = str(scoped.get("owner") or "").strip()
+            requested_workspace = str(scoped.get("workspace_id") or "").strip()
+            from src.memory_scope import chat_workspace
+
+            expected_workspace = (
+                os.environ.get("FM_WORKSPACE_ID", "").strip()
+                or chat_workspace()
+            )
+            if requested_owner and requested_owner != _OWNER:
+                raise PermissionError("memory owner does not match the lifetools session")
+            if (
+                requested_workspace
+                and expected_workspace
+                and requested_workspace != expected_workspace
+            ):
+                raise PermissionError(
+                    "memory workspace does not match the lifetools session"
+                )
+            if name != "memory_quality":
+                scoped["owner"] = _OWNER
+                scoped["workspace_id"] = expected_workspace
+            elif bool(scoped.get("rebuild_graph_fts")):
+                raise PermissionError(
+                    "global memory maintenance is unavailable through a session bridge"
+                )
+            if name == "delete_memory":
+                result = await _MEMORY_LIFECYCLE.delete(
+                    str(scoped.get("id") or ""),
+                    owner=_OWNER,
+                    workspace_id=expected_workspace or None,
+                )
+                result = {"deleted": result is not None, "result": result}
+            elif name == "review_candidate":
+                if not isinstance(scoped.get("accept"), bool):
+                    raise ValueError("candidate review requires a boolean accept value")
+                result = await provider.review_candidate(
+                    str(scoped.get("id") or ""),
+                    accept=scoped["accept"],
+                    reason=str(scoped.get("reason") or "reviewed_by_agent"),
+                    owner=_OWNER,
+                    workspace_id=expected_workspace,
+                )
+            elif name == "update_candidate":
+                candidate = await provider.update_candidate(
+                    str(scoped.get("id") or ""),
+                    text=str(scoped.get("content") or ""),
+                    category=scoped.get("category"),
+                    reason=str(scoped.get("reason") or "edited_by_agent"),
+                    owner=_OWNER,
+                    workspace_id=expected_workspace,
+                )
+                result = {"updated": True, "candidate": candidate}
+            elif name == "resolve_memory":
+                resolved = await provider.resolve_question(
+                    str(scoped.get("id") or ""),
+                    answer=str(scoped.get("answer") or "").strip() or None,
+                    resolved_by=str(scoped.get("resolved_by") or "").strip() or None,
+                    expected_revision=scoped.get("expected_revision"),
+                    owner=_OWNER,
+                )
+                result = {"resolved": bool(resolved)}
+            elif name == "reopen_memory":
+                expected_revision = scoped.get("expected_revision")
+                if expected_revision is None:
+                    detail = await provider.versioned_detail(
+                        str(scoped.get("id") or ""), owner=_OWNER
+                    )
+                    expected_revision = detail["current_revision"]
+                detail = await provider.reopen_question(
+                    str(scoped.get("id") or ""),
+                    expected_revision=int(expected_revision),
+                    owner=_OWNER,
+                )
+                result = {"reopened": True, "memory": detail}
+            elif name == "memory_forget":
+                result = await _MEMORY_LIFECYCLE.forget(
+                    str(scoped.get("action") or ""),
+                    owner=_OWNER,
+                    workspace_id=expected_workspace or None,
+                    selector_kind=scoped.get("selector_kind"),
+                    selector=scoped.get("selector"),
+                    preview_token=scoped.get("preview_token"),
+                    tombstone_id=scoped.get("tombstone_id"),
+                    operation_id=scoped.get("operation_id"),
+                )
+            elif name == "memory_retention" and scoped.get("action") in {
+                "preview_expire",
+                "expire",
+                "status",
+            }:
+                action = str(scoped.get("action"))
+                if action == "expire" and not scoped.get("preview_token"):
+                    result = await _MEMORY_LIFECYCLE.expire_retention(
+                        owner=_OWNER,
+                        workspace_id=expected_workspace,
+                    )
+                else:
+                    result = await _MEMORY_LIFECYCLE.retention(
+                        action,
+                        owner=_OWNER,
+                        workspace_id=expected_workspace,
+                        preview_token=scoped.get("preview_token"),
+                        operation_id=scoped.get("operation_id"),
+                    )
+            elif (
+                name == "owner_lifecycle"
+                and scoped.get("action") in {"purge", "rename"}
+            ):
+                raise PermissionError(
+                    "owner mutation is unavailable through a session bridge"
+                )
+            else:
+                result = await provider.invoke_tool(name, scoped)
+                if name == "search":
+                    _render_search_identity(
+                        result,
+                        owner=_OWNER,
+                        workspace_id=expected_workspace,
+                    )
+        except Exception as exc:
+            logger.error("lifetools memory dispatch error for %s: %s", name, exc)
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"error": "memory transport failed", "exit_code": 1}
+                        ),
+                    )
+                ],
+                isError=True,
+            )
+        return [TextContent(type="text", text=json.dumps(result))]
+
+    if name in {"read_copal", "manage_copal"}:
+        scoped = dict(arguments or {})
+        requested_workspace = str(scoped.get("workspace") or "").strip()
+        if requested_workspace and requested_workspace != _COPAL_WORKSPACE:
+            return [TextContent(text=json.dumps({
+                "error": "Copal workspace does not match the execution's pinned workspace",
+                "code": "copal_workspace_mismatch",
+                "expected": _COPAL_WORKSPACE,
+                "received": requested_workspace,
+                "exit_code": 1,
+            }))]
+        scoped["workspace"] = _COPAL_WORKSPACE
+        arguments = scoped
 
     from src.tool_execution import execute_tool_block
 
@@ -244,6 +630,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             disabled_tools=set(),  # mimo is the sole permission gate
             owner=_OWNER,
             workspace=_WORKSPACE,
+            authority_workspace_id=_AUTHORITY_WORKSPACE_ID,
+            copal_workspace=_COPAL_WORKSPACE,
         )
     except Exception as e:
         logger.error("lifetools dispatch error for %s: %s", name, e, exc_info=True)

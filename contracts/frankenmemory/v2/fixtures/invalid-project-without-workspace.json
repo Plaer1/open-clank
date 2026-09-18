@@ -1,0 +1,5 @@
+{
+  "contract_version": "frankenmemory.v2",
+  "operation": "scope.resolve",
+  "scope": {"owner_id": "owner-e", "workspace_id": null, "project_id": "project-without-workspace"}
+}

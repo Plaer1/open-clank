@@ -6,6 +6,12 @@ import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
 import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
+// Shared secondary attribution remains available to callers as `Shared by ${sharedBy}`.
+import {
   catalogHasModelChoice,
   catalogEntries,
   modelChoiceKey,
@@ -25,6 +31,27 @@ const RECENT_MAX = 5;
 // Catalogs at or below this size are small enough that hiding everything
 // behind search would be a regression — keep listing them in browse mode.
 const BROWSE_ALL_LIMIT = 12;
+const PRESET_LABELS = Object.freeze({
+  standard: 'Standard',
+  fast: 'Fast preset',
+  pro: 'Pro preset',
+});
+const PRESET_ORDER = Object.freeze({ standard: 0, fast: 1, pro: 2 });
+const THINKING_LABELS = Object.freeze({
+  default: 'Default',
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Maximum',
+  ultra: 'Ultra',
+});
+const THINKING_ORDER = Object.freeze({
+  default: 0, none: 1, minimal: 2, low: 3, medium: 4,
+  high: 5, xhigh: 6, max: 7, ultra: 8,
+});
 
 function _loadList(key) {
   try {
@@ -69,6 +96,49 @@ function _pickerModelKey(m) {
   return `${m.endpointId || m.url || m.epName || 'model'}::${m.mid || ''}`;
 }
 
+function _modelFamilyKey(m) {
+  const baseModelId = m?.baseModelId || m?.mid || '';
+  return `${m?.endpointId || m?.url || 'model'}::${baseModelId}`;
+}
+
+function _groupModelChoices(models) {
+  const groups = new Map();
+  (models || []).forEach(model => {
+    const key = _modelFamilyKey(model);
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, baseModelId: model.baseModelId || model.mid, choices: [] };
+      groups.set(key, group);
+    }
+    group.choices.push(model);
+  });
+  return [...groups.values()].map(group => {
+    const base = group.choices.find(choice => (
+      choice.mid === group.baseModelId && !choice.preset && !choice.variant
+    )) || group.choices.find(choice => !choice.preset && !choice.variant)
+      || group.choices[0];
+    return { ...base, ...group, display: base.display, choices: group.choices };
+  });
+}
+
+function _presetKey(choice) {
+  return String(choice?.preset || 'standard').toLowerCase();
+}
+
+function _variantKey(choice) {
+  return String(choice?.variant || 'default').toLowerCase();
+}
+
+function _presetLabel(value) {
+  const key = String(value || 'standard').toLowerCase();
+  return PRESET_LABELS[key] || key.replace(/[-_]+/g, ' ').replace(/^./, letter => letter.toUpperCase());
+}
+
+function _thinkingLabel(value) {
+  const key = String(value || 'default').toLowerCase();
+  return THINKING_LABELS[key] || key.replace(/[-_]+/g, ' ').replace(/^./, letter => letter.toUpperCase());
+}
+
 // ── Shared keyboard nav for model pickers ──
 function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
   if (e.key === 'Escape') { closeFn(); return; }
@@ -80,7 +150,9 @@ function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
   }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
-    const items = [...listEl.querySelectorAll(itemSelector)].filter(el => el.style.display !== 'none');
+    const items = [...listEl.querySelectorAll(itemSelector)].filter(el => (
+      el.style.display !== 'none' && !el.hidden && !el.closest('[hidden]')
+    ));
     if (!items.length) return;
     const cur = items.findIndex(el => el.classList.contains('kb-active'));
     items.forEach(el => el.classList.remove('kb-active'));
@@ -95,6 +167,7 @@ function _handlePickerKeydown(e, listEl, itemSelector, closeFn) {
 // Dependencies injected via initModelPicker()
 let _deps = null;
 let _defaultChatPickInFlight = false;
+let _defaultChatRefreshQueued = false;
 let _defaultPendingSeq = 0;
 
 function _modelExists(modelId, url, endpointId = '') {
@@ -129,8 +202,12 @@ async function _ensureModelCacheForFallback() {
   }
 }
 
-async function _ensureDefaultPendingChat() {
-  if (!_deps || _defaultChatPickInFlight) return;
+async function _ensureDefaultPendingChat(force = false) {
+  if (!_deps) return;
+  if (_defaultChatPickInFlight) {
+    if (force) _defaultChatRefreshQueued = true;
+    return;
+  }
   if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
   let pending = _deps.getPendingChat && _deps.getPendingChat();
   if (pending && pending.modelId && pending.source === 'manual') return;
@@ -139,14 +216,28 @@ async function _ensureDefaultPendingChat() {
   try {
     let dc = null;
     try {
-      dc = window.__odysseusDefaultChat || null;
+      const response = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+      if (response.ok) dc = await response.json();
     } catch (_) {}
+    if (!dc || !dc.endpoint_url || !dc.model) {
+      try {
+        dc = window.__odysseusDefaultChat
+          || JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+      } catch (_) {}
+    } else {
+      try {
+        window.__odysseusDefaultChat = dc;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
+      } catch (_) {}
+    }
     // Cache/default fetches yield. Never let their stale snapshot replace a
     // model the user picked while they were in flight.
+    if (seq !== _defaultPendingSeq) return;
     if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
     pending = _deps.getPendingChat && _deps.getPendingChat();
     if (pending && pending.modelId && pending.source === 'manual') return;
     if (dc && dc.endpoint_url && dc.model && _modelExists(dc.model, dc.endpoint_url, dc.endpoint_id)) {
+      const latest = _deps.getPendingChat && _deps.getPendingChat();
       const pendingUrl = String((pending && pending.url) || '').replace(/\/+$/, '');
       const defaultUrl = String(dc.endpoint_url || '').replace(/\/+$/, '');
       _deps.setPendingChat({
@@ -174,6 +265,10 @@ async function _ensureDefaultPendingChat() {
     }
   } finally {
     _defaultChatPickInFlight = false;
+    if (_defaultChatRefreshQueued) {
+      _defaultChatRefreshQueued = false;
+      _ensureDefaultPendingChat();
+    }
   }
 }
 
@@ -246,28 +341,8 @@ function _initModelPickerDropdown() {
     } catch (_) {}
   }
 
-  // Local endpoint health — only probed for LOCAL endpoints, since
-  // cloud APIs are essentially always up. Cached briefly on the
-  // server side too (8s TTL). Picker opens do not probe; the refresh button
-  // is the explicit network/probe action.
-  let _localProbe = {};            // {endpoint_id: {alive, latency_ms, error}}
-  let _localProbeFetchedAt = 0;
-  const _LOCAL_PROBE_TTL_MS = 5000;
   let _pickerLoading = false;
   let _pickerLoadSeq = 0;
-
-  async function _refreshLocalProbe() {
-    try {
-      if (window.__odysseusChatBusy || Date.now() < (window.__odysseusChatBusyUntil || 0)) return;
-    } catch (_) {}
-    const now = Date.now();
-    if (now - _localProbeFetchedAt < _LOCAL_PROBE_TTL_MS) return;
-    _localProbeFetchedAt = now;
-    try {
-      const r = await fetch('/api/model-endpoints/probe-local', { credentials: 'same-origin' });
-      if (r.ok) _localProbe = (await r.json()) || {};
-    } catch (_) { /* leave stale data; picker still works */ }
-  }
 
   function _getAllModels() {
     const items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
@@ -283,9 +358,6 @@ function _initModelPickerDropdown() {
       // existing "local server appears offline" path on line 301).
       const epOffline = !!item.offline;
       const entries = catalogEntries(item);
-      // Mark local endpoints whose live probe failed.
-      const probeResult = item.endpoint_id ? _localProbe[item.endpoint_id] : null;
-      const isLocalDead = !!(probeResult && probeResult.alive === false);
       entries.forEach(entry => {
         const mid = entry.mid;
         const choiceKey = modelChoiceKey(mid, item.endpoint_id, item.url);
@@ -296,31 +368,44 @@ function _initModelPickerDropdown() {
         seen.add(choiceKey);
         // Catalog-boundary rows (entry.family set) carry their own public
         // identity: the transport/endpoint behind them is invisible to users.
-        const boundary = !!entry.family;
-        const sharedBy = item.shared ? String(item.shared_by || '').trim() : '';
-        const sharedLabel = sharedBy ? `Shared by ${sharedBy}` : '';
+        const shared = item.shared === true;
+        const boundary = !!entry.family || !!entry.providerDisplayName || !!item.provider_display_name;
+        const providerName = providerDisplayName(
+          entry.providerDisplayName || item.provider_display_name || entry.family,
+        );
+        const sharedBy = shared ? String(item.shared_by || '').trim() : '';
+        const sharedLabel = shared
+          ? sharedSecondaryLabel({ label: item.share_label, owner: sharedBy })
+          : '';
         result.push({
           key: choiceKey,
           mid,
           display: (entry.displayName || mid).split('/').pop(),
-          family: entry.family || null,
+          baseModelId: entry.baseModelId || null,
+          preset: entry.preset || null,
+          variant: entry.variant || null,
+          family: boundary ? providerName : null,
+          providerFamilyId: entry.providerFamilyId || item.provider_family_id || null,
+          providerName,
+          shared,
+          sharedBy,
+          shareLabel: item.share_label || null,
           extra: !!entry.extra,
           url: item.url,
           endpointId: item.endpoint_id,
+          category: item.category || '',
           epName: sharedLabel || (boundary ? '' : (item.endpoint_name || '')),
-          providerText: boundary ? [entry.family || '', sharedLabel].filter(Boolean).join(' ') : [
+          providerText: boundary ? [shared ? sharedProviderLabel(providerName) : providerName, sharedLabel].filter(Boolean).join(' ') : [
             item.endpoint_name || '',
             sharedLabel,
             item.category || '',
             item.host || '',
             item.url || '',
           ].filter(Boolean).join(' '),
-          stale: entry.stale || isLocalDead || epOffline,
+          stale: entry.stale || epOffline,
           staleReason: entry.stale
             ? 'catalog entry is stale'
-            : (epOffline
-              ? (item.ping_error || 'endpoint offline')
-              : (isLocalDead ? (probeResult.error || 'not responding') : '')),
+            : (epOffline ? (item.ping_error || 'provider route offline') : ''),
           offline: epOffline,
         });
       });
@@ -361,7 +446,6 @@ function _initModelPickerDropdown() {
     if (showLoading) _renderLoading(force ? 'Refreshing models…' : 'Loading models…');
     try {
       await window.modelsModule.refreshModels(force);
-      await _refreshLocalProbe();
     } finally {
       if (seq === _pickerLoadSeq) {
         _pickerLoading = false;
@@ -430,6 +514,7 @@ function _initModelPickerDropdown() {
   // ids (direct endpoints, local servers) group under their endpoint's name
   // instead of all piling into "Other".
   function _groupLabel(m) {
+    if (m.shared) return sharedProviderLabel(m.providerName);
     if (m.family) return m.family;
     if (m.mid.indexOf('/') > 0) return _providerDisplayName(_providerSlug(m.mid));
     return m.epName || 'Other';
@@ -446,11 +531,21 @@ function _initModelPickerDropdown() {
     updateModelPicker();
     if (!menu.classList.contains('hidden')) _populate(search.value || '');
   });
+  window.addEventListener('openclank:default-chat-changed', () => {
+    if (!_deps || (_deps.getCurrentSessionId && _deps.getCurrentSessionId())) return;
+    const pending = _deps.getPendingChat && _deps.getPendingChat();
+    if (pending && pending.modelId && pending.source === 'manual') return;
+    _defaultPendingSeq++;
+    _deps.setPendingChat(null);
+    _ensureDefaultPendingChat(true);
+    updateModelPicker();
+  });
 
   function _populate(filter) {
     listEl.innerHTML = '';
     listEl.classList.remove('is-loading');
-    const all = _getAllModels();
+    const allChoices = _getAllModels();
+    const all = _groupModelChoices(allChoices);
     const q = (filter || '').trim().toLowerCase();
     const hasAnyModel = all.length > 0;
     listEl.classList.toggle('is-empty', !hasAnyModel);
@@ -467,13 +562,17 @@ function _initModelPickerDropdown() {
     // Unique lookup so Recent/Favorites (stored as bare model IDs) can be
     // resolved back to full model objects; drops anything no longer offered.
     const byId = new Map();
-    all.forEach(m => {
+    allChoices.forEach(m => {
       byId.set(modelChoiceKey(m), m);
       if (!byId.has(m.mid)) byId.set(m.mid, m);
     });
 
-    const favs = resolveStoredModelChoices(_loadFavorites(), all);
-    const recent = resolveStoredModelChoices(_loadRecent(), all);
+    const groupByChoice = new Map();
+    all.forEach(group => group.choices.forEach(choice => {
+      groupByChoice.set(modelChoiceKey(choice), group);
+    }));
+    const favs = resolveStoredModelChoices(_loadFavorites(), allChoices);
+    const recent = resolveStoredModelChoices(_loadRecent(), allChoices);
     _saveList(FAVORITES_KEY, favs);
     _saveList(RECENT_KEY, recent);
 
@@ -489,7 +588,27 @@ function _initModelPickerDropdown() {
       empty.textContent = text;
       listEl.appendChild(empty);
     }
-    function _addRow(m) {
+    function _activeChoice(group) {
+      let modelId = '';
+      let endpointId = '';
+      try {
+        const currentSessionId = _deps.getCurrentSessionId();
+        const session = _deps.getSessions().find(item => item.id === currentSessionId);
+        const pending = _deps.getPendingChat();
+        modelId = session?.model || pending?.modelId || '';
+        endpointId = session?.endpoint_id || pending?.endpointId || '';
+      } catch (_) {}
+      return group.choices.find(choice => {
+        if (choice.mid !== modelId) return false;
+        if (endpointId === 'mimo:auto') return String(choice.endpointId || '').startsWith('mimo:');
+        return !endpointId || String(choice.endpointId || '') === String(endpointId);
+      }) || null;
+    }
+
+    function _addRow(m, preferredChoice = null) {
+      const family = document.createElement('div');
+      family.className = 'mp-model-family';
+      family.dataset.modelFamily = m.baseModelId || m.mid;
       const row = document.createElement('div');
       row.className = 'model-switch-item';
       if (m.stale) {
@@ -523,11 +642,122 @@ function _initModelPickerDropdown() {
       epSpan.textContent = _epDisplay;
       row.appendChild(epSpan);
 
-      // Inline favorite dot — toggles favorite, never picks the model.
+      const choices = m.choices?.length ? m.choices : [m];
+      const baseChoice = choices.find(choice => (
+        choice.mid === (m.baseModelId || m.mid) && !choice.preset && !choice.variant
+      )) || choices.find(choice => !choice.preset && !choice.variant) || choices[0];
+      const initialChoice = (preferredChoice && choices.includes(preferredChoice) ? preferredChoice : null)
+        || _activeChoice(m)
+        || baseChoice;
+
+      const presetGroups = new Map();
+      choices.forEach(choice => {
+        const preset = _presetKey(choice);
+        if (!presetGroups.has(preset)) presetGroups.set(preset, []);
+        presetGroups.get(preset).push(choice);
+      });
+      const hasOptions = choices.length > 1;
+      if (hasOptions) {
+        const optionsButton = document.createElement('button');
+        optionsButton.type = 'button';
+        optionsButton.className = 'mp-model-options-button';
+        optionsButton.textContent = 'Options';
+        optionsButton.setAttribute('aria-expanded', 'false');
+        optionsButton.setAttribute('aria-label', `Choose mode and thinking for ${m.display}`);
+        row.appendChild(optionsButton);
+
+        const panel = document.createElement('div');
+        panel.className = 'mp-model-options';
+        panel.hidden = true;
+        const controls = document.createElement('div');
+        controls.className = 'mp-model-option-controls';
+
+        const modeWrap = document.createElement('label');
+        modeWrap.className = 'mp-model-option-field';
+        modeWrap.appendChild(document.createTextNode('Mode'));
+        const modeSelect = document.createElement('select');
+        modeSelect.setAttribute('aria-label', `${m.display} mode`);
+        [...presetGroups.keys()].sort((a, b) => (
+          (PRESET_ORDER[a] ?? 99) - (PRESET_ORDER[b] ?? 99)
+          || a.localeCompare(b)
+        )).forEach(preset => {
+          const option = document.createElement('option');
+          option.value = preset;
+          option.textContent = _presetLabel(preset);
+          modeSelect.appendChild(option);
+        });
+        modeSelect.value = _presetKey(initialChoice);
+        modeWrap.appendChild(modeSelect);
+        modeWrap.hidden = presetGroups.size < 2;
+
+        const thinkingWrap = document.createElement('label');
+        thinkingWrap.className = 'mp-model-option-field';
+        thinkingWrap.appendChild(document.createTextNode('Thinking'));
+        const thinkingSelect = document.createElement('select');
+        thinkingSelect.setAttribute('aria-label', `${m.display} thinking`);
+        thinkingWrap.appendChild(thinkingSelect);
+
+        const useButton = document.createElement('button');
+        useButton.type = 'button';
+        useButton.className = 'mp-model-use-button';
+        useButton.textContent = 'Use';
+
+        const choicesForMode = () => presetGroups.get(modeSelect.value) || [];
+        const renderThinking = (wanted = '') => {
+          const modeChoices = [...choicesForMode()].sort((a, b) => {
+            const left = _variantKey(a);
+            const right = _variantKey(b);
+            return (THINKING_ORDER[left] ?? 99) - (THINKING_ORDER[right] ?? 99)
+              || left.localeCompare(right);
+          });
+          const prior = wanted || thinkingSelect.value || 'default';
+          thinkingSelect.replaceChildren();
+          modeChoices.forEach(choice => {
+            const option = document.createElement('option');
+            option.value = _variantKey(choice);
+            option.textContent = _thinkingLabel(option.value);
+            thinkingSelect.appendChild(option);
+          });
+          thinkingSelect.value = modeChoices.some(choice => _variantKey(choice) === prior)
+            ? prior
+            : (_variantKey(modeChoices[0]) || 'default');
+          thinkingWrap.hidden = modeChoices.length < 2;
+        };
+        renderThinking(_variantKey(initialChoice));
+        modeSelect.addEventListener('change', event => {
+          event.stopPropagation();
+          renderThinking('default');
+        });
+        thinkingSelect.addEventListener('change', event => event.stopPropagation());
+        useButton.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const selected = choicesForMode().find(choice => (
+            _variantKey(choice) === thinkingSelect.value
+          )) || choicesForMode()[0];
+          if (selected) _pick(selected);
+        });
+        optionsButton.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          panel.hidden = !panel.hidden;
+          optionsButton.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
+          if (!panel.hidden) (modeWrap.hidden ? thinkingSelect : modeSelect).focus();
+        });
+        panel.addEventListener('click', event => event.stopPropagation());
+        controls.append(modeWrap, thinkingWrap, useButton);
+        panel.appendChild(controls);
+        family.append(row, panel);
+      } else {
+        family.appendChild(row);
+      }
+
+      // Inline favorite dot — toggles the logical model family, never picks it.
       const favDot = document.createElement('button');
       favDot.type = 'button';
-      const choiceKey = modelChoiceKey(m);
-      favDot.className = 'mp-fav-dot' + (favs.includes(choiceKey) ? ' active' : '');
+      const familyChoiceKeys = choices.map(modelChoiceKey);
+      let isFavorite = familyChoiceKeys.some(key => favs.includes(key));
+      favDot.className = 'mp-fav-dot' + (isFavorite ? ' active' : '');
       favDot.textContent = '●';
       const _setFavState = (on) => {
         favDot.classList.toggle('active', on);
@@ -535,18 +765,21 @@ function _initModelPickerDropdown() {
         favDot.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
         favDot.setAttribute('aria-pressed', on ? 'true' : 'false');
       };
-      _setFavState(favs.includes(choiceKey));
+      _setFavState(isFavorite);
       favDot.addEventListener('click', (e) => {
         e.stopPropagation();
-        const nowFav = _toggleFavorite(m);
+        const nowFav = !isFavorite;
+        familyChoiceKeys.forEach(key => {
+          const index = favs.indexOf(key);
+          if (index >= 0) favs.splice(index, 1);
+        });
+        if (nowFav) favs.push(modelChoiceKey(initialChoice));
+        _saveList(FAVORITES_KEY, favs);
+        isFavorite = nowFav;
         _setFavState(nowFav);
         favDot.classList.remove('pulse');
         void favDot.offsetWidth;
         favDot.classList.add('pulse');
-        // Keep our in-memory copy aligned so a follow-up re-render is correct.
-        const idx = favs.indexOf(choiceKey);
-        if (nowFav && idx < 0) favs.push(choiceKey);
-        else if (!nowFav && idx >= 0) favs.splice(idx, 1);
         if (uiModule && uiModule.showToast) uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
         // In browse mode the Favorites section membership changed — rebuild
         // (cheap: Recent + Favorites). In search mode the row stays put, so
@@ -559,16 +792,21 @@ function _initModelPickerDropdown() {
       });
       row.appendChild(favDot);
 
-      row.addEventListener('click', () => _pick(m));
-      listEl.appendChild(row);
+      row.addEventListener('click', () => _pick(baseChoice));
+      listEl.appendChild(family);
+      return family;
     }
 
     // ── Search mode: flat, filtered results across the whole catalog ──
     if (q) {
       const matches = all.filter(m => {
-        const label = _groupLabel(m).toLowerCase();
-        const searchId = m.family ? m.display : m.mid;
-        return [searchId, m.display, m.epName, m.providerText, label]
+        const choiceText = m.choices.flatMap(choice => [
+          choice.mid,
+          choice.display,
+          _presetLabel(_presetKey(choice)),
+          _thinkingLabel(_variantKey(choice)),
+        ]);
+        return [m.baseModelId, m.display, m.epName, m.providerText, _groupLabel(m), ...choiceText]
           .filter(Boolean).join(' ').toLowerCase().includes(q);
       });
       if (matches.length === 0) _addEmpty('No matching models');
@@ -585,41 +823,49 @@ function _initModelPickerDropdown() {
     //      section entirely — when there's only ~10 models, the whole
     //      list fits below as "All models" and a separate Recent
     //      section just duplicates rows.
-    // Variants ARE models in this app's idiom — "(low)" rows in the picker,
-    // "(low)" options in settings selects. They browse like everything else.
+    // Transport variants remain exact selectable routes, but browse as one
+    // logical model with compact Mode/Thinking controls.
     const browsable = all;
 
     const shown = new Set();
-    const favModels = favs.map(id => byKey.get(id) || byId.get(id)).filter(Boolean);
+    const groupedStoredChoices = stored => {
+      const seen = new Set();
+      return stored.map(id => {
+        const choice = byId.get(id);
+        const group = choice ? groupByChoice.get(modelChoiceKey(choice)) : null;
+        if (!group || seen.has(group.key)) return null;
+        seen.add(group.key);
+        return { group, choice };
+      }).filter(Boolean);
+    };
+    const favModels = groupedStoredChoices(favs);
     if (favModels.length) {
       _addSection('Favorites');
-      favModels.forEach(m => { shown.add(modelChoiceKey(m)); _addRow(m); });
+      favModels.forEach(({ group, choice }) => { shown.add(group.key); _addRow(group, choice); });
     }
     // Recent: only render when the catalog is big enough that surfacing
     // a recency shortlist is actually useful, AND only models that
     // aren't already in Favorites (dedupe).
     if (browsable.length > BROWSE_ALL_LIMIT) {
-      const recentModels = recent
-        .map(id => byId.get(id))
-        .filter(Boolean)
-        .filter(m => !shown.has(modelChoiceKey(m)))
+      const recentModels = groupedStoredChoices(recent)
+        .filter(({ group }) => !shown.has(group.key))
         .slice(0, RECENT_MAX);
       if (recentModels.length) {
         _addSection('Recent');
-        recentModels.forEach(m => { shown.add(modelChoiceKey(m)); _addRow(m); });
+        recentModels.forEach(({ group, choice }) => { shown.add(group.key); _addRow(group, choice); });
       }
     }
 
     // Small catalogs: still list everything so users aren't forced to search.
     if (browsable.length <= BROWSE_ALL_LIMIT) {
-      const rest = browsable.filter(m => !shown.has(modelChoiceKey(m)));
+      const rest = browsable.filter(m => !shown.has(m.key));
       if (rest.length) {
         if (shown.size) _addSection('All models');
         rest.forEach(_addRow);
       }
     } else {
       // Large catalog: collapsible family/provider groups.
-      const rest = browsable.filter(m => !shown.has(modelChoiceKey(m)));
+      const rest = browsable.filter(m => !shown.has(m.key));
       const groups = new Map();
       rest.forEach(m => {
         const provider = _providerGroupKey(m);
@@ -688,14 +934,15 @@ async function _pick(m) {
         if (window.__odysseusModelSwitchPromise === switchPromise) delete window.__odysseusModelSwitchPromise;
       } catch (_) {}
     };
-    const currentSessionId = _deps.getCurrentSessionId();
-    const _pendingChat = _deps.getPendingChat();
-    const _completePick = () => {
-      if (m && m.mid) _pushRecent(m);
-      try { document.dispatchEvent(new CustomEvent('odysseus:model-picked', { detail: m })); } catch {}
-      updateModelPicker();
-      uiModule.showToast(`Using ${m.display}`);
-    };
+    try {
+      const currentSessionId = _deps.getCurrentSessionId();
+      const _pendingChat = _deps.getPendingChat();
+      const _completePick = () => {
+        if (m && m.mid) _pushRecent(m);
+        try { document.dispatchEvent(new CustomEvent('odysseus:model-picked', { detail: m })); } catch {}
+        updateModelPicker();
+        uiModule.showToast(`Using ${m.display}`);
+      };
 
     // Blur search input before closing to dismiss keyboard on mobile
     if (document.activeElement) document.activeElement.blur();
@@ -752,8 +999,13 @@ async function _pick(m) {
         return;
       }
     }
-    // Persist and broadcast only after the selection actually succeeded.
-    _completePick();
+      // Persist and broadcast only after the selection actually succeeded.
+      _completePick();
+    } finally {
+      // Chat waits for this fence before POSTing. Every success and failure
+      // path must release it or the composer deadlocks before the request.
+      finishSwitch();
+    }
   }
 
   document.addEventListener('odysseus:auto-select-model', async (e) => {
@@ -782,8 +1034,19 @@ async function _pick(m) {
           display: (entries[idx].displayName || entries[idx].mid).split('/').pop(),
           url: item.url || detail.url || '',
           endpointId: item.endpoint_id || detail.endpointId || '',
-          epName: item.endpoint_name || detail.endpointName || '',
-          providerText: [item.endpoint_name || detail.endpointName || '', item.url || detail.url || ''].filter(Boolean).join(' '),
+          epName: item.shared
+            ? sharedSecondaryLabel({ label: item.share_label, owner: item.shared_by })
+            : (item.endpoint_name || detail.endpointName || ''),
+          providerName: providerDisplayName(
+            entries[idx].providerDisplayName || item.provider_display_name || entries[idx].family,
+          ),
+          shared: item.shared === true,
+          providerText: [
+            item.shared
+              ? sharedProviderLabel(item.provider_display_name || entries[idx].providerDisplayName || entries[idx].family)
+              : (item.endpoint_name || detail.endpointName || ''),
+            item.url || detail.url || '',
+          ].filter(Boolean).join(' '),
         };
         break;
       }

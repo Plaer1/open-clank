@@ -1,0 +1,56 @@
+# Open Clank's canonical first-party Hex contract.
+# The exact bytes are pinned by activation; edit this file, then reactivate.
+contract: open-clank-hexes/v2
+
+settings:
+  confirm_before_deleting:
+    over_lines: 50
+
+hexes:
+  - hex: "Plans live in .clanker/futures/ and are Markdown: metaplan at .clanker/futures/<metaplan>.md and slices below the same canonical root."
+    in: ./.clanker/futures/*
+    allowed_filetypes: .md
+
+  - hex: "Clanker sidecar notes and audit evidence are Markdown under .clankers/robonotes/<topic>/, with subfolders and focused slices organized by domain, question, or decision."
+    in: ./.clankers/robonotes/*
+    allowed_filetypes: .md
+    why: "Keep the robonotes root for navigation. Continue older flat notes in the appropriate topic folder, linking back to historical evidence."
+
+  - hex: "Each robonotes topic keeps a concise index linking its slices and any related .clanker/futures/ plan; read the index and relevant slices on demand."
+    in: ./.clankers/robonotes/*
+    why: "Indexes orient the next session with current status, key decisions, and next steps; detailed evidence belongs in the linked slices. Do not load entire note collections into context."
+
+  - hex: "Slice robonotes at meaningful conceptual boundaries using judgment, without hard size limits; split when distinct concerns or accumulated detail make selective reading difficult."
+    in: ./.clankers/robonotes/*
+    why: "Keep each slice coherent and independently useful. Summarize findings and link sources or artifacts instead of accumulating raw logs, transcripts, inventories, or repeated evidence."
+
+  - hex: "Canonical Clanker paths reject legacy and singular/plural typo namespaces."
+    in: ./*
+    canonical_layout_paths: true
+
+  - hex: "Reference clones stay out of git (.references/ is study material)."
+    run_before_commit: 'test -z "$(git ls-files .references)"'
+
+  - hex: "Process confinement is the OS boundary — no in-app sandbox broker or process-confinement gate."
+    run_before_commit: '! grep -rniE "process_confinement_(required|unavailable)|RESTRICTED_PROCESS_TOOLS" src/ routes/ services/ packages/odysseus-files/src/'
+
+  - hex: "Claude is never attributed in commits — no AI co-author, generated-with, or session trailers."
+    run_before_push: '! git log --format=%B | grep -qiE "co-authored-by:.*(claude|anthropic)|generated with.*\\[?(claude|anthropic)|^claude-session:"'
+
+  - hex: "No credentials in first-party code."
+    in: [./src/*, ./routes/*, ./services/*, ./scripts/*, ./config/*]
+    no_secrets: true
+    level: warn
+
+  - hex: "Glue and memory code changes update canonical plans or robonotes."
+    changed_with:
+      when: [src/openclank/**, mcp_servers/**]
+      expect: [.clanker/futures/**, .clankers/robonotes/**]
+    level: warn
+
+  - hex: "Canvas backgrounds retain one running owner when an unchanged pattern is reapplied."
+    in: [./static/js/theme.js, ./tests/clanker_browser_acceptance.mjs]
+    why: "A duplicate animation loop or canvas remount presents as flicker."
+    background_animation_lifecycle:
+      theme_module: static/js/theme.js
+      browser_test: tests/clanker_browser_acceptance.mjs

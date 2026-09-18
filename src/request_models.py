@@ -13,7 +13,7 @@ class ChatRequest(BaseModel):
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
     incognito: bool = Field(default=False, description="Keep the session memory-only")
-    
+
     @field_validator('message')
     @classmethod
     def clean_message(cls, v):
@@ -42,7 +42,11 @@ class MemoryAddRequest(BaseModel):
     workspace_id: Optional[str] = Field(
         default=None,
         max_length=200,
-        description="Scope override (U3): open questions may be workspace-bound or global",
+        description="Optional scope assertion; must match the server memory workspace",
+    )
+    question_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Typed v2 association for an open question; never inferred from prose",
     )
 
     @field_validator('category')
@@ -135,6 +139,10 @@ class SessionResponse(BaseModel):
     endpoint_id: Optional[str] = Field(default=None, description="Canonical model endpoint ID")
     rag: bool = Field(default=False, description="RAG enabled")
     archived: bool = Field(default=False, description="Whether session is archived")
+    workspace_id: Optional[str] = Field(
+        default=None,
+        description="Stable Workspace bound to this chat",
+    )
 
 
 class MemoryResponse(BaseModel):

@@ -111,7 +111,12 @@ export async function MimoAuthPlugin(_input: PluginInput): Promise<Hooks> {
       ],
     },
     "chat.headers": async (input, output) => {
-      if (input.model.providerID !== "xiaomi") return
+      if (
+        input.model.providerID !== "xiaomi" &&
+        input.provider?.options?._openclankFamilyID !== "xiaomi" &&
+        input.provider?.options?._openclankAdapterID !== "mimo-native"
+      )
+        return
       output.headers["X-Mimo-Source"] = "mimocode-cli"
     },
   }

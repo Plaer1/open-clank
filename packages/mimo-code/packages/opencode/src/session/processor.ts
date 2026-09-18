@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
+import { Cause, Deferred, Duration, Effect, Layer, Context, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
@@ -26,6 +26,7 @@ import { Log } from "@/util"
 import { isRecord } from "@/util/record"
 import { createTextNgramMonitor, type TextNgramMonitor } from "./prompt/text-ngram-detection"
 import { Flag } from "@/flag/flag"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { monitor as tryBestMonitor, type TryBestIncident } from "./try-best-detector"
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -406,6 +407,16 @@ export const layer: Layer.Layer<
         if (ctx.textNgramMonitor.append(text)) ctx.textNgramRepeat = true
       }
 
+      const commitManagedAttempt = () =>
+        ManagedProvider.enabled()
+          ? Effect.promise(() => ManagedProvider.commitSessionOperation(ctx.sessionID))
+          : Effect.void
+
+      const recordManagedSuccess = () =>
+        ManagedProvider.enabled()
+          ? Effect.promise(() => ManagedProvider.recordSessionSuccess(ctx.sessionID))
+          : Effect.void
+
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
         switch (value.type) {
           case "start":
@@ -413,6 +424,7 @@ export const layer: Layer.Layer<
             return
 
           case "reasoning-start":
+            yield* commitManagedAttempt()
             if (value.id in ctx.reasoningMap) return
             ctx.reasoningMap[value.id] = {
               id: PartID.ascending(),
@@ -456,6 +468,7 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-start":
+            yield* commitManagedAttempt()
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
@@ -485,6 +498,7 @@ export const layer: Layer.Layer<
             return
 
           case "tool-call": {
+            yield* commitManagedAttempt()
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
@@ -556,6 +570,9 @@ export const layer: Layer.Layer<
             throw value.error
 
           case "start-step":
+            // A provider start-step means the remote request was accepted and
+            // may already be billable, even before a visible token arrives.
+            yield* commitManagedAttempt()
             ctx.stepStartedAt = Date.now()
             ctx.firstTokenAt = undefined
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
@@ -571,6 +588,7 @@ export const layer: Layer.Layer<
             return
 
           case "finish-step": {
+            yield* commitManagedAttempt()
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage,
@@ -633,6 +651,7 @@ export const layer: Layer.Layer<
                 messageID: ctx.assistantMessage.parentID,
               })
               .pipe(Effect.ignore, Effect.forkIn(scope))
+            yield* recordManagedSuccess()
             if (
               !ctx.assistantMessage.summary &&
               isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
@@ -643,6 +662,7 @@ export const layer: Layer.Layer<
           }
 
           case "text-start":
+            yield* commitManagedAttempt()
             ctx.currentText = {
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -694,6 +714,7 @@ export const layer: Layer.Layer<
             return
 
           case "finish":
+            yield* commitManagedAttempt()
             return
 
           default:
@@ -784,7 +805,7 @@ export const layer: Layer.Layer<
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
-          yield* Effect.gen(function* () {
+          const oneAttempt = Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.stepPartIds = []
@@ -823,20 +844,57 @@ export const layer: Layer.Layer<
                 ctx.stepPartIds = []
               }),
             ),
-            Effect.retry(
-              SessionRetry.policy({
-                parse,
-                set: (info) =>
-                  isMain
-                    ? status.set(ctx.sessionID, {
-                        type: "retry",
-                        attempt: info.attempt,
-                        message: info.message,
-                        next: info.next,
-                      })
-                    : Effect.void,
-              }),
-            ),
+          )
+
+          const managedRetry = (attempt: number): Effect.Effect<void, unknown> =>
+            oneAttempt.pipe(
+              Effect.catch((error: unknown) =>
+                Effect.promise(() => ManagedProvider.recordSessionAttempt(ctx.sessionID, error)).pipe(
+                  Effect.flatMap((decision) => {
+                    if (!decision.retry) return Effect.fail(error)
+                    const nextAttempt = attempt + 1
+                    const baseDelay = decision.rotated ? 0 : Math.min(500 * 2 ** attempt, 5_000)
+                    const delayMs =
+                      baseDelay === 0 ? 0 : Math.max(1, Math.round(baseDelay * (0.75 + Math.random() * 0.5)))
+                    const update = isMain
+                      ? status.set(ctx.sessionID, {
+                          type: "retry",
+                          attempt: nextAttempt,
+                          message: decision.rotated
+                            ? "Trying another eligible provider account"
+                            : "Retrying the same provider account",
+                          next: Date.now() + delayMs,
+                        })
+                      : Effect.void
+                    return update.pipe(
+                      Effect.andThen(Effect.sleep(Duration.millis(delayMs))),
+                      Effect.andThen(managedRetry(nextAttempt)),
+                    )
+                  }),
+                ),
+              ),
+            )
+
+          const execution = ManagedProvider.enabled()
+            ? managedRetry(0)
+            : oneAttempt.pipe(
+                Effect.retry(
+                  SessionRetry.policy({
+                    parse,
+                    set: (info) =>
+                      isMain
+                        ? status.set(ctx.sessionID, {
+                            type: "retry",
+                            attempt: info.attempt,
+                            message: info.message,
+                            next: info.next,
+                          })
+                        : Effect.void,
+                  }),
+                ),
+              )
+
+          yield* execution.pipe(
             Effect.catch(halt),
             Effect.ensuring(cleanup()),
           )

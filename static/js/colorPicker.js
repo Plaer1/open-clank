@@ -390,7 +390,11 @@ function close() {
 
 // ── Attach to inputs ──────────────────────────────────────────────────
 // Standard setter we need to call after wrapping .value with a custom setter.
-const _NATIVE_VALUE_DESC = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+// Keep the module importable by the lightweight Node renderer harness. The
+// native descriptor is only needed when a real browser input is attached.
+const _NATIVE_VALUE_DESC = typeof HTMLInputElement !== 'undefined'
+  ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+  : null;
 
 function _syncSwatch(el) {
   const v = _NATIVE_VALUE_DESC.get.call(el);
@@ -398,7 +402,7 @@ function _syncSwatch(el) {
 }
 
 export function attachColorPicker(inputEl) {
-  if (!inputEl || inputEl.dataset.cpAttached === '1') return;
+  if (!inputEl || !_NATIVE_VALUE_DESC || inputEl.dataset.cpAttached === '1') return;
   inputEl.dataset.cpAttached = '1';
 
   // Neutralize the native color dialog by changing the element's type.

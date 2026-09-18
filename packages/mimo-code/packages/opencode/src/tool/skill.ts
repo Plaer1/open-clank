@@ -46,8 +46,15 @@ export const SkillTool = Tool.define(
             metadata: {},
           })
 
-          // A1.3: emit usage event (best-effort, fail-open, fire-and-forget)
-          void Skill._writeUsage(params.name)
+          const active = yield* Effect.promise(() =>
+            Skill._writeUsage(info, ctx.sessionID),
+          )
+          if (!active) {
+            yield* skill.reload()
+            throw new Error(
+              `Skill "${params.name}" could not be revalidated as the exact active Open Clank revision. The skill catalogue was refreshed.`,
+            )
+          }
 
           const rendered = yield* renderSkillContent(info, rg, ctx.abort)
 

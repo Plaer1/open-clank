@@ -204,6 +204,10 @@ function _initHoverCardSpaceToggle() {
       }
       return;
     }
+    // Files and Code have real in-window Space semantics (preview/select or
+    // editor input). Do not let the generic hovered-window minimizer consume
+    // that key before the tool's own handler sees it.
+    if (e.target?.closest?.('.files-window, .code-editor-window')) return;
     const id = _spaceWindowId(hoveredToggleWindow);
     if (!id) return;
     if (_spaceIsBlocked(e, hoveredToggleWindow)) return;
@@ -212,7 +216,7 @@ function _initHoverCardSpaceToggle() {
   }, true);
 }
 
-_initHoverCardSpaceToggle();
+if (typeof document !== 'undefined') _initHoverCardSpaceToggle();
 
 /**
  * Copy text to clipboard
@@ -410,7 +414,7 @@ export function showToast(msg, durationOrOpts) {
 /**
  * Show error toast message
  */
-export function showError(msg) {
+export function showError(msg, options = {}) {
   if (!toastEl) {
     toastEl = document.getElementById('toast');
   }
@@ -426,6 +430,28 @@ export function showError(msg) {
   const textSpan = document.createElement('span');
   textSpan.textContent = msg;
   toastEl.appendChild(textSpan);
+
+  if (options.action && typeof options.onAction === 'function') {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'toast-error-action';
+    action.textContent = options.action;
+    action.setAttribute('aria-label', options.actionHint || options.action);
+    action.style.cssText = 'padding:2px 10px;margin-left:10px;border:1px solid currentColor;border-radius:4px;background:none;color:inherit;cursor:pointer;font-size:12px;pointer-events:auto;';
+    action.addEventListener('click', (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      clearTimeout(toastEl._hideTimer);
+      toastEl.classList.remove('show');
+      Promise.resolve(options.onAction()).catch((error) => {
+        showError(error?.message || 'Recovery action failed');
+      });
+    });
+    toastEl.appendChild(action);
+    toastEl.style.pointerEvents = 'auto';
+  } else {
+    toastEl.style.pointerEvents = '';
+  }
 
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
@@ -446,7 +472,8 @@ export function showError(msg) {
   toastEl._hideTimer = setTimeout(() => {
     toastEl.classList.add('exiting');
     toastEl.classList.remove('show');
-  }, 6000);
+    toastEl.style.pointerEvents = '';
+  }, Number(options.duration) > 0 ? Number(options.duration) : 6000);
 }
 
 /**
@@ -791,7 +818,7 @@ export function esc(s) {
 // When a touch starts inside .modal-content, set a flag so that
 // synthetic mouse events on the backdrop are ignored.
 let _touchInsideModal = false;
-if ('ontouchstart' in window) {
+if (typeof window !== 'undefined' && 'ontouchstart' in window) {
   document.addEventListener('touchstart', (e) => {
     if (e.target.closest('.modal-content')) {
       _touchInsideModal = true;
@@ -824,9 +851,9 @@ function _initScrollDismiss() {
     setTimeout(_initScrollDismiss, 500);
   }
 }
-if (document.readyState === 'loading') {
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _initScrollDismiss);
-} else {
+} else if (typeof document !== 'undefined') {
   _initScrollDismiss();
 }
 
@@ -886,7 +913,7 @@ if (typeof window !== 'undefined') {
 // ── Mobile: clear enter animation so inline transform works for dragging ──
 // The CSS `animation: sheet-enter ... forwards` holds the final transform,
 // blocking any inline style changes. We clear it once the animation completes.
-if ('ontouchstart' in window || window.innerWidth <= 768) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && ('ontouchstart' in window || window.innerWidth <= 768)) {
   document.addEventListener('animationend', (e) => {
     if (e.animationName === 'sheet-enter' &&
         (e.target.classList.contains('modal-content') || e.target.id === 'theme-popup')) {
@@ -912,7 +939,7 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 // ── Mobile swipe-down-to-dismiss for bottom sheet modals ──
 // Finger-following drag with velocity-based dismiss.
 // Works from grab handle, header, OR anywhere on the sheet when content is scrolled to top.
-if ('ontouchstart' in window) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && 'ontouchstart' in window) {
   const DISMISS_THRESHOLD = 50;    // px — dismiss if dragged past this
   const VELOCITY_THRESHOLD = 0.3;  // px/ms — fast flick dismisses even below threshold
   const RUBBER_RESISTANCE = 0.35;  // drag resistance when pulling up past origin
@@ -1073,6 +1100,21 @@ if ('ontouchstart' in window) {
     el.style.willChange = '';
 
     if (shouldDismiss) {
+      const managedModal = el.closest('.modal');
+      const managedWindow = managedModal?.__openClankWindow || managedModal?.__copalWindow;
+      if (managedWindow?.requestCloseAsync) {
+        // Open Clank windows may own an async dirty-state gate. Let that gate
+        // decide before the shared swipe path hides or unregisters anything.
+        // A cancelled close snaps the sheet back; an allowed close runs the
+        // window's normal onClosed lifecycle exactly once.
+        el.style.transition = 'transform 0.2s ease-out';
+        el.style.transform = '';
+        void managedWindow.requestCloseAsync().finally(() => {
+          el.style.transition = '';
+          el.style.animation = '';
+        });
+        return;
+      }
       // Animate out — use remaining distance to calculate duration
       const remaining = el.offsetHeight - dy;
       const speed = Math.max(Math.abs(_velocity), 0.8); // min speed
@@ -1114,7 +1156,7 @@ if ('ontouchstart' in window) {
 }
 
 // ---- Bring modal to front on click ----
-{
+if (typeof document !== 'undefined') {
   const raiseModalToFront = (modal, floor = 250) => {
     const z = nextToolWindowZ({
       exclude: modal,
@@ -1165,7 +1207,7 @@ if ('ontouchstart' in window) {
 // own scrolling container that often fails — the user types blind.
 // Scroll the input into the middle of the still-visible viewport
 // after the keyboard has had a moment to animate in.
-if ('ontouchstart' in window || window.innerWidth <= 768) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && ('ontouchstart' in window || window.innerWidth <= 768)) {
   let _kbScrollTimer = null;
   document.addEventListener('focusin', (e) => {
     const el = e.target;
@@ -1208,7 +1250,7 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 // Priority: expanded library card → open chat thinking block → topmost modal.
 // Runs capture-phase + stopImmediatePropagation so per-modal ESC listeners
 // never also fire (which would otherwise close several modals at once).
-if (!window._odyEscExpandGuard) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && !window._odyEscExpandGuard) {
   window._odyEscExpandGuard = true;
 
   // Auto-promote any modal that becomes visible to the top of the z-stack.
@@ -1255,6 +1297,12 @@ if (!window._odyEscExpandGuard) {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
 
+    // Files owns Escape while its in-window preview is open. Let the preview
+    // handler consume the key instead of collapsing the entire Open Clank
+    // window through the global modal arbiter.
+    if (e.target?.closest?.('.files-window')
+        && document.querySelector('.files-window [data-files-preview]:not([hidden])')) return;
+
     // An open modal <dialog> owns Escape outright. The platform already
     // closes exactly the topmost dialog of a stack via its cancel behavior,
     // so silence every competing document-level handler (this one included)
@@ -1263,6 +1311,13 @@ if (!window._odyEscExpandGuard) {
       e.stopImmediatePropagation();
       return;
     }
+
+    // A mounted Copal sheet owns Escape for its grid selection/edit/menu
+    // lifecycle.  The pointer-aware window fallback below would otherwise
+    // close the hovered Copal window before the sheet's bubble handler can
+    // restore its managed cell focus. Modal dialogs are checked first so a
+    // menu opened from a sheet still receives native cancel/Escape handling.
+    if (e.target?.closest?.('.copal-sheet-surface')) return;
 
     // Find the single thing to close, in priority order. The first hit wins.
     // Important: if a thinking block is open we MUST handle it ourselves and

@@ -21,7 +21,8 @@ Security fixes are handled on the default branch until formal releases are cut.
 - Leave high-risk agent tools restricted to admins: shell, Python, file read/write, email send/read, MCP, app API, task/skill/memory management, settings, tokens, and model serving.
 - Rotate API keys, webhook secrets, and Odysseus API tokens if they appear in logs, screenshots, demos, or shared chats.
 - Treat shell, model-serving, MCP, email, calendar, and vault features as privileged admin functionality.
-- Common internal-only ports are Odysseus `7000`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
+- Process confinement is the operating system's job, not the app's (owner ruling 2026-08-14). Agent shell/Python/background processes run with the Open Clank process account's full OS permissions; Open Clank enforces identity, People/Agent scope, and typed interactive approvals, but it is not a sandbox. If you want agent execution confined, run the Open Clank server itself under a restricted OS account, container, or VM.
+- Common internal-only ports are Open Clank `7777`, SearXNG `8080`, ntfy `8091`, ChromaDB `8100`, Ollama `11434`, and local model/provider APIs such as `8000-8020`.
 
 ## Publishing A Fork
 

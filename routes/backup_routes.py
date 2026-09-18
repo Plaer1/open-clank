@@ -239,9 +239,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     continue
                 if title.lower() in existing_titles:
                     continue
-                owner = skill.get("owner")
-                if user and not owner:
-                    owner = user
                 # Skills live on disk as SKILL.md files; the old JSON-era
                 # skills_manager.save() no longer exists. Write each new skill
                 # via add_skill (source="user" skips auto-dedup — this is an
@@ -257,7 +254,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     source="user",
                     teacher_model=skill.get("teacher_model"),
                     confidence=skill.get("confidence", 0.8),
-                    owner=owner,
+                    owner=user,
                     category=skill.get("category", "general"),
                     when_to_use=skill.get("when_to_use"),
                     procedure=skill.get("procedure"),
@@ -266,7 +263,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     platforms=skill.get("platforms"),
                     requires_toolsets=skill.get("requires_toolsets"),
                     fallback_for_toolsets=skill.get("fallback_for_toolsets"),
-                    status=skill.get("status", "draft"),
+                    status="draft",
                     version=skill.get("version", "1.0.0"),
                 )
                 if result.get("_deduped"):

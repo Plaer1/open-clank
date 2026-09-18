@@ -69,6 +69,9 @@ describe("tool.view_image", () => {
 
         expect(result.title).toBe("image.png")
         expect(result.metadata.detail).toBe("high")
+        expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+        expect(result.metadata.file.kind).toBe("image")
+        expect(result.metadata.file.fingerprint).toStartWith("sha256:")
         expect(result.attachments?.[0].mime).toBe("image/png")
         expect(result.attachments?.[0].filename).toBe("image.png")
         expect(result.attachments?.[0].url.startsWith("data:image/png;base64,")).toBe(true)

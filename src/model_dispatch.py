@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Iterable, Optional
 
@@ -12,13 +11,15 @@ from fastapi import HTTPException
 
 from src.endpoint_resolver import (
     ResolvedModelTarget,
-    direct_runtime_provider_id,
     resolve_model_target,
+)
+from src.openclank.agent_supervisor import (
+    AgentSupervisorAdmissionError as SupervisorAdmissionError,
 )
 
 logger = logging.getLogger(__name__)
 
-_mimo_supervisor: Any = None
+_agent_supervisor: Any = None
 
 
 @dataclass(frozen=True)
@@ -128,13 +129,27 @@ def _agent_turn_envelope(
     return envelope
 
 
+def set_agent_supervisor(supervisor: Any) -> None:
+    """Set the server-owned neutral supervisor used by model dispatch."""
+
+    global _agent_supervisor
+    _agent_supervisor = supervisor
+
+
+def get_agent_supervisor() -> Any:
+    return _agent_supervisor
+
+
 def set_mimo_supervisor(supervisor: Any) -> None:
-    global _mimo_supervisor
-    _mimo_supervisor = supervisor
+    """Compatibility alias for the pre-facade application bootstrap."""
+
+    set_agent_supervisor(supervisor)
 
 
 def get_mimo_supervisor() -> Any:
-    return _mimo_supervisor
+    """Compatibility alias for legacy callers during the strangler phase."""
+
+    return get_agent_supervisor()
 
 
 async def mimo_agent_target(
@@ -143,66 +158,36 @@ async def mimo_agent_target(
     owner: Optional[str] = None,
     supervisor: Any = None,
 ) -> ResolvedModelTarget:
-    """Resolve strict Agent identity by persisted endpoint ID, never by URL."""
+    """Reject every route that did not enter through normalized managed ACP."""
     if target is None:
         return None
     if target.transport == "acp":
-        return target
-    pool = supervisor or _mimo_supervisor
-    if pool is None:
-        from src.openclank.mimo_supervisor import SupervisorAdmissionError
-        raise SupervisorAdmissionError("SUPERVISOR_UNAVAILABLE", "Open Clank agent runtime is unavailable")
-
-    from core.database import ModelEndpoint, SessionLocal
-    from src.auth_helpers import owner_filter
-    from src.model_capabilities import endpoint_capability_states
-    from src.openclank.mimo_supervisor import SupervisorAdmissionError
-
-    endpoint_id = (target.endpoint_id or "").strip()
-    if not endpoint_id:
-        raise SupervisorAdmissionError(
-            "UNREGISTERED_ENDPOINT",
-            "This legacy session has no unambiguous persisted endpoint identity",
-            phase="routing", retryable=False,
-        )
-    db = SessionLocal()
-    try:
-        query = db.query(ModelEndpoint).filter(
-            ModelEndpoint.id == endpoint_id,
-            ModelEndpoint.is_enabled == True,  # noqa: E712
-        )
-        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
-        endpoint = query.first()
-        if endpoint is None:
+        connection_id, separator, model_id = str(target.model_id or "").partition("/")
+        if (
+            not separator
+            or not connection_id
+            or not model_id
+            or target.provider_id != connection_id
+            or target.endpoint_id != connection_id
+            or target.headers
+        ):
             raise SupervisorAdmissionError(
-                "ENDPOINT_NOT_PROJECTABLE",
-                "The selected endpoint is missing, disabled, or not visible to this owner",
-                phase="routing", retryable=False,
+                "INVALID_MANAGED_ROUTE",
+                "The selected model did not retain its normalized connection identity",
+                phase="routing",
+                retryable=False,
             )
-        capability = next(
-            (
-                item
-                for item in endpoint_capability_states(db, endpoint)
-                if item["model_id"] == target.model_id
-            ),
-            None,
-        )
-        tools_enabled = capability.get("tools_enabled", True) if capability else True
-    finally:
-        db.close()
-    provider_id = direct_runtime_provider_id(endpoint_id)
-    return resolve_model_target(
-        "mimo://acp",
-        f"{provider_id}/{target.model_id}",
-        endpoint_id=endpoint_id,
-        provider_id=provider_id,
-        capabilities={"tools": tools_enabled, "auxiliary": False},
-        lifecycle=target.lifecycle,
+        return target
+    raise SupervisorAdmissionError(
+        "LEGACY_PROVIDER_ROUTE_RETIRED",
+        "Direct provider dispatch is unavailable; select a model from the provider catalogue",
+        phase="routing",
+        retryable=False,
     )
 
 
 async def _supervisor(explicit: Any = None, *, owner: Optional[str] = None) -> Any:
-    supervisor = explicit or _mimo_supervisor
+    supervisor = explicit or _agent_supervisor
     if supervisor and hasattr(supervisor, "for_owner"):
         try:
             supervisor = await supervisor.for_owner(owner)
@@ -213,67 +198,16 @@ async def _supervisor(explicit: Any = None, *, owner: Optional[str] = None) -> A
     return supervisor
 
 
-def _shared_runtime_target(
-    target: ResolvedModelTarget,
-    owner: Optional[str],
-):
-    """Resolve one enabled trusted grant to its private runtime model."""
-    from src.model_shares import (
-        resolve_shared_model_access,
-        runtime_model_for_access,
-        share_id_from_endpoint,
-        source_tools_enabled,
-    )
-
-    if share_id_from_endpoint(target.endpoint_id) is None:
-        return None
-    from core.database import SessionLocal
-
-    db = SessionLocal()
-    try:
-        access = resolve_shared_model_access(
-            db,
-            actor_owner=owner or "",
-            endpoint_id=target.endpoint_id,
-            model_id=target.model_id,
-        )
-        if access is None:
-            raise HTTPException(
-                403,
-                "This shared model is no longer available to your account",
-            )
-        runtime_model = runtime_model_for_access(db, access)
-        if runtime_model is None:
-            raise HTTPException(410, "The shared model source is invalid")
-        return access, runtime_model, source_tools_enabled(db, access)
-    finally:
-        db.close()
-
-
 async def _acp_turn_worker(
     target: ResolvedModelTarget,
     *,
     owner: Optional[str],
     supervisor: Any,
 ):
-    """Return the isolated worker/model for one ACP turn and optional lease."""
-    shared = _shared_runtime_target(target, owner)
-    if shared is not None:
-        access, runtime_model, _tools_enabled = shared
-        pool = supervisor or _mimo_supervisor
-        admit_shared = getattr(pool, "admit_shared_agent", None)
-        if not callable(admit_shared):
-            raise HTTPException(503, "Trusted model sharing is unavailable")
-        provider_id, separator, model_id = runtime_model.partition("/")
-        if not separator:
-            raise HTTPException(410, "The shared model source is invalid")
-        lease = await admit_shared(access, provider_id, model_id)
-        return lease.worker, runtime_model, lease
-
-    from src.openclank.mimo_projection import runtime_native_model_id
-
+    """Return the recipient-bound managed worker for one normalized ACP turn."""
+    target = await mimo_agent_target(target, owner=owner, supervisor=supervisor)
     worker = await _supervisor(supervisor, owner=owner)
-    return worker, runtime_native_model_id(target.model_id), None
+    return worker, target.model_id, None
 
 
 def _validated_candidates(
@@ -298,59 +232,65 @@ async def stream_chat_target(
     fallbacks: Iterable[tuple[str, str, dict]] = (),
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
-    if target.transport == "acp":
-        worker_lease = None
-        successful_terminal = False
-        try:
-            worker, runtime_model, worker_lease = await _acp_turn_worker(
-                target,
-                owner=owner,
-                supervisor=supervisor,
+    """Compatibility SSE wrapper over managed ``chat.complete``.
+
+    This helper remains for lightweight product surfaces that still consume
+    the historical SSE shape (currently rewrite).  It deliberately performs
+    no provider HTTP streaming: the managed router owns provider execution,
+    retries, account rotation, and sharing.  Tool-bearing turns belong at
+    :func:`stream_agent_target` instead.
+    """
+
+    del cwd, fallbacks
+    try:
+        target = await mimo_agent_target(
+            target,
+            owner=owner,
+            supervisor=supervisor,
+        )
+        if kwargs.get("tools"):
+            raise SupervisorAdmissionError(
+                "TOOLS_REQUIRE_AGENT",
+                "Tool-bearing turns require the managed Agent boundary",
+                phase="routing",
+                retryable=False,
             )
-            bridge = worker.bridge
-        except Exception as exc:
-            for event in _typed_error_sse(exc):
-                yield event
-            return
-        try:
-            envelope = dict(kwargs.get("turn_envelope") or {})
-            envelope.update({"lane": "auxiliary", "incognito": True})
-            async for chunk in bridge.run_turn(
-                session_id,
-                messages,
-                model=runtime_model,
-                cwd=None,
-                owner=owner,
-                turn_envelope=envelope,
-            ):
-                if chunk.strip() == "data: [DONE]":
-                    successful_terminal = True
-                yield chunk
-        finally:
-            try:
-                await worker.delete_session(session_id)
-            except Exception as exc:
-                logger.debug("Failed to clean up auxiliary Open Clank agent stream %s: %s", session_id, exc)
-            if worker_lease is not None:
-                await worker_lease.release(
-                    successful_terminal=successful_terminal,
-                )
-        return
 
-    from src.llm_core import stream_llm_with_fallback
+        envelope = dict(kwargs.get("turn_envelope") or {})
+        from src.openclank.chat_routing import resolve_chat_route, shared_endpoint_id
+        from src.openclank.modality_facade import complete_text
 
-    # ACP-only concepts stop at the transport fork: the HTTP leg's stream_llm
-    # has no turn envelope and must not receive one.
-    kwargs.pop("turn_envelope", None)
-    async for chunk in stream_llm_with_fallback(
-        _validated_candidates(target, fallbacks),
-        messages,
-        owner=owner,
-        cwd=cwd,
-        supervisor=supervisor,
-        **kwargs,
-    ):
-        yield chunk
+        _connection_id, _separator, provider_model_id = target.model_id.partition("/")
+        grant_id = str(envelope.get("provider_grant_id") or "").strip()
+        route = resolve_chat_route(
+            owner=owner,
+            endpoint_id=(
+                shared_endpoint_id(grant_id)
+                if grant_id
+                else target.endpoint_id
+            ),
+            model_id=provider_model_id,
+        )
+        max_tokens = kwargs.get("max_output_tokens", kwargs.get("max_tokens"))
+        if max_tokens is not None and int(max_tokens) < 1:
+            max_tokens = None
+        text = await complete_text(
+            owner=owner or "local-installation",
+            purpose="chat",
+            messages=messages,
+            model_route_id=route.model_route_id,
+            grant_id=route.provider_grant_id,
+            root_operation_id=envelope.get("root_operation_id"),
+            idempotency_key=f"stream-chat-{session_id}",
+            temperature=kwargs.get("temperature"),
+            max_output_tokens=max_tokens,
+        )
+        if text:
+            yield f'data: {json.dumps({"delta": text})}\n\n'
+        yield "data: [DONE]\n\n"
+    except Exception as exc:
+        for event in _typed_error_sse(exc):
+            yield event
 
 
 async def stream_agent_target(
@@ -364,9 +304,29 @@ async def stream_agent_target(
     fallbacks: Iterable[tuple[str, str, dict]] = (),
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
+    # Every strict/background origin converges here before a worker lease is
+    # acquired. A fresh Rust AgentScope projection selects private file
+    # lifetools; native OpenCode filesystem/search/process aliases stay denied,
+    # so a caller cannot recover the old repo/home fallback by omitting the
+    # route layer's disabled-tool list.
+    from src.tool_security import (
+        brokered_agent_file_tools,
+        unavailable_strict_agent_tools,
+    )
+    brokered_file_tools = brokered_agent_file_tools(owner, cwd)
+    unavailable_tools = unavailable_strict_agent_tools(owner, cwd)
+    if unavailable_tools:
+        kwargs["disabled_tools"] = set(kwargs.get("disabled_tools") or ()) | unavailable_tools
+        relevant = kwargs.get("relevant_tools")
+        if relevant is not None:
+            kwargs["relevant_tools"] = set(relevant) - unavailable_tools
     turn_envelope = _agent_turn_envelope(
         messages, cwd, kwargs.pop("turn_envelope", None), kwargs,
     )
+    # Caller payloads cannot mint this field. It is a fresh server projection
+    # of the current owner/workspace AgentScope and is consumed only to expose
+    # private Rust-backed lifetools while native OS tools stay denied.
+    turn_envelope["brokered_file_tools"] = sorted(brokered_file_tools)
     request = AgentRunRequest(
         target=target,
         messages=messages,
@@ -382,9 +342,8 @@ async def stream_agent_target(
 
 async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     """The only strict tool-bearing application door."""
-    pool = request.supervisor or _mimo_supervisor
+    pool = request.supervisor or _agent_supervisor
     if pool is None or not callable(getattr(pool, "admit_agent", None)):
-        from src.openclank.mimo_supervisor import SupervisorAdmissionError
         exc = SupervisorAdmissionError(
             "SUPERVISOR_UNAVAILABLE", "The strict Open Clank agent coordinator is unavailable"
         )
@@ -392,22 +351,13 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             yield event
         return
 
-    shared_access = None
-    shared_tools_enabled = None
     try:
-        shared = _shared_runtime_target(request.target, request.owner)
-        if shared is not None:
-            shared_access, runtime_model, shared_tools_enabled = shared
-            target = request.target
-        else:
-            target = await mimo_agent_target(
-                request.target,
-                owner=request.owner,
-                supervisor=pool,
-            )
-            from src.openclank.mimo_projection import runtime_native_model_id
-
-            runtime_model = runtime_native_model_id(target.model_id)
+        target = await mimo_agent_target(
+            request.target,
+            owner=request.owner,
+            supervisor=pool,
+        )
+        runtime_model = target.model_id
     except Exception as exc:
         if not hasattr(exc, "as_dict") and not isinstance(exc, HTTPException):
             logger.exception("Unexpected strict Agent admission failure")
@@ -417,7 +367,6 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
 
     qualified = runtime_model.split("/", 1)
     if len(qualified) != 2:
-        from src.openclank.mimo_supervisor import SupervisorAdmissionError
         exc = SupervisorAdmissionError(
             "MODEL_NOT_PROJECTED", "Open Clank agent models must retain provider identity",
             phase="routing", retryable=False,
@@ -430,24 +379,11 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     session_lease = None
     successful_terminal = False
     try:
-        if shared_access is not None:
-            admit_shared = getattr(pool, "admit_shared_agent", None)
-            if not callable(admit_shared):
-                raise HTTPException(
-                    503,
-                    "Trusted model sharing is unavailable",
-                )
-            worker_lease = await admit_shared(
-                shared_access,
-                provider_id,
-                model_id,
-            )
-        else:
-            worker_lease = await pool.admit_agent(
-                request.owner,
-                provider_id,
-                model_id,
-            )
+        worker_lease = await pool.admit_agent(
+            request.owner,
+            provider_id,
+            model_id,
+        )
         worker = worker_lease.worker
         incognito = bool((request.turn_envelope or {}).get("incognito"))
         session_lease = AgentSessionLease(
@@ -456,15 +392,11 @@ async def run_agent(request: AgentRunRequest) -> AsyncGenerator[str, None]:
             # The bridge owns exact-id cleanup for Temporary Agent sessions.
             ephemeral=target.lifecycle == "ephemeral" and not incognito,
         )
-        yield f'data: {json.dumps({"type": "projection", "data": {"generation": worker_lease.generation, "fingerprint": worker_lease.fingerprint[:12], "projection_pending": worker_lease.projection_pending, **({"shared": True} if shared_access is not None else {})}})}\n\n'
+        is_shared = bool((request.turn_envelope or {}).get("provider_grant_id"))
+        yield f'data: {json.dumps({"type": "projection", "data": {"generation": worker_lease.generation, "fingerprint": worker_lease.fingerprint[:12], "projection_pending": worker_lease.projection_pending, **({"shared": True} if is_shared else {})}})}\n\n'
         envelope = dict(request.turn_envelope or {})
         envelope["lane"] = "agent"
-        if shared_access is not None:
-            envelope["shared_model"] = shared_access.share_id
-        if (
-            shared_tools_enabled is False
-            or target.capabilities.get("tools") is False
-        ):
+        if target.capabilities.get("tools") is False:
             envelope["allowed_tools"] = []
         async for chunk in worker.bridge.run_turn(
             request.session_id,
@@ -514,77 +446,67 @@ async def call_model_target(
 
 
 async def run_auxiliary_inference(request: AuxiliaryRequest) -> str:
-    """Named, structurally tool-free inference; it can never rescue Agent."""
+    """Compatibility wrapper over the typed managed-completion boundary.
+
+    Provider URLs and headers are deliberately not forwarded. A surviving
+    caller must already carry normalized managed connection identity; direct
+    HTTP targets fail closed.
+    """
     if not request.purpose.strip():
         raise ValueError("Auxiliary inference requires a named product purpose")
     target = request.target
-    if target.transport == "http":
-        from src.llm_core import llm_call_async
-
-        options = dict(request.options)
-        if request.timeout is not None:
-            options.setdefault("timeout", request.timeout)
-        return await llm_call_async(
-            target.endpoint_url,
-            target.model_id,
-            request.messages,
-            headers=dict(target.headers),
-            session_id=request.session_id,
-            owner=request.owner,
-            cwd=None,
-            _transport_checked=True,
-            **options,
+    if target.transport != "acp" or target.headers:
+        raise SupervisorAdmissionError(
+            "LEGACY_PROVIDER_ROUTE_RETIRED",
+            "Direct provider dispatch is unavailable; configure a managed route binding",
+            phase="routing",
+            retryable=False,
         )
 
-    worker, runtime_model, worker_lease = await _acp_turn_worker(
+    await mimo_agent_target(
         target,
         owner=request.owner,
         supervisor=request.supervisor,
     )
-    turn_session = request.session_id or f"aux-{request.purpose}-{uuid.uuid4().hex}"
-    parts: list[str] = []
-    error: Optional[tuple[int, str]] = None
-    session_lease = AgentSessionLease(worker, turn_session, ephemeral=True)
-    successful_terminal = False
-    try:
-        async for chunk in worker.bridge.run_turn(
-            turn_session,
-            request.messages,
-            model=runtime_model,
-            cwd=None,
-            owner=request.owner,
-            turn_envelope={"lane": "auxiliary", "purpose": request.purpose, "incognito": True},
-        ):
-            if chunk.strip() == "data: [DONE]":
-                successful_terminal = True
-            event = "message"
-            for line in chunk.splitlines():
-                if line.startswith("event:"):
-                    event = line[6:].strip()
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                raw = line[5:].strip()
-                if not raw or raw == "[DONE]":
-                    continue
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if event == "error" or data.get("error"):
-                    error = (
-                        int(data.get("status") or 502),
-                        str(data.get("error") or data.get("text") or "Open Clank agent ACP call failed"),
-                    )
-                    continue
-                if isinstance(data.get("delta"), str) and not data.get("thinking"):
-                    parts.append(data["delta"])
-        if error:
-            raise HTTPException(*error)
-        return "".join(parts)
-    finally:
-        await session_lease.close()
-        if worker_lease is not None:
-            await worker_lease.release(
-                successful_terminal=successful_terminal,
-            )
+
+    from src.openclank.chat_routing import resolve_chat_route
+    from src.openclank.modality_facade import complete_text
+
+    route = resolve_chat_route(
+        owner=request.owner,
+        endpoint_id=target.endpoint_id,
+        model_id=target.model_id.split("/", 1)[1],
+    )
+    raw_purpose = request.purpose.strip().lower()
+    if raw_purpose == "memory" or raw_purpose.startswith("memory:"):
+        purpose = "memory"
+    elif "research" in raw_purpose:
+        purpose = "research"
+    elif "task" in raw_purpose:
+        purpose = "tasks"
+    elif raw_purpose == "chat":
+        purpose = "chat"
+    else:
+        purpose = "utility"
+
+    options = dict(request.options)
+    max_output_tokens = options.pop(
+        "max_output_tokens",
+        options.pop("max_tokens", None),
+    )
+    call = complete_text(
+        owner=request.owner or "local-installation",
+        purpose=purpose,
+        messages=request.messages,
+        model_route_id=route.model_route_id,
+        grant_id=route.provider_grant_id,
+        root_operation_id=options.pop("root_operation_id", None),
+        temperature=options.pop("temperature", None),
+        max_output_tokens=max_output_tokens,
+    )
+    if request.timeout is None:
+        return await call
+
+    import asyncio
+
+    return await asyncio.wait_for(call, timeout=request.timeout)

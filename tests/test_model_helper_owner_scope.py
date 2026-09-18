@@ -15,31 +15,42 @@ def _function_source(path: str, name: str) -> str:
 
 def test_document_ai_tidy_resolves_with_owner_scope():
     body = _function_source("routes/document_routes.py", "ai_tidy_documents")
-    assert "resolve_task_endpoint(owner=user or None)" in body
-    assert 'resolve_endpoint("default", owner=user or None)' in body
+    assert 'owner=user or "local-installation"' in body
+    assert 'purpose="utility"' in body
+    assert "complete_text" in body
+    assert "resolve_endpoint(" not in body
 
 
 def test_calendar_quick_parse_resolves_with_owner_scope():
     body = _function_source("routes/calendar_routes.py", "quick_parse")
     assert "owner = _require_user(request)" in body
-    assert 'resolve_endpoint("utility", owner=owner or None)' in body
-    assert 'resolve_endpoint("default", owner=owner or None)' in body
+    assert 'owner=owner or "local-installation"' in body
+    assert 'purpose="utility"' in body
+    assert "complete_text" in body
+    assert "resolve_endpoint(" not in body
 
 
-def test_task_parse_resolves_with_owner_scope():
+def test_task_parse_uses_owner_scoped_managed_tasks_route():
     body = _function_source("routes/task_routes.py", "parse_task")
     assert "user = _owner(request)" in body
-    assert 'resolve_endpoint("utility", owner=user or None)' in body
-    assert 'resolve_endpoint("default", owner=user or None)' in body
+    assert 'owner=user or "local-installation"' in body
+    assert 'purpose="tasks"' in body
+    assert "complete_text" in body
+    assert "resolve_endpoint(" not in body
 
 
 def test_history_compact_resolves_with_owner_scope():
     body = _function_source("routes/history/history_routes.py", "compact_session")
     assert "owner = effective_user(request)" in body
-    assert 'resolve_endpoint("utility", owner=owner or None)' in body
+    assert 'owner=owner or "local-installation"' in body
+    assert 'purpose="utility"' in body
+    assert "complete_text" in body
+    assert "resolve_endpoint(" not in body
 
 
 def test_note_reminder_synthesis_resolves_with_owner_scope():
     body = _function_source("routes/note/note_routes.py", "dispatch_reminder")
-    assert 'resolve_endpoint("utility", owner=owner or None)' in body
-    assert 'resolve_endpoint("default", owner=owner or None)' in body
+    assert 'owner=owner or "local-installation"' in body
+    assert 'purpose="utility"' in body
+    assert "complete_text" in body
+    assert "resolve_endpoint(" not in body

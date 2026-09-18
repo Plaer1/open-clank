@@ -1,5 +1,6 @@
 import asyncio
 import os
+import uuid
 from types import SimpleNamespace
 
 import httpx
@@ -265,6 +266,7 @@ async def test_list_sanitizes_payload_and_exposes_explicit_capabilities(monkeypa
         "capabilities": {
             "redirect": False,
             "device_code": True,
+            "browser_callback": False,
             "paste_code": False,
             "api_key": True,
         },
@@ -272,8 +274,77 @@ async def test_list_sanitizes_payload_and_exposes_explicit_capabilities(monkeypa
         "chat_models": 0,
         "active": False,
         "served_by": None,
+        "hidden_model_ids": [],
+        "hidden_count": 0,
     }
     assert "models" not in provider
+
+
+@pytest.mark.asyncio
+async def test_list_filters_unsupported_generic_oauth_methods(monkeypatch):
+    async def fake_catalog(_supervisor):
+        return catalog(
+            "synthetic",
+            [
+                {"type": "oauth", "label": "Unaudited browser login"},
+                {"type": "api", "label": "API key"},
+            ],
+        )
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    result = await endpoint("GET", "/api/mimo/providers")(request=request())
+    provider = result["providers"][0]
+
+    assert provider["methods"] == [{
+        "index": 1,
+        "type": "api",
+        "label": "API key",
+        "capability": "api_key",
+    }]
+    assert provider["capabilities"] == {
+        "redirect": False,
+        "device_code": False,
+        "browser_callback": False,
+        "paste_code": False,
+        "api_key": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_exposes_only_remote_safe_xai_oauth_method(monkeypatch):
+    async def fake_catalog(_supervisor):
+        return catalog(
+            "xai",
+            [
+                {"type": "oauth", "label": "Loopback browser login"},
+                {"type": "oauth", "label": "Device login"},
+                {"type": "api", "label": "API key"},
+            ],
+        )
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    result = await endpoint("GET", "/api/mimo/providers")(request=request())
+    provider = result["providers"][0]
+
+    assert [(method["index"], method["capability"]) for method in provider["methods"]] == [
+        (1, "device_code"),
+        (2, "api_key"),
+    ]
+    assert provider["capabilities"]["device_code"] is True
+    assert provider["capabilities"]["browser_callback"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_marks_worker_owned_browser_callback(monkeypatch):
+    async def fake_catalog(_supervisor):
+        return catalog("gitlab", [{"type": "oauth", "label": "GitLab OAuth"}])
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    result = await endpoint("GET", "/api/mimo/providers")(request=request())
+    provider = result["providers"][0]
+
+    assert provider["methods"][0]["capability"] == "browser_callback"
+    assert provider["capabilities"]["browser_callback"] is True
 
 
 @pytest.mark.asyncio
@@ -348,6 +419,187 @@ async def test_api_key_is_owner_scoped_forwarded_once_and_never_echoed(monkeypat
     )
     assert calls == [("PUT", "/auth/openai", {"type": "api", "key": "do-not-echo"})]
     assert "do-not-echo" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_native_disconnect_revokes_shared_workers_and_notifies_recipients(
+    monkeypatch,
+):
+    suffix = uuid.uuid4().hex
+    owner = f"owner-{suffix}"
+    recipient = f"recipient-{suffix}"
+    share_id = f"share-{suffix}"
+    connection_id = f"connection-{suffix}"
+    revoked = []
+    notifications = []
+
+    class Pool(Supervisor):
+        async def for_owner(self, requested_owner):
+            assert requested_owner == owner
+            return self
+
+        async def revoke_shared_access(self, requested_owner, requested_share):
+            revoked.append((requested_owner, requested_share))
+
+        async def refresh_endpoint_projection(self):
+            return None
+
+    class Notifications:
+        def add_notification(self, task_name, status, task_id=None, **kwargs):
+            notifications.append({
+                "task_name": task_name,
+                "status": status,
+                "task_id": task_id,
+                **kwargs,
+            })
+
+    connection = SimpleNamespace(id=connection_id, family_id="xiaomi")
+    grant = SimpleNamespace(
+        id=share_id,
+        owner=owner,
+        recipient=recipient,
+        connection_id=connection_id,
+        revision=3,
+        model_selector={"mode": "explicit_models", "model_route_ids": ["route-1"]},
+    )
+    route_row = SimpleNamespace(id="route-1", provider_model_id="xiaomi/mimo-v2.5-pro")
+
+    class ProviderStore:
+        def __init__(self):
+            self.expected_owner = owner
+
+        def list_connections(self, *, owner):
+            assert owner == self.expected_owner
+            return [connection]
+
+        def list_share_grants(self, *, owner):
+            assert owner == self.expected_owner
+            return [grant]
+
+        def list_model_routes(self, *, owner, connection_id):
+            assert owner == self.expected_owner
+            assert connection_id == connection.id
+            return [route_row]
+
+        def revoke_share_grant(self, *, owner, grant_id, expected_revision):
+            assert owner == self.expected_owner
+            assert grant_id == share_id
+            assert expected_revision == 3
+            grant.state = "revoked"
+            return grant
+
+    monkeypatch.setattr("src.openclank.provider_store.ProviderStore", ProviderStore)
+
+    async def fake_catalog(_supervisor):
+        return catalog("xiaomi", [{"type": "oauth", "label": "Login"}])
+
+    async def fake_native(_supervisor, method, path, body=None, **_kwargs):
+        assert (method, path, body) == ("DELETE", "/auth/xiaomi", None)
+        assert revoked == [(recipient, share_id)]
+        return True
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    monkeypatch.setattr(routes, "_native", fake_native)
+    monkeypatch.setattr(
+        "src.event_bus.get_task_scheduler",
+        lambda: Notifications(),
+    )
+    req = request(user=owner, cookie=f"session-{owner}")
+    req.app.state.mimo_supervisor = Pool()
+    result = await endpoint("DELETE", "/{provider_id}")(
+        provider_id="xiaomi",
+        request=req,
+    )
+    await asyncio.sleep(0)
+
+    assert result["revoked_model_shares"] == 1
+    assert revoked == [(recipient, share_id)]
+    assert [note["owner"] for note in notifications] == [recipient]
+    assert notifications[0]["kind"] == "model_share"
+    assert "mimo-v2.5-pro" in notifications[0]["body"]
+    assert "key" not in repr(notifications).lower()
+
+
+@pytest.mark.asyncio
+async def test_api_key_forwards_selected_method_prompt_inputs_as_metadata(monkeypatch):
+    calls = []
+    methods = [
+        {"type": "oauth", "label": "Browser login"},
+        {
+            "type": "api",
+            "label": "Gateway API key",
+            "prompts": [
+                {"type": "text", "key": "accountId", "message": "Account ID"},
+                {"type": "text", "key": "gatewayId", "message": "Gateway ID"},
+            ],
+        },
+    ]
+
+    async def fake_catalog(_supervisor):
+        return catalog("cloudflare-ai-gateway", methods)
+
+    async def fake_native(_supervisor, method, path, body=None, **_kwargs):
+        calls.append((method, path, body))
+        return True
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    monkeypatch.setattr(routes, "_native", fake_native)
+    await endpoint("PUT", "/{provider_id}/api-key")(
+        provider_id="cloudflare-ai-gateway",
+        payload=routes.ApiKeyCredential(
+            key="gateway-secret",
+            method=1,
+            inputs={"accountId": "account-1", "gatewayId": "gateway-1"},
+        ),
+        request=request(),
+    )
+
+    assert calls == [(
+        "PUT",
+        "/auth/cloudflare-ai-gateway",
+        {
+            "type": "api",
+            "key": "gateway-secret",
+            "metadata": {
+                "accountId": "account-1",
+                "gatewayId": "gateway-1",
+            },
+        },
+    )]
+
+
+@pytest.mark.asyncio
+async def test_api_key_rejects_inputs_not_declared_by_selected_method(monkeypatch):
+    native_called = False
+    methods = [{
+        "type": "api",
+        "label": "Workers API key",
+        "prompts": [{"type": "text", "key": "accountId", "message": "Account ID"}],
+    }]
+
+    async def fake_catalog(_supervisor):
+        return catalog("cloudflare-workers-ai", methods)
+
+    async def fake_native(*_args, **_kwargs):
+        nonlocal native_called
+        native_called = True
+        return True
+
+    monkeypatch.setattr(routes, "_catalog", fake_catalog)
+    monkeypatch.setattr(routes, "_native", fake_native)
+    with pytest.raises(HTTPException) as invalid:
+        await endpoint("PUT", "/{provider_id}/api-key")(
+            provider_id="cloudflare-workers-ai",
+            payload=routes.ApiKeyCredential(
+                key="workers-secret",
+                method=0,
+                inputs={"gatewayId": "not-declared"},
+            ),
+            request=request(),
+        )
+
+    assert invalid.value.status_code == 400
+    assert native_called is False
 
 
 @pytest.mark.asyncio
@@ -498,6 +750,7 @@ async def test_expired_flow_is_terminal(monkeypatch):
 async def test_stable_configured_redirect_ignores_forwarded_host_and_state_is_one_use(monkeypatch):
     calls = []
     monkeypatch.setenv("APP_PUBLIC_URL", "https://buildweek.openclank.dev/")
+    monkeypatch.setitem(routes._AUTH_CAPABILITIES, "synthetic", {0: "redirect"})
 
     async def fake_catalog(_supervisor):
         return catalog("synthetic", [{"type": "oauth", "label": "Sign in"}])
@@ -550,6 +803,7 @@ async def test_stable_configured_redirect_ignores_forwarded_host_and_state_is_on
 @pytest.mark.asyncio
 async def test_redirect_error_page_does_not_echo_provider_error(monkeypatch):
     monkeypatch.setenv("APP_PUBLIC_URL", "https://buildweek.openclank.dev")
+    monkeypatch.setitem(routes._AUTH_CAPABILITIES, "synthetic", {0: "redirect"})
     seen = {}
 
     async def fake_catalog(_supervisor):

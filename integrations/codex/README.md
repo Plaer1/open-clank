@@ -11,7 +11,7 @@ This directory contains the Codex plugin/skill bundle for Odysseus.
 5. Configure the terminal Codex session:
 
 ```bash
-export ODYSSEUS_URL=http://your-odysseus-host:7000
+export ODYSSEUS_URL=http://your-odysseus-host:7777
 export ODYSSEUS_API_TOKEN=ody_generated_token
 mkdir -p ~/plugins
 curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/codex/plugin.zip" -o /tmp/odysseus-codex-plugin.zip

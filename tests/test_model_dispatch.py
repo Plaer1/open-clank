@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.endpoint_resolver import build_chat_url, resolve_model_target
+from src.endpoint_resolver import ResolvedModelTarget, build_chat_url, resolve_model_target
 from src.model_dispatch import _typed_error_sse, call_model_target
 
 
@@ -73,10 +73,30 @@ class _FakeSupervisor:
         self.deleted.append(session_id)
 
 
-async def test_nonstream_acp_collects_answer_and_cleans_ephemeral_session():
-    supervisor = _FakeSupervisor()
-    target = resolve_model_target(
-        "mimo://acp", "xiaomi/mimo-v2", lifecycle="ephemeral"
+async def test_nonstream_acp_uses_typed_managed_completion(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(
+        "src.openclank.chat_routing.resolve_chat_route",
+        lambda **kwargs: SimpleNamespace(
+            model_route_id="route-1",
+            provider_grant_id=None,
+        ),
+    )
+
+    async def complete(**kwargs):
+        seen.update(kwargs)
+        return "hello world"
+
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", complete)
+    target = ResolvedModelTarget(
+        transport="acp",
+        endpoint_url="openclank://engine",
+        model_id="pcn_xiaomi/mimo-v2",
+        endpoint_id="pcn_xiaomi",
+        provider_id="pcn_xiaomi",
+        capabilities={"chat": True},
+        lifecycle="ephemeral",
     )
 
     answer = await call_model_target(
@@ -84,14 +104,15 @@ async def test_nonstream_acp_collects_answer_and_cleans_ephemeral_session():
         [{"role": "user", "content": "hi"}],
         session_id="aux-test",
         owner="alice",
-        supervisor=supervisor,
     )
 
     assert answer == "hello world"
-    assert supervisor.deleted == ["aux-test"]
+    assert seen["purpose"] == "utility"
+    assert seen["model_route_id"] == "route-1"
+    assert seen["owner"] == "alice"
 
 
-async def test_mimo_url_never_reaches_http_client(monkeypatch):
+async def test_retired_mimo_url_is_rejected_without_reaching_http_client(monkeypatch):
     import src.llm_core as llm_core
     import src.model_dispatch as dispatch
 
@@ -103,14 +124,17 @@ async def test_mimo_url_never_reaches_http_client(monkeypatch):
             raise AssertionError(f"HTTP client touched through {name}")
 
     monkeypatch.setattr(llm_core, "_get_http_client", lambda: _NoHttp())
-    answer = await llm_core.llm_call_async(
-        "mimo://acp",
-        "xiaomi/mimo-v2",
-        [{"role": "user", "content": "hi"}],
-        owner="alice",
-    )
-    assert answer == "hello world"
-    assert len(supervisor.deleted) == 1
+    with pytest.raises(
+        llm_core.DirectModelDispatchRetired,
+        match="managed operation router",
+    ):
+        await llm_core.llm_call_async(
+            "mimo://acp",
+            "xiaomi/mimo-v2",
+            [{"role": "user", "content": "hi"}],
+            owner="alice",
+        )
+    assert supervisor.deleted == []
 
 
 class _RejectingClient:
@@ -161,34 +185,134 @@ async def test_rejected_mimo_model_aborts_before_prompt(monkeypatch, tmp_path):
 def test_chat_routes_dispatch_by_resolved_target_not_drive_flag():
     source = open("routes/chat_routes.py", encoding="utf-8").read()
     assert 'os.environ.get("OPENTHESIUS_DRIVE")' not in source
-    assert "stream_chat_target(" not in source
+    assert "stream_chat_target(" in source
     assert "stream_agent_target(" in source
+    assert "stream_llm(" not in source
 
 
-def test_settings_reject_stale_or_ineligible_mimo_capabilities(monkeypatch):
-    import src.model_dispatch as dispatch
+def test_turn_envelope_maps_public_interaction_mode_to_internal_provider_mode(monkeypatch):
+    import routes.chat_routes as chat_routes
+
+    monkeypatch.setattr(chat_routes, "_transcript_revision", lambda _session_id: 0)
+    for public_mode, provider_mode in (
+        ("chat", "build"),
+        ("agent", "build"),
+        ("plan", "plan"),
+    ):
+        envelope = chat_routes._turn_envelope(
+            session_id="session-1",
+            owner="alice",
+            workspace="/tmp",
+            model="model-a",
+            mode=public_mode,
+            incognito=False,
+        )
+        assert envelope["mode"] == public_mode
+        assert envelope["provider_mode"] == provider_mode
+
+
+def test_public_mode_source_does_not_render_or_dispatch_provider_native_modes():
+    from pathlib import Path
+
+    slash = Path("static/js/slashCommands.js").read_text(encoding="utf-8")
+    autocomplete = Path("static/js/slashAutocomplete.js").read_text(encoding="utf-8")
+    index = Path("static/index.html").read_text(encoding="utf-8")
+    assert "id=\"mimo-mode-select\"" not in index
+    assert "availableModes" not in autocomplete
+    assert "_setMimoConfig('mode'" not in slash
+    assert "/build" not in autocomplete
+
+
+def test_settings_accept_only_live_normalized_route_capabilities(monkeypatch):
     from routes.auth_routes import _validate_model_settings_update
+    from src.openclank.provider_store import ProviderNotFound
 
-    supervisor = _FakeSupervisor()
-    monkeypatch.setattr(dispatch, "_mimo_supervisor", supervisor)
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(mimo_supervisor=supervisor))
+    routes = {
+        "pmr-chat": SimpleNamespace(
+            id="pmr-chat", connection_id="conn", provider_model_id="chat-model",
+            enabled=True, deleted_at=None, visibility="visible",
+            operations=["chat.complete", "chat.stream"],
+        ),
+        "pmr-no-vision": SimpleNamespace(
+            id="pmr-no-vision", connection_id="conn", provider_model_id="text-only",
+            enabled=True, deleted_at=None, visibility="visible",
+            operations=["chat.complete"],
+        ),
+    }
+
+    class Store:
+        def get_model_route(self, *, model_route_id, **_kwargs):
+            if model_route_id not in routes:
+                raise ProviderNotFound("missing")
+            return routes[model_route_id]
+
+        def get_connection(self, **_kwargs):
+            return SimpleNamespace(id="conn", enabled=True, deleted_at=None)
+
+        def list_connections(self, **_kwargs):
+            return [SimpleNamespace(id="conn", enabled=True, deleted_at=None)]
+
+        def list_model_routes(self, **_kwargs):
+            return list(routes.values())
+
+    monkeypatch.setattr("src.openclank.provider_store.ProviderStore", Store)
+    request = SimpleNamespace()
+
+    _validate_model_settings_update(
+        {"default_endpoint_id": "conn", "default_model": "pmr-chat"},
+        {},
+        request,
+        "admin",
     )
 
-    with pytest.raises(Exception, match="default_model is not available"):
+    with pytest.raises(Exception, match="available normalized model route"):
         _validate_model_settings_update(
-            {"default_endpoint_id": "mimo", "default_model": "missing/model"},
+            {"default_endpoint_id": "conn", "default_model": "missing/model"},
             {},
             request,
             "admin",
         )
-    with pytest.raises(Exception, match="does not advertise vision"):
+    with pytest.raises(Exception, match="available normalized model route"):
         _validate_model_settings_update(
-            {"vision_model": "xiaomi/mimo-v2"},
+            {"vision_model": "pmr-no-vision"},
             {},
             request,
             "admin",
         )
+
+
+def test_settings_accept_grant_backed_shared_models_without_source_ids(monkeypatch):
+    from routes.auth_routes import _validate_model_settings_update
+
+    seen = []
+
+    class Store:
+        pass
+
+    def resolve(**kwargs):
+        seen.append(dict(kwargs))
+        return SimpleNamespace(operations=("chat.complete", "chat.stream"))
+
+    monkeypatch.setattr("src.openclank.provider_store.ProviderStore", Store)
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_route", resolve)
+
+    _validate_model_settings_update(
+        {
+            "memory_endpoint_id": "share:grant-public",
+            "memory_model": "provider-model-public",
+        },
+        {},
+        SimpleNamespace(),
+        "alice",
+    )
+
+    assert len(seen) == 1
+    assert seen[0]["owner"] == "alice"
+    assert seen[0]["endpoint_id"] == "share:grant-public"
+    assert seen[0]["model_id"] == "provider-model-public"
+    assert set(seen[0]) == {
+        "owner", "endpoint_id", "model_id", "provider_store"
+    }
 
 
 def test_canonical_revision_bumps_once_per_context_mutation():
@@ -302,13 +426,19 @@ def test_mimo_tool_policy_applies_chat_incognito_and_aliases():
 
     # Tool-free behavior is structural: auxiliary turns and a user's explicit
     # Tools-off preference both get a full deny.
-    assert _mimo_tool_policy({"mode": "chat"}) == {"frankenmemory_*": False}
-    assert _mimo_tool_policy({"incognito": True}) == {"frankenmemory_*": False}
+    ordinary = _mimo_tool_policy({"mode": "chat"})
+    incognito = _mimo_tool_policy({"incognito": True})
+    for policy in (ordinary, incognito):
+        assert policy["frankenmemory_*"] is False
+        assert policy["read"] is False
+        assert policy["grep"] is False
+        assert policy["lifetools_*_read_file"] is False
     assert _mimo_tool_policy({"lane": "auxiliary", "incognito": True}) == {"*": False}
-    assert _mimo_tool_policy({"lane": "agent", "allowed_tools": []}) == {
-        "*": False,
-        "frankenmemory_*": False,
-    }
+    tools_off = _mimo_tool_policy({"lane": "agent", "allowed_tools": []})
+    assert tools_off["*"] is False
+    assert tools_off["frankenmemory_*"] is False
+    assert tools_off["read"] is False
+    assert tools_off["lifetools_*_read_file"] is False
     policy = _mimo_tool_policy({
         "mode": "agent",
         "disabled_tools": ["write_file", "manage_memory"],
@@ -317,6 +447,16 @@ def test_mimo_tool_policy_applies_chat_incognito_and_aliases():
     assert policy["apply_patch"] is False
     assert policy["memory"] is False
     assert policy["frankenmemory_*"] is False
+
+    brokered = _mimo_tool_policy({
+        "mode": "agent",
+        "brokered_file_tools": ["read_file", "grep"],
+    })
+    assert brokered["read"] is False
+    assert brokered["grep"] is False
+    assert brokered["lifetools_*_read_file"] is True
+    assert brokered["lifetools_*_grep"] is True
+    assert brokered["lifetools_*_write_file"] is False
 
 
 async def test_owner_supervisor_pool_starts_once_and_partitions_home(monkeypatch, tmp_path):
@@ -536,6 +676,7 @@ def test_mimo_child_environment_strips_provider_credentials(monkeypatch, tmp_pat
     monkeypatch.setenv("PATH", "/safe/bin")
     monkeypatch.setenv("FM_DB_PATH", db_path)
     monkeypatch.setenv("FM_DB_ID", "db-test")
+    monkeypatch.setenv("FM_WORKSPACE_ID", "goal-workspace")
     monkeypatch.setenv("FM_MCP_COMMAND", "/opt/fm-mcp")
     monkeypatch.setenv("FM_EMBED_API_BASE", "https://embed.example/v1")
     monkeypatch.setenv("FM_EMBED_API_KEY", "embed-secret")
@@ -554,27 +695,31 @@ def test_mimo_child_environment_strips_provider_credentials(monkeypatch, tmp_pat
     assert "KUBECONFIG" not in child_env
     assert "SAFE_SETTING" not in child_env
     assert child_env["PATH"] == "/safe/bin"
+    assert child_env["MIMOCODE_DISABLE_PROVIDER_ENV"] == "1"
+    assert child_env["MIMOCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert child_env["MIMOCODE_DISABLE_EXTERNAL_SKILLS"] == "1"
+    assert child_env["MIMOCODE_DISABLE_REMOTE_SKILLS"] == "1"
+    assert child_env["MIMOCODE_DISABLE_CLAUDE_CODE"] == "1"
+    assert child_env["FM_WORKSPACE_ID"] == "goal-workspace"
+    for name in (
+        "FM_EMBED_API_BASE",
+        "FM_EMBED_API_KEY",
+        "FM_EMBED_MODEL",
+        "FM_EMBED_DIMENSIONS",
+        "FM_EMBED_TIMEOUT_MS",
+    ):
+        assert name not in child_env
     assert {
         name: child_env[name]
         for name in (
             "FM_DB_PATH",
             "FM_DB_ID",
             "FM_MCP_COMMAND",
-            "FM_EMBED_API_BASE",
-            "FM_EMBED_API_KEY",
-            "FM_EMBED_MODEL",
-            "FM_EMBED_DIMENSIONS",
-            "FM_EMBED_TIMEOUT_MS",
         )
     } == {
         "FM_DB_PATH": db_path,
         "FM_DB_ID": "db-test",
         "FM_MCP_COMMAND": "/opt/fm-mcp",
-        "FM_EMBED_API_BASE": "https://embed.example/v1",
-        "FM_EMBED_API_KEY": "embed-secret",
-        "FM_EMBED_MODEL": "embedding-model",
-        "FM_EMBED_DIMENSIONS": "3072",
-        "FM_EMBED_TIMEOUT_MS": "45000",
     }
 
 
@@ -582,6 +727,14 @@ def test_lifetools_descriptor_uses_running_python():
     from src.openclank.acp_bridge import lifetools_mcp_descriptor
 
     assert lifetools_mcp_descriptor()["command"] == sys.executable
+
+
+def test_lifetools_exposes_only_brokered_file_forms():
+    from src.openclank.lifetools_server import _BRIDGED_TOOLS
+
+    names = {tool.name for tool in _BRIDGED_TOOLS}
+    assert {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}.issubset(names)
+    assert {"bash", "python", "apply_patch", "get_workspace"}.isdisjoint(names)
 
 
 async def test_mimo_question_is_owner_revision_bound_and_single_use():
@@ -1156,70 +1309,20 @@ async def test_http_transport_drops_acp_only_turn_envelope(monkeypatch):
     assert "turn_envelope" not in captured
 
 
-def _auth_sup(module, tmp_path, monkeypatch, stored=None, stored_at=0.0):
-    sup = module.MimoSupervisor(None)
-    sup._mimocode_home = str(tmp_path / "mimocode")
-    sup._owner = "e"
-    written = {}
-    monkeypatch.setattr(module, "_load_stored_auth", lambda owner: (stored, stored_at))
-    monkeypatch.setattr(module, "_store_auth", lambda owner, payload: written.update({owner: payload}))
-    return sup, written
-
-
-def test_auth_store_seeded_from_db_when_runtime_home_is_fresh(tmp_path, monkeypatch):
-    """Wipe data/mimocode entirely: provider connections come back from app.db."""
+def test_managed_supervisor_exposes_no_runtime_provider_auth_cache_api():
+    """Provider credentials cross only capability-bound managed callbacks."""
+    import inspect
     import src.openclank.mimo_supervisor as module
 
-    payload = json.dumps({"openai": {"type": "oauth"}})
-    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=payload, stored_at=9e12)
-
-    sup._reconcile_auth_store()
-
-    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
-    assert auth_file.read_text() == payload
-    assert (auth_file.stat().st_mode & 0o777) == 0o600
-    assert written == {}
-
-
-def test_auth_store_adopts_legacy_file_into_db(tmp_path, monkeypatch):
-    import src.openclank.mimo_supervisor as module
-
-    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=None)
-    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
-    auth_file.parent.mkdir(parents=True)
-    auth_file.write_text(json.dumps({"xiaomi": {"type": "api"}}))
-
-    sup._reconcile_auth_store()
-
-    assert written == {"e": json.dumps({"xiaomi": {"type": "api"}})}
-
-
-def test_auth_store_fresher_file_wins_and_mirrors_back(tmp_path, monkeypatch):
-    """OAuth refresh written by the child after the last mirror must not be
-    clobbered by a stale DB copy."""
-    import src.openclank.mimo_supervisor as module
-
-    stale = json.dumps({"openai": {"type": "oauth", "token": "old"}})
-    fresh = json.dumps({"openai": {"type": "oauth", "token": "new"}})
-    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored=stale, stored_at=1.0)
-    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
-    auth_file.parent.mkdir(parents=True)
-    auth_file.write_text(fresh)
-
-    sup._reconcile_auth_store()
-
-    assert auth_file.read_text() == fresh
-    assert written == {"e": fresh}
-
-
-def test_sync_auth_to_db_mirrors_changes(tmp_path, monkeypatch):
-    import src.openclank.mimo_supervisor as module
-
-    sup, written = _auth_sup(module, tmp_path, monkeypatch, stored="{}")
-    auth_file = tmp_path / "mimocode" / "data" / "auth.json"
-    auth_file.parent.mkdir(parents=True)
-    auth_file.write_text(json.dumps({"deepseek": {"type": "api"}}))
-
-    sup.sync_auth_to_db()
-
-    assert written == {"e": json.dumps({"deepseek": {"type": "api"}})}
+    for name in (
+        "_auth_file",
+        "_reconcile_auth_store",
+        "sync_auth_to_db",
+        "_recover_generation_auth_caches",
+    ):
+        assert not hasattr(module.MimoSupervisor, name)
+        assert not hasattr(module.MimoSupervisorPool, name)
+    source = inspect.getsource(module)
+    assert "MimoAuthStore" not in source
+    assert "MimoProjectionState" not in source
+    assert "MIMOCODE_PROVIDER_AUTH_FD" not in source

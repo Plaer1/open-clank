@@ -60,7 +60,8 @@ def test_open_questions_render_inside_endorsed_block():
     block = render_trusted_block(_digest(open_questions=[QUESTION]), PREFS)
     assert block.startswith(TRUST_SENTINEL)
     assert "Open questions the user wants answered:" in block
-    assert "- user's name?" in block
+    assert "- `q1` — user's name?" in block
+    assert "displayed memory ID" in block
     assert "weave the question in" in block.lower() or "weave" in block.lower()
     assert "never interrogate" in block.lower()
 
@@ -131,6 +132,7 @@ class _StubProvider:
         self.remember_calls.append({
             "text": text,
             "category": category,
+            "source": source,
             "capture_mode": capture_mode,
         })
         return SimpleNamespace(id="m_new", text=text, category=category)
@@ -138,16 +140,32 @@ class _StubProvider:
     async def resolve_id(self, display_id, *, owner=None):
         return display_id
 
-    async def resolve_question(self, memory_id, *, resolved_by=None, owner=None):
-        self.resolved.append({"id": memory_id, "resolved_by": resolved_by})
+    async def resolve_question(
+        self,
+        memory_id,
+        *,
+        resolved_by=None,
+        answer=None,
+        expected_revision=None,
+        owner=None,
+    ):
+        self.resolved.append(
+            {"id": memory_id, "resolved_by": resolved_by, "answer": answer}
+        )
         return self.resolve_result
 
 
 @pytest.fixture
 def stub_provider(monkeypatch):
     import src.ai_interaction as ai
+    import routes.prefs_routes as prefs_routes
     stub = _StubProvider()
     monkeypatch.setattr(ai, "_memory_provider", stub)
+    monkeypatch.setattr(
+        prefs_routes,
+        "_load_for_user",
+        lambda _owner: {"memory_mode": "automatic"},
+    )
     return stub
 
 
@@ -157,6 +175,7 @@ async def test_manage_memory_add_question_normalizes(stub_provider):
     assert "error" not in result
     call = stub_provider.remember_calls[0]
     assert call["category"] == "unknown"
+    assert call["source"] == "user"
     assert call["text"] == "users name?"
 
 
@@ -164,7 +183,9 @@ async def test_manage_memory_resolve_round_trip(stub_provider):
     from src.ai_interaction import do_manage_memory
     result = await do_manage_memory("resolve\nq_123\nm_answer", owner="alice")
     assert result.get("action") == "resolve"
-    assert stub_provider.resolved == [{"id": "q_123", "resolved_by": "m_answer"}]
+    assert stub_provider.resolved == [
+        {"id": "q_123", "resolved_by": None, "answer": "m_answer"}
+    ]
 
 
 async def test_manage_memory_resolve_refuses_non_questions(stub_provider):
@@ -216,9 +237,11 @@ async def test_live_unknown_lifecycle_add_recall_resolve(tmp_path):
         hits = await provider.recall("favorite editor", owner="alice")
         assert any(h.memory.kind == "unknown" for h in hits)
 
-        # Direct resolve (U7a): archived with provenance, leaves digest.
+        # Direct resolve (U7a): the answer revises the same stable block.
         question_id = questions[0]["id"]
-        assert await provider.resolve_question(question_id, owner="alice")
+        assert await provider.resolve_question(
+            question_id, answer="Neovim", owner="alice"
+        )
         digest_after = await provider.digest(owner="alice")
         assert not (digest_after.get("open_questions") or [])
         # Double-resolve is a clean failure.

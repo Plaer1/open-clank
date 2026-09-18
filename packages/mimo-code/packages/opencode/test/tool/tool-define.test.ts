@@ -56,4 +56,73 @@ describe("Tool.define", () => {
 
     expect(first).not.toBe(second)
   })
+
+  test("resource declarations schedule wrapped invocations by canonical path", async () => {
+    const calls: string[] = []
+    let releaseFirst!: () => void
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    let firstStarted!: () => void
+    const firstReady = new Promise<void>((resolve) => {
+      firstStarted = resolve
+    })
+    let disjointStarted!: () => void
+    const disjointReady = new Promise<void>((resolve) => {
+      disjointStarted = resolve
+    })
+    const scheduledParams = z.object({
+      path: z.string(),
+      access: z.enum(["read", "write"]),
+      hold: z.boolean().optional(),
+    })
+    const info = await runtime.runPromise(
+      Tool.define(
+        "scheduled-tool",
+        Effect.succeed({
+          description: "scheduled",
+          parameters: scheduledParams,
+          resources: (args: z.infer<typeof scheduledParams>) =>
+            args.access === "read" ? { reads: [args.path] } : { writes: [args.path] },
+          execute: (args: z.infer<typeof scheduledParams>) =>
+            Effect.promise(async () => {
+              calls.push(args.path)
+              if (args.hold) {
+                firstStarted()
+                await firstRelease
+              }
+              if (args.path.endsWith("second")) disjointStarted()
+              return { title: "scheduled", output: "ok", metadata: { truncated: false } }
+            }),
+        }),
+      ),
+    )
+    const tool = await Effect.runPromise(info.init())
+    const ctx = {
+      sessionID: "ses_scheduler",
+      messageID: "msg_scheduler",
+      agent: "build",
+      abort: AbortSignal.any([]),
+      messages: [],
+      metadata: () => Effect.void,
+      ask: () => Effect.void,
+    } as any
+
+    const first = Effect.runPromise(
+      tool.execute({ path: "/tmp/open-clank-scheduler-first", access: "read", hold: true }, ctx),
+    )
+    await firstReady
+    const blocked = Effect.runPromise(
+      tool.execute({ path: "/tmp/open-clank-scheduler-first", access: "write" }, ctx),
+    )
+    const disjoint = Effect.runPromise(
+      tool.execute({ path: "/tmp/open-clank-scheduler-second", access: "write" }, ctx),
+    )
+    await disjointReady
+    expect(calls.filter((item) => item.endsWith("first"))).toHaveLength(1)
+
+    releaseFirst()
+    await Promise.all([first, blocked, disjoint])
+    expect(calls.filter((item) => item.endsWith("first"))).toHaveLength(2)
+  })
 })

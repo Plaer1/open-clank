@@ -100,17 +100,20 @@ async function _loadSkillEntries() {
 
 async function _loadMimoEntries(force = false) {
   const state = await loadMimoControlState(force);
-  if (!state.available) return [];
-  const entries = [];
-  for (const mode of state.modes?.availableModes || []) {
-    entries.push({
-      token: `/${mode.id}`,
-      aliases: [],
-      category: 'Agent modes',
-      help: mode.description || `Switch Open Clank agent to ${mode.name || mode.id}`,
-      usage: `/${mode.id} [prompt]`,
-    });
-  }
+  // Only the public Open Clank interaction modes belong in autocomplete.
+  // Provider-native ACP values (including Build) remain internal.
+  const entries = ['chat', 'plan', 'agent'].map(mode => ({
+    token: `/${mode}`,
+    aliases: [],
+    category: 'Interaction modes',
+    help: mode === 'chat'
+      ? 'Read-only answers and safe context'
+      : mode === 'plan'
+        ? 'Investigate and propose a plan'
+        : 'Use the enabled agent tools',
+    usage: `/${mode} [prompt]`,
+  }));
+  if (!state.available) return entries;
   for (const command of state.commands || []) {
     const help = command.description || 'Run agent command';
     entries.push({

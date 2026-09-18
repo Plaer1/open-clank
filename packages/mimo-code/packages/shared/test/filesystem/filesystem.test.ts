@@ -1,9 +1,12 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect, spyOn } from "bun:test"
 import { Effect, Layer, FileSystem } from "effect"
 import { NodeFileSystem } from "@effect/platform-node"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { testEffect } from "../lib/effect"
 import path from "path"
+import * as NFS from "fs/promises"
+import { spawn } from "child_process"
+import { createServer } from "net"
 
 const live = AppFileSystem.layer.pipe(Layer.provideMerge(NodeFileSystem.layer))
 const { effect: it } = testEffect(live)
@@ -317,7 +320,474 @@ describe("AppFileSystem", () => {
     )
   })
 
+  describe("atomic contract", () => {
+    it(
+      "canonicalizes a missing target beneath a symlinked parent",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const root = path.join(tmp, "root")
+        const outside = path.join(tmp, "outside")
+        yield* filesys.makeDirectory(root)
+        yield* filesys.makeDirectory(outside)
+        yield* Effect.promise(() => NFS.symlink(outside, path.join(root, "link")))
+
+        const canonical = yield* fs.canonicalTarget(path.join(root, "link", "new.txt"))
+        expect(canonical).toBe(path.join(outside, "new.txt"))
+        expect(AppFileSystem.contains(root, canonical)).toBe(false)
+      }),
+    )
+
+    it(
+      "sends one authenticated Lore action for a multi-target agent batch",
+      Effect.gen(function* () {
+        // Bun's macOS AF_UNIX client closes before delivering a peer response;
+        // the same hook is exercised end-to-end on Linux in the qualification matrix.
+        if (process.platform === "darwin") return
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const first = path.join(tmp, "first.txt")
+        const second = path.join(tmp, "second.txt")
+        const socketPath = path.join("/tmp", `mimo-history-${Date.now()}.sock`)
+        yield* filesys.writeFileString(first, "before")
+        const serverScript = `
+import socket, sys
+path = sys.argv[1]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(8)
+log = open(path + ".log", "wb")
+for _ in range(3):
+    conn, _ = server.accept()
+    body = b""
+    while b"\\n" not in body:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    log.write(body)
+    log.flush()
+    conn.sendall(b"{}")
+    conn.close()
+log.close()
+server.close()
+`
+        const historyServer = spawn("python3", ["-c", serverScript, socketPath], { stdio: ["ignore", "ignore", "pipe"] })
+        yield* Effect.promise(async () => {
+          for (let attempt = 0; attempt < 100; attempt++) {
+            if (await NFS.stat(socketPath).then(() => true).catch(() => false)) return
+            await new Promise((resolve) => setTimeout(resolve, 10))
+          }
+          throw new Error("history fixture socket did not start")
+        })
+        const history: AppFileSystem.HistoryContext = {
+          actorId: "agent-1",
+          accountId: "acct-1",
+          workspaceId: "workspace-1",
+          workspaceRoot: tmp,
+          socketPath,
+          token: "opaque-token",
+          status: { status: "paused", history_status: "paused", capture_phase: "unavailable", durable: false, coverage: "NoCapture" },
+        }
+        try {
+          yield* fs.atomicBatch([
+            { path: first, content: "after", actionId: "mimo-batch-1", history },
+            { path: second, content: "created", actionId: "mimo-batch-1", history },
+          ])
+          expect(history.status.status).toBe("complete")
+        } finally {
+          if (historyServer.exitCode === null) historyServer.kill()
+          yield* Effect.promise(() => new Promise<void>((resolve) => {
+            if (historyServer.exitCode !== null) resolve()
+            else historyServer.once("close", () => resolve())
+          }))
+        }
+        const frameBytes = yield* Effect.promise(() => NFS.readFile(socketPath + ".log"))
+        const frames = frameBytes.toString("utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        expect(yield* filesys.readFileString(first)).toBe("after")
+        expect(yield* filesys.readFileString(second)).toBe("created")
+        expect(frames).toHaveLength(3)
+        expect(frames.map((frame) => Object.keys(frame)[0])).toEqual(["Prepare", "RecordLive", "Complete"])
+        expect(frames.every((frame) => {
+          const envelope = frame[Object.keys(frame)[0]!].envelope
+          return envelope.auth.actor_id === "agent-1" && envelope.auth.account_id === "acct-1" && envelope.auth.token === "opaque-token" && envelope.action_id === "mimo-batch-1"
+        })).toBe(true)
+        const request = frames[0].Prepare.envelope.request
+        expect(request.operation).toBe("replace")
+        expect(request.modified_resource_ids).toHaveLength(2)
+        expect(request.coverage.kind).toBe("ObservedAfterOnly")
+      }),
+    )
+
+    it(
+      "preserves BOM, newlines, mode and rejects a stale fingerprint",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const file = path.join(tmp, "script.txt")
+        yield* Effect.promise(() => NFS.writeFile(file, Buffer.from("\ufeffalpha\r\nbeta\r\n", "utf8")))
+        yield* filesys.chmod(file, 0o751)
+        const snapshot = yield* fs.readTextSnapshot(file)
+
+        yield* fs.atomicWrite({
+          path: file,
+          content: AppFileSystem.encodeText(snapshot, snapshot.text.replace("beta", "BETA")),
+          expectedFingerprint: snapshot.fingerprint,
+          mode: snapshot.mode,
+        })
+        expect(yield* Effect.promise(() => NFS.readFile(file))).toEqual(Buffer.from("\ufeffalpha\r\nBETA\r\n", "utf8"))
+        expect((yield* Effect.promise(() => NFS.stat(file))).mode & 0o777).toBe(0o751)
+
+        const fresh = yield* fs.readTextSnapshot(file)
+        yield* Effect.promise(() => NFS.appendFile(file, "external\r\n"))
+        const conflict = yield* Effect.flip(
+          fs.atomicWrite({
+            path: file,
+            content: "ours",
+            expectedFingerprint: fresh.fingerprint,
+          }),
+        )
+        expect(conflict).toBeInstanceOf(AppFileSystem.AtomicConflict)
+      }),
+    )
+
+    it(
+      "validates the whole batch before changing the first file",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const first = path.join(tmp, "first.txt")
+        const second = path.join(tmp, "second.txt")
+        yield* filesys.writeFileString(first, "first-old")
+        yield* filesys.writeFileString(second, "second-old")
+        const one = yield* fs.readTextSnapshot(first)
+        const two = yield* fs.readTextSnapshot(second)
+        yield* filesys.writeFileString(second, "external")
+
+        yield* Effect.flip(
+          fs.atomicBatch([
+            { path: first, content: "first-new", expectedFingerprint: one.fingerprint },
+            { path: second, content: "second-new", expectedFingerprint: two.fingerprint },
+          ]),
+        )
+        expect(yield* filesys.readFileString(first)).toBe("first-old")
+        expect(yield* filesys.readFileString(second)).toBe("external")
+      }),
+    )
+
+    it(
+      "round-trips UTF-16 byte order and refuses binary text",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const little = path.join(tmp, "little.txt")
+        const big = path.join(tmp, "big.txt")
+        const binary = path.join(tmp, "binary.txt")
+        const oddLittle = path.join(tmp, "odd-little.txt")
+        const oddBig = path.join(tmp, "odd-big.txt")
+        yield* Effect.promise(() => NFS.writeFile(little, Buffer.from([0xff, 0xfe, 0x61, 0x00, 0x0a, 0x00])))
+        yield* Effect.promise(() => NFS.writeFile(big, Buffer.from([0xfe, 0xff, 0x00, 0x61, 0x00, 0x0a])))
+        yield* Effect.promise(() => NFS.writeFile(binary, Buffer.from([0x61, 0x00, 0x62])))
+        yield* Effect.promise(() => NFS.writeFile(oddLittle, Buffer.from([0xff, 0xfe, 0x61])))
+        yield* Effect.promise(() => NFS.writeFile(oddBig, Buffer.from([0xfe, 0xff, 0x00])))
+
+        for (const file of [little, big]) {
+          const snapshot = yield* fs.readTextSnapshot(file)
+          yield* fs.atomicWrite({
+            path: file,
+            content: AppFileSystem.encodeText(snapshot, snapshot.text.replace("a", "A")),
+            expectedFingerprint: snapshot.fingerprint,
+            mode: snapshot.mode,
+          })
+        }
+
+        expect(yield* Effect.promise(() => NFS.readFile(little))).toEqual(
+          Buffer.from([0xff, 0xfe, 0x41, 0x00, 0x0a, 0x00]),
+        )
+        expect(yield* Effect.promise(() => NFS.readFile(big))).toEqual(
+          Buffer.from([0xfe, 0xff, 0x00, 0x41, 0x00, 0x0a]),
+        )
+        yield* Effect.flip(fs.readTextSnapshot(binary))
+        yield* Effect.flip(fs.readTextSnapshot(oddLittle))
+        yield* Effect.flip(fs.readTextSnapshot(oddBig))
+      }),
+    )
+
+    it(
+      "rejects canonical aliases in one batch",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const target = path.join(tmp, "target.txt")
+        const alias = path.join(tmp, "alias.txt")
+        yield* filesys.writeFileString(target, "old")
+        yield* Effect.promise(() => NFS.symlink(target, alias))
+
+        const error = yield* Effect.flip(
+          fs.atomicBatch([
+            { path: target, content: "one" },
+            { path: alias, content: "two" },
+          ]),
+        )
+        expect(String(error)).toContain("duplicate target")
+        expect(yield* filesys.readFileString(target)).toBe("old")
+      }),
+    )
+
+    it(
+      "updates a symlink target without replacing the link",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const target = path.join(tmp, "target.txt")
+        const alias = path.join(tmp, "alias.txt")
+        yield* filesys.writeFileString(target, "old")
+        yield* Effect.promise(() => NFS.symlink(target, alias))
+        const snapshot = yield* fs.readTextSnapshot(alias)
+
+        yield* fs.atomicWrite({
+          path: alias,
+          content: "new",
+          expectedFingerprint: snapshot.fingerprint,
+        })
+
+        expect((yield* Effect.promise(() => NFS.lstat(alias))).isSymbolicLink()).toBe(true)
+        expect(yield* filesys.readFileString(target)).toBe("new")
+      }),
+    )
+
+    it(
+      "rejects a parent symlink swap before commit",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const inside = path.join(tmp, "inside")
+        const outside = path.join(tmp, "outside")
+        const alias = path.join(tmp, "alias")
+        yield* filesys.makeDirectory(inside)
+        yield* filesys.makeDirectory(outside)
+        yield* Effect.promise(() => NFS.symlink(inside, alias))
+        const requested = path.join(alias, "new.txt")
+        const realMkdir = NFS.mkdir.bind(NFS)
+        let swapped = false
+        const mkdir = spyOn(NFS, "mkdir").mockImplementation(
+          (async (target, options) => {
+            const result = await realMkdir(target, options)
+            if (!swapped && target === inside) {
+              swapped = true
+              await NFS.unlink(alias)
+              await NFS.symlink(outside, alias)
+            }
+            return result
+          }) as typeof NFS.mkdir,
+        )
+
+        try {
+          const failure = yield* Effect.flip(
+            fs.atomicWrite({
+              path: requested,
+              content: "blocked",
+              requireMissing: true,
+            }),
+          )
+          expect(failure).toBeInstanceOf(AppFileSystem.AtomicConflict)
+          expect(yield* filesys.exists(path.join(inside, "new.txt"))).toBe(false)
+          expect(yield* filesys.exists(path.join(outside, "new.txt"))).toBe(false)
+        } finally {
+          mkdir.mockRestore()
+        }
+      }),
+    )
+
+    it(
+      "never overwrites an external create race",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const target = path.join(tmp, "new.txt")
+        const realLink = NFS.link.bind(NFS)
+        const link = spyOn(NFS, "link").mockImplementation(async (source, destination) => {
+          await NFS.writeFile(target, "external")
+          return realLink(source, destination)
+        })
+
+        try {
+          const failure = yield* Effect.flip(
+            fs.atomicWrite({
+              path: target,
+              content: "ours",
+              requireMissing: true,
+            }),
+          )
+          expect(failure).toBeInstanceOf(AppFileSystem.AtomicConflict)
+          expect(yield* filesys.readFileString(target)).toBe("external")
+        } finally {
+          link.mockRestore()
+        }
+      }),
+    )
+
+    it(
+      "rolls back a failure at every commit position",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+
+        for (const failAt of [1, 2, 3]) {
+          const dir = path.join(tmp, `case-${failAt}`)
+          yield* filesys.makeDirectory(dir)
+          const targets = [0, 1, 2].map((index) => path.join(dir, `file-${index}.txt`))
+          for (const [index, target] of targets.entries()) {
+            yield* filesys.writeFileString(target, `old-${index}`)
+          }
+          const realRename = NFS.rename.bind(NFS)
+          let installs = 0
+          const rename = spyOn(NFS, "rename").mockImplementation(async (source, destination) => {
+            if (String(source).includes(".tmp.")) {
+              installs += 1
+              if (installs === failAt) throw new Error(`install ${failAt} failed`)
+            }
+            return realRename(source, destination)
+          })
+
+          try {
+            yield* Effect.flip(
+              fs.atomicBatch(
+                targets.map((target, index) => ({
+                  path: target,
+                  content: `new-${index}`,
+                })),
+              ),
+            )
+            for (const [index, target] of targets.entries()) {
+              expect(yield* filesys.readFileString(target)).toBe(`old-${index}`)
+            }
+          } finally {
+            rename.mockRestore()
+          }
+        }
+      }),
+    )
+
+    it(
+      "retains a recoverable backup when rollback itself fails",
+      Effect.gen(function* () {
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const first = path.join(tmp, "first.txt")
+        const second = path.join(tmp, "second.txt")
+        yield* filesys.writeFileString(first, "first-old")
+        yield* filesys.writeFileString(second, "second-old")
+        const realRename = NFS.rename.bind(NFS)
+        const rename = spyOn(NFS, "rename").mockImplementation(async (source, destination) => {
+          if (String(source).includes(".tmp.") && destination === second) {
+            throw new Error("commit failed")
+          }
+          if (String(source).includes(".bak.") && destination === first) {
+            throw new Error("rollback failed")
+          }
+          return realRename(source, destination)
+        })
+
+        try {
+          const failure = yield* Effect.flip(
+            fs.atomicBatch([
+              { path: first, content: "first-new" },
+              { path: second, content: "second-new" },
+            ]),
+          )
+          expect(failure).toBeInstanceOf(AppFileSystem.AtomicRollbackError)
+          const entries = yield* filesys.readDirectory(tmp)
+          const backup = entries.find((name) => name.startsWith(".first.txt.bak."))
+          expect(backup).toBeDefined()
+          expect(yield* filesys.readFileString(path.join(tmp, backup!))).toBe("first-old")
+          expect(yield* filesys.readFileString(second)).toBe("second-old")
+        } finally {
+          rename.mockRestore()
+        }
+      }),
+    )
+  })
+
   describe("pure helpers", () => {
+    it(
+      "schedules disjoint resources concurrently and serializes canonical overlaps",
+      Effect.gen(function* () {
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const firstPath = path.join(tmp, "first.txt")
+        const secondPath = path.join(tmp, "second.txt")
+        const aliasPath = path.join(tmp, "alias.txt")
+        yield* filesys.writeFileString(firstPath, "first")
+        yield* filesys.writeFileString(secondPath, "second")
+        yield* Effect.promise(() => NFS.symlink(firstPath, aliasPath))
+
+        const first = yield* Effect.promise(() =>
+          AppFileSystem.acquireFileResources({ reads: [firstPath] }),
+        )
+        const overlap = AppFileSystem.acquireFileResources({ writes: [firstPath] })
+        const overlapReady = yield* Effect.promise(() =>
+          Promise.race([
+            overlap.then(() => true),
+            new Promise<false>((resolve) => queueMicrotask(() => resolve(false))),
+          ]),
+        )
+        expect(overlapReady).toBe(false)
+
+        const disjoint = AppFileSystem.acquireFileResources({ writes: [secondPath] })
+        const disjointLease = yield* Effect.promise(() => disjoint)
+        disjointLease.release()
+
+        const alias = AppFileSystem.acquireFileResources({ writes: [aliasPath] })
+        const aliasReady = yield* Effect.promise(() =>
+          Promise.race([
+            alias.then(() => true),
+            new Promise<false>((resolve) => queueMicrotask(() => resolve(false))),
+          ]),
+        )
+        expect(aliasReady).toBe(false)
+
+        first.release()
+        const overlapLease = yield* Effect.promise(() => overlap)
+        overlapLease.release()
+        const aliasLease = yield* Effect.promise(() => alias)
+        aliasLease.release()
+
+        const held = yield* Effect.promise(() =>
+          AppFileSystem.acquireFileResources({ writes: [firstPath] }),
+        )
+        const controller = new AbortController()
+        const cancelled = AppFileSystem.acquireFileResources(
+          { reads: [firstPath] },
+          controller.signal,
+        )
+        controller.abort()
+        const wasCancelled = yield* Effect.promise(() =>
+          cancelled.then(
+            () => false,
+            () => true,
+          ),
+        )
+        expect(wasCancelled).toBe(true)
+        held.release()
+        const afterCancellation = yield* Effect.promise(() =>
+          AppFileSystem.acquireFileResources({ writes: [firstPath] }),
+        )
+        afterCancellation.release()
+      }),
+    )
+
     test("mimeType returns correct types", () => {
       expect(AppFileSystem.mimeType("file.json")).toBe("application/json")
       expect(AppFileSystem.mimeType("image.png")).toBe("image/png")

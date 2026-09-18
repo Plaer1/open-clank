@@ -38,18 +38,26 @@ KINDS_PREF = "memory_trust_auto_kinds"
 def trust_prefs(prefs: Any) -> Tuple[bool, Dict[str, bool]]:
     """Sanitize raw per-user prefs into (master, kind_switches).
 
-    Unknown kind keys are dropped, values coerced to bool, missing kinds
-    take the T7 defaults. Malformed prefs read as all-off master.
+    Unknown kind keys are dropped, non-boolean values are rejected by
+    treating the affected switch as disabled, and missing kinds take the T7
+    defaults.  In particular, the string ``"false"`` is not truthy.
     """
     if not isinstance(prefs, Mapping):
         return False, dict(DEFAULT_KIND_TRUST)
-    master = bool(prefs.get(MASTER_PREF, False))
+    master = prefs.get(MASTER_PREF, False)
+    if not isinstance(master, bool):
+        master = False
     kinds = dict(DEFAULT_KIND_TRUST)
     raw_kinds = prefs.get(KINDS_PREF)
     if isinstance(raw_kinds, Mapping):
         for kind, value in raw_kinds.items():
             if kind in kinds:
-                kinds[kind] = bool(value)
+                if isinstance(value, bool):
+                    kinds[kind] = value
+                else:
+                    # Fail closed for malformed persisted preference values;
+                    # do not let Python's bool("false") become True.
+                    kinds[kind] = False
     return master, kinds
 
 
@@ -69,7 +77,7 @@ def trusted(entry: Any, prefs: Any) -> bool:
     """
     if str(_field(entry, "source_type") or "") == "human":
         return True
-    if bool(_field(entry, "pinned", False)):
+    if _field(entry, "pinned", False) is True:
         return True
     kind = str(_field(entry, "kind") or "")
     if kind not in TRUSTABLE_KINDS:

@@ -14,11 +14,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from core.middleware import INTERNAL_TOOL_OWNER_HEADER, INTERNAL_TOOL_USER
-from src.endpoint_resolver import resolve_endpoint
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
-from routes.model_routes import normalize_mimo_connection_id
 from src.constants import DEEP_RESEARCH_DIR
+from src.openclank.chat_routing import (
+    ChatRouteUnavailable,
+    MANAGED_ENGINE_PUBLIC_URL,
+    list_chat_routes,
+    resolve_chat_route,
+)
+from src.openclank.modality_facade import managed_route_summary
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 
@@ -73,15 +78,6 @@ def _find_owned_research_path(session_id: str, user: str) -> Path | None:
 
 logger = logging.getLogger(__name__)
 
-# Model-name substrings that are NOT chat/generation models — research must
-# never pick these as its model. An OpenAI-style endpoint often lists
-# `text-embedding-ada-002` etc. first in its model list, which is why research
-# was failing with "Cannot reach model 'text-embedding-ada-002'".
-_NON_CHAT_MODEL = (
-    "text-embedding", "embedding", "tts-", "whisper", "dall-e",
-    "moderation", "rerank", "reranker", "clip", "stable-diffusion",
-)
-
 _RESEARCH_IMAGE_BLOCKLIST = {
     "cdn.shopify.com/s/files/1/0179/4388/7926/files/icon.png",
 }
@@ -131,80 +127,77 @@ def _research_thumbnail(data: dict) -> str:
     return ""
 
 
-def _first_chat_model(models) -> str:
-    """First model that isn't an embedding/tts/etc. — falls back to models[0]."""
-    for m in (models or []):
-        if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
-            return m
-    return (models[0] if models else "")
-
-
 def _resolve_research_endpoint(sess, owner: Optional[str] = None) -> tuple:
-    """Return (endpoint_url, model, headers) for Deep Research, checking admin overrides."""
-    owner = owner or getattr(sess, "owner", None) or None
-    url, model, headers = resolve_endpoint(
-        "research",
-        fallback_url=sess.endpoint_url,
-        fallback_model=sess.model,
-        fallback_headers=sess.headers,
-        owner=owner,
+    """Compatibility projection of the owner's managed research binding.
+
+    Chat callers still expect ``(endpoint, model, headers)`` while the handler
+    migrates independently.  The endpoint is a non-network managed-engine
+    sentinel and headers are always empty; execution resolves the durable
+    ``research`` purpose binding again inside the operation router.
+    """
+    route = managed_route_summary(
+        owner=owner or getattr(sess, "owner", None) or "",
+        purpose="research",
+        operation="chat.complete",
     )
-    return url, model, headers
-
-
-def _owned_enabled_endpoint(db, owner, endpoint_id=None):
-    """An enabled ModelEndpoint owned exactly by `owner`, optionally narrowed
-    to a specific endpoint_id; None if nothing visible matches.
-
-    Owner-scoped on purpose. ModelEndpoint is per-user (core/database.py: non-null
-    owner = private, "the model picker only shows the endpoint to that user") and
-    holds a decrypted `api_key`. /api/research/start feeds the resolved row's
-    api_key + base_url into research_handler.start_research(llm_endpoint=,
-    llm_headers=), so an UNSCOPED lookup — by the caller-supplied endpoint_id, or
-    via the bare first-enabled fallback — would let a research-privileged user
-    spend ANOTHER user's API key/quota and reach whatever internal base_url they
-    configured. Mirrors webhook_routes._first_enabled_endpoint and
-    session_routes._owned_endpoint. A null/empty owner sees only legacy
-    ownerless rows in single-user mode.
-    """
-    from src.database import ModelEndpoint
-    from src.auth_helpers import owner_filter
-    q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
-    if endpoint_id:
-        q = q.filter(ModelEndpoint.id == endpoint_id)
-    return owner_filter(q, ModelEndpoint, owner, include_shared=False).first()
-
-
-def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
-    """Resolve a ModelEndpoint row into (chat_url, model, headers).
-
-    Mirrors endpoint_resolver.resolve_endpoint's provider-auth handling for
-    panel-selected research endpoints. ChatGPT Subscription endpoints keep
-    OAuth tokens in ProviderAuthSession, so ep.api_key is intentionally empty.
-    """
-    from src.endpoint_resolver import (
-        build_chat_url,
-        build_headers,
-        resolve_endpoint_runtime as resolve_model_endpoint_runtime,
+    if route is None:
+        return "", "", {}
+    return (
+        MANAGED_ENGINE_PUBLIC_URL,
+        route.get("model_name") or route.get("model_id") or "",
+        {},
     )
 
-    try:
-        base, api_key = resolve_model_endpoint_runtime(ep, owner=owner)
-    except Exception as e:
-        logger.warning("Could not resolve endpoint credentials for research: %s", e)
-        return None
 
-    ep_model = (model or "").strip()
-    if not ep_model:
-        try:
-            models = json.loads(ep.cached_models) if ep.cached_models else []
-            if models:
-                ep_model = _first_chat_model(models)
-        except Exception:
-            pass
-    if not ep_model:
+def _requested_research_route(owner: str, endpoint_id: str, model: str):
+    """Resolve an optional panel selection using normalized, secret-free IDs."""
+    endpoint = str(endpoint_id or "").strip()
+    model_id = str(model or "").strip()
+    if not endpoint and not model_id:
         return None
-    return build_chat_url(base), ep_model, build_headers(api_key, base)
+    if endpoint and model_id:
+        route = resolve_chat_route(
+            owner=owner,
+            endpoint_id=endpoint,
+            model_id=model_id,
+        )
+        if "chat.complete" not in set(route.operations or ()):
+            raise ChatRouteUnavailable(
+                "Selected model does not support research completions"
+            )
+        return route
+
+    own, shared = list_chat_routes(owner)
+    candidates = [
+        route for route in (*own, *shared)
+        if "chat.complete" in set(route.operations or ())
+    ]
+    if not endpoint:
+        default = managed_route_summary(
+            owner=owner,
+            purpose="research",
+            operation="chat.complete",
+        )
+        if default is None:
+            raise ChatRouteUnavailable("No managed research route is configured")
+        candidates = [
+            route for route in candidates
+            if route.connection_id == default.get("connection_id")
+        ]
+    else:
+        candidates = [
+            route for route in candidates
+            if route.public_endpoint_id == endpoint
+        ]
+    if model_id:
+        candidates = [
+            route for route in candidates
+            if route.provider_model_id == model_id
+        ]
+    candidates.sort(key=lambda route: (route.display_name.casefold(), route.model_route_id))
+    if not candidates:
+        raise ChatRouteUnavailable("Selected research model is unavailable")
+    return candidates[0]
 
 
 def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
@@ -511,89 +504,64 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 user = tool_owner
         session_id = f"rp-{uuid.uuid4().hex[:12]}"
 
-        if body.endpoint_id:
-            native_connection = normalize_mimo_connection_id(body.endpoint_id)
-            if native_connection:
-                from src.endpoint_resolver import resolve_endpoint_by_id
+        try:
+            selected_route = _requested_research_route(
+                user,
+                body.endpoint_id or "",
+                body.model or "",
+            )
+        except ChatRouteUnavailable as exc:
+            raise HTTPException(400, str(exc)) from exc
 
-                resolved = resolve_endpoint_by_id(
-                    native_connection,
-                    body.model,
-                    owner=user,
+        if selected_route is None:
+            route = managed_route_summary(
+                owner=user,
+                purpose="research",
+                operation="chat.complete",
+            )
+            if route is None:
+                raise HTTPException(
+                    400,
+                    "No managed research model is configured. Choose one in Providers first.",
                 )
-                if not resolved:
-                    raise HTTPException(400, "Open Clank agent model is unavailable")
-                auth_manager = getattr(request.app.state, "auth_manager", None)
-                get_privileges = getattr(auth_manager, "get_privileges", None)
-                privileges = get_privileges(user) if get_privileges and user else {}
-                allowed = set((privileges or {}).get("allowed_models") or [])
-                restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
-                if (privileges or {}).get("block_all_models") or (restricted and resolved[1] not in allowed):
-                    raise HTTPException(403, f"Your account is not allowed to use model {resolved[1]!r}")
-                ep_url, ep_model, ep_headers = resolved
-            else:
-                from src.database import SessionLocal
-                db = SessionLocal()
-                try:
-                    # Owner-scoped: never resolve another user's private endpoint
-                    # (and its decrypted api_key / internal base_url). A scoped miss
-                    # reads as 404 so the endpoint's existence isn't revealed.
-                    ep = _owned_enabled_endpoint(db, user, body.endpoint_id)
-                    if not ep:
-                        raise HTTPException(404, "Endpoint not found or disabled")
-                    resolved = _resolve_endpoint_runtime(ep, owner=user, model=body.model)
-                    if not resolved:
-                        raise HTTPException(400, "Endpoint is not configured with a usable model.")
-                    ep_url, ep_model, ep_headers = resolved
-                finally:
-                    db.close()
+            model_label = route.get("model_id") or route.get("model_name") or "managed"
+            selected_model_route_id = None
+            selected_grant_id = None
+            privilege_route_id = route.get("model_route_id") or ""
         else:
-            ep_url, ep_model, ep_headers = resolve_endpoint("research", owner=user)
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("utility", owner=user)
-            # When neither research nor utility is configured, use the user's
-            # configured DEFAULT model (default_endpoint_id/default_model) rather
-            # than arbitrarily grabbing the first enabled endpoint's first model
-            # (which surfaced gpt-3.5). "Default" should mean the default model.
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("default", owner=user)
-            if not ep_url:
-                ep_url, ep_model, ep_headers = resolve_endpoint("chat", owner=user)
-            if not ep_url:
-                from src.database import SessionLocal
-                db = SessionLocal()
-                try:
-                    # Owner-scoped first-enabled fallback: the caller's own rows
-                    # + legacy null-owner shared rows only — never borrow another
-                    # user's private endpoint/api_key. Same fix as the
-                    # /api/v1/chat fallback (webhook_routes._first_enabled_endpoint).
-                    ep = _owned_enabled_endpoint(db, user)
-                    if ep:
-                        resolved = _resolve_endpoint_runtime(ep, owner=user)
-                        if resolved:
-                            ep_url, ep_model, ep_headers = resolved
-                finally:
-                    db.close()
-            if not ep_url:
-                raise HTTPException(400, "No endpoints configured. Add one in Settings first.")
-            if body.model:
-                ep_model = body.model
+            model_label = selected_route.provider_model_id
+            selected_model_route_id = selected_route.model_route_id
+            selected_grant_id = selected_route.provider_grant_id
+            privilege_route_id = selected_route.model_route_id
+
+        auth_manager = getattr(request.app.state, "auth_manager", None)
+        get_privileges = getattr(auth_manager, "get_privileges", None)
+        privileges = get_privileges(user) if get_privileges and user else {}
+        allowed = set((privileges or {}).get("allowed_models") or [])
+        restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
+        if (privileges or {}).get("block_all_models") or (
+            restricted
+            and model_label not in allowed
+            and privilege_route_id not in allowed
+        ):
+            raise HTTPException(403, f"Your account is not allowed to use model {model_label!r}")
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
         research_handler.start_research(
             session_id=session_id,
             query=body.query,
-            llm_endpoint=ep_url,
-            llm_model=ep_model,
+            llm_model=model_label,
             max_time=body.max_time,
-            llm_headers=ep_headers,
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
             owner=user,
+            model_route_id=selected_model_route_id,
+            grant_id=selected_grant_id,
+            root_operation_id=session_id,
         )
         return {"session_id": session_id, "status": "running", "query": body.query}
 
@@ -658,8 +626,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         """Create a new chat session pre-seeded with this research as context.
 
         Reads the persisted research result + sources for `session_id`, creates
-        a fresh session (inheriting endpoint/model/headers from the source
-        session if available, otherwise from the resolved chat endpoint), and
+        a fresh session (inheriting normalized route identity from the source
+        session if available, otherwise using a managed purpose binding), and
         injects a single system message containing the report and sources so
         the user can ask follow-up questions in a clean conversation.
         """
@@ -693,61 +661,45 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if not result:
             raise HTTPException(404, "No research result available for this session")
 
-        # Inherit endpoint/model/headers from the source session when possible.
-        # For panel-launched research (rp-* IDs), there is no chat session, so
-        # fall back through the same chain as /api/research/start: research →
-        # utility → first enabled endpoint in the DB.
-        ep_url, ep_model, ep_headers, ep_id = "", "", {}, None
+        # Inherit only normalized, secret-free route identity from the source
+        # session. Panel-launched research has no source chat, so use the
+        # owner's managed chat/research/utility bindings in that order.
+        selected_route = None
         try:
             src_sess = session_manager.get_session(session_id)
-            ep_url = src_sess.endpoint_url or ""
-            ep_model = src_sess.model or ""
-            ep_headers = dict(src_sess.headers or {})
-            ep_id = getattr(src_sess, "endpoint_id", None)
+            selected_route = resolve_chat_route(
+                owner=user,
+                endpoint_id=getattr(src_sess, "endpoint_id", None),
+                model_id=getattr(src_sess, "model", None),
+                model_route_id=getattr(src_sess, "provider_model_route_id", None),
+            )
         except KeyError:
             pass
+        except ChatRouteUnavailable:
+            pass
 
-        def _merge(r_url, r_model, r_headers):
-            nonlocal ep_url, ep_model, ep_headers
-            if not ep_url and r_url:
-                ep_url = r_url
-            if not ep_model and r_model:
-                ep_model = r_model
-            if not ep_headers and r_headers:
-                ep_headers = dict(r_headers)
-
-        if not ep_url or not ep_model:
-            _merge(*resolve_endpoint("chat", owner=user))
-        if not ep_url or not ep_model:
-            _merge(*resolve_endpoint("research", owner=user))
-        if not ep_url or not ep_model:
-            _merge(*resolve_endpoint("utility", owner=user))
-        if not ep_url or not ep_model:
-            # Last resort: this user's enabled endpoint, plus legacy shared rows.
-            from src.database import SessionLocal
-            from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
-            db = SessionLocal()
-            try:
-                ep = _owned_enabled_endpoint(db, user)
-                if ep:
-                    ep_id = ep.id
-                    base = normalize_base(ep.base_url)
-                    fallback_url = build_chat_url(base)
-                    fallback_headers = build_headers(ep.api_key, base)
-                    fallback_model = ""
-                    if ep.cached_models:
-                        try:
-                            models = json.loads(ep.cached_models)
-                            if models:
-                                fallback_model = _first_chat_model(models)
-                        except Exception:
-                            pass
-                    _merge(fallback_url, fallback_model, fallback_headers)
-            finally:
-                db.close()
-
-        if not ep_url or not ep_model:
-            raise HTTPException(400, "No endpoint configured — add one in Settings first")
+        if selected_route is not None:
+            ep_model = selected_route.provider_model_id
+            ep_id = selected_route.public_endpoint_id
+            model_route_id = selected_route.model_route_id
+        else:
+            route = None
+            for purpose in ("chat", "research", "utility"):
+                route = managed_route_summary(
+                    owner=user,
+                    purpose=purpose,
+                    operation="chat.complete",
+                )
+                if route is not None:
+                    break
+            if route is None:
+                raise HTTPException(
+                    400,
+                    "No managed chat model is configured — choose one in Providers first",
+                )
+            ep_model = route.get("model_id") or route.get("model_name") or ""
+            ep_id = route.get("connection_id") or None
+            model_route_id = route.get("model_route_id") or None
 
         # Create new session
         new_sid = str(uuid.uuid4())
@@ -760,15 +712,13 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         new_sess = session_manager.create_session(
             session_id=new_sid,
             name=new_name,
-            endpoint_url=ep_url,
+            endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
             model=ep_model,
             rag=False,
             owner=user,
             endpoint_id=ep_id,
+            provider_model_route_id=model_route_id,
         )
-        if ep_headers:
-            new_sess.headers = ep_headers
-            session_manager.save_sessions()
         try:
             from src.event_bus import fire_event
             fire_event("session_created", user)

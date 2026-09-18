@@ -1,0 +1,73 @@
+# Copal's insular first-party Open Clank Hexes contract.
+# It does not import or inherit the root Open Clank contract.
+contract: open-clank-hexes/v2
+
+imports:
+  - .clankers/hexes/cant_stop_checks.py
+
+settings:
+  ask_me_before_staging: true
+  confirm_before_push: true
+  confirm_before_deleting:
+    over_lines: 5
+  warn_about_similar_files:
+    above: 0.86
+    ignore:
+      - "**/__init__.py"
+      - ".references/**"
+      - "treehouse/**"
+      - "servo-shell/target/**"
+      - "rust/**/target/**"
+      - "out/**"
+      - ".next/**"
+
+hexes:
+  - hex: "Copal Hexes are insular and must not import OpenClank/OpenClaw rules"
+    in: ./
+    why: "Copal owns its own contract. Reference repositories remain evidence only."
+    forbidden_files:
+      - "./openclank*"
+      - "./openclaw*"
+      - "./.openclank/**"
+      - "./.openclaw/**"
+
+  - hex: "Copal repo contract and launch surface stay present"
+    in: ./
+    required_files:
+      - AGENTS.md
+      - app.py
+      - .clankers/hexes/contract.yaml
+      - .hex
+      - .hex.cant-stop-dont-stop-wont-stop
+      - open.sh
+      - package.json
+      - README.md
+
+  - hex: "Copal source tree contains only app source filetypes"
+    in: ./src/*
+    allowed_filetypes: [.ts, .tsx, .css]
+
+  - hex: "Scripts are shell scripts"
+    in: ./scripts/*
+    allowed_filetypes: .sh
+
+  - hex: "Plans live in .clanker/futures/ and are Markdown"
+    in: ./.clanker/futures/*
+    allowed_filetypes: .md
+
+  - hex: "Clanker sidecar notes and evidence live in .clankers/robonotes/"
+    in: ./.clankers/robonotes/*
+    allowed_filetypes: [.md, .html, .png, .err]
+
+  - hex: "Reference clones stay out of git"
+    run_before_commit: 'test -z "$(git ls-files references .references)"'
+
+  - hex: "Claude is never attributed in commits"
+    run_before_push: '! git log --format=%B | grep -qiE "co-authored-by:.*(claude|anthropic)|generated with.*\\[?(claude|anthropic)|^claude-session:"'
+
+  - hex: "Reference imports remain isolated from Copal source"
+    forbidden_files:
+      - "./src/**/.references/**"
+      - "./src/**/treehouse/**"
+      - "./src/**/openclank/**"
+      - "./src/**/openclaw/**"

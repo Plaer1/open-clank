@@ -17,26 +17,70 @@
   window._odysseusLoadTime = Date.now();
   (function(){
     try {
-      var t = JSON.parse(localStorage.getItem('odysseus-theme'));
+      var _bootOwner = localStorage.getItem('odysseus-auth-owner') || localStorage.getItem('odysseus-auth-user');
+      var _bootThemeKey = _bootOwner ? 'odysseus-theme:scope:' + encodeURIComponent(_bootOwner) : 'odysseus-theme';
+      // Once an owner is known, never flash the anonymous/previous owner's
+      // theme while that account namespace is being hydrated.
+      var t = JSON.parse(localStorage.getItem(_bootThemeKey) || (!_bootOwner ? localStorage.getItem('odysseus-theme') : 'null'));
       var s = document.documentElement.style;
       var themeName = (t && t.name) || 'clanker-dark';
       var c = t && t.colors;
       // Built-in presets are versioned. Do not let an older saved Clanker
       // palette flash before theme.js migrates localStorage.
-      if (themeName === 'clanker-dark') c = {
-        bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5',
-        advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#5A9EF5',sendBtnHover:'#3276D4',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
+      if (themeName === 'clanker-dark' && !(t && t.colors)) c = {
+        bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#B83B78',
+        advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
       };
-      if (themeName === 'clanker-light') c = {
-        bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#2469D8',
-        advanced:{userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#2469D8',sendBtnHover:'#10489D',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'}
+      if (themeName === 'clanker-light' && !(t && t.colors)) c = {
+        bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#B83B78',
+        advanced:{userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'}
       };
+      // Old built-in records used blue as their implicit accent. Recognize
+      // only an exact built-in-shaped record; customized palettes are kept.
+      if (t && t.colors && (themeName === 'clanker-dark' || themeName === 'clanker-light')) {
+        var _legacyAccent = String(t.colors.red || '').toUpperCase();
+        var _defaultBg = themeName === 'clanker-dark' ? '#191A1E' : '#F3EEDB';
+        var _defaultFg = themeName === 'clanker-dark' ? '#FFF4D6' : '#17202A';
+        var _defaultPanel = themeName === 'clanker-dark' ? '#25272C' : '#FFF9E7';
+        var _defaultBorder = themeName === 'clanker-dark' ? '#555A62' : '#26323D';
+        if ((_legacyAccent === '#5A9EF5' || _legacyAccent === '#2469D8')
+            && (!t.colors.bg || String(t.colors.bg).toUpperCase() === _defaultBg)
+            && (!t.colors.fg || String(t.colors.fg).toUpperCase() === _defaultFg)
+            && (!t.colors.panel || String(t.colors.panel).toUpperCase() === _defaultPanel)
+            && (!t.colors.border || String(t.colors.border).toUpperCase() === _defaultBorder)) {
+          c = themeName === 'clanker-dark'
+            ? { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:'#B83B78', advanced:{sendBtnBg:'#B83B78',sendBtnHover:'#8E285B'} }
+            : { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:'#B83B78', advanced:{sendBtnBg:'#B83B78',sendBtnHover:'#8E285B'} };
+        }
+      }
+      // Runtime normalization fills partial Clanker records from these same
+      // preset advanced values before applying user overrides. Keeping this
+      // map in the boot path prevents first-paint token flashes.
+      var _clankerAdvancedDefaults = {
+        'clanker-dark': {userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'},
+        'clanker-light': {userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'},
+      };
+      if (c && _clankerAdvancedDefaults[themeName]) {
+        c.advanced = Object.assign({}, _clankerAdvancedDefaults[themeName], c.advanced || {});
+      }
       if (c) {
-        s.setProperty('--bg', c.bg);
-        s.setProperty('--fg', c.fg);
-        s.setProperty('--panel', c.panel);
-        s.setProperty('--border', c.border);
-        if (c.red) s.setProperty('--red', c.red);
+        s.setProperty('--bg', c.bg || '#191A1E');
+        s.setProperty('--fg', c.fg || '#FFF4D6');
+        s.setProperty('--panel', c.panel || '#25272C');
+        s.setProperty('--border', c.border || '#555A62');
+        s.setProperty('--red', c.red || '#B83B78');
+        s.setProperty('--accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        s.setProperty('--accent-primary', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        var _clankerAccent = themeName === 'clanker-dark' || themeName === 'clanker-light';
+        s.setProperty('--accent-hover', (c.advanced && c.advanced.accentHover) || (_clankerAccent ? '#8E285B' : ((c.advanced && c.advanced.sendBtnHover) || c.red || '#B83B78')));
+        s.setProperty('--accent-focus', (c.advanced && c.advanced.accentFocus) || (_clankerAccent ? '#D95F9A' : (c.red || '#B83B78')));
+        s.setProperty('--accent-disabled', (c.advanced && c.advanced.accentDisabled) || (_clankerAccent ? '#B97A99' : (c.red || '#B83B78')));
+        s.setProperty('--accent-error', (c.advanced && c.advanced.accentError) || '#FF776E');
+        s.setProperty('--accent-selection', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        s.setProperty('--color-accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        s.setProperty('--color-error', (c.advanced && c.advanced.accentError) || '#FF776E');
+        s.setProperty('--color-danger', (c.advanced && c.advanced.accentError) || '#FF776E');
+        s.setProperty('--color-success', (c.advanced && c.advanced.successColor) || '#8DD85D');
         // Set --brand-color now (= custom brand or the theme red) so the
         // loading-screen ASCII wave shows its final colour from the first
         // paint. Otherwise it starts on --red and visibly switches once the
@@ -49,7 +93,7 @@
         var mtc = document.querySelector('meta[name="theme-color"]');
         if (mtc && c.bg) mtc.setAttribute('content', c.bg);
         // Update favicon to match accent color
-        var ac = c.red || '#5A9EF5';
+        var ac = c.red || '#B83B78';
         var fav = document.querySelector("link[rel='icon']");
         if (fav) fav.href = 'data:image/svg+xml,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 3 29 27H3Z' fill='none' stroke='" + ac + "' stroke-width='2' stroke-linejoin='round'/><path d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='" + ac + "' fill-rule='evenodd' clip-rule='evenodd'/><circle cx='16' cy='17' r='1.2' fill='" + ac + "'/></svg>");
         // Derive syntax highlighting colors from theme
@@ -78,14 +122,15 @@
         s.setProperty('--hl-builtin', hsl2h(180,Math.min(fH[1]+15,60),dk?65:40));
         s.setProperty('--hl-variable', hsl2h((fH[0]+30)%360,Math.min(fH[1]+5,60),fH[2]));
         s.setProperty('--hl-params', hsl2h(fH[0],Math.max(fH[1]-5,10),dk?Math.min(fH[2]+8,85):Math.max(fH[2]-8,25)));
-        // Apply advanced overrides if present
-        if (c.advanced) {
-          var a = c.advanced;
-          var advMap = {userBubbleBg:'--user-bubble-bg',aiBubbleBg:'--ai-bubble-bg',bubbleBorder:'--bubble-border',sidebarBg:'--sidebar-bg',sectionAccent:'--section-accent',brandColor:'--brand-color',inputBg:'--input-bg',inputBorder:'--input-border',sendBtnBg:'--send-btn-bg',sendBtnHover:'--send-btn-hover',codeBg:'--code-bg',codeFg:'--code-fg',toggleBg:'--toggle-bg',toggleActive:'--toggle-active',accentPrimary:'--accent-primary',accentError:'--accent-error'};
-          for (var k in advMap) { if (a[k]) s.setProperty(advMap[k], a[k]); }
-        }
+        // Apply every owned advanced token, including defaults when a custom
+        // record omitted it, so values cannot bleed from the prior theme.
+        var a = c.advanced || {};
+        var advDefaults = {userBubbleBg:c.bg||'#191A1E',aiBubbleBg:c.panel||'#25272C',bubbleBorder:c.border||'#555A62',sidebarBg:c.panel||'#25272C',sectionAccent:c.red||'#B83B78',brandColor:c.red||'#B83B78',brandMixTo:c.fg||'#FFF4D6',hamburgerColor:c.fg||'#FFF4D6',inputBg:c.panel||'#25272C',inputBorder:c.border||'#555A62',sendBtnBg:c.red||'#B83B78',sendBtnHover:c.red||'#B83B78',codeBg:s.getPropertyValue('--hl-bg')||c.bg||'#101114',codeFg:c.fg||'#FFF4D6',toggleBg:c.panel||'#25272C',toggleActive:c.red||'#B83B78'};
+        var advMap = {userBubbleBg:'--user-bubble-bg',aiBubbleBg:'--ai-bubble-bg',bubbleBorder:'--bubble-border',sidebarBg:'--sidebar-bg',sectionAccent:'--section-accent',brandColor:'--brand-color',brandMixTo:'--brand-mix-to',hamburgerColor:'--hamburger-color',inputBg:'--input-bg',inputBorder:'--input-border',sendBtnBg:'--send-btn-bg',sendBtnHover:'--send-btn-hover',codeBg:'--code-bg',codeFg:'--code-fg',toggleBg:'--toggle-bg',toggleActive:'--toggle-active'};
+        for (var k in advMap) s.setProperty(advMap[k], a[k] || advDefaults[k]);
       }
-      // Apply font early
+      // Apply font early. Clanker themes intentionally keep the bundled Liga
+      // policy in lockstep with theme.js and the body class stylesheet.
       var themeFont = (themeName === 'clanker-dark' || themeName === 'clanker-light') ? 'liga-comic-mono' : (t && t.font);
       if (themeFont) {
         var fm = {'liga-comic-mono':"'Liga Comic Mono', 'Fira Code', monospace",mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",opendyslexic:"'OpenDyslexic', sans-serif"};
@@ -120,10 +165,10 @@
   (function(){
     try {
       var path = (window.location.pathname || '').toLowerCase();
-      var theme = (function(){ try { return JSON.parse(localStorage.getItem('odysseus-theme')); } catch(_) { return null; } })();
+      var theme = (function(){ try { var o=localStorage.getItem('odysseus-auth-owner') || localStorage.getItem('odysseus-auth-user'); var k=o ? 'odysseus-theme:scope:' + encodeURIComponent(o) : 'odysseus-theme'; return JSON.parse(localStorage.getItem(k) || (!o ? localStorage.getItem('odysseus-theme') : 'null')); } catch(_) { return null; } })();
       var ac = theme && theme.name === 'clanker-dark'
-        ? '#5A9EF5'
-        : (theme && (theme.red || theme.colors && theme.colors.red)) || '#5A9EF5';
+        ? ((theme.colors && theme.colors.red) || '#B83B78')
+        : (theme && (theme.red || theme.colors && theme.colors.red)) || '#B83B78';
       // Shapes are line-stroke SVGs (no emoji glyphs). Each entry returns
       // the inner SVG markup rendered against currentColor=`ac`.
       var SHAPES = {
@@ -137,6 +182,9 @@
           "<line x1='10' y1='10' x2='22' y2='10' stroke='" + ac + "' stroke-width='2'/>" +
           "<line x1='10' y1='15' x2='22' y2='15' stroke='" + ac + "' stroke-width='2'/>" +
           "<line x1='10' y1='20' x2='18' y2='20' stroke='" + ac + "' stroke-width='2'/>",
+        '/copal/editor':
+          "<rect x='6' y='4' width='20' height='24' rx='2' fill='none' stroke='" + ac + "' stroke-width='2.5'/>" +
+          "<path d='M10 21 20 11l3 3-10 10H10z' fill='none' stroke='" + ac + "' stroke-width='2'/>",
         '/cookbook':
           "<path d='M5 8 L5 26 A2 2 0 0 0 7 28 L25 28 A2 2 0 0 0 27 26 L27 8' fill='none' stroke='" + ac + "' stroke-width='2.5' stroke-linejoin='round'/>" +
           "<path d='M9 4 L23 4 L23 8 L9 8 Z' fill='none' stroke='" + ac + "' stroke-width='2.5' stroke-linejoin='round'/>" +
@@ -173,7 +221,8 @@
       // Also customize the page title so the bookmark inherits a useful name.
       var titles = {
         '/calendar': 'Calendar — Open Clank',
-        '/notes': 'Notes — Open Clank',
+        '/notes': 'Editor — Open Clank',
+        '/copal/editor': 'Editor — Open Clank',
         '/cookbook': 'Cookbook — Open Clank',
         '/email': 'Email — Open Clank',
         '/memory': 'Memory — Open Clank',
@@ -211,7 +260,8 @@
     } catch(e){}
   })();
   </script>
-  <script defer src="/static/lib/highlight.min.js"></script>
+  <script defer src="/static/lib/shiki.bundle.js?v=20260815shiki1"></script>
+  <script defer src="/static/js/highlighter.js?v=20260815shiki1"></script>
   <!-- Self-hosted fonts — inlined so mobile clients fetch immediately -->
   <style>
     @font-face { font-family: 'Fira Code'; font-weight: 300; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Light.woff2') format('woff2'); }
@@ -247,7 +297,7 @@
        below (inline onload= attrs are blocked by CSP script-src-attr). -->
   <link id="katex-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" media="print">
   <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script id="mermaid-script" async src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script id="mermaid-script" async src="/static/lib/mermaid.min.js?v=20260815mermaid1"></script>
   <script nonce="{{CSP_NONCE}}">
     (function(){
       var k = document.getElementById('katex-css');
@@ -259,17 +309,17 @@
     })();
   </script>
   <link rel="stylesheet" href="/static/style.css?v=20260728syncshell1">
-  <link rel="modulepreload" href="/static/app.js?v=20260728syncshell1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260719errsurface">
+  <link rel="modulepreload" href="/static/app.js?v=20260816qol2s01">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260804doneframe1">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js?v=20260722ctxheader4">
+  <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
 </head>
 <body>
   <!-- Loading overlay — hides all flashing until app is ready -->
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#191A1E);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
-    <div id="loader-wave" style="color:var(--brand-color,var(--red,#5A9EF5));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
+    <div id="loader-wave" style="color:var(--brand-color,var(--red,#B83B78));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
   </div>
   <script nonce="{{CSP_NONCE}}">
   (function(){
@@ -361,6 +411,7 @@
               <button id="memory-bulk-delete" class="memory-toolbar-btn danger" disabled><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>
               <button id="memory-bulk-cancel" class="memory-toolbar-btn" title="Cancel (Esc)" style="margin-left:4px;padding:3px 6px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
+            <div id="memory-import-pending" class="memory-import-pending hidden"></div>
             <div id="memory-list" class="memory-list"></div>
             <div id="memory-suggestions-body" class="memory-suggestions hidden"></div>
           </div>
@@ -376,6 +427,7 @@
                 <option value="raw">Raw trajectory</option>
                 <option value="candidate">Candidates</option>
                 <option value="curated">Curated</option>
+                <option value="history">History</option>
                 <option value="quarantine">Quarantined</option>
               </select>
               <select id="memory-inspect-status" class="memory-sort-select" aria-label="Candidate status" hidden>
@@ -410,6 +462,7 @@
             <h2 style="margin:0 0 6px 0;font-size:13px;">Endorsed guidance (injected with real force)</h2>
             <span class="admin-toggle-sub" style="display:block;margin:0 0 6px 0;opacity:0.6">Memories you wrote, pinned, or trusted via the toggles. Injected below the persona as standing guidance.</span>
             <pre id="memory-digest-trusted" style="margin:0;white-space:pre-wrap;font-size:11px;line-height:1.5;opacity:0.9;">—</pre>
+            <div id="memory-digest-edit-list" class="memory-list" style="margin-top:8px;"></div>
           </div>
           <div class="admin-card">
             <h2 style="margin:0 0 6px 0;font-size:13px;">Untrusted index card (behind the firewall)</h2>
@@ -429,11 +482,11 @@
               <h2 style="margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;color:var(--accent, var(--red));"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Add Memory</h2>
               <span style="flex:1"></span>
               <button id="memory-import-btn" class="theme-io-btn" title="Import memories from a file" style="height:26px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Import</button>
-              <button id="memory-export-btn" class="theme-io-btn" title="Export all memories as JSON" style="height:26px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export</button>
-              <input type="file" id="memory-import-file" accept=".txt,.md,.pdf,.csv,.log,.json,.py,.js,.html" hidden />
+              <button id="memory-export-btn" class="theme-io-btn" title="Export memories — full bundle by default, with optional filters" style="height:26px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export</button>
+              <input type="file" id="memory-import-file" multiple accept=".txt,.md,.pdf,.csv,.log,.json,.py,.js,.html,.zip,.jpg,.jpeg,.png,.webp" hidden />
             </div>
             <p class="memory-desc doclib-desc" style="margin:4px 0 6px;">
-              Import a <code>.txt</code>, <code>.md</code>, <code>.pdf</code>, <code>.csv</code>, <code>.log</code>, <code>.json</code>, <code>.py</code>, <code>.js</code>, or <code>.html</code> file &mdash; the AI reads it and suggests candidate memories you can approve.
+              Import one or more text files, a validated Memory bundle, or pre-alpha JPEG/PNG/WebP photos &mdash; image analysis requires an image-aware Memory model and every suggestion stays reviewable.
             </p>
             <div class="memory-add-row" style="margin-top:8px;">
               <div class="skill-ph-wrap" style="flex:1;min-width:0;">
@@ -581,6 +634,60 @@
               <input type="number" id="skill-max-input" min="0" max="12" step="1" value="3" aria-label="Max skills to inject" style="flex-shrink:0;width:72px;background:var(--input-bg,var(--panel));color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums" />
             </div>
             <span class="admin-toggle-sub" style="display:block;margin-top:6px;opacity:0.5">Set to 0 to disable skill injection.</span>
+          </div>
+          <div class="admin-card" id="memory-handler-profile-card">
+            <h2 style="margin:0;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/></svg>Handler profile</h2>
+            <p class="admin-toggle-sub" style="display:block;margin:6px 0 0">Your Handler is the human this Memory belongs to. These controls do not infer a name or handedness; they keep a direct interface preference separate from what Memory has learned.</p>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px">
+              <label class="admin-toggle-sub" for="memory-mobile-control-side" style="margin:0">Mobile controls</label>
+              <select id="memory-mobile-control-side" class="memory-sort-select" aria-label="Preferred side for mobile controls">
+                <option value="system">System / device default</option>
+                <option value="left">Left</option>
+                <option value="right">Right</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+              <button type="button" id="memory-add-profile-questions" class="memory-toolbar-btn">Add profile questions</button>
+              <span id="memory-profile-question-status" class="admin-toggle-sub" role="status" aria-live="polite" aria-atomic="true" style="margin:0;flex:1;min-width:180px"></span>
+            </div>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px;opacity:0.6">Adds reviewable open questions for your Handler's preferred name and mobile-control preference. Nothing is added until you choose this button.</span>
+          </div>
+          <div class="admin-card admin-danger-card" id="memory-nuke-card">
+            <h2 style="color:var(--color-error);display:flex;align-items:center;gap:6px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+              Nuke my Brain data
+            </h2>
+            <p class="admin-toggle-sub" style="margin:0 0 10px 0">Delete selected live Brain data owned by your account. RAG documents, chunks, indexes, exports, backups, and source files are retained. Other users and built-in or shared skills stay untouched. Memory capture remains enabled, so future chats can create new memories.</p>
+            <fieldset id="memory-nuke-components" style="border:0;margin:0;padding:0">
+              <legend style="font-size:12px;font-weight:600;margin-bottom:6px">Select what to delete</legend>
+              <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:0 2px 6px 0">
+                <button type="button" id="memory-nuke-all" class="priv-models-all" aria-controls="memory-nuke-component-list" style="background:none;border:0;padding:0;font:inherit">All</button>
+                <span aria-hidden="true" style="opacity:0.35">/</span>
+                <button type="button" id="memory-nuke-none" class="priv-models-none" aria-controls="memory-nuke-component-list" style="background:none;border:0;padding:0;font:inherit">None</button>
+              </div>
+              <div id="memory-nuke-component-list" class="priv-models-list" style="max-height:none">
+                <label for="memory-nuke-memories">
+                  <input type="checkbox" id="memory-nuke-memories" data-memory-nuke-component="memories" />
+                  <span><strong>Memories</strong><span class="admin-toggle-sub" style="display:block;margin:1px 0 0">Saved and curated memories, history, Memory photos, and their associated text. Graph nodes derived from them disappear too; RAG documents and indexes stay.</span></span>
+                </label>
+                <label for="memory-nuke-graph">
+                  <input type="checkbox" id="memory-nuke-graph" data-memory-nuke-component="graph" />
+                  <span><strong>Graph view data</strong><span class="admin-toggle-sub" style="display:block;margin:1px 0 0">Standalone memory and indexed-code relationships, entities, cues, and index state. Source files remain; retained memories may rebuild their derived graph nodes later.</span></span>
+                </label>
+                <label for="memory-nuke-ingest">
+                  <input type="checkbox" id="memory-nuke-ingest" data-memory-nuke-component="ingest" />
+                  <span><strong>Ingest pipeline state</strong><span class="admin-toggle-sub" style="display:block;margin:1px 0 0">Raw captures, pending or rejected candidates, quarantine, and ingest job state.</span></span>
+                </label>
+                <label for="memory-nuke-skills">
+                  <input type="checkbox" id="memory-nuke-skills" data-memory-nuke-component="skills" />
+                  <span><strong>Skills</strong><span class="admin-toggle-sub" style="display:block;margin:1px 0 0">Skills you own and their usage, promotion, and audit history. Built-in and shared skills stay.</span></span>
+                </label>
+              </div>
+            </fieldset>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+              <button type="button" id="memory-nuke-btn" class="admin-btn-delete" disabled>Nuke selected</button>
+              <span id="memory-nuke-status" class="admin-toggle-sub" role="status" aria-live="polite" aria-atomic="true" style="margin:0;flex:1;min-width:180px"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -757,6 +864,8 @@
               <option value="clanker-radar">Clanker Radar Ripples</option>
               <option value="clanker-gem-drift">Clanker Gem Drift</option>
               <option value="clanker-emoji-drift">Clanker Emoji Drift</option>
+              <option value="clanker-matrix-rain">Clanker Matrix Rain</option>
+              <option value="clanker-emoji-rain">Clanker Emoji Rain</option>
               <option value="clanker-blueprint">Clanker LCARS Status Sweep</option>
               <option value="dots">Dots</option>
               <option value="synapse">Synapse</option>
@@ -829,13 +938,23 @@
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
     <button class="icon-rail-btn" id="rail-copal" title="Copal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M2 19h20"/><path d="M8 7h8M8 11h8M8 15h5"/></svg></button>
+    <div id="rail-copal-launchers" class="rail-copal-launchers" aria-label="Copal destinations">
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="notes" title="Editor" aria-label="Editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
+      <button style="display:none" class="icon-rail-btn rail-copal-entry" data-copal-launcher="code" data-copal-compat="true" title="Editor" aria-label="Editor" data-copal-target="/code"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-launcher="files" title="Files" aria-label="Files" data-copal-target="/files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="wiki" title="Wiki" aria-label="Wiki"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 1 2-2h14"/><path d="M8 7h8M8 11h6"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="timeline" title="Timeline" aria-label="Timeline"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h12M4 18h8"/><circle cx="19" cy="18" r="2"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="graph" title="Graph" aria-label="Graph"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="m7 11 10-5M7 13l10 5"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="treehouse" title="TreeHouse" aria-label="TreeHouse"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16M6 18V9l6-5 6 5v9M9 18v-4h6v4"/></svg></button>
+      <button class="icon-rail-btn rail-copal-entry" data-copal-view="todo" title="Meatbag Tasks" aria-label="Meatbag Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M7 9h10M7 13h6M7 17l2 2 4-4"/></svg></button>
+    </div>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
-    <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
+    <button style="display:none" class="icon-rail-btn" id="rail-notes" data-copal-compat="true" title="Editor" aria-label="Editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Clanker Tasks" aria-label="Clanker Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
     <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
     <div style="flex:1"></div>
@@ -951,15 +1070,14 @@
           <button type="button" class="section-header-btn" id="copal-appearance-btn" title="Show or hide Copal launchers" aria-label="Copal appearance"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         </div>
         <div id="copal-submenu" class="copal-sidebar-submenu">
-          <a class="list-item copal-sidebar-link" href="/copal/notes" data-copal-view="notes"><span class="grow">Notes</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/wiki" data-copal-view="wiki"><span class="grow">Wiki</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/timeline" data-copal-view="timeline"><span class="grow">Timeline</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/galaxy" data-copal-view="galaxy"><span class="grow">Galaxy</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/graph" data-copal-view="graph"><span class="grow">Graph</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/mind" data-copal-view="mind"><span class="grow">Mind</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/bases" data-copal-view="bases"><span class="grow">Bases</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/treehouse" data-copal-view="treehouse"><span class="grow">TreeHouse</span></a>
-          <a class="list-item copal-sidebar-link" href="/copal/todo" data-copal-view="todo"><span class="grow">Meatbag Tasks</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/editor" data-copal-view="notes"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></span><span class="grow">Editor</span></a>
+          <a style="display:none" class="list-item copal-sidebar-link" id="tool-code-btn" href="/code" data-code-editor-launcher data-copal-launcher="code" data-copal-compat="true"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></span><span class="grow">Editor</span></a>
+          <a class="list-item copal-sidebar-link" id="tool-files-btn" href="/files" data-files-launcher data-copal-launcher="files"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><span class="grow">Files</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/wiki" data-copal-view="wiki"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 1 2-2h14"/><path d="M8 7h8M8 11h6"/></svg></span><span class="grow">Wiki</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/timeline" data-copal-view="timeline"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h12M4 18h8"/><circle cx="19" cy="18" r="2"/></svg></span><span class="grow">Timeline</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/graph" data-copal-view="graph"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="m7 11 10-5M7 13l10 5"/></svg></span><span class="grow">Graph</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/treehouse" data-copal-view="treehouse"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16M6 18V9l6-5 6 5v9M9 18v-4h6v4"/></svg></span><span class="grow">TreeHouse</span></a>
+          <a class="list-item copal-sidebar-link" href="/copal/todo" data-copal-view="todo"><span class="copal-launcher-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M7 9h10M7 13h6M7 17l2 2 4-4"/></svg></span><span class="grow">Meatbag Tasks</span></a>
         </div>
       </div>
 
@@ -1056,7 +1174,7 @@
             <span class="list-item-plus-label">document</span>
           </button>
         </div>
-        <div class="list-item" id="tool-notes-btn">
+        <div style="display:none" class="list-item" id="tool-notes-btn" data-copal-compat="true" aria-hidden="true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1064,7 +1182,7 @@
             <path d="M15 3v5h5"/>
             <path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/>
           </svg>
-          <span class="grow">Notes</span>
+          <span class="grow">Editor</span>
         </div>
         <div class="list-item" id="tool-tasks-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1115,7 +1233,7 @@
     <h1 class="a11y-visually-hidden">Open Clank</h1>
     <div class="chat-top-bar">
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
-      <div class="chat-meta-overlay"><span id="current-meta">Open Clank Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div></div></span></div>    </div>
+      <div class="chat-meta-overlay"><span id="current-meta">Open Clank Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" id="goal-panel-btn" class="goal-panel-open-btn" aria-haspopup="dialog" aria-controls="goal-dialog" hidden>Goals</button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div></div></span></div>    </div>
     <div id="welcome-screen">
       <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3 29 27H3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/><circle cx="16" cy="17" r="1.2" fill="currentColor"/></svg>Open Clank</div>
       <div class="welcome-sub" id="welcome-sub">Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.</div>
@@ -1197,7 +1315,8 @@
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
         </div>
-        <select id="mimo-mode-select" class="model-picker-btn hidden" aria-label="Open Clank agent mode" title="Open Clank agent session mode"></select>
+        <!-- ACP provider mode is negotiated internally from the one public
+             Open Clank interaction-mode control below. -->
       </div>
       <div id="pinned-tools-bar"></div>
       <div class="chat-input-bottom" style="visibility:hidden">
@@ -1254,6 +1373,24 @@
               </button>
             </div>
           </div>
+          <!-- One public interaction mode; provider-native Build/Plan remains
+               an internal ACP negotiation detail. -->
+          <div class="chat-mode-picker" id="chat-mode-picker">
+            <button type="button" class="chat-mode-picker-btn" id="chat-mode-picker-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="Interaction mode: Agent" title="Agent mode — Use the enabled agent tools">
+              <span id="chat-mode-picker-label">Agent</span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="chat-mode-picker-menu" id="chat-mode-picker-menu" role="listbox" aria-label="Interaction mode" hidden>
+              <button type="button" role="option" data-interaction-mode="chat" aria-selected="false"><strong>Chat</strong><span>Read-only answers and safe context</span></button>
+              <button type="button" role="option" data-interaction-mode="plan" aria-selected="false"><strong>Plan</strong><span>Investigate and propose a plan</span></button>
+              <button type="button" role="option" data-interaction-mode="agent" aria-selected="true"><strong>Agent</strong><span>Use the enabled agent tools</span></button>
+            </div>
+          </div>
+          <!-- Permission mode: manual / yolo / auto -->
+          <button type="button" class="input-icon-btn permission-mode-btn" id="permission-mode-btn" title="Permission mode — manual: approve each action · yolo: auto-approve, questions allowed · auto: no prompts, no questions" aria-label="Permission mode">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span id="permission-mode-label" style="font-size:11px;margin-left:2px;">Manual</span>
+          </button>
           <!-- Web search (magnifying glass) -->
           <button type="button" class="input-icon-btn" title="Web search" id="web-toggle-btn" data-mode-tool="true" aria-label="Web search" aria-pressed="false">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1467,6 +1604,41 @@
   </script>
 
   <!-- Rename Session Modal -->
+  <dialog id="goal-dialog" class="goal-dialog" aria-labelledby="goal-dialog-title">
+    <div class="goal-dialog-header">
+      <h2 id="goal-dialog-title">Session goals</h2>
+      <button type="button" id="goal-dialog-close" aria-label="Close goals">×</button>
+    </div>
+    <p id="goal-dialog-status" class="goal-dialog-status" role="status" aria-live="polite"></p>
+    <section aria-labelledby="goal-active-heading">
+      <h3 id="goal-active-heading">Active</h3>
+      <div id="goal-active"></div>
+    </section>
+    <section aria-labelledby="goal-queue-heading">
+      <h3 id="goal-queue-heading">Queued</h3>
+      <ol id="goal-queue"></ol>
+    </section>
+    <section aria-labelledby="goal-history-heading">
+      <div class="goal-section-heading">
+        <h3 id="goal-history-heading">History</h3>
+        <button type="button" id="goal-clear-history">Clear history</button>
+      </div>
+      <ol id="goal-history"></ol>
+    </section>
+    <section aria-labelledby="goal-analytics-heading">
+      <h3 id="goal-analytics-heading">Outcomes</h3>
+      <dl id="goal-analytics" class="goal-data-grid"></dl>
+    </section>
+    <form id="goal-create-form">
+      <label for="goal-objective">Add a goal</label>
+      <div class="goal-create-row">
+        <input id="goal-objective" name="objective" maxlength="4000" autocomplete="off" required>
+        <button type="submit">Add</button>
+      </div>
+      <small>New goals queue behind the active one.</small>
+    </form>
+  </dialog>
+
   <div id="rename-session-modal" class="modal hidden">
     <div class="modal-content" role="dialog" aria-label="Rename session" style="width: 400px;">
       <div class="modal-header">
@@ -1532,6 +1704,14 @@
           <button class="settings-nav-item" data-settings-tab="search">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <span>Search</span>
+          </button>
+          <button class="settings-nav-item" data-settings-tab="file-access">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>Permissions</span>
+          </button>
+          <button class="settings-nav-item" data-settings-tab="history">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>
+            <span>History</span>
           </button>
           <div class="settings-sidebar-divider"></div>
           <!-- Section 2: Comms (Integrations → Email → Reminders).
@@ -1625,13 +1805,6 @@
                 <span class="adm-model-logo" id="set-defaultModelSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
                 <select id="set-defaultModelSelect" class="settings-select"></select>
               </div>
-              <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" style="margin-top:6px;">Fallbacks</label>
-                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-                  <div id="set-defaultFallbacks" class="settings-fallbacks"></div>
-                  <button type="button" class="settings-fallback-add" id="set-defaultAddFallback" title="Add a model to try if the one above fails">+ Add fallback</button>
-                </div>
-              </div>
               <div id="set-defaultChatMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
@@ -1649,14 +1822,24 @@
                 <span class="adm-model-logo" id="set-utilityModelSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
                 <select id="set-utilityModelSelect" class="settings-select"><option value="">—</option></select>
               </div>
-              <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" style="margin-top:6px;">Fallbacks</label>
-                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-                  <div id="set-utilityFallbacks" class="settings-fallbacks"></div>
-                  <button type="button" class="settings-fallback-add" id="set-utilityAddFallback" title="Add a model to try if the utility model fails">+ Add fallback</button>
-                </div>
-              </div>
               <div id="set-utilityChatMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M12 2a5 5 0 0 0-5 5v1a4 4 0 0 0-2 7.46V17a5 5 0 0 0 5 5h4a5 5 0 0 0 5-5v-1.54A4 4 0 0 0 17 8V7a5 5 0 0 0-5-5z"/><path d="M9 10h6M9 14h6"/></svg>Memory Model</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs memory extraction, consolidation, and graph enrichment. Leave blank to follow Utility dynamically, including later Utility changes.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Endpoint</label>
+                <span class="adm-model-logo" id="set-memoryEpSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
+                <select id="set-memoryEpSelect" class="settings-select"><option value="">Same as Utility</option></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Model</label>
+                <span class="adm-model-logo" id="set-memoryModelSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
+                <select id="set-memoryModelSelect" class="settings-select"><option value="">Same as Utility</option></select>
+              </div>
+              <div id="set-memoryChatMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
           <div class="admin-card">
@@ -1667,13 +1850,6 @@
                 <label class="settings-label">Model</label>
                 <span class="adm-model-logo" id="set-vlModelSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
                 <select id="set-vlModelSelect" class="settings-select"><option value="">Auto-detect</option></select>
-              </div>
-              <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" style="margin-top:6px;">Fallbacks</label>
-                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-                  <div id="set-visionFallbacks" class="settings-fallbacks"></div>
-                  <button type="button" class="settings-fallback-add" id="set-visionAddFallback" title="Add a vision model to try if the one above fails">+ Add fallback</button>
-                </div>
               </div>
               <div id="set-visionSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
@@ -1908,6 +2084,11 @@
 
         <!-- ═══ APPEARANCE TAB ═══ -->
         <div data-settings-panel="appearance" class="settings-appearance-panel hidden">
+          <div class="admin-card settings-theme-card" id="settings-theme-surface">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg>Theme</h2>
+            <p class="settings-hint">Choose a preset or customize the colors, typography, and background for this account.</p>
+            <div id="settings-theme-controls"></div>
+          </div>
           <div class="admin-card">
             <h2>Language</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Choose the language used by Open Clank. Your choice is saved in this browser.</div>
@@ -1931,6 +2112,14 @@
                 <option value="fa">فارسی</option>
               </select>
             </div>
+          </div>
+          <div class="admin-card">
+            <h2>Context menu</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Use Open Clank's accessible context menu for editing, links and Copal objects in every supported browser.</div>
+            <label class="vis-row" style="padding-left:0;">
+              <span class="vis-label">Enable custom context menu <span class="vis-hint">Turn off to restore the browser menu</span></span>
+              <input type="checkbox" id="set-custom-context-menu" checked><span class="vis-switch"></span>
+            </label>
           </div>
           <div class="admin-card" style="padding-bottom:6px;">
             <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>Sidebar<span style="flex:1"></span><button type="button" class="vis-reset-btn" data-vis-reset title="Reset this section to defaults" aria-label="Reset Sidebar to defaults" style="background:none;border:none;padding:2px 4px;cursor:pointer;color:inherit;opacity:0.55;display:inline-flex;align-items:center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button></h2>
@@ -2002,7 +2191,7 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 7h6M9 11h6M9 15h4"/></svg></span>
-                <span class="vis-label">Notes</span>
+                <span class="vis-label">Editor</span>
                 <input type="checkbox" checked data-ui-key="tool-notes"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
@@ -2108,7 +2297,7 @@
             </div>
           </div>
           <div class="admin-card" data-copal-notes-appearance-card>
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>Copal Notes</h2>
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>Editor</h2>
             <p class="settings-hint">Workspace appearance for this browser and the active Copal workspace.</p>
             <div class="settings-row">
               <label class="settings-label" for="set-copal-notes-preview-layout">Preview layout</label>
@@ -2116,6 +2305,14 @@
                 <option value="inline">Inline live preview</option>
                 <option value="side-by-side">Side-by-side</option>
               </select>
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="set-copal-notes-template-folder">Template folder</label>
+              <input id="set-copal-notes-template-folder" class="settings-input" data-copal-notes-setting="templateFolder" placeholder="Templates" autocomplete="off">
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" for="set-copal-notes-daily-template">Daily template ID</label>
+              <input id="set-copal-notes-daily-template" class="settings-input" data-copal-notes-setting="dailyTemplateId" placeholder="Optional template document ID" autocomplete="off">
             </div>
             <div class="vis-toggles">
               <label class="vis-row">
@@ -2130,10 +2327,30 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon vis-icon-text">⋮</span>
-                <span class="vis-label">Notes ribbon <span class="vis-hint">Show quick actions inside Notes</span></span>
+                <span class="vis-label">Editor ribbon <span class="vis-hint">Show quick actions inside Editor</span></span>
                 <input id="set-copal-notes-ribbon" type="checkbox" data-copal-notes-setting="ribbon"><span class="vis-switch"></span>
               </label>
+              <label class="vis-row">
+                <span class="vis-icon vis-icon-text">✓</span>
+                <span class="vis-label">Hide completed tasks in reading mode</span>
+                <input id="set-copal-notes-completed-visibility" type="checkbox" data-copal-notes-setting="completedVisibility"><span class="vis-switch"></span>
+              </label>
             </div>
+          </div>
+          <div class="admin-card" data-copal-navigation-appearance-card>
+            <h2>Copal navigation</h2>
+            <p class="settings-hint">Choose which Copal launchers appear in the sidebar. Hiding a launcher never removes its data or Clanker access.</p>
+            <div id="set-copal-navigation-entries" class="vis-toggles"></div>
+            <div class="settings-inline-actions">
+              <button type="button" class="copal-btn" data-copal-entry-action="show">Show all</button>
+              <button type="button" class="copal-btn" data-copal-entry-action="hide">Hide all</button>
+              <button type="button" class="copal-btn" data-copal-entry-action="reset">Reset to defaults</button>
+            </div>
+          </div>
+          <div class="admin-card" data-copal-notes-panels-card>
+            <h2>Editor — Sidebar panels</h2>
+            <p class="settings-hint">Files and Search stay on the left. Move, hide, or reorder the six other panels.</p>
+            <div id="set-copal-notes-panels"></div>
           </div>
         </div>
 
@@ -2177,6 +2394,10 @@
               <input id="settings-pw-current" type="password" placeholder="Current password" autocomplete="current-password" style="padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:12px;">
               <input id="settings-pw-new" type="password" placeholder="New password" autocomplete="new-password" style="padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:12px;">
               <input id="settings-pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password" style="padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:12px;">
+              <label id="settings-pw-empty-row" style="display:none;align-items:center;gap:7px;font-size:11px;color:var(--muted);cursor:pointer;">
+                <input id="settings-pw-empty" type="checkbox">
+                <span>Set this admin account's password to an empty string</span>
+              </label>
               <div class="settings-row" style="margin-top:2px;justify-content:flex-end;">
                 <span id="settings-pw-msg" style="font-size:11px;margin-right:auto;"></span>
                 <button class="admin-btn-add" id="settings-pw-save">Update Password</button>
@@ -2255,6 +2476,16 @@
                 <textarea id="set-reminder-webhook-template" class="settings-select" rows="3" style="font-family:inherit;resize:vertical;flex:1" placeholder='{"content": "{{title}}: {{message}}"}'></textarea>
               </div>
               <div id="set-reminder-channel-hint" style="font-size:11px;opacity:0.6;"></div>
+              <div class="settings-row" style="align-items:flex-start;margin-top:10px;">
+                <label class="settings-label" style="padding-top:6px;" for="set-reminder-add-endpoint">Reminder endpoints</label>
+                <div style="flex:1;min-width:0;">
+                  <div id="set-reminder-endpoints-list" class="reminder-endpoints-list" aria-live="polite"></div>
+                  <button type="button" id="set-reminder-add-endpoint" class="admin-btn-sm" style="margin-top:6px">+ Add endpoint</button>
+                  <div style="font-size:11px;opacity:0.6;margin-top:5px;">Add browser, email, ntfy, or webhook destinations. Empty list uses the selected channel above.</div>
+                  <div id="set-reminder-endpoints-msg" style="font-size:11px;margin-top:3px;" role="status" aria-live="polite"></div>
+                  <textarea id="set-reminder-endpoints" class="settings-select" rows="1" aria-hidden="true" tabindex="-1" style="display:none"></textarea>
+                </div>
+              </div>
               <div style="font-size:11px;opacity:0.6;margin-top:4px;">Configure email account, ntfy server, etc. in <a href="#" id="set-reminders-open-integrations" style="color:var(--accent, var(--red));text-decoration:none;font-weight:600;">Integrations</a>.</div>
             </div>
           </div>
@@ -2329,6 +2560,19 @@
 
         <!-- ═══ SERVICES TAB ═══ -->
         <div data-settings-panel="services">
+
+          <div id="provider-control-root">
+            <div class="provider-control-page-meta">
+              <div id="provider-control-summary" class="provider-control-summary"></div>
+              <div id="provider-control-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+              <button type="button" class="admin-btn-sm" id="provider-control-refresh">Refresh</button>
+            </div>
+            <div id="provider-control-create"></div>
+
+            <div id="provider-control-oauth" aria-live="polite"></div>
+          </div>
+
+          <template id="provider-legacy-controls-retired">
 
           <!-- ── Local card ─────────────────────────────────────────── -->
           <div class="admin-card">
@@ -2412,7 +2656,10 @@
                       <svg class="adm-provider-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <input id="adm-epUrl" type="text" placeholder="Base URL or pick provider" autocomplete="off" style="border-left:0;border-top-left-radius:0;border-bottom-left-radius:0;border-top-right-radius:6px;border-bottom-right-radius:6px;">
-                    <div class="adm-provider-menu hidden" id="adm-provider-menu"></div>
+                    <div class="adm-provider-menu hidden" id="adm-provider-menu" role="listbox">
+                      <input id="adm-provider-search" class="adm-provider-menu-search" type="search" placeholder="Search providers…" aria-label="Search endpoint providers" autocomplete="off">
+                      <div id="adm-provider-options"></div>
+                    </div>
                   </div>
                 </div>
                 <select id="adm-epKind" style="display:none">
@@ -2421,19 +2668,19 @@
                 </select>
                 <select id="adm-epProvider" style="display:none">
                   <option value="">Custom URL</option>
-                  <option value="https://api.anthropic.com" data-logo="anthropic">Anthropic</option>
-                  <option value="https://api.deepseek.com/v1" data-logo="deepseek" selected>DeepSeek</option>
-                  <option value="https://api.openai.com/v1" data-logo="openai">OpenAI</option>
-                  <option value="copilot" data-logo="github" data-auth-flow="copilot">GitHub Copilot</option>
+                  <option value="https://api.anthropic.com" data-logo="anthropic" data-provider-id="anthropic">Anthropic</option>
+                  <option value="https://api.deepseek.com/v1" data-logo="deepseek" data-provider-id="deepseek" selected>DeepSeek</option>
+                  <option value="https://api.openai.com/v1" data-logo="openai" data-provider-id="openai">OpenAI</option>
+                  <option value="copilot" data-logo="github" data-provider-id="github-copilot" data-auth-flow="copilot">GitHub Copilot</option>
                   <option value="chatgpt-subscription" data-logo="openai" data-auth-flow="chatgpt-subscription">ChatGPT Subscription</option>
-                  <option value="https://openrouter.ai/api/v1" data-logo="openrouter">OpenRouter</option>
+                  <option value="https://openrouter.ai/api/v1" data-logo="openrouter" data-provider-id="openrouter">OpenRouter</option>
                   <option value="https://ollama.com/api" data-logo="ollama">Ollama Cloud</option>
-                  <option value="https://api.groq.com/openai/v1" data-logo="groq">Groq</option>
-                  <option value="https://api.mistral.ai/v1" data-logo="mistral">Mistral</option>
-                  <option value="https://api.together.xyz/v1" data-logo="together">Together AI</option>
-                  <option value="https://api.fireworks.ai/inference/v1" data-logo="fireworks">Fireworks AI</option>
-                  <option value="https://generativelanguage.googleapis.com/v1beta/openai" data-logo="gemini">Google Gemini</option>
-                  <option value="https://api.x.ai/v1" data-logo="grok">xAI Grok</option>
+                  <option value="https://api.groq.com/openai/v1" data-logo="groq" data-provider-id="groq">Groq</option>
+                  <option value="https://api.mistral.ai/v1" data-logo="mistral" data-provider-id="mistral">Mistral</option>
+                  <option value="https://api.together.xyz/v1" data-logo="together" data-provider-id="togetherai">Together AI</option>
+                  <option value="https://api.fireworks.ai/inference/v1" data-logo="fireworks" data-provider-id="fireworks-ai">Fireworks AI</option>
+                  <option value="https://generativelanguage.googleapis.com/v1beta/openai" data-logo="gemini" data-provider-id="google">Google Gemini</option>
+                  <option value="https://api.x.ai/v1" data-logo="grok" data-provider-id="xai">xAI Grok</option>
                   <option value="https://api.z.ai/api/paas/v4" data-logo="zhipu">Z.AI (Zhipu)</option>
                   <option value="https://opencode.ai/zen/v1" data-logo="opencode">OpenCode Zen</option>
                   <option value="https://opencode.ai/zen/go/v1" data-logo="opencode">OpenCode Go</option>
@@ -2453,31 +2700,72 @@
                 <div id="adm-deviceAuthStatus" class="adm-ep-inline-msg" style="min-height:0;margin-top:0;"></div>
               </div>
             </div>
-            <div id="mimo-provider-directory" class="adm-add-section" style="margin-top:16px;">
-              <div class="adm-ep-section-head" style="display:flex;align-items:center;gap:8px;">
-                <span>Provider accounts</span>
-                <span style="flex:1"></span>
-                <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search…" aria-label="Search API providers" autocomplete="off" style="font-size:11px;padding:2px 6px;width:120px;">
-                <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
+          </div>
+
+          <!-- ── Provider account card ──────────────────────────────── -->
+          <div id="mimo-provider-directory" class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M19 8v6"/><path d="M16 11h6"/></svg>
+              Add Provider Account
+              <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Login)</span>
+              <span style="flex:1"></span>
+              <button id="mimo-provider-refresh" type="button" class="admin-btn-sm" style="font-size:11px;font-weight:normal;">Refresh</button>
+            </h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Use browser login or an API key. Connected models appear under Added Models → API.</div>
+            <div class="adm-add-section">
+              <div class="mimo-provider-combo">
+                <div class="mimo-provider-search-shell">
+                  <input id="mimo-provider-search" class="settings-input" type="search" placeholder="Search account providers…" aria-label="Search account providers" role="combobox" aria-autocomplete="list" aria-controls="mimo-provider-menu" aria-expanded="false" autocomplete="off">
+                  <div id="mimo-provider-menu" class="adm-provider-menu hidden" role="listbox"></div>
+                </div>
               </div>
-              <div class="admin-toggle-sub" style="margin:6px 0 10px;">Use browser login or an API key. Connected models appear under Added Models → API.</div>
               <div id="mimo-provider-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
               <div id="mimo-provider-flow"></div>
               <div id="mimo-provider-list"></div>
             </div>
+          </div>
 
-            <div id="model-share-received" class="adm-add-section" style="margin-top:16px;">
-              <div class="adm-ep-section-head">Shared with you</div>
-              <div class="admin-toggle-sub" style="margin:6px 0 10px;">Models a trusted Open Clank user offered to your account. Add only the ones you want.</div>
+          <div id="model-share-received" class="admin-card">
+            <h2>Shared with you</h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Models a trusted Open Clank user offered to your account. Add only the ones you want.</div>
+            <div class="adm-add-section">
               <div id="model-share-status" class="admin-toggle-sub" role="status" aria-live="polite" style="margin-bottom:6px;"></div>
               <div id="model-share-list"></div>
             </div>
           </div>
 
+          </template>
+
         </div>
 
         <!-- ═══ ADDED MODELS TAB ═══ -->
         <div data-settings-panel="added-models" class="hidden">
+          <div class="admin-card provider-control-added-heading provider-control-added-shell">
+            <div class="provider-control-titlebar">
+              <div>
+                <h2><span aria-hidden="true" class="provider-control-heading-mark">✓</span> Added Models</h2>
+                <div class="admin-toggle-sub">Models you've connected. Open a provider to manage its models or account.</div>
+              </div>
+              <button type="button" class="admin-btn-sm" data-provider-control-refresh>Refresh</button>
+            </div>
+            <div id="provider-control-added-summary" class="provider-control-summary"></div>
+            <div id="provider-control-added-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+            <div id="provider-control-connections"></div>
+          </div>
+
+          <details class="admin-card provider-control-advanced">
+            <summary>Model routing</summary>
+            <div class="provider-control-advanced-body">
+              <section>
+                <h2>Model routing</h2>
+                <div class="admin-toggle-sub">Choose one model for each purpose.</div>
+                <div id="provider-control-bindings" class="provider-control-bindings"></div>
+              </section>
+            </div>
+          </details>
+        </div>
+
+        <template id="provider-legacy-added-models-retired">
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="20 6 9 17 4 12"/></svg>Added Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Endpoints)</span>
               <span style="flex:1"></span>
@@ -2515,7 +2803,7 @@
               <div id="mimo-permission-grants"></div>
             </div>
           </div>
-        </div>
+        </template>
 
         <!-- ═══ TOOLS TAB ═══ -->
         <!-- ═══ INTEGRATIONS TAB ═══ -->
@@ -2528,6 +2816,83 @@
             <div style="text-align:right;padding:8px 0;">
               <button type="button" class="admin-btn-add" id="unified-intg-add-btn" style="text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:5px;flex-shrink:0;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Add Integration</button>
             </div>
+          </div>
+        </div>
+
+        <!-- ═══ TOOLS TAB ═══ -->
+        <div data-settings-panel="history" class="hidden">
+          <div class="admin-card" data-history-settings>
+            <h2>History storage</h2>
+            <div class="admin-toggle-sub" data-history-usage>Loading measured usage…</div>
+            <div class="settings-row" style="margin-top:12px;align-items:center;gap:8px;">
+              <label class="settings-label" for="history-total-bytes">Installation target</label>
+              <input id="history-total-bytes" data-history-total type="number" min="1" step="1048576" class="settings-select" style="max-width:180px;" />
+              <button type="button" class="admin-btn-add" data-history-save>Save target</button>
+            </div>
+            <div class="admin-toggle-sub" data-history-inherited style="margin-top:8px;"></div>
+            <div class="admin-card" style="margin-top:12px;padding:10px;" data-history-scopes>
+              <h3 style="margin:0 0 8px;font-size:13px;">Workspace and allowlisted directory limits</h3>
+              <div class="admin-toggle-sub">These limits charge retained content logically. Directory roots come from Permissions and are never accepted as arbitrary host paths here.</div>
+              <div data-history-scope-list style="margin-top:10px;"></div>
+            </div>
+            <div data-history-status role="status" aria-live="polite" style="margin-top:10px;"></div>
+          </div>
+        </div>
+
+        <!-- ═══ TOOLS TAB ═══ -->
+        <div data-settings-panel="file-access" class="hidden">
+          <div class="admin-card">
+            <h2>Host locations &amp; agent access</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">Register one physical Location, then explicitly choose whether agents may use it. Whole disk delegates safety to OS permissions and never becomes the default folder. An active chat folder can only narrow this set.</div>
+            <div class="settings-col admin-only">
+              <div class="settings-row" style="align-items:flex-start;flex-wrap:wrap;gap:8px;">
+                <button type="button" class="admin-btn-add" id="odysseus-file-root-add">Add Location…</button>
+                <span class="admin-toggle-sub">Home, folder, exact file, and whole-disk choices use the same reviewed flow as Files.</span>
+              </div>
+              <div id="odysseus-file-root-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+            </div>
+            <div id="odysseus-file-roots" style="margin-top:12px;"></div>
+          </div>
+          <div class="admin-card admin-only">
+            <h2>People access</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">Share a registered Location with a non-admin user. Their Editor, Copal vault, search, watchers, and user-directed file operations stay inside these assignments. This does not grant agent permissions.</div>
+            <div class="settings-col">
+              <div class="settings-row" style="align-items:flex-start;flex-wrap:wrap;gap:8px;">
+                <label class="settings-label" for="odysseus-file-visibility-subject">User</label>
+                <select id="odysseus-file-visibility-subject" class="settings-select" style="width:180px;"><option value="">Choose a non-admin user</option></select>
+                <label class="settings-label" for="odysseus-file-visibility-root">Location</label>
+                <select id="odysseus-file-visibility-root" class="settings-select" style="flex:1;min-width:220px;"><option value="">Add a Location first</option></select>
+              </div>
+              <div class="settings-row" style="align-items:flex-start;flex-wrap:wrap;gap:8px;">
+                <span class="settings-label">Capabilities</span>
+                <label><input type="checkbox" id="odysseus-file-visibility-read" checked /> Browse / download</label>
+                <label><input type="checkbox" id="odysseus-file-visibility-write" /> Modify</label>
+                <button type="button" class="admin-btn-add" id="odysseus-file-visibility-add">Share location</button>
+              </div>
+              <div id="odysseus-file-visibility-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
+            </div>
+            <div id="odysseus-file-visibility-assignments" style="margin-top:12px;"></div>
+          </div>
+          <div class="admin-card" id="odysseus-file-visible-to-me">
+            <h2>Editor &amp; workspace access</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">This is the user-directed app visibility ceiling. Owner/admin accounts follow the OS account’s filesystem access; non-admin accounts see only administrator-assigned Locations. The editor opens at home or an assigned Location by default. Agent tools remain separate and may be narrower.</div>
+            <div id="odysseus-file-visible-to-me-list" style="margin-top:12px;"></div>
+          </div>
+          <div class="admin-card" id="odysseus-permission-resets">
+            <h2>Agent approvals</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">Prompt approvals are separate from folder visibility. Resetting them stops durable operation approvals; it does not remove shared locations or delete files.</div>
+            <div id="odysseus-agent-grants" class="permission-grants-inline" aria-live="polite">Loading approvals…</div>
+            <div class="settings-row" style="flex-wrap:wrap;gap:6px;margin-top:8px;">
+              <button type="button" class="admin-btn-sm" id="odysseus-permissions-reset-chat">Reset this chat</button>
+              <button type="button" class="admin-btn-sm" id="odysseus-permissions-reset-workspace">Reset this workspace</button>
+            </div>
+            <div class="settings-row" style="flex-wrap:wrap;gap:6px;margin-top:8px;">
+              <label class="settings-label" for="odysseus-permissions-reset-location">Location</label>
+              <select id="odysseus-permissions-reset-location" class="settings-select" style="flex:1;min-width:180px;"><option value="">Choose a location</option></select>
+              <button type="button" class="admin-btn-sm" id="odysseus-permissions-reset-location-button">Reset location agent access</button>
+            </div>
+            <button type="button" class="admin-btn-sm" id="odysseus-permissions-reset-all">Reset all agent permissions</button>
+            <div id="odysseus-permissions-reset-status" class="admin-toggle-sub" role="status" aria-live="polite"></div>
           </div>
         </div>
 
@@ -2644,10 +3009,10 @@
 
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
               <div>
-                <div class="admin-toggle-label">Delete all memory</div>
-                <div class="admin-toggle-sub">Clears `memory.json`, the Memory table, and the vector store. Skills not affected.</div>
+                <div class="admin-toggle-label">Reset your Brain data</div>
+                <div class="admin-toggle-sub">Open Brain settings for the account-owned preview and confirmation flow. Other users and shared data stay untouched.</div>
               </div>
-              <button class="admin-btn-delete" data-wipe-kind="memory" title="Delete all memory" aria-label="Delete all memory" style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Delete</button>
+              <button type="button" class="admin-btn-sm" id="adm-open-brain-reset" title="Open Brain reset" aria-label="Open Brain reset" style="white-space:nowrap;">Open Brain reset</button>
             </div>
 
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
@@ -2701,10 +3066,10 @@
             <hr style="border:0;border-top:1px solid color-mix(in srgb, #e55 25%, var(--border));margin:14px 0 10px;">
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <div>
-                <div class="admin-toggle-label" style="color:#e55;">Delete everything</div>
-                <div class="admin-toggle-sub">All eight categories above, in one go. Same effect as wiping each one in sequence.</div>
+                <div class="admin-toggle-label" style="color:#e55;">Delete all seven global categories</div>
+                <div class="admin-toggle-sub">Across all accounts: chats, skills, notes, tasks, documents, gallery, and calendar. Memories, graph, and ingest data are excluded; use the account-owned Brain reset for those.</div>
               </div>
-              <button class="admin-btn-delete" data-wipe-kind="__all__" title="Delete every category" aria-label="Delete everything" style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-weight:600;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Delete All</button>
+              <button class="admin-btn-delete" data-wipe-kind="__all__" title="Delete all remaining categories" aria-label="Delete all remaining categories" style="display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-weight:600;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Delete All Remaining</button>
             </div>
             <div id="adm-wipeMsg" style="margin-top:8px;"></div>
           </div>
@@ -2734,33 +3099,36 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js?v=20260722ctxheader4"></script>
+<script type="module" src="/static/js/sessions.js"></script>
+<script type="module" src="/static/js/goals.js?v=20260730goal2"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js"></script>
 <script type="module" src="/static/js/voiceRecorder.js"></script>
-<script type="module" src="/static/js/models.js?v=20260715startupcalm2"></script>  <!-- This must come BEFORE app.js -->
+<script type="module" src="/static/js/models.js"></script>  <!-- This must come BEFORE app.js -->
 <script type="module" src="/static/js/rag.js"></script>
 <script type="module" src="/static/js/presets.js"></script>
 <script type="module" src="/static/js/search.js"></script>
 <script type="module" src="/static/js/spinner.js"></script>
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js?v=20260722emailfastindex1"></script>
-<script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260722emailfastindex1"></script>
+<script type="module" src="/static/js/gallery.js"></script>
+<script type="module" src="/static/js/chatRenderer.js"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260719errsurface"></script>
+<script type="module" src="/static/js/chat.js?v=20260804doneframe1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260723compareicon1"></script>
+<script type="module" src="/static/js/settings.js"></script>
+<script src="/static/js/historySettings.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260728syncshell1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/js/contextualHelp.js"></script>
+<script type="module" src="/static/app.js?v=20260816qol2s01"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260728syncshell1"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

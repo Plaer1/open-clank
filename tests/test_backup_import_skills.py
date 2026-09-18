@@ -69,7 +69,13 @@ def test_import_adds_new_skill_via_add_skill(monkeypatch):
     endpoint = _setup(monkeypatch, skills)
 
     body = {
-        "skills": [{"name": "buy-milk", "title": "Buy milk", "description": "Buy milk"}],
+        "skills": [{
+            "name": "buy-milk",
+            "title": "Buy milk",
+            "description": "Buy milk",
+            "owner": "mallory",
+            "status": "published",
+        }],
         "preferences": {"theme": "dark"},
     }
     with monkeypatch.context() as m:
@@ -90,3 +96,5 @@ def test_import_adds_new_skill_via_add_skill(monkeypatch):
     assert result["ok"] is True
     skills.add_skill.assert_called_once()
     assert skills.add_skill.call_args.kwargs.get("source") == "user"
+    assert skills.add_skill.call_args.kwargs.get("owner") == "alice"
+    assert skills.add_skill.call_args.kwargs.get("status") == "draft"

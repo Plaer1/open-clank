@@ -14,6 +14,9 @@ import pytest
 from src import bg_jobs
 from src.agent_tools.bg_job_tools import ManageBgJobsTool
 
+_OWNER = "alice"
+_WORKSPACE = "/workspace"
+
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
@@ -27,9 +30,18 @@ def store(tmp_path, monkeypatch):
     return {"dir": jobs_dir, "killed": killed}
 
 
-def _seed(session_id="sess-a", status="running", job_id="job0001", output="", pid=4321):
+def _seed(
+    session_id="sess-a",
+    status="running",
+    job_id="job0001",
+    output="",
+    pid=4321,
+    owner=_OWNER,
+    workspace=_WORKSPACE,
+):
     rec = {
         "id": job_id, "session_id": session_id, "command": "sleep 60",
+        "owner": owner, "workspace": workspace,
         "status": status, "pid": pid, "started_at": time.time(),
         "ended_at": None if status == "running" else time.time(),
         "exit_code": None if status == "running" else 0,
@@ -45,11 +57,24 @@ def _seed(session_id="sess-a", status="running", job_id="job0001", output="", pi
     return rec
 
 
-def _run(args, session_id="sess-a"):
-    return asyncio.run(ManageBgJobsTool().execute(json.dumps(args), {"session_id": session_id, "owner": None}))
+def _run(args, session_id="sess-a", owner=_OWNER, workspace=_WORKSPACE):
+    return asyncio.run(ManageBgJobsTool().execute(
+        json.dumps(args),
+        {"session_id": session_id, "owner": owner, "workspace": workspace},
+    ))
 
 
 # ── bg_jobs.kill ────────────────────────────────────────────────────────────
+
+def test_launch_requires_complete_scope(store):
+    with pytest.raises(ValueError, match="authenticated owner"):
+        bg_jobs.launch(
+            "true",
+            session_id="sess-a",
+            owner=None,
+            workspace=_WORKSPACE,
+        )
+
 
 def test_kill_marks_killed_and_suppresses_followup(store):
     _seed(job_id="job0001", pid=4321)
@@ -119,6 +144,11 @@ def test_no_session_is_rejected(store):
     assert "error" in out
 
 
+def test_owner_and_workspace_are_required(store):
+    assert "error" in _run({"action": "list"}, owner="")
+    assert "error" in _run({"action": "list"}, workspace="")
+
+
 def test_list_empty(store):
     assert "No background jobs" in _run({"action": "list"})["output"]
 
@@ -128,6 +158,25 @@ def test_list_scoped_to_session(store):
     _seed(session_id="sess-b", job_id="bbbb")
     out = _run({"action": "list"}, session_id="sess-a")["output"]
     assert "aaaa" in out and "bbbb" not in out
+
+
+def test_list_is_fail_closed_across_owner_and_workspace(store, tmp_path):
+    workspace_a = str(tmp_path / "a")
+    workspace_b = str(tmp_path / "b")
+    _seed(job_id="alice-a", owner="alice", workspace=workspace_a)
+    _seed(job_id="bob-a", owner="bob", workspace=workspace_a)
+    _seed(job_id="alice-b", owner="alice", workspace=workspace_b)
+    _seed(job_id="legacy", owner="", workspace="")
+
+    out = _run(
+        {"action": "list"},
+        owner="alice",
+        workspace=workspace_a,
+    )["output"]
+    assert "alice-a" in out
+    assert "bob-a" not in out
+    assert "alice-b" not in out
+    assert "legacy" not in out
 
 
 def test_output_returns_captured_log(store):
@@ -140,6 +189,89 @@ def test_output_cross_session_denied(store):
     _seed(session_id="sess-a", job_id="job0001", output="secret")
     out = _run({"action": "output", "job_id": "job0001"}, session_id="sess-b")
     assert "error" in out and "secret" not in out.get("error", "")
+
+
+def test_output_requires_exact_owner_and_workspace(store, tmp_path):
+    workspace_a = str(tmp_path / "a")
+    _seed(
+        session_id="sess-a",
+        job_id="job0001",
+        output="secret",
+        owner="alice",
+        workspace=workspace_a,
+    )
+
+    assert "error" in _run(
+        {"action": "output", "job_id": "job0001"},
+        owner="bob",
+        workspace=workspace_a,
+    )
+    assert "error" in _run(
+        {"action": "output", "job_id": "job0001"},
+        owner="alice",
+        workspace=str(tmp_path / "b"),
+    )
+    assert "secret" in _run(
+        {"action": "output", "job_id": "job0001"},
+        owner="alice",
+        workspace=workspace_a,
+    )["output"]
+
+
+def test_wait_does_not_expose_internal_paths(store):
+    _seed(job_id="done01", status="done")
+    session = _run(
+        {"action": "wait", "job_id": "done01", "timeout_s": 0},
+    )["session"]
+    assert session["state"] == "done"
+    assert session["elapsed_s"] >= 0
+    assert session["owner"] == _OWNER
+    assert session["workspace"] == _WORKSPACE
+    assert "log_path" not in session
+    assert "exit_path" not in session
+    assert "pid" not in session
+
+
+def test_delete_removes_record_and_retained_output(store):
+    _seed(job_id="done01", status="done", output="retained")
+    log_path = bg_jobs._JOBS_DIR / "done01.log"
+    out = _run({"action": "delete", "job_id": "done01"})
+    assert "Deleted" in out["output"]
+    assert bg_jobs.get("done01") is None
+    assert not log_path.exists()
+
+
+def test_session_delete_removes_only_exact_owner_jobs(store):
+    _seed(
+        session_id="sess-a",
+        job_id="alice-a",
+        owner="alice",
+        output="owned",
+        pid=101,
+    )
+    _seed(
+        session_id="sess-a",
+        job_id="bob-a",
+        owner="bob",
+        output="foreign owner",
+        pid=202,
+    )
+    _seed(
+        session_id="sess-b",
+        job_id="alice-b",
+        owner="alice",
+        output="foreign session",
+        pid=303,
+    )
+
+    assert bg_jobs.delete_for_session_owner(
+        session_id="sess-a",
+        owner="alice",
+    ) == 1
+    assert "alice-a" not in bg_jobs._load()
+    assert not (bg_jobs._JOBS_DIR / "alice-a.log").exists()
+    assert set(bg_jobs._load()) == {"bob-a", "alice-b"}
+    assert store["killed"] == [101]
 
 
 def test_kill_via_tool(store):
@@ -155,6 +287,40 @@ def test_kill_cross_session_denied(store):
     out = _run({"action": "kill", "job_id": "job0001"}, session_id="sess-b")
     assert "error" in out
     assert store["killed"] == []  # never touched another chat's job
+
+
+def test_operation_rechecks_scope_after_lookup(store, monkeypatch):
+    _seed(job_id="job0001", owner="bob", workspace=_WORKSPACE)
+    monkeypatch.setattr(
+        bg_jobs,
+        "get_scoped",
+        lambda *args, **kwargs: {
+            **bg_jobs._load()["job0001"],
+            "owner": _OWNER,
+        },
+    )
+
+    out = _run({"action": "kill", "job_id": "job0001"})
+
+    assert "error" in out
+    assert store["killed"] == []
+    assert bg_jobs._load()["job0001"]["status"] == "running"
+
+
+def test_low_level_job_operations_enforce_scope(store):
+    _seed(job_id="job0001", owner="bob", workspace=_WORKSPACE, output="secret")
+    scope = {
+        "session_id": "sess-a",
+        "owner": _OWNER,
+        "workspace": _WORKSPACE,
+    }
+
+    with pytest.raises(KeyError):
+        bg_jobs.tail("job0001", **scope)
+    assert bg_jobs.write("job0001", "nope", **scope) is False
+    assert bg_jobs.kill("job0001", **scope) is None
+    assert bg_jobs.delete("job0001", **scope) is False
+    assert bg_jobs._load()["job0001"]["status"] == "running"
 
 
 def test_kill_requires_job_id(store):

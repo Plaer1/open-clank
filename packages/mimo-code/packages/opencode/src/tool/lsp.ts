@@ -35,6 +35,9 @@ export const LspTool = Tool.define(
         line: z.number().int().min(1).describe("The line number (1-based, as shown in editors)"),
         character: z.number().int().min(1).describe("The character offset (1-based, as shown in editors)"),
       }),
+      resources: (args: { file_path: string }) => ({
+        reads: [path.isAbsolute(args.file_path) ? args.file_path : path.join(Instance.directory, args.file_path)],
+      }),
       execute: (
         args: { operation: (typeof operations)[number]; file_path: string; line: number; character: number },
         ctx: Tool.Context,

@@ -9,6 +9,7 @@ import { tmpdir } from "../fixture/fixture"
 import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { Global } from "../../src/global"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 
 const baseCtx: Omit<Tool.Context, "ask"> = {
   sessionID: SessionID.make("ses_test"),
@@ -67,7 +68,7 @@ describe("tool.assertExternalDirectory", () => {
 
     const directory = "/tmp/project"
     const target = "/tmp/outside/file.txt"
-    const expected = glob(path.join(path.dirname(target), "*"))
+    const expected = glob(path.join(path.dirname(AppFileSystem.resolve(target)), "*"))
 
     await Instance.provide({
       directory,
@@ -87,7 +88,7 @@ describe("tool.assertExternalDirectory", () => {
 
     const directory = "/tmp/project"
     const target = "/tmp/outside"
-    const expected = glob(path.join(target, "*"))
+    const expected = glob(path.join(AppFileSystem.resolve(target), "*"))
 
     await Instance.provide({
       directory,

@@ -317,7 +317,10 @@ def test_compare_mode_branch_skips_agent_runs_in_source():
 
     branch_idx = src.index("if compare_mode:")
     direct_return_idx = src.index("return StreamingResponse(_safe_stream(), media_type=", branch_idx)
-    detach_idx = src.index("agent_runs.start(session, _safe_stream())", branch_idx)
+    detach_idx = src.index(
+        "agent_runs.start(session, _safe_stream(), owner=_user)",
+        branch_idx,
+    )
 
     assert branch_idx < direct_return_idx < detach_idx, (
         "compare_mode must short-circuit to a direct (non-detached) "

@@ -128,6 +128,29 @@ def test_resume_reader_shows_live_tool_activity():
     assert "setInterval" not in reader, "the feed must not leak timers"
 
 
+def test_resume_reader_claims_session_before_network_await():
+    """Concurrent refresh/session hooks must attach at most one SSE reader."""
+    chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+    resume_at = chat.index("export async function resumeStream")
+    reader = chat[resume_at:resume_at + 9000]
+    guard_at = reader.index("if (hasActiveStream(sessionId)) return false;")
+    claim_at = reader.index("_resumingStreams.add(sessionId);", guard_at)
+    fetch_at = reader.index("await fetch(`${API_BASE}/api/chat/resume/${sessionId}`)", claim_at)
+    assert guard_at < claim_at < fetch_at, (
+        "resumeStream must claim the session synchronously before its first await"
+    )
+    assert reader.count("_resumingStreams.add(sessionId);") == 1
+    assert "_resumingStreams.delete(sessionId);" in reader
+
+
+def test_stop_abort_paths_do_not_duplicate_cancelled_markers_or_rows():
+    """The click handler and aborted fetch catch may both process one Stop."""
+    chat = (_REPO / "static" / "js" / "chat.js").read_text(encoding="utf-8")
+    assert "holder.dataset.cancelledByUser === 'true'" in chat
+    assert "holder.dataset.cancelledByUser = 'true';" in chat
+    assert "!holder.querySelector('.stopped-indicator')" in chat
+
+
 def test_resume_reader_surfaces_interactive_events_like_live_stream():
     """Page-refresh replay must restore the same question and permission cards
     that the foreground reader renders when their SSE events arrive live."""
@@ -146,6 +169,14 @@ def test_resume_reader_surfaces_interactive_events_like_live_stream():
     assert "_storeSessionState('permission', sessionId, json.data || {})" in permission
     assert "spinner.destroy()" in permission
     assert "chatRenderer.renderPermissionCard(json.data || {}, sessionId)" in permission
+
+
+def test_destructive_permission_card_shows_exact_working_directory():
+    renderer = (_REPO / "static" / "js" / "chatRenderer.js").read_text(
+        encoding="utf-8"
+    )
+    assert "Working directory: ${d.workdir}" in renderer
+    assert "white-space:pre-wrap" in renderer
 
 
 def test_chat_js_sweeps_stranded_running_cards_at_stream_end():

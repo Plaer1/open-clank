@@ -15,9 +15,12 @@ process.chdir(dir)
 await import("./generate.ts")
 
 import { Script } from "@mimo-ai/script"
-import pkg from "../package.json"
 
-const BINARY_PREFIX = "mimocode"
+const BINARY_PREFIX = "openclank-engine"
+
+if (Script.release) {
+  throw new Error("Upstream MiMo release publishing is disabled; use the Open Clank release workflow")
+}
 
 // Load migrations from migration directories
 const migrationDirs = (
@@ -204,8 +207,7 @@ process.on("exit", () => {
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  await $`bun ci`.cwd(path.resolve(dir, "../.."))
 }
 for (const item of targets) {
   const name = [
@@ -237,15 +239,19 @@ for (const item of targets) {
     external: ["node-gyp"],
     format: "esm",
     minify: true,
-    splitting: true,
+    // Bun 1.3.14 assigns nondeterministic hashes to shared chunks when a
+    // compiled build has several entrypoints. Keeping the entries independent
+    // is slightly larger, but makes identical source produce byte-identical
+    // release payloads and preserves the embedded worker entrypoints.
+    splitting: false,
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(BINARY_PREFIX, "bun") as any,
-      outfile: `dist/${name}/bin/mimo`,
-      execArgv: [`--user-agent=mimocode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/openclank-engine`,
+      execArgv: [`--user-agent=openclank-engine/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     files: embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {},
@@ -262,7 +268,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/mimo`
+    const binaryPath = `dist/${name}/bin/openclank-engine`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
@@ -275,22 +281,21 @@ for (const item of targets) {
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/README.md`).write(
-    `This is the ${item.os}-${item.arch} binary for [@mimo-ai/cli](https://www.npmjs.com/package/@mimo-ai/cli). Install that package directly.\n`,
+    `Private Open Clank managed engine for ${item.os}-${item.arch}. Install and verify it through Open Clank.\n`,
   )
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {
-        name: `@mimo-ai/${name}`,
+        name: `@open-clank/${name}`,
         version: Script.version,
-        description: "Platform-specific binary for @mimo-ai/cli.",
+        description: "Private platform-specific Open Clank managed engine.",
         license: "MIT",
-        author: "Xiaomi MiMo Team",
-        homepage: "https://mimo.xiaomi.com/coder",
+        author: "Open Clank contributors",
         repository: {
           type: "git",
-          url: "git+https://github.com/XiaomiMiMo/MiMo-Code.git",
+          url: "git+https://github.com/open-clank/open-clank.git",
         },
-        keywords: ["ai", "coding", "agent", "cli", "mimo"],
+        keywords: ["open-clank", "ai", "agent", "engine"],
         os: [item.os],
         cpu: [item.arch],
       },

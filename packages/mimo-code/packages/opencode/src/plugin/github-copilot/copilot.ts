@@ -28,6 +28,18 @@ function base(enterpriseUrl?: string) {
   return enterpriseUrl ? `https://copilot-api.${normalizeDomain(enterpriseUrl)}` : "https://api.githubcopilot.com"
 }
 
+function usesCopilotConnection(input: {
+  model: { providerID: string; api: { npm: string } }
+  provider?: { options?: Record<string, unknown> }
+}): boolean {
+  return (
+    input.model.providerID.includes("github-copilot") ||
+    input.model.api.npm === "@ai-sdk/github-copilot" ||
+    input.provider?.options?._openclankFamilyID === "github-copilot" ||
+    input.provider?.options?._openclankAdapterID === "copilot-chat"
+  )
+}
+
 // Check if a message is a synthetic user msg used to attach an image from a tool call
 function imgMsg(msg: any): boolean {
   if (msg?.role !== "user") return false
@@ -328,7 +340,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
       ],
     },
     "chat.params": async (incoming, output) => {
-      if (!incoming.model.providerID.includes("github-copilot")) return
+      if (!usesCopilotConnection(incoming)) return
 
       // Match github copilot cli, omit maxOutputTokens for gpt models
       if (incoming.model.api.id.includes("gpt")) {
@@ -343,7 +355,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
       }
     },
     "chat.headers": async (incoming, output) => {
-      if (!incoming.model.providerID.includes("github-copilot")) return
+      if (!usesCopilotConnection(incoming)) return
 
       if (incoming.model.api.npm === "@ai-sdk/anthropic") {
         output.headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"

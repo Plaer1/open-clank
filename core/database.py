@@ -1,12 +1,14 @@
 import os
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text, update
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, inspect, text, update
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import Session as ORMSession, relationship, sessionmaker, backref
@@ -83,6 +85,29 @@ engine = create_engine(
 # rollback journal; -wal/-shm appear once WAL is enabled. Each can hold copies of
 # secret-bearing pages, so they get the same 0o600 lockdown as the DB itself.
 _SQLITE_SIDECARS = ("-journal", "-wal", "-shm")
+
+
+_RETIRED_PROVIDER_TABLES = frozenset({
+    "model_endpoints",
+    "model_capabilities",
+    "provider_auth_sessions",
+    "mimo_auth_store",
+    "mimo_model_prefs",
+    "model_shares",
+    "model_share_subscriptions",
+    "mimo_projection_states",
+})
+
+
+def _provider_cutover_is_complete() -> bool:
+    """Read the pre-app marker without importing migration/database code."""
+
+    marker = Path(DATA_DIR) / ".migrations" / "provider-cutover-v1.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return False
+    return payload.get("schema_version") == 1 and payload.get("phase") == "complete"
 
 
 def _sqlite_db_path(url) -> Optional[str]:
@@ -186,8 +211,15 @@ class Session(TimestampMixin, Base):
     name = Column(String, nullable=False)
     endpoint_url = Column(String, nullable=False)
     endpoint_id = Column(String, nullable=True, index=True)
+    # Stable normalized execution identity. endpoint_* remains nullable,
+    # display-only compatibility after the provider hard cut.
+    provider_model_route_id = Column(String, nullable=True, index=True)
     model = Column(String, nullable=False)
     owner = Column(String, nullable=True, index=True)  # username; null = legacy/shared
+    # Opaque reference into the canonical file-policy Workspace catalog. This
+    # is deliberately not a SQL foreign key: that catalog uses its own raw
+    # SQLite schema and may be configured separately from this ORM database.
+    workspace_id = Column(String, nullable=True, index=True)
     
     # Configuration flags
     rag = Column(Boolean, default=False)
@@ -258,6 +290,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'workspace_id': self.workspace_id,
         }
 
 class ChatMessage(Base):
@@ -332,6 +365,10 @@ class TurnActor(Base):
     mode = Column(String, nullable=False)
     agent = Column(String, nullable=False)
     description = Column(Text, nullable=False, default="")
+    # Keep the pre-resolution request and the provider-resolved destination
+    # separately for truthful actor accounting and audit display.
+    requested_model = Column(String, nullable=True)
+    effective_model = Column(String, nullable=True)
     background = Column(Boolean, nullable=False, default=False)
     lifecycle = Column(String, nullable=False, default="ephemeral")
     counts_toward_total = Column(Boolean, nullable=False, default=False)
@@ -685,6 +722,21 @@ class MimoAuthStore(TimestampMixin, Base):
     payload = Column(EncryptedText, nullable=True)  # JSON auth store contents
 
 
+class MimoModelPref(Base):
+    """Per-owner visibility for mimo provider-account models.
+
+    Row present = the owner hid that model from their own chat lists.
+    Opt-out hide-list (vanilla semantics): provider inventories fluctuate,
+    so newly appearing models default to visible until the owner hides them.
+    Provider-account connections have no ModelEndpoint row, so their
+    visibility state lives here instead of hidden_models/pinned_models."""
+    __tablename__ = "mimo_model_prefs"
+
+    owner = Column(String, primary_key=True, nullable=False, index=True)
+    provider_id = Column(String, primary_key=True)
+    model_id = Column(String, primary_key=True)
+
+
 class ModelShare(TimestampMixin, Base):
     """One exact model route an owner has deliberately published."""
 
@@ -753,6 +805,8 @@ class Comparison(TimestampMixin, Base):
     model_b = Column(String, nullable=False)
     endpoint_a = Column(String, nullable=False)
     endpoint_b = Column(String, nullable=False)
+    provider_model_route_a_id = Column(String, nullable=True, index=True)
+    provider_model_route_b_id = Column(String, nullable=True, index=True)
     response_a = Column(Text, nullable=True)
     response_b = Column(Text, nullable=True)
     metrics_a = Column(Text, nullable=True)         # JSON string
@@ -800,6 +854,40 @@ class ApiToken(TimestampMixin, Base):
     scopes = Column(String, nullable=False, default="chat")
     is_active = Column(Boolean, default=True)
     last_used_at = Column(DateTime, nullable=True)
+    # Client classification keeps TUI device credentials inside the same
+    # Open Clank application-token authority without granting them access to
+    # ordinary API routes.  Existing rows migrate as ``api``.
+    client_kind = Column(String, nullable=False, default="api")
+    expires_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    device_label = Column(String, nullable=True)
+
+
+class TuiTurnSubmission(TimestampMixin, Base):
+    """Durable idempotency fence for a TUI-submitted canonical turn."""
+
+    __tablename__ = "tui_turn_submissions"
+
+    id = Column(String(64), primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    session_id = Column(
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key = Column(String(128), nullable=False)
+    request_hash = Column(String(64), nullable=False)
+    state = Column(String, nullable=False, default="submitting", index=True)
+    error_code = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner",
+            "idempotency_key",
+            name="uq_tui_turn_owner_idempotency",
+        ),
+    )
 
 
 class Webhook(TimestampMixin, Base):
@@ -873,6 +961,7 @@ class CrewMember(TimestampMixin, Base):
     model         = Column(String, nullable=True)
     endpoint_url  = Column(String, nullable=True)
     endpoint_id   = Column(String, ForeignKey("model_endpoints.id", ondelete="SET NULL"), nullable=True)
+    provider_model_route_id = Column(String, nullable=True, index=True)
     greeting      = Column(Text, nullable=True)
     enabled_tools = Column(Text, nullable=True)             # JSON array or "all"
     session_id    = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
@@ -911,7 +1000,14 @@ class ScheduledTask(TimestampMixin, Base):
     model          = Column(String, nullable=True)
     endpoint_url   = Column(String, nullable=True)
     endpoint_id    = Column(String, ForeignKey("model_endpoints.id", ondelete="SET NULL"), nullable=True, index=True)
+    provider_model_route_id = Column(String, nullable=True, index=True)
     workspace      = Column(String, nullable=True)
+    # Opaque file-policy Workspace identity. ``workspace`` remains the raw
+    # path compatibility lane for older administrator-created tasks; new
+    # callers persist this ID and derive the path from current policy per run.
+    workspace_id   = Column(String, nullable=True, index=True)
+    # Logical Copal namespace; deliberately independent from filesystem cwd.
+    copal_workspace = Column(String, nullable=False, default="default")
     allowed_tools  = Column(Text, nullable=False, default="[]")
     interaction_policy = Column(String, nullable=False, default="fail_on_interaction")
     max_tool_calls = Column(Integer, nullable=False, default=20)
@@ -1120,6 +1216,37 @@ def _migrate_add_owner_column():
             conn.close()
         except Exception:
             pass
+
+
+def _migrate_add_session_workspace_id_column():
+    """Add the stable per-chat Workspace reference without guessing a backfill."""
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if not columns:
+            return
+        if "workspace_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN workspace_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_workspace_id "
+            "ON sessions(workspace_id)"
+        )
+        conn.commit()
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "sessions.workspace_id migration failed: %s", error
+        )
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 def _migrate_model_endpoints():
     """Recreate model_endpoints table if schema changed (url->base_url)."""
@@ -1683,6 +1810,7 @@ def _migrate_add_background_agent_contract_columns():
         for name, definition in {
             "endpoint_id": "TEXT",
             "workspace": "TEXT",
+            "copal_workspace": "TEXT NOT NULL DEFAULT 'default'",
             "allowed_tools": "TEXT NOT NULL DEFAULT '[]'",
             "interaction_policy": "TEXT NOT NULL DEFAULT 'fail_on_interaction'",
             "max_tool_calls": "INTEGER NOT NULL DEFAULT 20",
@@ -1711,6 +1839,20 @@ def _migrate_add_background_agent_contract_columns():
             "(SELECT endpoint_id FROM sessions WHERE sessions.id = crew_members.session_id) "
             "WHERE endpoint_id IS NULL AND session_id IS NOT NULL"
         )
+
+        # A completed provider hard cut intentionally removes model_endpoints.
+        # The contract columns and session-linked compatibility backfill above
+        # still apply, but there is no legacy endpoint authority left against
+        # which URL-only rows can be resolved or stale IDs can be validated.
+        # Keep those compatibility values untouched; normalized route IDs are
+        # installed by the provider mapping/core route-reference migrations.
+        model_endpoints_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'model_endpoints'"
+        ).fetchone()
+        if model_endpoints_exists is None:
+            conn.commit()
+            return
 
         def _base(value: str) -> str:
             value = (value or "").strip().rstrip("/")
@@ -1912,6 +2054,49 @@ def _migrate_add_api_token_scopes_column():
         except Exception:
             pass
 
+
+def _migrate_add_api_token_client_columns():
+    """Add bounded-client metadata used by Open Clank TUI device tokens."""
+    import sqlite3
+
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(api_tokens)").fetchall()
+        }
+        if not columns:
+            return
+        additions = {
+            "client_kind": "TEXT NOT NULL DEFAULT 'api'",
+            "expires_at": "DATETIME",
+            "revoked_at": "DATETIME",
+            "device_label": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE api_tokens ADD COLUMN {name} {definition}"
+                )
+        conn.execute(
+            "UPDATE api_tokens SET client_kind = 'api' "
+            "WHERE client_kind IS NULL OR client_kind = ''"
+        )
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "api_tokens client metadata migration failed: %s", e
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def _migrate_assign_legacy_owner():
     """Assign all null-owner data to the first (admin) user.
 
@@ -2097,7 +2282,18 @@ def _migrate_add_doc_source_email_cols():
         logging.getLogger(__name__).warning(f"doc source-email migration: {e}")
 
 def _migrate_add_task_automation_columns():
-    """Add automation columns to scheduled_tasks table if missing."""
+    """Add automation columns and safely relax legacy task constraints.
+
+    SQLite rewrites dependent foreign-key targets when a referenced table is
+    renamed.  A naive ``scheduled_tasks -> _old_scheduled_tasks`` rebuild can
+    therefore retarget ``task_runs`` and cascade-delete its history when the
+    temporary table is dropped.  Freeze that rename propagation while foreign
+    keys are disabled, rebuild from the complete current ORM table, validate
+    the result, and restore the connection pragmas before returning.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
     new_cols = {
         "task_type": "VARCHAR DEFAULT 'llm'",
         "action": "VARCHAR",
@@ -2106,68 +2302,192 @@ def _migrate_add_task_automation_columns():
         "trigger_count": "INTEGER",
         "trigger_counter": "INTEGER DEFAULT 0",
     }
+    raw_connection = None
+    cursor = None
+    foreign_keys = 1
+    legacy_alter_table = 0
     try:
-        with engine.connect() as conn:
-            cols_info = list(conn.execute(text("PRAGMA table_info(scheduled_tasks)")))
-            col_names = [r[1] for r in cols_info]
-            for col_name, col_def in new_cols.items():
-                if col_name not in col_names:
-                    conn.execute(text(f"ALTER TABLE scheduled_tasks ADD COLUMN {col_name} {col_def}"))
+        raw_connection = engine.raw_connection()
+        cursor = raw_connection.cursor()
+        tables = {
+            str(row[0])
+            for row in cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "scheduled_tasks" not in tables:
+            return
 
-            # Check if prompt/schedule/scheduled_time are still NOT NULL — need table rebuild
-            notnull_map = {r[1]: r[3] for r in cols_info}
-            needs_rebuild = (
-                notnull_map.get("prompt", 0) == 1 or
-                notnull_map.get("schedule", 0) == 1 or
-                notnull_map.get("scheduled_time", 0) == 1
+        cols_info = cursor.execute(
+            'PRAGMA table_info("scheduled_tasks")'
+        ).fetchall()
+        col_names = {str(row[1]) for row in cols_info}
+        for col_name, col_def in new_cols.items():
+            if col_name not in col_names:
+                cursor.execute(
+                    f'ALTER TABLE "scheduled_tasks" ADD COLUMN "{col_name}" {col_def}'
+                )
+        raw_connection.commit()
+
+        # Refresh after ALTERs so every newly added compatibility value is
+        # available to the copy below.
+        cols_info = cursor.execute(
+            'PRAGMA table_info("scheduled_tasks")'
+        ).fetchall()
+        col_names = {str(row[1]) for row in cols_info}
+        notnull_map = {str(row[1]): int(row[3]) for row in cols_info}
+        needs_rebuild = any(
+            notnull_map.get(column, 0) == 1
+            for column in ("prompt", "schedule", "scheduled_time")
+        )
+        if not needs_rebuild:
+            logging.getLogger(__name__).info(
+                "Task automation columns migration complete"
             )
-            if needs_rebuild:
-                logging.getLogger(__name__).info("Rebuilding scheduled_tasks to make prompt/schedule/scheduled_time nullable")
-                conn.execute(text("ALTER TABLE scheduled_tasks RENAME TO _old_scheduled_tasks"))
-                conn.execute(text("""
-                    CREATE TABLE scheduled_tasks (
-                        id VARCHAR PRIMARY KEY,
-                        owner VARCHAR,
-                        name VARCHAR NOT NULL,
-                        prompt TEXT,
-                        schedule VARCHAR,
-                        scheduled_time VARCHAR,
-                        scheduled_day INTEGER,
-                        scheduled_date DATETIME,
-                        next_run DATETIME,
-                        last_run DATETIME,
-                        status VARCHAR,
-                        output_target VARCHAR,
-                        session_id VARCHAR,
-                        model VARCHAR,
-                        endpoint_url VARCHAR,
-                        run_count INTEGER,
-                        created_at DATETIME NOT NULL,
-                        updated_at DATETIME NOT NULL,
-                        task_type VARCHAR DEFAULT 'llm',
-                        action VARCHAR,
-                        trigger_type VARCHAR DEFAULT 'schedule',
-                        trigger_event VARCHAR,
-                        trigger_count INTEGER,
-                        trigger_counter INTEGER DEFAULT 0
-                    )
-                """))
-                conn.execute(text("""
-                    INSERT INTO scheduled_tasks
-                    SELECT id, owner, name, prompt, schedule, scheduled_time,
-                           scheduled_day, scheduled_date, next_run, last_run,
-                           status, output_target, session_id, model, endpoint_url,
-                           run_count, created_at, updated_at,
-                           task_type, action, trigger_type, trigger_event,
-                           trigger_count, trigger_counter
-                    FROM _old_scheduled_tasks
-                """))
-                conn.execute(text("DROP TABLE _old_scheduled_tasks"))
+            return
 
-            conn.commit()
-            logging.getLogger(__name__).info("Task automation columns migration complete")
+        if "_old_scheduled_tasks" in tables:
+            raise RuntimeError(
+                "Cannot rebuild scheduled_tasks while _old_scheduled_tasks exists"
+            )
+
+        logging.getLogger(__name__).info(
+            "Rebuilding scheduled_tasks to make prompt/schedule/scheduled_time nullable"
+        )
+        foreign_keys = int(cursor.execute("PRAGMA foreign_keys").fetchone()[0])
+        legacy_alter_table = int(
+            cursor.execute("PRAGMA legacy_alter_table").fetchone()[0]
+        )
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("PRAGMA legacy_alter_table=ON")
+        cursor.execute("BEGIN IMMEDIATE")
+
+        cursor.execute(
+            'ALTER TABLE "scheduled_tasks" RENAME TO "_old_scheduled_tasks"'
+        )
+        included_foreign_keys = None
+        if "model_endpoints" not in tables:
+            # Provider hard-cut databases deliberately retain endpoint_id only
+            # as nullable display compatibility after dropping the legacy
+            # authority table. Rebuilding an old task table must not resurrect
+            # a dangling FK to that retired parent.
+            included_foreign_keys = [
+                constraint
+                for constraint in ScheduledTask.__table__.foreign_key_constraints
+                if constraint.referred_table.name != "model_endpoints"
+            ]
+        cursor.execute(
+            str(
+                CreateTable(
+                    ScheduledTask.__table__,
+                    include_foreign_key_constraints=included_foreign_keys,
+                ).compile(dialect=engine.dialect)
+            )
+        )
+
+        target_names = []
+        select_expressions = []
+        copy_parameters = []
+        for column in ScheduledTask.__table__.columns:
+            name = str(column.name)
+            target_names.append(f'"{name}"')
+            if name in col_names:
+                select_expressions.append(f'"{name}"')
+                continue
+            default = column.default
+            if default is not None and getattr(default, "is_scalar", False):
+                select_expressions.append("?")
+                copy_parameters.append(default.arg)
+            elif name in {"created_at", "updated_at"}:
+                select_expressions.append("CURRENT_TIMESTAMP")
+            elif column.nullable:
+                select_expressions.append("NULL")
+            else:
+                raise RuntimeError(
+                    f"Cannot rebuild scheduled_tasks without required column {name}"
+                )
+
+        cursor.execute(
+            "INSERT INTO scheduled_tasks ("
+            + ", ".join(target_names)
+            + ") SELECT "
+            + ", ".join(select_expressions)
+            + ' FROM "_old_scheduled_tasks"',
+            tuple(copy_parameters),
+        )
+        cursor.execute('DROP TABLE "_old_scheduled_tasks"')
+        for index in sorted(
+            ScheduledTask.__table__.indexes,
+            key=lambda candidate: candidate.name or "",
+        ):
+            cursor.execute(
+                str(CreateIndex(index).compile(dialect=engine.dialect))
+            )
+
+        violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"scheduled_tasks rebuild introduced foreign-key violations: {violations!r}"
+            )
+        raw_connection.commit()
+        logging.getLogger(__name__).info(
+            "Task automation columns migration complete"
+        )
     except Exception as e:
-        logging.getLogger(__name__).warning(f"task automation migration: {e}")
+        if raw_connection is not None:
+            raw_connection.rollback()
+        logging.getLogger(__name__).exception(
+            "task automation migration failed: %s", e
+        )
+        raise
+    finally:
+        if cursor is not None:
+            try:
+                cursor.execute(f"PRAGMA legacy_alter_table={legacy_alter_table}")
+                cursor.execute(f"PRAGMA foreign_keys={foreign_keys}")
+            finally:
+                cursor.close()
+        if raw_connection is not None:
+            raw_connection.close()
+
+
+def _migrate_add_task_workspace_id_column():
+    """Add stable task Workspace identity after legacy task-table rebuilds.
+
+    The automation migration above may rebuild ``scheduled_tasks`` on an old
+    database, so this migration intentionally runs after it. Existing raw-path
+    ``workspace`` values are compatibility authority only and are never guessed
+    into opaque Workspace IDs.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    try:
+        with engine.begin() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "scheduled_tasks" not in tables:
+                return
+            columns = {
+                str(row[1])
+                for row in conn.exec_driver_sql(
+                    'PRAGMA table_info("scheduled_tasks")'
+                ).fetchall()
+            }
+            if "workspace_id" not in columns:
+                conn.exec_driver_sql(
+                    'ALTER TABLE "scheduled_tasks" ADD COLUMN "workspace_id" VARCHAR'
+                )
+            conn.exec_driver_sql(
+                'CREATE INDEX IF NOT EXISTS "ix_scheduled_tasks_workspace_id" '
+                'ON "scheduled_tasks" ("workspace_id")'
+            )
+    except Exception:
+        logger.exception("scheduled_tasks.workspace_id schema migration failed")
+        raise
 
 def _migrate_add_email_oauth_columns():
     """Add Google OAuth and display_name columns to email_accounts if missing."""
@@ -2499,6 +2819,93 @@ def _migrate_seed_email_account():
         logging.getLogger(__name__).warning(f"seed email account migration: {e}")
 
 
+_PROVIDER_ROUTE_REFERENCE_COLUMNS = {
+    "sessions": {
+        "provider_model_route_id": "ix_sessions_provider_model_route_id",
+    },
+    "scheduled_tasks": {
+        "provider_model_route_id": "ix_scheduled_tasks_provider_model_route_id",
+    },
+    "crew_members": {
+        "provider_model_route_id": "ix_crew_members_provider_model_route_id",
+    },
+    "comparisons": {
+        "provider_model_route_a_id": "ix_comparisons_provider_model_route_a_id",
+        "provider_model_route_b_id": "ix_comparisons_provider_model_route_b_id",
+    },
+}
+
+
+def _migrate_add_provider_route_reference_columns():
+    """Add normalized route references to every existing legacy-domain table.
+
+    SQLAlchemy's ``create_all`` creates these columns on a fresh database but
+    deliberately does not alter an existing table.  The provider cutover can
+    add a reference column while applying a resolvable frozen-plan reference,
+    but a table with no resolvable rows never passes through that ALTER path.
+    Run this unconditional schema migration after ``Base.create_all`` so both
+    cut-over and ordinary existing databases match the ORM before any startup
+    service queries them.
+
+    Values already written by provider cutover are intentionally untouched.
+    The stable route IDs live in separate provider metadata, so these are
+    nullable indexed references rather than SQLite foreign keys.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    try:
+        with engine.begin() as conn:
+            tables = {
+                str(row[0])
+                for row in conn.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            for table, additions in _PROVIDER_ROUTE_REFERENCE_COLUMNS.items():
+                if table not in tables:
+                    continue
+                columns = {
+                    str(row[1])
+                    for row in conn.exec_driver_sql(
+                        f'PRAGMA table_info("{table}")'
+                    ).fetchall()
+                }
+                for column, index_name in additions.items():
+                    if column not in columns:
+                        conn.exec_driver_sql(
+                            f'ALTER TABLE "{table}" ADD COLUMN "{column}" VARCHAR'
+                        )
+                    conn.exec_driver_sql(
+                        f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                        f'ON "{table}" ("{column}")'
+                    )
+    except Exception:
+        logger.exception("Provider route reference schema migration failed")
+        raise
+
+
+def _migrate_add_actor_model_columns():
+    """Add actor model provenance columns to existing accounting databases."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "turn_actors" not in tables:
+            return
+        columns = {
+            str(row[1])
+            for row in conn.exec_driver_sql("PRAGMA table_info(\"turn_actors\")").fetchall()
+        }
+        for column in ("requested_model", "effective_model"):
+            if column not in columns:
+                conn.exec_driver_sql(f'ALTER TABLE "turn_actors" ADD COLUMN "{column}" VARCHAR')
+
+
 # WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
@@ -2508,17 +2915,43 @@ def init_db():
     Initialize the database by creating all tables.
     Should be called when starting the application.
     """
-    _migrate_model_endpoints()
-    # Existing tables must gain ORM-declared columns before any post-create
-    # query selects ModelEndpoint rows.
-    _migrate_add_model_endpoint_probe_columns()
-    Base.metadata.create_all(bind=engine)
+    legacy_provider_active = not _provider_cutover_is_complete()
+    if legacy_provider_active:
+        _migrate_model_endpoints()
+        # Existing tables must gain ORM-declared columns before any post-create
+        # query selects ModelEndpoint rows.
+        _migrate_add_model_endpoint_probe_columns()
+        Base.metadata.create_all(bind=engine)
+    else:
+        Base.metadata.create_all(
+            bind=engine,
+            tables=[
+                table
+                for table in Base.metadata.sorted_tables
+                if table.name not in _RETIRED_PROVIDER_TABLES
+            ],
+        )
+    # SessionManager/restart recovery below selects full Session rows. Existing
+    # databases must gain the externally-referenced Workspace column before
+    # that first ORM query, not only in the later legacy migration chain.
+    _migrate_add_session_workspace_id_column()
+    # The normalized provider domain deliberately uses separate metadata so it
+    # can hard-cut away from legacy endpoint/auth tables without entangling this
+    # module's large schema.  Both domains share the same engine and sessions.
+    from core.provider_models import ProviderBase
+    ProviderBase.metadata.create_all(bind=engine)
+    from core.operation_models import OperationBase
+    OperationBase.metadata.create_all(bind=engine)
+    # Existing actor tables need their model provenance columns before restart
+    # recovery performs its first full ORM query.
+    _migrate_add_actor_model_columns()
     # A full process restart ends any process-local actor feed. Preserve
     # acknowledged totals while making unfinished lifecycle state honest.
     from src.agent_actor_accounting import recover_actor_accounting_after_restart
     recover_actor_accounting_after_restart()
-    from src.model_capabilities import migrate_legacy_model_capabilities
-    migrate_legacy_model_capabilities()
+    if legacy_provider_active:
+        from src.model_capabilities import migrate_legacy_model_capabilities
+        migrate_legacy_model_capabilities()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for
@@ -2554,19 +2987,22 @@ def init_db():
                     "Could not restrict %s to 0o600; it may expose DB pages.",
                     sidecar,
                 )
-    _migrate_add_hidden_models_column()
-    _migrate_add_cached_models_column()
-    _migrate_add_pinned_models_column()
-    _migrate_model_endpoint_model_lists()
+    if legacy_provider_active:
+        _migrate_add_hidden_models_column()
+        _migrate_add_cached_models_column()
+        _migrate_add_pinned_models_column()
+        _migrate_model_endpoint_model_lists()
     _migrate_add_notes_sort_order()
-    _migrate_add_model_type_column()
-    _migrate_add_model_endpoint_refresh_columns()
-    _migrate_add_model_endpoint_owner_column()
-    _migrate_add_provider_auth_id_column()
-    _migrate_add_provider_auth_account_id_column()
-    _migrate_add_supports_tools_column()
+    if legacy_provider_active:
+        _migrate_add_model_type_column()
+        _migrate_add_model_endpoint_refresh_columns()
+        _migrate_add_model_endpoint_owner_column()
+        _migrate_add_provider_auth_id_column()
+        _migrate_add_provider_auth_account_id_column()
+        _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
+    _migrate_add_session_workspace_id_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_folder_column()
@@ -2578,18 +3014,24 @@ def init_db():
     _migrate_add_multiuser_owner_columns()
     _migrate_add_gallery_caption_column()
     _migrate_add_api_token_scopes_column()
+    _migrate_add_api_token_client_columns()
     _migrate_backfill_document_owner_from_session()
-    _migrate_assign_legacy_owner()
+    if legacy_provider_active:
+        _migrate_assign_legacy_owner()
     # Endpoint identity backfills run only after every legacy endpoint and
     # session/task owner has been claimed.  Otherwise a NULL endpoint was
     # treated as shared and could be linked into another user's row.
-    _migrate_add_session_endpoint_id_column()
-    _migrate_add_background_agent_contract_columns()
+    if legacy_provider_active:
+        _migrate_add_session_endpoint_id_column()
     _migrate_add_tidy_verdict()
     _migrate_add_doc_source_email_cols()
     _migrate_add_oauth_config()
     _migrate_add_email_oauth_columns()
     _migrate_add_task_automation_columns()
+    # Keep every task authority column after the legacy automation rebuild,
+    # which can replace the table on databases that predate nullable prompts.
+    _migrate_add_background_agent_contract_columns()
+    _migrate_add_task_workspace_id_column()
     _migrate_add_disabled_tools()
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_session_persona_column()
@@ -2609,7 +3051,14 @@ def init_db():
     _migrate_chat_messages_fts()
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()
-    _migrate_encrypt_endpoint_keys()
+    if legacy_provider_active:
+        _migrate_encrypt_endpoint_keys()
+    # Keep this after every scheduled_tasks rebuild migration. create_all() is
+    # intentionally non-migrating for existing tables, and an older automation
+    # schema rebuild can otherwise remove a route column added earlier here.
+    # Startup services do not begin issuing ORM queries until init_db returns.
+    _migrate_add_provider_route_reference_columns()
+    _migrate_add_actor_model_columns()
     _migrate_backfill_task_folders()
 
 

@@ -6,8 +6,9 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7000').replace(/\/$/, '');
+const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
 const outputDir = process.argv[3] || '/tmp/openclank-i18n-browser';
 fs.mkdirSync(outputDir, { recursive: true });
 
@@ -20,7 +21,23 @@ const port = await new Promise((resolve, reject) => {
   });
 });
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-i18n-'));
-const chromium = spawn('/usr/bin/chromium', [
+function chromeExecutable() {
+  const candidates = [
+    process.env.OPENCLANK_CHROME_BIN,
+    process.env.CHROME_BIN,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/opt/homebrew/bin/chromium',
+    '/usr/local/bin/chromium',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+  ].filter(Boolean);
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+const chrome = chromeExecutable();
+assert(chrome, 'Chrome/Chromium executable required; set OPENCLANK_CHROME_BIN or CHROME_BIN');
+const chromium = spawn(chrome, [
   '--headless=new', '--no-sandbox', '--disable-gpu',
   `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank',
 ], { stdio: 'ignore' });
@@ -143,14 +160,28 @@ try {
   fs.writeFileSync(path.join(outputDir, 'japanese-interface.png'), Buffer.from(capture.data, 'base64'));
 
   await command('Page.navigate', { url: `${base}/static/login.html?__lang=zh-TW&__fresh=1` });
-  await waitFor("window.openClankI18n && document.readyState === 'complete'", 'unsupported locale page');
+  await waitFor("window.openClankI18n && document.readyState === 'complete'", 'Traditional Chinese locale page');
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
-  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), false);
+  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), true);
+  assert.equal(await evaluate("document.querySelector('.i18n-offer').lang"), 'zh-Hant');
+  await evaluate("document.querySelector('.i18n-offer [data-decline]').click()");
 
-  console.log(JSON.stringify({ offer, matrix, contentSafety, unsupportedTraditionalChinese: true }, null, 2));
+  console.log(JSON.stringify({ offer, matrix, contentSafety, traditionalChineseAlias: 'zh-TW→zh-Hant' }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   chromium.kill('SIGTERM');
-  fs.rmSync(profile, { recursive: true, force: true });
+  if (chromium.exitCode == null) {
+    await new Promise(resolve => {
+      const timer = setTimeout(() => {
+        if (chromium.exitCode == null) chromium.kill('SIGKILL');
+        resolve();
+      }, 3000);
+      chromium.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  for (let attempt = 0; attempt < 10 && fs.existsSync(profile); attempt += 1) {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    if (fs.existsSync(profile)) await delay(100);
+  }
 }

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import secrets
 import uuid
 from datetime import datetime
@@ -12,15 +13,19 @@ from pydantic import BaseModel
 
 from core.database import SessionLocal, ScheduledTask, TaskRun
 from core.constants import internal_api_base
-from src.auth_helpers import get_current_user
+from src.auth_helpers import effective_user, get_current_user
 from src.constants import DATA_DIR, EMAIL_URGENCY_CACHE_DIR
+from src.openclank.file_policy import FilePolicyRepository
+from src.openclank.workspace_policy_service import (
+    WorkspacePolicyServiceError,
+    resolve_owned_workspace,
+)
 from src.task_action_policy import (
     ADMIN_ONLY_TASK_ACTIONS,
     is_admin_only_task_action,
     owner_has_admin_task_privileges,
 )
 from src.task_scheduler import compute_next_run, HOUSEKEEPING_DEFAULTS
-from routes.model_routes import is_mimo_connection_id
 from routes.prefs_routes import _load_for_user, _save_for_user
 
 logger = logging.getLogger(__name__)
@@ -172,7 +177,10 @@ class TaskCreate(BaseModel):
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
     endpoint_id: Optional[str] = None
+    provider_model_route_id: Optional[str] = None
     workspace: Optional[str] = None
+    workspace_id: Optional[str] = None
+    copal_workspace: str = "default"
     allowed_tools: Optional[list[str]] = None
     interaction_policy: str = "fail_on_interaction"
     max_tool_calls: Optional[int] = 20
@@ -198,7 +206,10 @@ class TaskUpdate(BaseModel):
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
     endpoint_id: Optional[str] = None
+    provider_model_route_id: Optional[str] = None
     workspace: Optional[str] = None
+    workspace_id: Optional[str] = None
+    copal_workspace: Optional[str] = None
     allowed_tools: Optional[list[str]] = None
     interaction_policy: Optional[str] = None
     max_tool_calls: Optional[int] = None
@@ -241,7 +252,10 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "model": t.model,
         "endpoint_url": t.endpoint_url,
         "endpoint_id": getattr(t, "endpoint_id", None),
+        "provider_model_route_id": getattr(t, "provider_model_route_id", None),
         "workspace": getattr(t, "workspace", None),
+        "workspace_id": getattr(t, "workspace_id", None),
+        "copal_workspace": getattr(t, "copal_workspace", None) or "default",
         "allowed_tools": _json_string_list(getattr(t, "allowed_tools", None)),
         "interaction_policy": getattr(t, "interaction_policy", None) or "fail_on_interaction",
         "max_tool_calls": getattr(t, "max_tool_calls", None),
@@ -293,117 +307,154 @@ def _run_research_id(task: ScheduledTask) -> str:
 
 
 def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
-    """Resolve a task run through its persisted endpoint identity."""
-    endpoint_id = getattr(task, "endpoint_id", None)
+    """Return the nonsecret managed-engine endpoint for a normalized task."""
+    route_id = getattr(task, "provider_model_route_id", None)
     try:
-        if not endpoint_id and getattr(task, "session_id", None):
+        if not route_id and getattr(task, "session_id", None):
             from core.database import Session as DbSession
             sess = db.query(DbSession).filter(DbSession.id == task.session_id).first()
-            endpoint_id = getattr(sess, "endpoint_id", None) if sess else None
+            route_id = getattr(sess, "provider_model_route_id", None) if sess else None
     except Exception:
         pass
-
-    from src.model_shares import share_id_from_endpoint
-
-    if (
-        is_mimo_connection_id(endpoint_id)
-        or share_id_from_endpoint(endpoint_id) is not None
-    ):
-        return "mimo://acp"
-    try:
-        from core.database import ModelEndpoint
-        from src.auth_helpers import owner_filter
-        from src.endpoint_resolver import build_chat_url, normalize_base
-
-        if endpoint_id:
-            query = db.query(ModelEndpoint).filter(
-                ModelEndpoint.id == endpoint_id,
-                ModelEndpoint.is_enabled == True,  # noqa: E712
-            )
-            ep = owner_filter(
-                query, ModelEndpoint, task.owner or "", include_shared=False
-            ).first()
-            if ep:
-                return build_chat_url(normalize_base(ep.base_url))
-    except Exception:
-        pass
-    return ""
+    if not route_id:
+        return ""
+    from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
+    return MANAGED_ENGINE_PUBLIC_URL
 
 
 def setup_task_routes(task_scheduler) -> APIRouter:
     router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
     def _owner(request: Request):
-        return get_current_user(request)
+        # Internal-tool requests carry the human owner separately. API tokens
+        # remain the sandboxed ``api`` pseudo-user because this CRUD surface is
+        # not a scope-aware token API.
+        if bool(getattr(getattr(request, "state", None), "api_token", False)):
+            return get_current_user(request)
+        return effective_user(request) or get_current_user(request)
 
-    def _task_agent_contract(db, req, owner: str | None, *, current=None) -> dict:
+    def _task_agent_contract(
+        db,
+        req,
+        owner: str | None,
+        request: Request,
+        *,
+        current=None,
+    ) -> dict:
         """Validate the durable identity/authority used by a headless Agent run."""
-        from core.database import ModelEndpoint
-        from src.auth_helpers import owner_filter
-        from src.endpoint_resolver import build_chat_url, normalize_base
+        from src.openclank.chat_routing import (
+            ChatRouteUnavailable,
+            MANAGED_ENGINE_PUBLIC_URL,
+            resolve_chat_route,
+        )
         from src.tool_policy import known_tool_names
 
+        fields_set = getattr(req, "model_fields_set", set())
         endpoint_id = (
             req.endpoint_id
-            if "endpoint_id" in getattr(req, "model_fields_set", set())
+            if "endpoint_id" in fields_set
             else getattr(current, "endpoint_id", None)
         )
         endpoint_url = (
             req.endpoint_url
-            if "endpoint_url" in getattr(req, "model_fields_set", set())
+            if "endpoint_url" in fields_set
             else getattr(current, "endpoint_url", None)
         )
-        if endpoint_id:
-            from routes.model_routes import is_mimo_connection_id
-            from src.model_shares import (
-                resolve_shared_model_access,
-                share_id_from_endpoint,
+        route_id = (
+            req.provider_model_route_id
+            if "provider_model_route_id" in fields_set
+            else getattr(current, "provider_model_route_id", None)
+        )
+        if "endpoint_id" in fields_set and not endpoint_id and "provider_model_route_id" not in fields_set:
+            route_id = None
+        selected_model = (
+            req.model
+            if "model" in fields_set
+            else getattr(current, "model", None)
+        )
+        if endpoint_id or route_id:
+            try:
+                route = resolve_chat_route(
+                    owner=owner,
+                    endpoint_id=endpoint_id,
+                    model_id=selected_model,
+                    model_route_id=route_id,
+                )
+            except ChatRouteUnavailable as exc:
+                raise HTTPException(400, str(exc)) from exc
+            endpoint_id = route.public_endpoint_id
+            endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+            route_id = route.model_route_id
+        elif endpoint_url:
+            raise HTTPException(
+                400,
+                "Headless Agent tasks require a managed model selection, not a raw endpoint URL",
             )
 
-            if is_mimo_connection_id(endpoint_id):
-                endpoint_url = "mimo://acp"
-            elif share_id_from_endpoint(endpoint_id) is not None:
-                selected_model = (
-                    req.model
-                    if "model" in getattr(req, "model_fields_set", set())
-                    else getattr(current, "model", None)
-                )
-                if resolve_shared_model_access(
-                    db,
-                    actor_owner=owner or "",
-                    endpoint_id=endpoint_id,
-                    model_id=selected_model or None,
-                ) is None:
-                    raise HTTPException(
-                        400,
-                        "Shared model is unavailable or not enabled",
-                    )
-                endpoint_url = "mimo://acp"
-            else:
-                query = db.query(ModelEndpoint).filter(
-                    ModelEndpoint.id == endpoint_id,
-                    ModelEndpoint.is_enabled == True,  # noqa: E712
-                )
-                query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
-                endpoint = query.first()
-                if endpoint is None:
-                    raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
-                endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
-        elif endpoint_url:
-            raise HTTPException(400, "Headless Agent tasks require endpoint_id, not a raw endpoint URL")
-
+        fields_set = getattr(req, "model_fields_set", set())
+        workspace_field_set = "workspace" in fields_set
+        workspace_id_field_set = "workspace_id" in fields_set
         workspace = (
             req.workspace
-            if "workspace" in getattr(req, "model_fields_set", set())
+            if workspace_field_set
             else getattr(current, "workspace", None)
         )
-        if workspace:
+        workspace_id = (
+            req.workspace_id
+            if workspace_id_field_set
+            else getattr(current, "workspace_id", None)
+        )
+        workspace = str(workspace or "").strip()
+        workspace_id = str(workspace_id or "").strip()
+
+        if workspace_field_set and workspace_id_field_set and workspace and workspace_id:
+            raise HTTPException(400, "Choose a Workspace ID or a legacy raw path, not both")
+        if workspace_id_field_set:
+            # Selecting or clearing the stable lane also clears any stale raw
+            # path unless the request explicitly chooses that compatibility
+            # lane instead.
+            workspace = "" if not workspace_field_set else workspace
+        elif workspace_field_set:
+            # An explicit legacy path selection replaces a prior stable ID.
+            workspace_id = ""
+
+        effective_workspace = ""
+        if workspace_id:
+            auth_manager = getattr(
+                getattr(getattr(request, "app", None), "state", None),
+                "auth_manager",
+                None,
+            )
+            try:
+                binding = resolve_owned_workspace(
+                    FilePolicyRepository(),
+                    workspace_id=workspace_id,
+                    owner_username=str(owner or ""),
+                    auth_manager=auth_manager,
+                    purpose="agent_workspace",
+                )
+            except WorkspacePolicyServiceError as error:
+                raise HTTPException(403, "Workspace is unavailable") from error
+            effective_workspace = binding.path
+            # Physical paths are derived for this validation only. The task
+            # row persists the opaque ID, not a second copy of its authority.
+            workspace = ""
+        elif workspace:
             if not owner_has_admin_task_privileges(owner):
                 raise HTTPException(403, "Only an administrator can grant a task workspace")
             from src.tool_execution import vet_workspace
             workspace = vet_workspace(workspace)
             if not workspace:
                 raise HTTPException(400, "Invalid or unsafe task workspace")
+            effective_workspace = workspace
+
+        copal_workspace = (
+            req.copal_workspace
+            if "copal_workspace" in getattr(req, "model_fields_set", set())
+            else getattr(current, "copal_workspace", None) or "default"
+        )
+        if not re.fullmatch(r"^[A-Za-z0-9._-]{1,64}$", str(copal_workspace or "")):
+            raise HTTPException(400, "Invalid Copal workspace")
 
         raw_tools = (
             req.allowed_tools
@@ -414,6 +465,21 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         unknown = set(allowed_tools) - known_tool_names()
         if unknown:
             raise HTTPException(400, f"Unknown task tools: {', '.join(sorted(unknown))}")
+
+        # Scheduled agents use the same server-projected Rust lifetools lane as
+        # chat. Validate the durable allowlist against the current workspace
+        # AgentScope now and again immediately before every run.
+        from src.tool_security import unavailable_strict_agent_tools
+        unavailable = set(allowed_tools) & unavailable_strict_agent_tools(
+            owner,
+            effective_workspace or None,
+        )
+        if unavailable:
+            raise HTTPException(
+                409,
+                "Scheduled task tools are outside the current brokered AgentScope: "
+                + ", ".join(sorted(unavailable)),
+            )
 
         interaction_policy = (
             req.interaction_policy
@@ -433,7 +499,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         return {
             "endpoint_id": endpoint_id or None,
             "endpoint_url": endpoint_url or None,
+            "provider_model_route_id": route_id or None,
             "workspace": workspace or None,
+            "workspace_id": workspace_id or None,
+            "copal_workspace": copal_workspace or "default",
             "allowed_tools": json.dumps(allowed_tools),
             "interaction_policy": "fail_on_interaction",
             "max_tool_calls": int(max_tool_calls),
@@ -442,36 +511,41 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     async def _generate_task_name(prompt: str, owner: Optional[str] = None) -> str:
         """Use LLM to generate a short task name from the prompt."""
         try:
-            from src.llm_core import llm_call_async
             from core.database import Session as DbSession
+            from src.openclank.chat_routing import share_id_from_endpoint
+            from src.openclank.modality_facade import complete_text
             db = SessionLocal()
             try:
                 q = db.query(DbSession).filter(
-                    DbSession.endpoint_url.isnot(None),
-                    DbSession.model.isnot(None),
+                    DbSession.provider_model_route_id.isnot(None),
                 )
-                if owner:
+                if owner is not None:
                     q = q.filter(DbSession.owner == owner)
+                else:
+                    q = q.filter(DbSession.owner.is_(None))
                 recent = q.order_by(DbSession.created_at.desc()).first()
-                if not recent:
-                    return prompt[:50].strip()
-                url, model = recent.endpoint_url, recent.model
-                headers = recent.headers or {}
-                source_session_id = recent.id
+                model_route_id = (
+                    getattr(recent, "provider_model_route_id", None)
+                    if recent else None
+                )
+                grant_id = (
+                    share_id_from_endpoint(getattr(recent, "endpoint_id", None))
+                    if recent else None
+                )
             finally:
                 db.close()
 
-            result = await llm_call_async(
-                url=url, model=model,
+            result = await complete_text(
+                owner=owner or "local-installation",
                 messages=[
                     {"role": "system", "content": "Generate a short title (3-5 words, no quotes) for this scheduled task. Reply with ONLY the title, nothing else."},
                     {"role": "user", "content": prompt[:500]},
                 ],
-                max_tokens=20,
-                headers=headers,
-                timeout=15,
-                owner=owner,
-                session_id=source_session_id,
+                purpose="tasks",
+                model_route_id=model_route_id,
+                grant_id=grant_id,
+                root_operation_id=f"task-name:{uuid.uuid4().hex}",
+                max_output_tokens=20,
             )
             title = result.strip().strip('"\'').strip()
             return title[:60] if title else prompt[:50].strip()
@@ -653,12 +727,15 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         try:
             then_task_id = _validate_then_task_id(db, req.then_task_id, user)
             agent_contract = (
-                _task_agent_contract(db, req, user)
+                _task_agent_contract(db, req, user, request)
                 if req.task_type in ("llm", "research")
                 else {
                     "endpoint_id": req.endpoint_id or None,
                     "endpoint_url": req.endpoint_url or None,
+                    "provider_model_route_id": req.provider_model_route_id or None,
                     "workspace": None,
+                    "workspace_id": None,
+                    "copal_workspace": req.copal_workspace or "default",
                     "allowed_tools": "[]",
                     "interaction_policy": "fail_on_interaction",
                     "max_tool_calls": 20,
@@ -748,6 +825,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         tables = cache_tables.get(action)
         if not tables:
             raise HTTPException(400, "This task has no clearable cache")
+        if not user:
+            # All email caches are owner-scoped. An ownerless request must
+            # never fall through to a table-wide DELETE.
+            raise HTTPException(403, "Authenticated owner required")
 
         import sqlite3
         from pathlib import Path
@@ -831,7 +912,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             next_action = req.action if req.action is not None else task.action
             _require_admin_for_task_action(user, next_task_type, next_action)
             agent_contract = (
-                _task_agent_contract(db, req, user, current=task)
+                _task_agent_contract(db, req, user, request, current=task)
                 if next_task_type in ("llm", "research")
                 else None
             )
@@ -1003,6 +1084,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             task.prompt = None
             task.model = None
             task.endpoint_url = None
+            task.endpoint_id = None
+            task.provider_model_route_id = None
             task.status = "paused" if defs.get("ship_paused") else "active"
             task.next_run = None
             if task.trigger_type == "schedule":
@@ -1254,8 +1337,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         AI news and summarize it") into a structured task draft the frontend
         can pre-fill the form with. Returns a draft only — the user reviews and
         saves it, so a misread schedule never goes live unreviewed."""
-        from src.endpoint_resolver import resolve_endpoint
-        from src.llm_core import llm_call_async
+        from src.openclank.modality_facade import complete_text
         from src.text_helpers import strip_think as _strip_think
         import json as _json, re as _re
         from datetime import datetime as _dt
@@ -1291,17 +1373,14 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             "use cron '0 H * * 1-5'. Keep the prompt actionable and self-contained."
         )
         try:
-            url, model, headers = resolve_endpoint("utility", owner=user or None)
-            if not url:
-                url, model, headers = resolve_endpoint("default", owner=user or None)
-            if not (url and model):
-                return {"success": False, "message": "No model endpoint configured"}
-            raw = await llm_call_async(
-                url=url, model=model,
+            raw = await complete_text(
+                owner=user or "local-installation",
                 messages=[{"role": "system", "content": sys},
                           {"role": "user", "content": desc[:1000]}],
-                temperature=0.2, max_tokens=400, headers=headers, timeout=45,
-                owner=user or None,
+                purpose="tasks",
+                root_operation_id=f"task-parse:{uuid.uuid4().hex}",
+                temperature=0.2,
+                max_output_tokens=400,
             )
             text = _strip_think(raw or "", prose=False, prompt_echo=False).strip()
             if text.startswith("```"):

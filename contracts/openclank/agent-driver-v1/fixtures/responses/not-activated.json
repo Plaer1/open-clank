@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "request_id": "00000000000000000000000000000002",
+  "ok": false,
+  "error": {
+    "code": "driver_not_activated",
+    "safe_message": "host activation is required before turn traffic",
+    "retryable": true
+  }
+}

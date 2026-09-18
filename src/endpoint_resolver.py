@@ -4,6 +4,7 @@
 Consolidates the 4+ copies of normalize_base / resolve_endpoint logic into one place.
 """
 
+import ipaddress
 import json
 import logging
 import socket
@@ -137,6 +138,11 @@ def _first_chat_model(models) -> Optional[str]:
     return (models[0] if models else None)
 
 
+def chat_capable_models(models) -> list[str]:
+    """All models that aren't embedding/tts/etc. (same filter as _first_chat_model)."""
+    return [m for m in (models or []) if not any(p in str(m).lower() for p in _NON_CHAT_MODEL)]
+
+
 def normalize_model_list(raw: Any) -> list[str]:
     """Normalize current JSON arrays and legacy comma-separated model lists."""
     if not raw:
@@ -198,14 +204,64 @@ def _endpoint_hidden_models(ep) -> set:
     return set(normalize_model_list(getattr(ep, "hidden_models", None)))
 
 
+_LOCAL_CLASSIFIER_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+_LOCAL_CLASSIFIER_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),  # Tailscale CGNAT
+)
+
+
+def endpoint_uses_pin_allowlist(ep) -> bool:
+    """Whether pinned_models is this endpoint's visibility allow-list.
+
+    Mirrors routes.model_routes._picker_requires_pinning (the classifier lives
+    in the routes layer, so the URL rules are ported here to avoid a cycle):
+    API-class endpoints gate the picker on pins; local/self-hosted endpoints
+    use the hidden list, so pins there stay additive."""
+    kind = str(getattr(ep, "endpoint_kind", None) or "auto").strip().lower()
+    if kind == "local":
+        return False
+    if kind in ("api", "proxy"):
+        return True
+    try:
+        host = (urlparse(str(getattr(ep, "base_url", "") or "")).hostname or "").lower()
+    except Exception:
+        host = ""
+    if host in _LOCAL_CLASSIFIER_HOSTS:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return not any(ip in network for network in _LOCAL_CLASSIFIER_NETWORKS)
+    if host and "." not in host:
+        return False  # single-label hosts are LAN by convention
+    return True
+
+
 def _endpoint_enabled_models(ep) -> list:
-    """Cached models minus the ones disabled on the endpoint, order preserved.
+    """Enabled models for dispatch/projection, order preserved.
 
     The auto-pick fallback must never select a model the user disabled — a
     Groq endpoint can list 16 models with only 1 enabled, and picking the
     raw first one resolves to a model that 400s ("requires terms acceptance").
+
+    When an endpoint has an explicit pin list, pins are the allow-list: the
+    ody-* projection must drain unpinned models exactly like the chat picker
+    does, otherwise "disabled" models stay dispatchable forever (the cache
+    survives every PATCH because hidden_models stays NULL on API rows).
+    Explicit empty ``[]`` means "show nothing" and drains everything; a NULL
+    pin list keeps the legacy cached-minus-hidden semantics.
     """
     hidden = _endpoint_hidden_models(ep)
+    raw_pins = getattr(ep, "pinned_models", None)
+    if raw_pins is not None and str(raw_pins).strip() and endpoint_uses_pin_allowlist(ep):
+        pinned = _endpoint_pinned_models(ep)
+        pinned = _filter_mlx_deepseek_v4_repo_when_shimmed(pinned)
+        return [m for m in pinned if m not in hidden]
     merged = []
     seen = set()
     for m in [*_endpoint_cached_models(ep), *_endpoint_pinned_models(ep)]:
@@ -231,9 +287,9 @@ def _resolve_mimo_model(
     eligibility.
     """
     try:
-        from src.model_dispatch import get_mimo_supervisor
+        from src.model_dispatch import get_agent_supervisor
 
-        supervisor = get_mimo_supervisor()
+        supervisor = get_agent_supervisor()
         if supervisor is None:
             return None
         try:
@@ -256,6 +312,23 @@ def _resolve_mimo_model(
             model_id for model_id in available
             if model_id.split("/", 1)[0] == provider_prefix
         ]
+    # Owner visibility fails closed: a model hidden from the provider-account
+    # panel must not be dispatchable by direct id either. ody-* projections
+    # are exempt — DB endpoints own their visibility via pins/hidden lists.
+    if owner:
+        try:
+            from core.mimo_model_prefs import owner_hidden_mimo_model_ids
+            from src.openclank.mimo_projection import public_native_model_id
+
+            hidden_ids = owner_hidden_mimo_model_ids(owner)
+        except Exception:
+            hidden_ids = set()
+        if hidden_ids:
+            available = [
+                model_id for model_id in available
+                if model_id.split("/", 1)[0].lower().startswith(DIRECT_ENDPOINT_PROVIDER_PREFIX)
+                or public_native_model_id(model_id) not in hidden_ids
+            ]
     selected = (model or "").strip()
     if selected:
         return selected if selected in available else None

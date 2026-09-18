@@ -86,11 +86,6 @@ def _stub_legacy_extractor(monkeypatch, calls):
     mem_extractor_mod.extract_and_store = fake_extract_and_store
     monkeypatch.setitem(sys.modules, "services.memory.memory_extractor", mem_extractor_mod)
 
-    task_endpoint_mod = types.ModuleType("src.task_endpoint")
-    task_endpoint_mod.resolve_task_endpoint = lambda url, model, headers, owner=None: (url, model, headers)
-    monkeypatch.setitem(sys.modules, "src.task_endpoint", task_endpoint_mod)
-
-
 def _sess():
     return SimpleNamespace(
         endpoint_url="https://api.deepseek.com/v1",

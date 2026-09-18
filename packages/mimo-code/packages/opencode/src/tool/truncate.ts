@@ -11,6 +11,8 @@ import { TRUNCATION_DIR } from "./truncation-dir"
 
 const log = Log.create({ service: "truncation" })
 const RETENTION = Duration.days(7)
+const META_SUFFIX = ".meta.json"
+const OUTPUT_NAME = /^tool_[0-9a-f]{12}[A-Za-z0-9]{14}$/
 
 export const MAX_LINES = 2000
 export const MAX_BYTES = 50 * 1024
@@ -30,6 +32,19 @@ export interface Options {
   outcome?: "success" | "error"
 }
 
+export interface Ownership {
+  owner: string
+  workspace: string
+  sessionID: string
+  callID?: string
+}
+
+interface Metadata extends Ownership {
+  version: 1
+  output: string
+  createdAt: number
+}
+
 function hasActorTool(agent?: Agent.Info) {
   if (!agent?.permission) return false
   return evaluate("actor", "*", agent.permission).action !== "deny"
@@ -37,12 +52,21 @@ function hasActorTool(agent?: Agent.Info) {
 
 export interface Interface {
   readonly cleanup: () => Effect.Effect<void>
-  readonly write: (text: string) => Effect.Effect<string>
+  readonly write: (text: string, ownership?: Ownership) => Effect.Effect<string>
+  readonly remove: (output: string, ownership: Pick<Ownership, "owner" | "sessionID"> & {
+    workspace?: string
+  }) => Effect.Effect<boolean>
+  readonly removeSession: (sessionID: string, owner?: string) => Effect.Effect<number>
   /**
    * Returns output unchanged when it fits within the limits, otherwise writes the full text
    * to the truncation directory and returns a preview plus a hint to inspect the saved file.
    */
-  readonly output: (text: string, options?: Options, agent?: Agent.Info) => Effect.Effect<Result>
+  readonly output: (
+    text: string,
+    options?: Options,
+    agent?: Agent.Info,
+    ownership?: Ownership,
+  ) => Effect.Effect<Result>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Truncate") {}
@@ -52,6 +76,46 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
 
+    const runtimeOwner = () => process.env.OPEN_CLANK_OWNER?.trim().toLowerCase() || "local"
+    const normalizeOwnership = (ownership?: Ownership): Ownership => ({
+      owner: ownership?.owner?.trim().toLowerCase() || runtimeOwner(),
+      workspace: path.resolve(ownership?.workspace || process.cwd()),
+      sessionID: ownership?.sessionID?.trim() || "unscoped",
+      ...(ownership?.callID ? { callID: ownership.callID } : {}),
+    })
+    const metaPath = (file: string) => file + META_SUFFIX
+    const outputPath = (value: string) => {
+      const name = path.basename(value)
+      return OUTPUT_NAME.test(name) ? path.join(TRUNCATION_DIR, name) : undefined
+    }
+    const readMetadata = (file: string) =>
+      fs.readJson(metaPath(file)).pipe(
+        Effect.map((raw): Metadata | undefined => {
+          if (!raw || typeof raw !== "object") return
+          const value = raw as Record<string, unknown>
+          if (
+            value.version !== 1 ||
+            typeof value.output !== "string" ||
+            path.basename(value.output) !== path.basename(file) ||
+            typeof value.createdAt !== "number" ||
+            !Number.isFinite(value.createdAt) ||
+            typeof value.owner !== "string" ||
+            typeof value.workspace !== "string" ||
+            typeof value.sessionID !== "string"
+          )
+            return
+          return value as unknown as Metadata
+        }),
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      )
+    const removePair = (file: string) =>
+      fs
+        .atomicBatch([
+          { path: file, content: null },
+          { path: metaPath(file), content: null },
+        ])
+        .pipe(Effect.orDie)
+
     const cleanup = Effect.fn("Truncate.cleanup")(function* () {
       const cutoff = Identifier.timestamp(
         Identifier.create("tool", "ascending", Date.now() - Duration.toMillis(RETENTION)),
@@ -60,20 +124,98 @@ export const layer = Layer.effect(
         Effect.map((all) => all.filter((name) => name.startsWith("tool_"))),
         Effect.catch(() => Effect.succeed([])),
       )
-      for (const entry of entries) {
-        if (Identifier.timestamp(entry) >= cutoff) continue
+      const names = new Set(entries)
+      for (const entry of entries.filter((name) => OUTPUT_NAME.test(name))) {
+        const file = path.join(TRUNCATION_DIR, entry)
+        const hasMetadata = names.has(entry + META_SUFFIX)
+        const metadata = hasMetadata ? yield* readMetadata(file) : undefined
+        if (!hasMetadata || metadata === undefined) {
+          yield* removePair(file)
+          continue
+        }
+        const expired =
+          Identifier.timestamp(entry) < cutoff ||
+          metadata.createdAt < Date.now() - Duration.toMillis(RETENTION)
+        if (!expired) continue
+        yield* removePair(file)
+      }
+      for (const entry of entries.filter((name) => name.endsWith(META_SUFFIX))) {
+        const output = entry.slice(0, -META_SUFFIX.length)
+        if (OUTPUT_NAME.test(output) && names.has(output)) continue
         yield* fs.remove(path.join(TRUNCATION_DIR, entry)).pipe(Effect.catch(() => Effect.void))
       }
     })
 
-    const write = Effect.fn("Truncate.write")(function* (text: string) {
+    const write = Effect.fn("Truncate.write")(function* (text: string, requested?: Ownership) {
       const file = path.join(TRUNCATION_DIR, ToolID.ascending())
+      const ownership = normalizeOwnership(requested)
+      const metadata: Metadata = {
+        version: 1,
+        output: path.basename(file),
+        createdAt: Date.now(),
+        ...ownership,
+      }
       yield* fs.ensureDir(TRUNCATION_DIR).pipe(Effect.orDie)
-      yield* fs.writeFileString(file, text).pipe(Effect.orDie)
+      yield* fs
+        .atomicBatch([
+          { path: file, content: text, requireMissing: true, mode: 0o600 },
+          {
+            path: metaPath(file),
+            content: JSON.stringify(metadata, null, 2),
+            requireMissing: true,
+            mode: 0o600,
+          },
+        ])
+        .pipe(Effect.orDie)
       return file
     })
 
-    const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, agent?: Agent.Info) {
+    const remove = Effect.fn("Truncate.remove")(function* (
+      requested: string,
+      ownership: Pick<Ownership, "owner" | "sessionID"> & { workspace?: string },
+    ) {
+      const file = outputPath(requested)
+      if (!file) return false
+      const metadata = yield* readMetadata(file)
+      if (!metadata) return false
+      if (
+        metadata.owner !== ownership.owner.trim().toLowerCase() ||
+        metadata.sessionID !== ownership.sessionID ||
+        (ownership.workspace !== undefined && metadata.workspace !== path.resolve(ownership.workspace))
+      )
+        return false
+      yield* removePair(file)
+      return true
+    })
+
+    const removeSession = Effect.fn("Truncate.removeSession")(function* (
+      sessionID: string,
+      requestedOwner?: string,
+    ) {
+      const owner = requestedOwner?.trim().toLowerCase() || runtimeOwner()
+      const entries = yield* fs.readDirectory(TRUNCATION_DIR).pipe(
+        Effect.map((all) => all.filter((name) => name.endsWith(META_SUFFIX))),
+        Effect.catch(() => Effect.succeed([])),
+      )
+      let removed = 0
+      for (const entry of entries) {
+        const output = entry.slice(0, -META_SUFFIX.length)
+        if (!OUTPUT_NAME.test(output)) continue
+        const file = path.join(TRUNCATION_DIR, output)
+        const metadata = yield* readMetadata(file)
+        if (!metadata || metadata.owner !== owner || metadata.sessionID !== sessionID) continue
+        yield* removePair(file)
+        removed++
+      }
+      return removed
+    })
+
+    const output = Effect.fn("Truncate.output")(function* (
+      text: string,
+      options: Options = {},
+      agent?: Agent.Info,
+      ownership?: Ownership,
+    ) {
       let maxLines = options.maxLines ?? MAX_LINES
       let maxBytes = options.maxBytes ?? MAX_BYTES
       const direction = options.direction ?? "head+tail"
@@ -132,7 +274,7 @@ export const layer = Layer.effect(
           }
 
           const omitted = lines.length - headOut.length - tailOut.length
-          const file = yield* write(text)
+          const file = yield* write(text, ownership)
 
           return {
             content: `${headOut.join("\n")}\n\n... ${omitted} lines omitted — showing head and tail ...\n\n${tailOut.join("\n")}\n\n${hint(file)}`,
@@ -173,7 +315,7 @@ export const layer = Layer.effect(
       const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
       const unit = hitBytes ? "bytes" : "lines"
       const preview = out.join("\n")
-      const file = yield* write(text)
+      const file = yield* write(text, ownership)
 
       return {
         content:
@@ -185,17 +327,22 @@ export const layer = Layer.effect(
       } as const
     })
 
-    yield* cleanup().pipe(
+    const safeCleanup = cleanup().pipe(
       Effect.catchCause((cause) => {
         log.error("truncation cleanup failed", { cause: Cause.pretty(cause) })
         return Effect.void
       }),
+    )
+    // Run once during layer startup so stale pairs and orphan sidecars do not
+    // survive until the first hourly maintenance tick.
+    yield* safeCleanup
+    yield* safeCleanup.pipe(
       Effect.repeat(Schedule.spaced(Duration.hours(1))),
-      Effect.delay(Duration.minutes(1)),
+      Effect.delay(Duration.hours(1)),
       Effect.forkScoped,
     )
 
-    return Service.of({ cleanup, write, output })
+    return Service.of({ cleanup, write, remove, removeSession, output })
   }),
 )
 

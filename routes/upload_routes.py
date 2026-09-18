@@ -3,7 +3,6 @@ import os
 import time
 import json
 import asyncio
-import shutil
 import uuid
 from pathlib import Path
 from fastapi import APIRouter, Request, File, UploadFile, HTTPException, Form
@@ -23,7 +22,12 @@ from core.database import (
 )
 from src.auth_helpers import effective_user
 from src.attachment_refs import attachment_refs_from_metadata
-from src.constants import GENERATED_IMAGES_DIR
+from src.generated_images import (
+    discard_staged_gallery_image,
+    gallery_owner_key,
+    publish_staged_gallery_image,
+    stage_gallery_image_bytes,
+)
 from src.upload_handler import (
     UploadCleanupSafetyError,
     count_recent_uploads,
@@ -186,12 +190,15 @@ def setup_upload_routes(upload_handler):
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
         if not sess:
             return None
-        if owner and sess.owner and sess.owner != owner:
+        if not owner or sess.owner != owner:
             return None
         return session_id
 
     def _promote_chat_image_to_gallery(meta: dict, owner: str | None, session_id: str | None = None) -> str | None:
         """Make chat-uploaded images visible in Gallery without changing chat storage."""
+        owner_key = gallery_owner_key(owner)
+        if owner_key is None:
+            return None
         is_image_file = getattr(upload_handler, "is_image_file", None)
         if not callable(is_image_file):
             return None
@@ -210,14 +217,11 @@ def setup_upload_routes(upload_handler):
                     GalleryImage.file_hash == file_hash,
                     GalleryImage.is_active == True,  # noqa: E712
                 )
-                if owner:
-                    q = q.filter(GalleryImage.owner == owner)
+                q = q.filter(GalleryImage.owner == owner_key)
                 existing = q.first()
                 if existing:
                     return existing.id
 
-            image_dir = Path(GENERATED_IMAGES_DIR)
-            image_dir.mkdir(parents=True, exist_ok=True)
             ext = Path(meta.get("name") or source_path).suffix.lower()
             if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
                 mime_ext = {
@@ -229,23 +233,39 @@ def setup_upload_routes(upload_handler):
                 }.get(meta.get("mime", ""))
                 ext = mime_ext or ".png"
             filename = f"{uuid.uuid4().hex[:12]}{ext}"
-            dest_path = image_dir / filename
-            shutil.copy2(source_path, dest_path)
+            content = Path(source_path).read_bytes()
+            staged = stage_gallery_image_bytes(content)
 
             image_id = str(uuid.uuid4())
-            db.add(GalleryImage(
+            image = GalleryImage(
                 id=image_id,
                 filename=filename,
                 prompt=meta.get("name") or "Chat upload",
                 model="chat-upload",
-                owner=owner,
-                session_id=_valid_session_id_for_owner(db, session_id, owner),
+                owner=owner_key,
+                session_id=_valid_session_id_for_owner(db, session_id, owner_key),
                 file_hash=file_hash,
                 width=meta.get("width"),
                 height=meta.get("height"),
-                file_size=meta.get("size"),
-            ))
-            db.commit()
+                file_size=len(content),
+            )
+            try:
+                db.add(image)
+                db.commit()
+                try:
+                    publish_staged_gallery_image(staged, filename)
+                except Exception:
+                    try:
+                        db.delete(image)
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        logger.exception(
+                            "Failed to retract unpublished chat Gallery metadata"
+                        )
+                    raise
+            finally:
+                discard_staged_gallery_image(staged)
             return image_id
         except Exception as e:
             db.rollback()
@@ -424,7 +444,8 @@ def setup_upload_routes(upload_handler):
 
     def _sync_gallery_caption_for_upload(info: dict | None, owner: str | None, text: str) -> None:
         """Copy upload OCR/vision text onto the promoted gallery image row."""
-        if not info:
+        owner_key = gallery_owner_key(owner)
+        if not info or owner_key is None:
             return
         file_hash = info.get("hash")
         if not file_hash:
@@ -434,9 +455,8 @@ def setup_upload_routes(upload_handler):
             q = db.query(GalleryImage).filter(
                 GalleryImage.file_hash == file_hash,
                 GalleryImage.is_active == True,  # noqa: E712
+                GalleryImage.owner == owner_key,
             )
-            if owner:
-                q = q.filter(GalleryImage.owner == owner)
             img = q.first()
             if not img:
                 return
@@ -479,9 +499,13 @@ def setup_upload_routes(upload_handler):
                 return {"text": cached_text, "cached": True}
             except Exception as e:
                 logger.warning(f"Vision cache read failed for {file_id}: {e}")
-        from src.document_processor import analyze_image_with_vl
+        from src.document_processor import analyze_image_with_vl_result_async
         try:
-            text = analyze_image_with_vl(path, owner=current_user) or ""
+            vision_result = await analyze_image_with_vl_result_async(
+                path,
+                owner=current_user,
+            )
+            text = str(vision_result.get("text") or "")
         except Exception as e:
             logger.error(f"Vision analysis failed for {file_id}: {e}")
             raise HTTPException(500, f"Vision analysis failed: {e}")

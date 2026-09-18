@@ -525,6 +525,10 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                if (key.startsWith("lifetools")) {
+                  const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+                  memory.registerManagedMcpClient(key, result.mcpClient)
+                }
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -534,9 +538,13 @@ export const layer = Layer.effect(
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             yield* Effect.forEach(
-              Object.values(s.clients),
-              (client) =>
+              Object.entries(s.clients),
+              ([name, client]) =>
                 Effect.gen(function* () {
+                  if (name.startsWith("lifetools")) {
+                    const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+                    memory.unregisterManagedMcpClient(name, client)
+                  }
                   const pid = client.transport instanceof StdioClientTransport ? client.transport.pid : null
                   if (typeof pid === "number") {
                     const pids = yield* descendants(pid)
@@ -561,8 +569,13 @@ export const layer = Layer.effect(
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
       delete s.defs[name]
-      if (!client) return Effect.void
-      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+      return Effect.gen(function* () {
+        if (name.startsWith("lifetools")) {
+          const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+          memory.unregisterManagedMcpClient(name, client)
+        }
+        if (client) yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+      })
     }
 
     const storeClient = Effect.fnUntraced(function* (
@@ -577,6 +590,10 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      if (name.startsWith("lifetools")) {
+        const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+        memory.registerManagedMcpClient(name, client)
+      }
       watch(s, name, client, bridge, timeout)
       return s.status[name]
     })

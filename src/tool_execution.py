@@ -10,6 +10,7 @@ Extracted from agent_tools.py.
 import asyncio
 import collections
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 from src.tool_security import (
     BUILTIN_EMAIL_TOOLS,
     email_tool_policy_names,
+    is_scoped_file_tool_allowed,
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
@@ -43,10 +45,11 @@ _AGENT_WORKDIR = DATA_DIR
 # ---------------------------------------------------------------------------
 # Path confinement for read_file / write_file
 # ---------------------------------------------------------------------------
-# read_file + write_file are admin-only tools, but the path the agent
-# supplies is model-controlled. Prompt-injection in an admin's chat can
-# weaponise "read /etc/shadow" or "write ~/.ssh/authorized_keys" without
-# the admin noticing.
+# File tools are server-scoped, but the path the agent supplies is
+# model-controlled. Prompt-injection in an admin's chat can weaponise
+# "read /etc/shadow" or "write ~/.ssh/authorized_keys" without the admin
+# noticing; regular users additionally require an administrator-issued
+# visibility assignment and the Rust lane remains authoritative.
 #
 # Policy:
 #   1. Sensitive-subpath deny list — checked FIRST. Blocks .ssh,
@@ -102,14 +105,77 @@ def _is_sensitive_path(resolved: str) -> bool:
     return filename in _SENSITIVE_FILE_PATTERNS_CF
 
 
+def _control_data_roots() -> list[str]:
+    """Canonical roots owned by Open Clank rather than the active workspace."""
+    from src.constants import AUTH_FILE, DATA_DIR, FM_DB_PATH
+
+    mimocode_home = os.environ.get("MIMOCODE_HOME")
+    candidates = [
+        DATA_DIR,
+        os.path.dirname(AUTH_FILE),
+        AUTH_FILE,
+        FM_DB_PATH,
+        f"{FM_DB_PATH}-wal",
+        f"{FM_DB_PATH}-shm",
+        f"{FM_DB_PATH}-journal",
+        os.environ.get("OPEN_CLANK_CONTROL_DATA_DIR"),
+        os.environ.get("OPEN_CLANK_SKILLS_DIR"),
+        mimocode_home,
+    ]
+    home = os.path.expanduser("~")
+    candidates.extend(
+        os.path.join(
+            os.environ.get(env_name) or os.path.join(home, fallback),
+            "mimocode",
+        )
+        for env_name, fallback in (
+            ("XDG_DATA_HOME", ".local/share"),
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_STATE_HOME", ".local/state"),
+            ("XDG_CACHE_HOME", ".cache"),
+        )
+    )
+    roots: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = os.path.realpath(os.path.expanduser(candidate))
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _is_control_data_path(resolved: str) -> bool:
+    """Return True when a canonical path is Open Clank runtime control data."""
+    target = os.path.normcase(os.path.realpath(resolved)).casefold()
+    for root in _control_data_roots():
+        normalized_root = os.path.normcase(root).casefold()
+        try:
+            if os.path.commonpath([target, normalized_root]) == normalized_root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _reject_control_data_path(raw_path: str, resolved: str) -> None:
+    if _is_control_data_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is Open Clank control data and is not accessible "
+            "through model file tools"
+        )
+
+
 def _tool_path_roots() -> list[str]:
     """Return the list of directory roots that read_file / write_file
-    may touch. Default: project data/ + system temp dirs. Extra roots
-    are loaded from the ``tool_path_extra_roots`` setting.
+    may touch. Open Clank's data root remains the legacy default candidate but
+    is rejected by the control-data guard. Extra roots are loaded from the
+    ``tool_path_extra_roots`` setting.
     """
     roots: list[str] = []
 
-    # Project data directory — the agent's primary workspace.
+    # Kept as the legacy default so an unbound call fails with the explicit
+    # control-data error instead of silently switching its workspace to /tmp.
     from src.constants import DATA_DIR
     roots.append(DATA_DIR)
 
@@ -156,9 +222,10 @@ def _resolve_tool_path(raw_path: str) -> str:
 
     Order of checks:
       1. Non-empty path.
-      2. Sensitive-subpath deny list (blocks .ssh, .gnupg, etc.
+      2. Open Clank control-data deny list.
+      3. Sensitive-subpath deny list (blocks .ssh, .gnupg, etc.
          even when the root is on the allowlist).
-      3. Allowlist containment (must land under one of the roots).
+      4. Allowlist containment (must land under one of the roots).
 
     Returns the realpath on success. Raises ValueError on rejection.
     Symlinks are resolved before comparison.
@@ -174,6 +241,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     resolved = os.path.realpath(expanded)
 
+    _reject_control_data_path(raw_path, resolved)
     if _is_sensitive_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
@@ -198,10 +266,10 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     """Confine a model-supplied path to the active workspace.
 
     Layered on top of upstream's path policy: the workspace is the allowed
-    root (relative paths resolve under it; paths that escape it are rejected),
-    and the sensitive-file deny list (.ssh, .gnupg, id_rsa, …) still applies
-    inside it. When no workspace is set, callers use _resolve_tool_path (the
-    default data/tmp allowlist) instead.
+    root (relative paths resolve under it; paths that escape it are rejected).
+    Control data and the sensitive-file deny list (.ssh, .gnupg, id_rsa, …)
+    still apply inside it. When no workspace is set, callers use
+    _resolve_tool_path instead.
     """
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
@@ -209,6 +277,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     candidate = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
     resolved = os.path.realpath(candidate)
+    _reject_control_data_path(raw_path, resolved)
     if _is_sensitive_path(resolved):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
@@ -252,16 +321,20 @@ def vet_workspace(raw: str) -> Optional[str]:
     """Validate a requested workspace path at bind time.
 
     Returns the canonical path, or None when it is unusable: not a real
-    directory, or itself a sensitive path (.ssh, .gnupg, ...). The in-workspace
-    resolver deny-lists sensitive paths *inside* the workspace, but the
-    empty-path search root is the workspace itself, so the root has to be
-    vetted before it is ever bound.
+    directory, control data, or itself a sensitive path (.ssh, .gnupg, ...).
+    The in-workspace resolver deny-lists protected paths *inside* the workspace,
+    but the empty-path search root is the workspace itself, so the root has to
+    be vetted before it is ever bound.
     """
     raw = (raw or "").strip()
     if not raw:
         return None
     resolved = os.path.realpath(os.path.expanduser(raw))
-    if not os.path.isdir(resolved) or _is_sensitive_path(resolved):
+    if (
+        not os.path.isdir(resolved)
+        or _is_sensitive_path(resolved)
+        or _is_control_data_path(resolved)
+    ):
         return None
     # Reject filesystem roots: binding / (or a Windows drive/UNC root) as the
     # workspace would make every absolute path "inside" it, collapsing the
@@ -270,6 +343,122 @@ def vet_workspace(raw: str) -> Optional[str]:
     if os.path.dirname(resolved) == resolved:
         return None
     return resolved
+
+
+def _read_only_auth_snapshot(auth_path: str):
+    """Read-only immutable account ID/admin snapshot for authorization checks.
+
+    Implemented once in ``src.openclank.operation_approvals`` so tool dispatch
+    and the approval lanes share a single read-only auth reader; importing it
+    lazily keeps module load free of the policy store.
+    """
+    from src.openclank.operation_approvals import ReadOnlyAuthSnapshot
+
+    return ReadOnlyAuthSnapshot(auth_path)
+
+
+def _copal_account_id(owner: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
+    """Resolve a tool username to the immutable TreeHouse account subject."""
+    username = str(owner or "").strip()
+    if not username or username.lower() == "local":
+        return username, None, None
+    from src.constants import AUTH_FILE
+    auth_path = str(os.environ.get("OPEN_CLANK_AUTHORITY_AUTH_PATH") or AUTH_FILE).strip()
+    if not os.path.isfile(auth_path):
+        from src.auth_helpers import _auth_disabled
+        if _auth_disabled():
+            # Explicit single-user mode retains the local compatibility
+            # namespace because no authenticated account identity exists.
+            return username, username, None
+        return username, None, "authentication identity store is unavailable"
+    try:
+        account_id = _read_only_auth_snapshot(auth_path).account_id(username)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return username, None, f"authentication identity store is unavailable: {exc}"
+    if not account_id:
+        return username, None, "authenticated tool owner does not resolve to an immutable account"
+    return username, str(account_id), None
+
+
+def _same_canonical_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
+        os.path.realpath(right)
+    )
+
+
+def _trusted_workspace_from_id(
+    raw_workspace: str,
+    *,
+    owner: Optional[str],
+    authority_workspace_id: str,
+) -> Optional[str]:
+    """Re-resolve a stable Workspace ID at the final native-tool door.
+
+    A stable ID never acts as a second, independent grant. The current auth
+    identity must still own the live Workspace and the canonical People + Agent
+    read intersection must still allow it. The server-derived path must also
+    equal the requested cwd. Only that trusted lane may bind a filesystem root
+    rejected by :func:`vet_workspace`, and only when the canonical Location was
+    explicitly registered as a whole-root/volume target.
+    """
+
+    requested = str(raw_workspace or "").strip()
+    owner_key = str(owner or "").strip().lower()
+    workspace_id = str(authority_workspace_id or "").strip()
+    if not requested or not owner_key or not workspace_id:
+        return None
+
+    from src.constants import APP_DB, AUTH_FILE
+    from src.openclank.file_policy import FilePolicyRepository
+    from src.openclank.workspace_policy_service import (
+        WorkspacePolicyServiceError,
+        resolve_owned_workspace,
+    )
+
+    db_path = str(
+        os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB
+    ).strip()
+    auth_path = str(
+        os.environ.get("OPEN_CLANK_AUTHORITY_AUTH_PATH") or AUTH_FILE
+    ).strip()
+    if not os.path.isabs(db_path) or not os.path.isabs(auth_path):
+        return None
+
+    try:
+        repository = FilePolicyRepository(db_path)
+        binding = resolve_owned_workspace(
+            repository,
+            workspace_id=workspace_id,
+            owner_username=owner_key,
+            auth_manager=_read_only_auth_snapshot(auth_path),
+            purpose="agent_workspace",
+        )
+        trusted = os.path.realpath(binding.path)
+        if not _same_canonical_path(requested, trusted):
+            return None
+
+        # Stable IDs constrain ordinary folders too. If the raw validator
+        # accepts the folder, keep every one of its existing safety checks.
+        vetted = vet_workspace(requested)
+        if vetted:
+            return trusted if _same_canonical_path(vetted, trusted) else None
+
+        # The one intentional exception is an explicitly modelled filesystem
+        # root. A random raw '/', a sensitive folder, or a Location recorded as
+        # an ordinary directory cannot enter this branch.
+        location = repository.get_location(binding.workspace.location_id)
+        if location.kind not in {"whole_root", "volume"}:
+            return None
+        if os.path.dirname(trusted) != trusted:
+            return None
+        return trusted
+    except (OSError, ValueError, WorkspacePolicyServiceError):
+        return None
+    except Exception as error:
+        # Store corruption/lock failures are authorization failures here. Keep
+        # the public result existence-blind while retaining an operator trace.
+        logger.warning("stable Workspace authority resolution failed: %s", error)
+        return None
 
 
 def agent_cwd() -> str:
@@ -290,16 +479,22 @@ def _resolve_search_root(raw_path: str) -> str:
 
     With a workspace active, the workspace folder is the root and a supplied
     path is confined inside it. Otherwise an empty path defaults to the agent's
-    primary root (project data dir) and a supplied path is confined by the
-    global allowlist + sensitive-file policy.
+    legacy primary root, which the control-data guard rejects. A supplied path
+    is confined by the global allowlist plus protected-path policy.
     """
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-        return os.path.realpath(ws) if not raw else _resolve_tool_path_in_workspace(ws, raw)
+        if raw:
+            return _resolve_tool_path_in_workspace(ws, raw)
+        root = os.path.realpath(ws)
+        _reject_control_data_path(ws, root)
+        return root
     if not raw:
         roots = _tool_path_roots()
-        return roots[0] if roots else os.path.realpath(".")
+        root = roots[0] if roots else os.path.realpath(".")
+        _reject_control_data_path(root, root)
+        return root
     return _resolve_tool_path(raw)
 
 logger = logging.getLogger(__name__)
@@ -336,9 +531,12 @@ _MCP_TOOL_MAP = {
     "write_file":     ("filesystem", "write_file"),
     "web_search":     ("web_search", "web_search"),
     "web_fetch":      ("web_fetch",  "web_fetch"),
-    "generate_image": ("image_gen",  "generate_image"),
 }
 _EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
+_EMAIL_MCP_ROOT_ARG = "_open_clank_root_operation_id"
+_RAG_MCP_OWNER_ARG = "_open_clank_owner"
+_RAG_MCP_WORKSPACE_ARG = "_open_clank_workspace_id"
+_RAG_MCP_PROJECT_ARG = "_open_clank_project_id"
 
 
 def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[str]]:
@@ -356,15 +554,6 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
             return {}, "Email MCP tool arguments must be a JSON object."
         return {}, None
     return parsed, None
-
-
-def _parse_generate_image(content: str) -> Dict:
-    lines = content.strip().split("\n")
-    args = {"prompt": lines[0].strip() if lines else ""}
-    for i, key in enumerate(["model", "size", "quality"], 1):
-        if len(lines) > i and lines[i].strip():
-            args[key] = lines[i].strip()
-    return args
 
 
 def _parse_manage_memory(content: str) -> Dict:
@@ -400,7 +589,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "web_fetch":      lambda c: {"url": c.split("\n")[0].strip()},
     "read_file":      lambda c: {"path": c.split("\n")[0].strip()},
     "write_file":     _parse_write_file,
-    "generate_image": _parse_generate_image,
     "manage_memory":  _parse_manage_memory,
 }
 
@@ -415,8 +603,7 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
 #
 # IMPORTANT — this only covers the MCP path. _build_mcp_args is reached via
 # _call_mcp_tool only for _MCP_TOOL_MAP tools (so an entry outside that map is
-# dead, as manage_memory was). And of these, only generate_image has a live MCP
-# server today; web_search/web_fetch/read_file/write_file have none, so they run
+# dead, as manage_memory was). Web search/fetch/read/write currently run
 # via _direct_fallback -> TOOL_HANDLERS, whose handlers decode JSON themselves
 # (see ReadFileTool/WriteFileTool/WebSearchTool/WebFetchTool). The entries here
 # are kept as defense-in-depth for if/when those servers are added. The live
@@ -427,7 +614,6 @@ _MCP_JSON_PRIMARY_KEYS: Dict[str, tuple] = {
     "web_fetch":      ("url",),
     "read_file":      ("path",),
     "write_file":     ("path",),
-    "generate_image": ("prompt",),
 }
 
 
@@ -466,38 +652,7 @@ async def _call_mcp_tool(
         if fallback:
             return fallback
 
-    # generate_image runs as a text-only MCP tool, so the saved image URL never
-    # reaches the agent loop's structured forwarding (which renders the image via
-    # buildImageBubble on result["image_url"]). Lift it out of the tool's stdout so
-    # the image renders deterministically — no dependence on the model echoing the
-    # URL into its prose (which it mangles/hallucinates).
-    if tool == "generate_image":
-        _promote_image_fields(result)
-
     return result
-
-
-def _promote_image_fields(result: Dict) -> None:
-    """Lift the image URL (+ prompt/model/size) from a successful generate_image MCP
-    text result into structured fields the agent loop already forwards to
-    buildImageBubble. Only acts on a dict result with exit_code 0; matches the
-    generated-image URL by pattern (absolute or relative) so it's robust to the
-    result's wording."""
-    if not isinstance(result, dict) or result.get("exit_code") != 0:
-        return
-    out = result.get("stdout") or ""
-    m = re.search(r'(?:https?://[^\s)\]]+)?/api/generated-image/[A-Za-z0-9._-]+', out)
-    if not m:
-        return
-    result["image_url"] = m.group(0).strip()
-    for field, pat in (
-        ("image_prompt", r'^Generated image for:\s*(.+)$'),
-        ("image_model", r'^model:\s*(.+)$'),
-        ("image_size", r'^size:\s*(.+)$'),
-    ):
-        fm = re.search(pat, out, re.M)
-        if fm:
-            result[field] = fm.group(1).strip()
 
 
 _BG_MARKERS = {"#!bg", "#bg", "# bg", "#background", "# background", "@background", "# @background"}
@@ -522,21 +677,36 @@ async def _direct_fallback(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    authority_workspace_id: Optional[str] = None,
 ) -> Optional[Dict]:
-    _subproc_env = {
-        **os.environ,
-        "TERM": "xterm-256color",
-        "COLUMNS": "120",
-        "LINES": "40",
-        "HOME": _AGENT_WORKDIR,
-    }
+    from src.shell_policy import minimal_shell_env
+
+    _subproc_env = minimal_shell_env(cwd=agent_cwd())
 
     try:
+        history_context = None
+        if owner:
+            try:
+                from src.openclank.history_capture import trusted_tool_context
+                _storage_owner, account_id, _identity_error = _copal_account_id(owner)
+                if account_id:
+                    history_context = trusted_tool_context(
+                        actor_id=str(owner),
+                        account_id=str(account_id),
+                        workspace_id=str(authority_workspace_id or agent_cwd()),
+                        workspace_root=agent_cwd(),
+                    )
+            except Exception:
+                # History is best-effort; normal live tool dispatch continues.
+                history_context = None
         ctx = {
             "progress_cb": progress_cb,
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "workspace": agent_cwd(),
+            "authority_workspace_id": str(authority_workspace_id or ""),
+            "history_context": history_context,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -574,15 +744,42 @@ async def execute_tool_block(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
+    authority_workspace_id: Optional[str] = None,
+    copal_workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    root_operation_id: Optional[str] = None,
+    provider_grant_id: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
     Thin wrapper: bind the per-turn workspace (so the path resolvers + subprocess
-    cwd confine to it) for the duration of this call, then delegate. Reset on the
-    way out so the binding never leaks to the next tool call.
+    cwd confine to it) for the duration of this call, then delegate. Every
+    caller is vetted here; route-level validation is not a security boundary.
+    Reset on the way out so the binding never leaks to the next tool call.
     """
-    token = _active_workspace.set(workspace or None)
+    requested_workspace = str(workspace or "").strip()
+    stable_workspace_id = str(authority_workspace_id or "").strip()
+    if stable_workspace_id:
+        bound_workspace = _trusted_workspace_from_id(
+            requested_workspace,
+            owner=owner,
+            authority_workspace_id=stable_workspace_id,
+        )
+    else:
+        bound_workspace = (
+            vet_workspace(requested_workspace) if requested_workspace else None
+        )
+    if (requested_workspace or stable_workspace_id) and not bound_workspace:
+        tool = str(getattr(block, "tool_type", "") or "tool")
+        return (
+            f"{tool}: BLOCKED",
+            {
+                "error": "The requested workspace was rejected by the containment policy.",
+                "exit_code": 1,
+                "blocked": True,
+            },
+        )
+    token = _active_workspace.set(bound_workspace)
     try:
         output = await _execute_tool_block_impl(
             block,
@@ -590,7 +787,11 @@ async def execute_tool_block(
             disabled_tools=disabled_tools,
             owner=owner,
             progress_cb=progress_cb,
+            authority_workspace_id=stable_workspace_id,
             tool_policy=tool_policy,
+            copal_workspace=copal_workspace,
+            root_operation_id=root_operation_id,
+            provider_grant_id=provider_grant_id,
         )
         return output
     finally:
@@ -603,7 +804,11 @@ async def _execute_tool_block_impl(
     disabled_tools: Optional[set] = None,
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    authority_workspace_id: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    copal_workspace: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+    provider_grant_id: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -644,6 +849,28 @@ async def _execute_tool_block_impl(
 
     tool = block.tool_type
     content = block.content
+    if tool in {"read_copal", "manage_copal"} and copal_workspace is not None:
+        try:
+            arguments = json.loads(content) if content.strip() else {}
+        except json.JSONDecodeError:
+            arguments = None
+        expected = str(copal_workspace or "default").strip() or "default"
+        requested = str(arguments.get("workspace") or "").strip() if isinstance(arguments, dict) else ""
+        if requested and requested != expected:
+            return (
+                f"{tool}: BLOCKED",
+                {
+                    "error": "Copal workspace does not match the execution's pinned workspace",
+                    "code": "copal_workspace_mismatch",
+                    "expected": expected,
+                    "received": requested,
+                    "exit_code": 1,
+                    "blocked": True,
+                },
+            )
+        if isinstance(arguments, dict):
+            arguments["workspace"] = expected
+            content = json.dumps(arguments)
 
     # The block/disable gates below must match every policy-equivalent
     # spelling of the tool name (bare email names alias their mcp__email__
@@ -699,12 +926,16 @@ async def _execute_tool_block_impl(
         logger.warning("Admin tool blocked for non-admin owner=%r tool=%s", owner, tool)
         return desc, result
 
-    if is_public_blocked_tool(tool) and not _owner_is_admin(owner):
+    if (
+        is_public_blocked_tool(tool)
+        and not _owner_is_admin(owner)
+        and not is_scoped_file_tool_allowed(tool, owner)
+    ):
         desc = f"{tool}: BLOCKED"
         result = {
             "error": (
-                f"Tool '{tool}' is restricted to admin users on this deployment. "
-                "Ask an admin to perform this action or grant the needed permission."
+                f"Tool '{tool}' is restricted to admin users or an administrator-issued "
+                "filesystem visibility assignment. Ask an admin to grant the needed permission."
             ),
             "exit_code": 1,
         }
@@ -720,7 +951,58 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            from core.platform_compat import find_bash
+            from src.shell_policy import (
+                ShellApprovalError,
+                ShellContainmentError,
+                contained_argv,
+                require_shell_approval,
+                shell_command_argv,
+            )
+
+            workspace = agent_cwd()
+            shell = find_bash() or (
+                os.environ.get("ComSpec", "cmd.exe")
+                if os.name == "nt"
+                else "/bin/bash"
+            )
+            network_mode = os.getenv("OPEN_CLANK_SHELL_NETWORK", "enabled")
+            try:
+                _, containment = contained_argv(
+                    shell_command_argv(shell, _bg_cmd),
+                    workspace=workspace,
+                    cwd=workspace,
+                    network=network_mode,
+                )
+                approval_binding = await require_shell_approval(
+                    _bg_cmd,
+                    ctx={
+                        "progress_cb": progress_cb,
+                        "session_id": session_id,
+                        "owner": owner,
+                        "workspace": workspace,
+                        "authority_workspace_id": str(
+                            authority_workspace_id or ""
+                        ),
+                    },
+                    cwd=workspace,
+                    containment=containment,
+                    network=network_mode,
+                )
+                rec = bg_jobs.launch(
+                    _bg_cmd,
+                    session_id=session_id,
+                    owner=owner,
+                    workspace=workspace,
+                    cwd=workspace,
+                    network=network_mode,
+                    approval_binding=approval_binding,
+                )
+            except (ShellApprovalError, ShellContainmentError, ValueError) as exc:
+                return (
+                    "bash (background): blocked",
+                    {"error": f"bash: {exc}", "exit_code": 126},
+                )
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
             result = {
@@ -742,15 +1024,33 @@ async def _execute_tool_block_impl(
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    if tool in {"bash", "python", "read_file", "write_file"}:
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"{tool}: {first_line}"
+        result = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            authority_workspace_id=authority_workspace_id,
+        ) or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
-    elif tool in ("grep", "glob", "ls", "get_workspace"):
+    elif tool in ("grep", "glob", "ls", "get_workspace", "manage_files"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
+        result = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            authority_workspace_id=authority_workspace_id,
+        ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "publish_file":
         desc = "publish_file"
@@ -761,7 +1061,13 @@ async def _execute_tool_block_impl(
     elif tool in ("apply_patch", "todowrite"):
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(
+            tool,
+            content,
+            session_id=session_id,
+            owner=owner,
+            authority_workspace_id=authority_workspace_id,
+        ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
@@ -817,6 +1123,46 @@ async def _execute_tool_block_impl(
     elif tool == "manage_notes":
         desc = "manage_notes"
         result = await do_manage_notes(content, owner=owner)
+    elif tool == "read_copal":
+        desc = "read_copal"
+        try:
+            from src.openclank.copal_tools import CopalReadError, read_copal
+            arguments = json.loads(content) if content.strip() else {}
+            storage_owner, account_id, identity_error = _copal_account_id(owner)
+            if identity_error:
+                raise CopalReadError(identity_error, code="identity_unavailable")
+            result = await read_copal(
+                arguments,
+                owner=storage_owner,
+                account_id=account_id,
+                admin=owner_is_admin_or_single_user(owner),
+            )
+        except CopalReadError as exc:
+            result = {"error": str(exc), "code": exc.code, "exit_code": 1}
+        except Exception as exc:
+            logger.exception("read_copal dispatch failed")
+            result = {"error": str(exc), "exit_code": 1}
+    elif tool == "manage_copal":
+        desc = "manage_copal"
+        try:
+            from src.openclank.copal_manage import CopalManageError, manage_copal
+            arguments = json.loads(content) if content.strip() else {}
+            storage_owner, account_id, identity_error = _copal_account_id(owner)
+            if identity_error:
+                raise CopalManageError(identity_error, code="identity_unavailable")
+            result = await manage_copal(
+                arguments,
+                owner=storage_owner,
+                account_id=account_id,
+                # Trusted tool context selects the concrete agent actor; the
+                # model cannot forge this binding in its JSON arguments.
+                actor_id=f"agent:{storage_owner or 'local-installation'}",
+            )
+        except CopalManageError as exc:
+            result = {"error": str(exc), "code": exc.code, **exc.detail, "exit_code": 1}
+        except Exception as exc:
+            logger.exception("manage_copal dispatch failed")
+            result = {"error": str(exc), "exit_code": 1}
     elif tool == "manage_calendar":
         desc = "manage_calendar"
         result = await do_manage_calendar(content, owner=owner)
@@ -862,9 +1208,32 @@ async def _execute_tool_block_impl(
     elif tool == "list_cookbook_servers":
         desc = "list_cookbook_servers"
         result = await do_list_cookbook_servers(content, owner=owner)
+    elif tool == "generate_image":
+        from src.ai_interaction import do_generate_image
+
+        desc = "generate_image"
+        result = await do_generate_image(
+            content,
+            session_id=session_id,
+            owner=owner,
+            root_operation_id=root_operation_id,
+            idempotency_key=(
+                "tool_image_" + hashlib.sha256(
+                    f"{root_operation_id}\0{content}".encode("utf-8")
+                ).hexdigest()
+                if root_operation_id
+                else None
+            ),
+            grant_id=provider_grant_id,
+        )
     elif tool == "edit_image":
         desc = "edit_image"
-        result = await do_edit_image(content, owner=owner)
+        result = await do_edit_image(
+            content,
+            owner=owner,
+            root_operation_id=root_operation_id,
+            grant_id=provider_grant_id,
+        )
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
@@ -928,9 +1297,12 @@ async def _execute_tool_block_impl(
             if _args_error is not None:
                 result = {"error": _args_error, "exit_code": 1}
             else:
-                if owner:
+                if owner or root_operation_id:
                     args = dict(args)
-                    args[_EMAIL_MCP_OWNER_ARG] = owner
+                    if owner:
+                        args[_EMAIL_MCP_OWNER_ARG] = owner
+                    if root_operation_id:
+                        args[_EMAIL_MCP_ROOT_ARG] = root_operation_id
                 result = await mcp.call_tool(qualified, args)
         else:
             result = {"error": "MCP manager not available", "exit_code": 1}
@@ -942,10 +1314,26 @@ async def _execute_tool_block_impl(
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:
                 result = {"error": parse_error, "exit_code": 1}
+            elif tool.startswith("mcp__rag__") and not owner:
+                result = {
+                    "error": "RAG MCP tool requires an authenticated owner",
+                    "exit_code": 1,
+                }
             else:
-                if tool.startswith("mcp__email__") and owner:
+                if tool.startswith("mcp__email__") and (owner or root_operation_id):
                     args = dict(args)
-                    args[_EMAIL_MCP_OWNER_ARG] = owner
+                    if owner:
+                        args[_EMAIL_MCP_OWNER_ARG] = owner
+                    if root_operation_id:
+                        args[_EMAIL_MCP_ROOT_ARG] = root_operation_id
+                if tool.startswith("mcp__rag__"):
+                    # The global RAG MCP process must not trust tenant scope
+                    # supplied by the model. Overwrite every private field from
+                    # the authenticated turn and its vetted workspace binding.
+                    args = dict(args)
+                    args[_RAG_MCP_OWNER_ARG] = owner
+                    args[_RAG_MCP_WORKSPACE_ARG] = get_active_workspace() or ""
+                    args[_RAG_MCP_PROJECT_ARG] = ""
                 result = await mcp.call_tool(tool, args)
         else:
             desc = f"mcp: {tool}"

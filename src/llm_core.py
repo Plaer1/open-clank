@@ -108,6 +108,37 @@ class LLMConfig:
     CONNECT_TIMEOUT = float(os.getenv('LLM_CONNECT_TIMEOUT', '10') or '10')
 
 
+class DirectModelDispatchRetired(RuntimeError):
+    """A caller attempted to use the removed Python provider transport."""
+
+    code = "LEGACY_PROVIDER_ROUTE_RETIRED"
+    status = 410
+    retryable = False
+
+
+def _direct_model_dispatch_retired() -> DirectModelDispatchRetired:
+    return DirectModelDispatchRetired(
+        "Direct Python model-provider dispatch is retired; use the managed operation router"
+    )
+
+
+def _retired_direct_model_stream() -> tuple[str, str]:
+    error = _direct_model_dispatch_retired()
+    return (
+        "event: error\ndata: "
+        + json.dumps(
+            {
+                "code": error.code,
+                "error": str(error),
+                "status": error.status,
+                "retryable": error.retryable,
+            }
+        )
+        + "\n\n",
+        "data: [DONE]\n\n",
+    )
+
+
 def _call_timeout(read_timeout) -> httpx.Timeout:
     """Per-request timeout for non-streaming LLM calls (connect from config)."""
     return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=10.0, pool=5.0)
@@ -1554,9 +1585,9 @@ def list_model_ids(
     """List available model IDs from an endpoint."""
     if urlparse(base_chat_url or "").scheme.lower() == "mimo":
         try:
-            from src.model_dispatch import get_mimo_supervisor
+            from src.model_dispatch import get_agent_supervisor
 
-            supervisor = get_mimo_supervisor()
+            supervisor = get_agent_supervisor()
             return [
                 item.get("modelId")
                 for item in (supervisor.available_models(owner=owner) if supervisor else [])
@@ -1626,8 +1657,16 @@ def normalize_model_id(
     return None
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
+             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+    """Fail closed at the retired synchronous provider-HTTP boundary."""
+
+    raise _direct_model_dispatch_retired()
+
+
+def _legacy_llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+                     max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+                     timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     if urlparse(url or "").scheme.lower() == "mimo":
         raise HTTPException(400, "Open Clank agent ACP requires the asynchronous model dispatcher")
@@ -1790,6 +1829,27 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
 
 
 async def llm_call_async(
+    url: str,
+    model: str,
+    messages: List[Dict],
+    temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+    max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS,
+    headers: Optional[Dict] = None,
+    timeout: int = LLMConfig.STREAM_TIMEOUT,
+    max_retries: int = LLMConfig.MAX_RETRIES,
+    prompt_type: Optional[str] = None,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    cwd: Optional[str] = None,
+    _transport_checked: bool = False,
+    workload: str = "foreground",
+) -> str:
+    """Fail closed at the retired asynchronous provider-HTTP boundary."""
+
+    raise _direct_model_dispatch_retired()
+
+
+async def _legacy_llm_call_async(
     url: str,
     model: str,
     messages: List[Dict],
@@ -2003,6 +2063,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      owner: Optional[str] = None, cwd: Optional[str] = None,
                      supervisor=None, tool_choice_none: bool = False,
                      workload: str = "foreground"):
+    """Yield one terminal error at the retired provider-stream boundary."""
+
+    for event in _retired_direct_model_stream():
+        yield event
+
+
+async def _legacy_stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
+                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                             owner: Optional[str] = None, cwd: Optional[str] = None,
+                             supervisor=None, tool_choice_none: bool = False,
+                             workload: str = "foreground"):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2035,7 +2108,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         return
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
-        async for chunk in _stream_llm_inner(
+        async for chunk in _legacy_stream_llm_inner(
             url,
             model,
             messages,
@@ -2051,11 +2124,11 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             yield chunk
 
 
-async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-                            max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-                            timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                            tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+async def _legacy_stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+                                   max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+                                   timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
+                                   tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                                   tool_choice_none: bool = False):
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -2683,6 +2756,13 @@ def _summarize_stream_error(err_chunk: Optional[str]) -> str:
 
 
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
+    """Yield one terminal error at the retired fallback-stream boundary."""
+
+    for event in _retired_direct_model_stream():
+        yield event
+
+
+async def _legacy_stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
@@ -2708,7 +2788,13 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         emitted = False
         retried = False
         pending_metadata = []
-        async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
+        async for chunk in _legacy_stream_llm(
+            url,
+            model,
+            messages,
+            headers=headers,
+            **kwargs,
+        ):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
                     # Pre-content failure with fallbacks left — swallow and

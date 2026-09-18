@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 # Least privilege: none of the jobs write to the repo.
@@ -15,6 +15,255 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  history-service:
+    name: Packaged history service (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Build release history worker
+        env:
+          CARGO_BUILD_JOBS: 1
+        run: cargo build --locked --release --manifest-path packages/openclank-history/Cargo.toml --bin openclank-history-service
+      - name: Verify packaged worker contract
+        run: |
+          test -x packages/openclank-history/target/release/openclank-history-service
+          test -n "$(grep -n 'libexec/openclank/history/openclank-history-service' build-macos-app.sh)"
+          test -n "$(grep -n 'openclank-history-builder' Dockerfile)"
+
+  managed-engine:
+    name: Managed engine (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-arm64
+            runner: macos-15
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: windows-x64
+            runner: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Install managed-contract validator
+        run: >-
+          python -m pip install
+          annotated-types==0.8.0
+          pydantic==2.13.4
+          pydantic-core==2.46.4
+          typing-extensions==4.16.0
+          typing-inspection==0.4.2
+      - name: Validate vendored source contract
+        run: python scripts/openclank_engine.py contract --json
+      - name: Build and ACP-verify twice
+        run: |
+          python scripts/openclank_engine.py --install-root "$RUNNER_TEMP/openclank-engine-a" build --json
+          python scripts/openclank_engine.py --install-root "$RUNNER_TEMP/openclank-engine-b" build --skip-dependencies --json
+      - name: Require reproducible payload hashes
+        env:
+          ENGINE_A: ${{ runner.temp }}/openclank-engine-a
+          ENGINE_B: ${{ runner.temp }}/openclank-engine-b
+        run: >-
+          python -c 'import hashlib,os,pathlib;
+          roots=[pathlib.Path(os.environ[name]) for name in ("ENGINE_A","ENGINE_B")];
+          snapshots=[{p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file()} for root in roots];
+          binaries=[next(value for name,value in snapshot.items() if pathlib.PurePosixPath(name).name.startswith("openclank-engine")) for snapshot in snapshots];
+          print("managed-engine sha256:", binaries[0]);
+          raise SystemExit(0 if snapshots[0] == snapshots[1] else "managed engine payload is not reproducible")'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openclank-engine-${{ matrix.target }}
+          path: ${{ runner.temp }}/openclank-engine-a
+          if-no-files-found: error
+
+  windows-portable:
+    name: Windows x64 portable server and TUI
+    needs: managed-engine
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+          architecture: x64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openclank-engine-windows-x64
+          path: libexec/openclank/engine
+      - name: Build checksummed Windows portable payload
+        shell: pwsh
+        run: ./build-windows-portable.ps1 -UseExistingVerifiedEngine
+      - name: Smoke public command, TUI branding, and engine
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/openclank/openclank.exe"
+          $version = (& $exe --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Open Clank [0-9]') {
+            throw "portable --version smoke failed: $version"
+          }
+          $help = (& $exe --help | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "portable --help smoke failed" }
+          foreach ($brand in @("MiMo", "Xiaomi", "OpenCode", "Odysseus")) {
+            if ($help.Contains($brand)) { throw "legacy brand surfaced in public help: $brand" }
+          }
+          $engine = (& $exe engine verify --json | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or -not $engine.ok -or $engine.target -ne "windows-x64") {
+            throw "portable managed engine verification failed"
+          }
+      - name: Portable fail-closed startup smoke
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/openclank/openclank.exe"
+          $asset = Resolve-Path "dist/openclank/_internal/static/index.html"
+          $backup = Join-Path $env:RUNNER_TEMP "openclank-index.html"
+          Copy-Item $asset $backup -Force
+          try {
+            [System.IO.File]::AppendAllText($asset, "integrity-smoke", (New-Object System.Text.UTF8Encoding($false)))
+            $output = (& $exe __managed-server --host 127.0.0.1 --port 7788 2>&1 | Out-String)
+            $code = $LASTEXITCODE
+            if ($code -eq 0 -or -not $output.Contains("portable payload checksum mismatch")) {
+              throw "packaged server did not fail closed on payload tampering: $output"
+            }
+          } finally {
+            Copy-Item $backup $asset -Force
+          }
+          & $exe engine verify --json
+          if ($LASTEXITCODE -ne 0) { throw "restored payload did not verify" }
+      - name: Run Windows packaging contracts
+        shell: pwsh
+        run: >-
+          python -m pytest -q
+          tests/test_windows_portable_contract.py
+          tests/test_openclank_cli.py
+          tests/test_openclank_bootstrap.py
+          tests/test_runtime_paths.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openclank-windows-x64-portable
+          path: dist/openclank
+          if-no-files-found: error
+          retention-days: 14
+
+  managed-engine-sign:
+    name: Sign managed engine (${{ matrix.target }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: managed-engine
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Mint the short-lived Fulcio identity used by cosign.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux-x64, linux-arm64, darwin-arm64, darwin-x64, windows-x64]
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openclank-engine-${{ matrix.target }}
+          path: ${{ runner.temp }}/payload
+      - name: Generate engine SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: ${{ runner.temp }}/payload
+          format: spdx-json
+          output-file: ${{ runner.temp }}/payload/openclank-engine.spdx.json
+          upload-artifact: false
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+      - name: Checksum and keyless-sign engine payload
+        env:
+          ENGINE_ROOT: ${{ runner.temp }}/payload
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main
+          CERTIFICATE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          binary=$(find "$ENGINE_ROOT" -type f \( -name openclank-engine -o -name openclank-engine.exe \) -print -quit)
+          provenance=$(find "$ENGINE_ROOT" -type f -name provenance.json -print -quit)
+          test -n "$binary" && test -n "$provenance"
+          mapfile -d '' payload_files < <(find "$ENGINE_ROOT" -type f -print0 | sort -z)
+          : > "$ENGINE_ROOT/SHA256SUMS"
+          for artifact in "${payload_files[@]}"; do
+            relative=${artifact#"$ENGINE_ROOT"/}
+            (cd "$ENGINE_ROOT" && sha256sum "$relative") >> "$ENGINE_ROOT/SHA256SUMS"
+          done
+          payload_files+=("$ENGINE_ROOT/SHA256SUMS")
+          for artifact in "${payload_files[@]}"; do
+            bundle="${artifact}.sigstore.json"
+            cosign sign-blob --yes --bundle "$bundle" "$artifact"
+            cosign verify-blob "$artifact" \
+              --bundle "$bundle" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_ISSUER"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openclank-engine-${{ matrix.target }}-signed
+          path: ${{ runner.temp }}/payload
+          if-no-files-found: error
+
+  windows-portable-sign:
+    name: Sign Windows x64 portable payload
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: windows-portable
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: openclank-windows-x64-portable
+          path: ${{ runner.temp }}/payload
+      - name: Generate portable SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: ${{ runner.temp }}/payload
+          format: spdx-json
+          output-file: ${{ runner.temp }}/payload/openclank-windows-x64.spdx.json
+          upload-artifact: false
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+      - name: Keyless-sign and verify the portable integrity roots
+        env:
+          PAYLOAD_ROOT: ${{ runner.temp }}/payload
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main
+          CERTIFICATE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          for artifact in "$PAYLOAD_ROOT/SHA256SUMS" "$PAYLOAD_ROOT/portable-provenance.json"; do
+            test -f "$artifact"
+            bundle="${artifact}.sigstore.json"
+            cosign sign-blob --yes --bundle "$bundle" "$artifact"
+            cosign verify-blob "$artifact" \
+              --bundle "$bundle" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_ISSUER"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: openclank-windows-x64-portable-signed
+          path: ${{ runner.temp }}/payload
+          if-no-files-found: error
+
   focused-test-guidance:
     name: Focused test guidance (report-only)
     if: github.event_name == 'pull_request'
@@ -117,13 +366,19 @@ jobs:
       # If so, skip the expensive pytest run while still reporting a passing check.
       - name: Check for docs-only changes
         id: docs-check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE_SHA"
+            HEAD="$PR_HEAD_SHA"
           else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.sha }}"
+            BASE="$PUSH_BEFORE_SHA"
+            HEAD="$PUSH_HEAD_SHA"
           fi
           # List all changed files; if every file matches docs/markdown patterns, skip pytest.
           changed=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null || git diff --name-only HEAD~1 HEAD)

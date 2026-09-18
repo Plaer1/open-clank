@@ -20,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict:
-    """Manage model endpoints: list, add, delete, enable, disable."""
-    from core.database import SessionLocal, ModelEndpoint, utcnow_naive
+    """List normalized provider connections; mutations use the Providers UI/API."""
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -29,88 +28,48 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 
     action = args.get("action", "list")
     owner = (owner or "").strip().lower()
-    db = SessionLocal()
     try:
-        async def _endpoint_changed():
-            from routes.model_routes import invalidate_model_catalogue_revision
-            invalidate_model_catalogue_revision(owner)
-            try:
-                from src.model_dispatch import get_mimo_supervisor
-                supervisor = get_mimo_supervisor()
-                if supervisor:
-                    await supervisor.refresh_endpoint_projection()
-            except Exception as exc:
-                logger.warning("endpoint reprojection deferred: %s", exc)
-
-        def _owned_endpoints():
-            query = db.query(ModelEndpoint)
-            if owner:
-                return query.filter(ModelEndpoint.owner == owner)
-            return query.filter(ModelEndpoint.owner.is_(None))
-
         if action == "list":
-            eps = _owned_endpoints().all()
-            items = [{"id": e.id, "name": e.name, "base_url": e.base_url,
-                       "is_enabled": e.is_enabled} for e in eps]
-            return {"response": f"{len(items)} endpoints", "endpoints": items, "exit_code": 0}
+            from src.openclank.chat_routing import list_chat_routes
 
-        elif action == "add":
-            import uuid as _uuid
-            from src.endpoint_resolver import canonical_endpoint_base, matching_endpoint, resolve_url
-            name = args.get("name", "")
-            base_url = canonical_endpoint_base(resolve_url(args.get("base_url", "")))
-            api_key = (args.get("api_key", "") or "").strip()
-            if not base_url:
-                return {"error": "base_url is required", "exit_code": 1}
-            existing = matching_endpoint(_owned_endpoints().all(), base_url, api_key)
-            if existing:
-                existing.base_url = base_url
-                existing.is_enabled = True
-                if getattr(existing, "model_refresh_mode", None) == "disabled":
-                    existing.model_refresh_mode = "auto"
-                if api_key and not existing.api_key:
-                    existing.api_key = api_key
-                db.commit()
-                await _endpoint_changed()
-                return {"response": f"Enabled existing endpoint '{existing.name}' (id: {existing.id})", "endpoint_id": existing.id, "existing": True, "exit_code": 0}
-            eid = str(_uuid.uuid4())[:8]
-            ep = ModelEndpoint(id=eid, name=name or base_url, base_url=base_url,
-                               api_key=api_key, is_enabled=True,
-                               owner=owner or None,
-                               created_at=utcnow_naive(), updated_at=utcnow_naive())
-            db.add(ep)
-            db.commit()
-            await _endpoint_changed()
-            return {"response": f"Added endpoint '{name or base_url}' (id: {eid})", "endpoint_id": eid, "exit_code": 0}
+            own, shared = list_chat_routes(owner)
+            grouped: dict[str, dict] = {}
+            for route in [*own, *shared]:
+                item = grouped.setdefault(
+                    route.public_endpoint_id,
+                    {
+                        "id": route.public_endpoint_id,
+                        "name": route.connection_label,
+                        "managed": True,
+                        "shared": route.shared,
+                        "models": [],
+                    },
+                )
+                item["models"].append(
+                    {
+                        "id": route.provider_model_id,
+                        "route_id": route.model_route_id,
+                    }
+                )
+            items = list(grouped.values())
+            return {
+                "response": f"{len(items)} managed provider connections",
+                "endpoints": items,
+                "exit_code": 0,
+            }
 
-        elif action == "delete":
-            eid = args.get("endpoint_id", "")
-            ep = _owned_endpoints().filter(ModelEndpoint.id == eid).first()
-            if not ep:
-                return {"error": f"Endpoint {eid} not found", "exit_code": 1}
-            name = ep.name
-            db.delete(ep)
-            db.commit()
-            await _endpoint_changed()
-            return {"response": f"Deleted endpoint '{name}'", "exit_code": 0}
-
-        elif action in ("enable", "disable"):
-            eid = args.get("endpoint_id", "")
-            ep = _owned_endpoints().filter(ModelEndpoint.id == eid).first()
-            if not ep:
-                return {"error": f"Endpoint {eid} not found", "exit_code": 1}
-            ep.is_enabled = (action == "enable")
-            db.commit()
-            await _endpoint_changed()
-            return {"response": f"Endpoint '{ep.name}' {action}d", "exit_code": 0}
-
-        else:
-            return {"error": f"Unknown action: {action}", "exit_code": 1}
+        if action in {"add", "delete", "enable", "disable"}:
+            return {
+                "error": (
+                    "Provider mutations require the Providers interface or "
+                    "/api/v1/providers with revision and idempotency controls"
+                ),
+                "exit_code": 1,
+            }
+        return {"error": f"Unknown action: {action}", "exit_code": 1}
     except Exception as e:
         logger.error(f"manage_endpoints error: {e}")
         return {"error": str(e), "exit_code": 1}
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +497,6 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
     action = args.get("action", "list")
     owner = (owner or "").strip().lower()
 
-    from core.database import SessionLocal
-    db = SessionLocal()
     try:
         # set/get/list/delete operate on the REAL app settings (the same store
         # the Settings panel writes), so changing a model / voice / search
@@ -636,57 +593,6 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return int(value)
             return value
 
-        def _model_slug(value: str) -> str:
-            import re as _re
-            return _re.sub(r"[^a-z0-9]+", "", (value or "").lower())
-
-        def _endpoint_model_from_cache(model_query: str):
-            """Resolve friendly model text to an enabled endpoint + real model id.
-
-            The Settings UI stores both `<prefix>_endpoint_id` and
-            `<prefix>_model`; writing only the model leaves the runtime on the
-            old endpoint. Prefer cached model lists so this stays fast/offline.
-            """
-            import json as _json
-            import re as _re
-            from core.database import ModelEndpoint
-
-            wanted = (model_query or "").strip()
-            wanted_slug = _model_slug(wanted)
-            wanted_tokens = [_model_slug(t) for t in _re.findall(r"[A-Za-z0-9]+", wanted)]
-            wanted_tokens = [t for t in wanted_tokens if t]
-            if not wanted_slug:
-                return None
-            best = None
-            endpoint_query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-            if owner:
-                endpoint_query = endpoint_query.filter(ModelEndpoint.owner == owner)
-            else:
-                endpoint_query = endpoint_query.filter(ModelEndpoint.owner.is_(None))
-            for ep in endpoint_query.all():
-                raw_models = []
-                try:
-                    raw_models = _json.loads(ep.cached_models or "[]") or []
-                except Exception:
-                    raw_models = []
-                # If cache is empty, still allow matching against endpoint name
-                # for callers using model@endpoint elsewhere later.
-                for mid in raw_models:
-                    mid = str(mid)
-                    mid_slug = _model_slug(mid)
-                    if not mid_slug:
-                        continue
-                    exact = mid.lower() == wanted.lower()
-                    compact_match = wanted_slug in mid_slug or mid_slug in wanted_slug
-                    token_match = bool(wanted_tokens) and all(tok in mid_slug for tok in wanted_tokens)
-                    if exact or compact_match or token_match:
-                        score = 3 if exact else (2 if compact_match else 1)
-                        if not best or score > best[0]:
-                            best = (score, ep.id, mid)
-            if best:
-                return {"endpoint_id": best[1], "model": best[2]}
-            return None
-
         def _mask(k, v):
             return "••••• (set in panel)" if _is_secret(k) and v else v
 
@@ -731,13 +637,13 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             s[key] = value
             changed_keys = {key}
             if key in {"default_model", "research_model", "utility_model", "task_model", "vision_model", "image_model"}:
-                resolved = _endpoint_model_from_cache(str(value))
-                if resolved:
-                    prefix = key[:-6]
-                    s[f"{prefix}_endpoint_id"] = resolved["endpoint_id"]
-                    s[key] = resolved["model"]
-                    value = resolved["model"]
-                    changed_keys.add(f"{prefix}_endpoint_id")
+                return {
+                    "response": (
+                        "Model defaults are normalized provider route bindings. "
+                        "Change them in the Providers interface."
+                    ),
+                    "exit_code": 0,
+                }
             _save_scoped_settings(s, changed_keys)
             if key.endswith("_model") and s.get(f"{key[:-6]}_endpoint_id"):
                 return {"response": f"Set {key} = {value} (endpoint {s.get(f'{key[:-6]}_endpoint_id')}).", "exit_code": 0}
@@ -835,8 +741,6 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
     except Exception as e:
         logger.error(f"manage_settings error: {e}")
         return {"error": str(e), "exit_code": 1}
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------

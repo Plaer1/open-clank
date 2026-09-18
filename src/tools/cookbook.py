@@ -213,13 +213,13 @@ def _infer_serve_port(cmd: str) -> int:
     """Infer likely listen port from a serve command."""
     if not cmd:
         return 8080
-    m = re.search(r"--port\\s+(\\d+)", cmd)
+    m = re.search(r"--port\s+(\d+)", cmd)
     if m:
         try:
             return int(m.group(1))
         except Exception:
             pass
-    m = re.search(r"OLLAMA_HOST=[^\\s]*?:(\\d+)", cmd)
+    m = re.search(r"OLLAMA_HOST=[^\s]*?:(\d+)", cmd)
     if m:
         try:
             return int(m.group(1))
@@ -231,58 +231,66 @@ def _infer_serve_port(cmd: str) -> int:
 
 
 def _infer_serve_host(host: str | None) -> tuple[str, bool]:
-    """Return (host, container_local) for registering a served endpoint."""
+    """Return a connectable host and whether the serve is container-local."""
     if not (host or "").strip():
         return "localhost", True
     base_host = host.split("@", 1)[-1] if "@" in host else host
     return base_host, False
 
 
-async def _ensure_served_endpoint(
+async def _ensure_served_provider(
     *,
     model: str,
     cmd: str,
     host: str | None,
     owner: str | None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
-    """Register/fetch a model endpoint for a running serve session."""
+    """Register a served model through the normalized provider authority."""
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    endpoint_host, container_local = _infer_serve_host(host)
+    provider_host, _container_local = _infer_serve_host(host)
     port = _infer_serve_port(cmd)
-    base_url = f"http://{endpoint_host}:{port}/v1"
+    provider_url = f"http://{provider_host}:{port}/v1"
     short_name = model.split("/")[-1] if "/" in model else model
     is_image = "diffusion_server.py" in (cmd or "") or "mlx_image_server.py" in (cmd or "")
     payload = {
         "name": short_name if not is_image else f"{short_name} (image)",
-        "base_url": base_url,
-        "skip_probe": "true",
+        "url": provider_url,
+        "model_id": model,
         "model_type": "image" if is_image else "llm",
-        "container_local": "true" if container_local else "false",
+        "session_id": session_id,
+        "supports_tools": "--enable-auto-tool-choice" in (cmd or ""),
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{_INTERNAL_BASE}/api/model-endpoints",
-                data=payload,
+                f"{_INTERNAL_BASE}/api/cookbook/provider-connections",
+                json=payload,
                 headers=_internal_headers(owner),
             )
             data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code >= 400:
             logger.debug(
-                f"ensure endpoint failed for {model!r}: status={resp.status_code} data={data}"
+                f"ensure provider failed for {model!r}: status={resp.status_code} data={data}"
             )
-            return {"added": False, "endpoint_id": "", "base_url": base_url, "error": data}
-        ep_id = data.get("id") if isinstance(data, dict) else None
+            return {"added": False, "connection_id": "", "url": provider_url, "error": data}
+        connection_id = data.get("id") if isinstance(data, dict) else None
         return {
-            "added": bool(ep_id),
-            "endpoint_id": ep_id or "",
-            "base_url": base_url,
+            "added": bool(connection_id),
+            "connection_id": connection_id or "",
+            "model_route_id": data.get("model_route_id", "") if isinstance(data, dict) else "",
+            "url": provider_url,
             "data": data,
         }
     except Exception as e:
-        logger.debug(f"ensure endpoint exception for {model!r}: {e}")
-        return {"added": False, "endpoint_id": "", "base_url": base_url, "error": str(e)}
+        logger.debug(f"ensure provider exception for {model!r}: {e}")
+        return {"added": False, "connection_id": "", "url": provider_url, "error": str(e)}
+
+
+# Compatibility export for the tool facade. The implementation no longer
+# reads or writes the retired endpoint table; callers receive connection IDs.
+_ensure_served_endpoint = _ensure_served_provider
 
 
 async def _cookbook_register_task(
@@ -292,8 +300,8 @@ async def _cookbook_register_task(
     cmd: str,
     task_type: str = "serve",
     *,
-    endpoint_added: bool = False,
-    endpoint_id: str = "",
+    provider_connected: bool = False,
+    provider_connection_id: str = "",
     owner: str | None = None,
 ) -> bool:
     """Append a task entry to cookbook_state.json after the agent
@@ -346,8 +354,8 @@ async def _cookbook_register_task(
         "sshPort": "",
         "platform": "linux",
         "_serveReady": False,
-        "_endpointAdded": bool(endpoint_added),
-        "_endpointId": endpoint_id or "",
+        "_providerConnected": bool(provider_connected),
+        "_providerConnectionId": provider_connection_id or "",
         "owner": owner or "",
     })
     state["tasks"] = tasks
@@ -738,19 +746,20 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
-            endpoint_id = data.get("endpoint_id") or ""
-            if endpoint_id:
-                endpoint_added = True
+            connection_id = data.get("provider_connection_id") or ""
+            if connection_id:
+                provider_connected = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(
-                    model=repo_id, cmd=cmd, host=host, owner=owner
+                provider_meta = await _ensure_served_provider(
+                    model=repo_id, cmd=cmd, host=host, owner=owner, session_id=sid
                 )
-                endpoint_added = bool(endpoint_meta.get("added"))
-                endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
+                provider_connected = bool(provider_meta.get("added"))
+                connection_id = provider_meta.get("connection_id", "") or connection_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id,
                 host=host, cmd=cmd, task_type="serve",
-                endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                provider_connected=provider_connected,
+                provider_connection_id=connection_id or "",
                 owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
@@ -767,7 +776,7 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
                 "task_type": "serve",
                 "phase": "running",
                 "host": host,
-                "endpoint_id": endpoint_id,
+                "provider_connection_id": connection_id,
                 "log_path": log_path,
                 "next_tools": [
                     {"name": "list_served_models", "arguments": {}},
@@ -1230,7 +1239,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
     """Register an externally-launched model server (bash + tmux + ssh, or
     anything else) into the Cookbook so it appears in list_served_models,
     can be stopped via stop_served_model, and is added to the user's
-    endpoint list for chat. Use this when a model was started outside
+    normalized provider catalogue for chat. Use this when a model was started outside
     the cookbook's serve flow but you want first-class tracking.
 
     Args (JSON):
@@ -1239,7 +1248,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
       model:         "cyankiwi/MiniMax-M2.7-AWQ-4bit" (HF repo or display name)
       port:          8000
       name:          optional display name (defaults to model basename)
-      add_endpoint:  bool (default true) — also register as a chat endpoint
+      add_provider:  bool (default true) — also register as a managed provider route
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
@@ -1254,7 +1263,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
     model = (args.get("model") or args.get("repo_id") or "").strip()
     port = args.get("port") or 8000
     display_name = (args.get("name") or "").strip() or (model.split("/")[-1] if "/" in model else model)
-    add_endpoint = args.get("add_endpoint", True)
+    add_provider = args.get("add_provider", True)
 
     if not sess or not model:
         return {"error": "tmux_session and model are required", "exit_code": 1}
@@ -1330,7 +1339,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
             "sshPort": "",
             "platform": "linux",
             "_serveReady": bool(server_up),
-            "_endpointAdded": False,
+            "_providerConnected": False,
             "_adoptedExternally": True,
         }
         tasks.append(new_task)
@@ -1342,37 +1351,39 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
         except Exception as e:
             return {"error": f"could not save cookbook state: {e}", "exit_code": 1}
 
-    # Optionally register as a chat endpoint
-    endpoint_msg = ""
-    if add_endpoint:
+    # Optionally register as a normalized, keyless local provider.
+    provider_msg = ""
+    if add_provider:
         # Resolve host to a URL. SSH form `user@host` → just take host.
         host_only = host.split("@", 1)[-1] if host else "localhost"
-        endpoint_url = f"http://{host_only}:{int(port)}/v1"
+        provider_url = f"http://{host_only}:{int(port)}/v1"
         try:
-            from src.tool_implementations import do_manage_endpoints  # avoid forward ref issues
-        except Exception:
-            do_manage_endpoints = None
-        if do_manage_endpoints is not None:
-            try:
-                ep_result = await do_manage_endpoints(json.dumps({
-                    "action": "add",
-                    "name": display_name,
-                    "endpoint_url": endpoint_url,
-                    "is_local": False,
-                }), owner=owner)
-                if isinstance(ep_result, dict) and not ep_result.get("error"):
-                    endpoint_msg = f" Endpoint {endpoint_url} added as {display_name!r}."
-                else:
-                    endpoint_msg = f" Endpoint registration skipped: {(ep_result or {}).get('error', 'unknown')}"
-            except Exception as e:
-                endpoint_msg = f" Endpoint registration failed: {e}"
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{_INTERNAL_BASE}/api/cookbook/provider-connections",
+                    json={
+                        "url": provider_url,
+                        "model_id": model,
+                        "name": display_name,
+                        "model_type": "llm",
+                        "session_id": sess,
+                    },
+                    headers=headers,
+                )
+                result = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            if response.status_code < 400 and result.get("id"):
+                provider_msg = f" Managed provider {provider_url} added as {display_name!r}."
+            else:
+                provider_msg = f" Provider registration skipped: {result.get('detail') or result.get('error') or 'unknown'}"
+        except Exception as e:
+            provider_msg = f" Provider registration failed: {e}"
 
     return {
         "output": (
             f"Adopted session {sess!r} ({model}) on {host or 'local'}:{port}. "
             + ("Already tracked — skipped state write. " if adopted_already else "Added to cookbook state. ")
             + ("Server responding. " if server_up else "Server not responding yet (still loading?). ")
-            + endpoint_msg
+            + provider_msg
         ).strip(),
         "session_id": sess,
         "host": host,
@@ -1514,23 +1525,24 @@ async def do_serve_preset(content: str, owner: Optional[str] = None) -> Dict:
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
-            endpoint_id = data.get("endpoint_id") or ""
-            if endpoint_id:
-                endpoint_added = True
+            connection_id = data.get("provider_connection_id") or ""
+            if connection_id:
+                provider_connected = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(
-                    model=repo_id, cmd=cmd, host=host, owner=owner
+                provider_meta = await _ensure_served_provider(
+                    model=repo_id, cmd=cmd, host=host, owner=owner, session_id=sid
                 )
-                endpoint_added = bool(endpoint_meta.get("added"))
-                endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
+                provider_connected = bool(provider_meta.get("added"))
+                connection_id = provider_meta.get("connection_id", "") or connection_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id, host=host,
                 cmd=cmd, task_type="serve",
-                endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                provider_connected=provider_connected,
+                provider_connection_id=connection_id or "",
                 owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
-            return {"output": f"Launched preset {chosen.get('name')!r}: {repo_id} on {host or 'local'} (session: {sid}){note}", "session_id": sid, "host": host, "endpoint_id": endpoint_id, "exit_code": 0}
+            return {"output": f"Launched preset {chosen.get('name')!r}: {repo_id} on {host or 'local'} (session: {sid}){note}", "session_id": sid, "host": host, "provider_connection_id": connection_id, "exit_code": 0}
         return {"error": data.get("error", "Serve failed"), "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}

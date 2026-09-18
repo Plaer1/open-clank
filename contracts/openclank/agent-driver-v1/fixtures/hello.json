@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "request_id": "00000000000000000000000000000001",
+  "owner_subject_id": "fixture-owner",
+  "session_id": "fixture-session",
+  "runtime_id": "fixture-runtime",
+  "runtime_epoch": "11111111111111111111111111111111",
+  "runtime_generation": 1,
+  "command": "hello",
+  "payload": {}
+}

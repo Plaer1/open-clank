@@ -17,6 +17,11 @@ from pydantic import BaseModel
 from core.database import SessionLocal, CrewMember, ScheduledTask
 from src.auth_helpers import get_current_user
 from core.auth import RESERVED_USERNAMES
+from src.openclank.chat_routing import (
+    ChatRouteUnavailable,
+    MANAGED_ENGINE_PUBLIC_URL,
+    resolve_chat_route,
+)
 from src.task_scheduler import compute_next_run
 
 
@@ -49,14 +54,32 @@ def _crew_to_dict(c: CrewMember) -> dict:
         tools = json.loads(c.enabled_tools) if c.enabled_tools else []
     except Exception:
         tools = []
+    route_id = getattr(c, "provider_model_route_id", None)
+    route = None
+    if route_id:
+        try:
+            route = resolve_chat_route(
+                owner=getattr(c, "owner", None),
+                endpoint_id=getattr(c, "endpoint_id", None),
+                model_route_id=route_id,
+                model_id=getattr(c, "model", None),
+            )
+        except ChatRouteUnavailable:
+            # A revoked share or disabled/deleted route must disappear from the
+            # settings selector instead of falling back to retired endpoint
+            # metadata still present on an old ORM object.
+            route = None
     return {
         "id": c.id,
         "name": c.name,
         "avatar": c.avatar,
         "personality": c.personality,
-        "model": c.model,
-        "endpoint_url": c.endpoint_url,
-        "endpoint_id": getattr(c, "endpoint_id", None),
+        "model": route.provider_model_id if route else c.model,
+        # Never disclose or revive a retired provider URL.  The compatibility
+        # field is a public transport marker; provider_model_route_id is the
+        # durable execution authority.
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL if route else None,
+        "endpoint_id": route.public_endpoint_id if route else None,
         "greeting": c.greeting,
         "enabled_tools": tools,
         "session_id": c.session_id,
@@ -64,6 +87,26 @@ def _crew_to_dict(c: CrewMember) -> dict:
         "timezone": c.timezone,
         "allow_autonomous_email": any(t in _EMAIL_TOOLS for t in tools),
     }
+
+
+def _enforce_model_privileges(request: Request, owner: str, route) -> None:
+    """Apply the same model allow-list used by session creation/switching."""
+
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    auth_manager = getattr(app_state, "auth_manager", None)
+    get_privileges = getattr(auth_manager, "get_privileges", None)
+    privileges = get_privileges(owner) if callable(get_privileges) and owner else {}
+    allowed = set((privileges or {}).get("allowed_models") or [])
+    restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
+    if (privileges or {}).get("block_all_models") or (
+        restricted
+        and route.provider_model_id not in allowed
+        and route.model_route_id not in allowed
+    ):
+        raise HTTPException(
+            403,
+            f"Your account is not allowed to use model {route.provider_model_id!r}",
+        )
 
 
 def _task_to_checkin_dict(t: ScheduledTask) -> dict:
@@ -186,29 +229,55 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                     name=(payload.name.strip() if payload.name is not None else None) or None,
                     personality=payload.personality,
                 )
-            if payload.model is not None:
-                crew_db.model = payload.model or None
-            if "endpoint_id" in payload.model_fields_set:
-                if payload.endpoint_id:
-                    from core.database import ModelEndpoint
-                    from src.auth_helpers import owner_filter
-                    from src.endpoint_resolver import build_chat_url, normalize_base
-                    query = db.query(ModelEndpoint).filter(
-                        ModelEndpoint.id == payload.endpoint_id,
-                        ModelEndpoint.is_enabled == True,  # noqa: E712
-                    )
-                    endpoint = owner_filter(
-                        query, ModelEndpoint, owner, include_shared=False
-                    ).first()
-                    if endpoint is None:
-                        raise HTTPException(400, "endpoint_id is missing, disabled, or not visible")
-                    crew_db.endpoint_id = endpoint.id
-                    crew_db.endpoint_url = build_chat_url(normalize_base(endpoint.base_url))
-                else:
+            if (
+                "endpoint_url" in payload.model_fields_set
+                and payload.endpoint_url not in (None, "", MANAGED_ENGINE_PUBLIC_URL)
+            ):
+                raise HTTPException(
+                    400,
+                    "Assistant model settings do not accept provider URLs",
+                )
+
+            routing_changed = bool(
+                {"model", "endpoint_id"}.intersection(payload.model_fields_set)
+            )
+            if routing_changed:
+                endpoint_id = (
+                    payload.endpoint_id
+                    if "endpoint_id" in payload.model_fields_set
+                    else crew_db.endpoint_id
+                )
+                model = (
+                    payload.model
+                    if "model" in payload.model_fields_set
+                    else crew_db.model
+                )
+                endpoint_id = str(endpoint_id or "").strip()
+                model = str(model or "").strip()
+                if not endpoint_id and not model:
                     crew_db.endpoint_id = None
                     crew_db.endpoint_url = None
-            elif payload.endpoint_url is not None:
-                raise HTTPException(400, "Assistant model settings require endpoint_id")
+                    crew_db.provider_model_route_id = None
+                    crew_db.model = None
+                elif not endpoint_id or not model:
+                    raise HTTPException(
+                        400,
+                        "Assistant model settings require both endpoint_id and model",
+                    )
+                else:
+                    try:
+                        selected_route = resolve_chat_route(
+                            owner=owner,
+                            endpoint_id=endpoint_id,
+                            model_id=model,
+                        )
+                    except ChatRouteUnavailable as exc:
+                        raise HTTPException(400, str(exc)) from exc
+                    _enforce_model_privileges(request, owner, selected_route)
+                    crew_db.endpoint_id = selected_route.public_endpoint_id
+                    crew_db.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+                    crew_db.provider_model_route_id = selected_route.model_route_id
+                    crew_db.model = selected_route.provider_model_id
             if payload.timezone is not None:
                 crew_db.timezone = payload.timezone or None
 
@@ -259,6 +328,7 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                         task.status = "active" if ci.enabled else "paused"
                     task.endpoint_id = crew_db.endpoint_id
                     task.endpoint_url = crew_db.endpoint_url
+                    task.provider_model_route_id = crew_db.provider_model_route_id
                     task.model = crew_db.model
                     task.allowed_tools = crew_db.enabled_tools or "[]"
                     task.interaction_policy = "fail_on_interaction"
@@ -290,15 +360,32 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                             after=now_utc, cron_expression=t.cron_expression, tz_name=tz_name,
                         )
 
+            # Route changes are atomic across the assistant, all of its
+            # headless check-ins, and the pinned chat.  No linked row may keep
+            # a URL-only or stale provider identity.
+            if routing_changed:
+                tasks = db.query(ScheduledTask).filter(
+                    ScheduledTask.owner == owner,
+                    ScheduledTask.crew_member_id == crew_db.id,
+                ).all()
+                for task in tasks:
+                    task.endpoint_id = crew_db.endpoint_id
+                    task.endpoint_url = crew_db.endpoint_url
+                    task.provider_model_route_id = crew_db.provider_model_route_id
+                    task.model = crew_db.model
+                    task.updated_at = datetime.utcnow()
+
             # The pinned assistant chat and its headless tasks share one exact
             # registered endpoint identity; never let URL-only copies drift.
-            if crew_db.session_id:
+            if routing_changed and crew_db.session_id:
                 from core.database import Session as DbSession
                 pinned = db.query(DbSession).filter(DbSession.id == crew_db.session_id).first()
                 if pinned:
                     pinned.endpoint_id = crew_db.endpoint_id
                     pinned.endpoint_url = crew_db.endpoint_url or ""
+                    pinned.provider_model_route_id = crew_db.provider_model_route_id
                     pinned.model = crew_db.model or ""
+                    pinned.headers = {}
 
             db.commit()
 

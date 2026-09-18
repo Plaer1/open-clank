@@ -5,8 +5,10 @@ import importlib
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +30,31 @@ from routes.shell_routes import (
     _venv_activate_prefix,
     DOCKER_IN_CONTAINER_HINT,
 )
+
+
+@pytest.fixture
+def short_unix_socket_path():
+    """Provide an AF_UNIX endpoint below macOS's 104-byte path limit."""
+    if not hasattr(socket, "AF_UNIX"):
+        pytest.skip("AF_UNIX sockets are unavailable on this platform")
+
+    short_root = Path(
+        tempfile.mkdtemp(
+            prefix="oc-sock-",
+            dir="/tmp" if os.name == "posix" else None,
+        )
+    )
+    socket_path = short_root / "docker.sock"
+    try:
+        try:
+            with socket.socket(socket.AF_UNIX) as unix_socket:
+                unix_socket.bind(str(socket_path))
+        except OSError as exc:
+            pytest.skip(f"AF_UNIX sockets are unavailable: {exc}")
+        socket_path.unlink(missing_ok=True)
+        yield socket_path
+    finally:
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
@@ -294,10 +321,10 @@ class TestHostDockerAccess:
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
         monkeypatch,
-        tmp_path,
+        short_unix_socket_path,
         flag,
     ):
-        socket_path = tmp_path / "docker.sock"
+        socket_path = short_unix_socket_path
         with socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             if flag is None:
@@ -310,9 +337,9 @@ class TestHostDockerAccess:
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
-        tmp_path,
+        short_unix_socket_path,
     ):
-        socket_path = tmp_path / "docker.sock"
+        socket_path = short_unix_socket_path
         with socket.socket(socket.AF_UNIX) as unix_socket:
             unix_socket.bind(str(socket_path))
             monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")

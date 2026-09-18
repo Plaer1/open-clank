@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7000').replace(/\/$/, '');
+const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
 const port = await new Promise((resolve, reject) => {
   const server = net.createServer();
   server.once('error', reject);
@@ -17,7 +17,13 @@ const port = await new Promise((resolve, reject) => {
   });
 });
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-models-'));
-const chromium = spawn('/usr/bin/chromium', [
+const browserExecutable = process.env.OPENCLANK_CHROME_BIN
+  || process.env.CHROME_BIN
+  || process.env.ODYSSEUS_BROWSER_EXECUTABLE
+  || ['/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    .find(candidate => fs.existsSync(candidate));
+assert(browserExecutable, 'Chromium or Google Chrome is required for this browser acceptance test');
+const chromium = spawn(browserExecutable, [
   '--headless=new', '--no-sandbox', '--disable-gpu',
   `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank',
 ], { stdio: 'ignore' });
@@ -73,6 +79,123 @@ try {
   await command('Runtime.enable');
   await command('Page.navigate', { url: `${base}/login` });
   await waitFor("document.readyState === 'complete'", 'login origin');
+  const addedModelsState = await evaluate(`(async () => {
+    const html = await fetch('/static/index.html').then(response => response.text());
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    document.body.replaceChildren(parsed.getElementById('settings-modal'));
+    const errors = [];
+    window.addEventListener('error', event => errors.push(event.error?.message || event.message));
+    window.addEventListener('unhandledrejection', event => errors.push(
+      event.reason?.message || String(event.reason),
+    ));
+    window.modelsModule = { refreshModels: async () => {} };
+    window.sessionModule = { updateModelPicker() {} };
+    const requests = [];
+    const json = data => new Response(JSON.stringify(data), {
+      status:200, headers:{'Content-Type':'application/json'},
+    });
+    window.fetch = async (input, options = {}) => {
+      const url = String(input);
+      requests.push({ url, method:options.method || 'GET' });
+      if (url.endsWith('/api/v1/providers/families')) {
+        return json({ families:[
+          {
+            id:'openai', display_name:'OpenAI', adapters:['openai-responses'],
+            kinds:['official'], billing_lanes:['metered_api'], model_count:1,
+            auth_methods:[
+              { id:'api_key', type:'api', label:'API key' },
+              { id:'oauth:0', type:'oauth', label:'Browser login' },
+            ],
+          },
+          {
+            id:'ollama', display_name:'Ollama', adapters:['ollama'],
+            kinds:['local'], billing_lanes:['local'], model_count:1,
+            auth_methods:[{ id:'none', type:'none', label:'No API key' }],
+          },
+        ] });
+      }
+      if (url.endsWith('/api/v1/providers/connections')) {
+        return json({ connections:[{
+          id:'pcn-browser', family_id:'openai', adapter_id:'openai-responses',
+          kind:'official', billing_lane:'metered_api', label:'OpenAI API',
+          url:null, enabled:true, revision:1,
+        }] });
+      }
+      if (url.endsWith('/api/v1/providers/connections/pcn-browser/accounts')) {
+        return json({ accounts:[{
+          id:'pac-browser', connection_id:'pcn-browser', label:'Primary',
+          auth_method:'api_key', auth_class:'metered', order:0, enabled:true, revision:1,
+        }] });
+      }
+      if (url.endsWith('/api/v1/providers/models')) {
+        return json({ models:[{
+          id:'pmr-browser', connection_id:'pcn-browser', model_id:'gpt-browser',
+          display_name:'GPT Browser', operations:['chat.stream'], enabled:true, revision:1,
+        }] });
+      }
+      if (url.endsWith('/api/v1/providers/bindings')) return json({ bindings:[] });
+      if (url.endsWith('/api/v1/providers/shares')) return json({ shares:[] });
+      if (url.endsWith('/api/v1/providers/shares/received')) return json({ shares:[] });
+      return json({});
+    };
+    let selected = '';
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function () {
+      selected = this.dataset.providerConnectionId || '';
+    };
+    const providers = await import('/static/js/providerControl.js?added-models-regression=2');
+    providers.init();
+    await providers.load();
+    providers.selectConnection('pcn-browser');
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    return {
+      quickAdd: document.getElementById('provider-control-create')?.textContent.trim() || '',
+      added: document.getElementById('provider-control-connections')?.textContent.trim() || '',
+      addModes:[...document.querySelectorAll('[data-provider-add-mode]')].map(form => form.dataset.providerAddMode).sort(),
+      nativeProviderSelects:document.querySelectorAll('[data-settings-panel="services"] select, [data-settings-panel="added-models"] select').length,
+      familyPickers:[...document.querySelectorAll('[data-provider-add-mode] [role="combobox"]')].map(trigger => ({
+        expanded:trigger.getAttribute('aria-expanded'),
+        haspopup:trigger.getAttribute('aria-haspopup'),
+        listbox:document.getElementById(trigger.getAttribute('aria-controls'))?.getAttribute('role'),
+      })),
+      connectionGroups:[...document.querySelectorAll('[data-provider-connection-group]')].map(group => group.dataset.providerConnectionGroup),
+      expandButtons:[...document.querySelectorAll('.provider-control-connection-toggle')].map(button => ({
+        expanded:button.getAttribute('aria-expanded'),
+        controls:button.getAttribute('aria-controls'),
+      })),
+      addedTabHidden: document.querySelector('[data-settings-tab="added-models"]')?.classList.contains('hidden'),
+      selected,
+      requests,
+      errors,
+    };
+  })()`);
+  assert.match(addedModelsState.quickAdd, /Add API Models/, 'Add Models renders the compact API form');
+  assert.match(addedModelsState.quickAdd, /Add Local Models/, 'Add Models renders the compact local form');
+  assert.deepEqual(addedModelsState.addModes, ['local', 'remote']);
+  assert.equal(addedModelsState.nativeProviderSelects, 0, 'provider settings render no native select elements');
+  assert.equal(addedModelsState.familyPickers.length, 2);
+  assert.ok(addedModelsState.familyPickers.every(picker => (
+    picker.expanded === 'false' && picker.haspopup === 'listbox' && picker.listbox === 'listbox'
+  )), 'provider family choices use collapsed ARIA combobox/listbox controls');
+  assert.match(addedModelsState.added, /OpenAI API/, 'Added Models renders normalized connections');
+  assert.match(addedModelsState.added, /GPT Browser/, 'Added Models renders normalized model routes');
+  assert.match(addedModelsState.added, /Refresh models/, 'model discovery is a plain per-provider action');
+  assert.doesNotMatch(addedModelsState.added, /chat\.stream|chat\.complete/,
+    'normal model rows do not expose operation identifiers');
+  assert.deepEqual(addedModelsState.connectionGroups, ['api'], 'Added Models groups API connection rows');
+  assert.equal(addedModelsState.expandButtons.length, 1);
+  assert.equal(addedModelsState.expandButtons[0].expanded, 'false', 'compact connection row begins collapsed');
+  assert.ok(addedModelsState.expandButtons[0].controls, 'compact connection row identifies its managed details');
+  assert.equal(addedModelsState.addedTabHidden, false, 'Added Models remains a visible settings destination');
+  assert.equal(addedModelsState.selected, 'pcn-browser', 'connection selection reaches the sibling Added Models panel');
+  assert.ok(addedModelsState.requests.some(request => request.url.includes('/api/v1/providers/connections')));
+  assert.equal(addedModelsState.requests.some(request => (
+    request.url.includes('/api/model-endpoints') || request.url.includes('/api/mimo/providers')
+  )), false, 'provider views do not fall back to retired provider APIs');
+  assert.equal(addedModelsState.requests.some(request => request.url.includes('/eligibility')), false,
+    'Added Models first paint does not wait for per-model health');
+  assert.deepEqual(addedModelsState.errors, [], 'Added Models renders without browser errors');
+
   await evaluate(`(async () => {
     document.body.innerHTML = '<main><div id="models"></div></main>';
     globalThis.__openClankAuthenticatedUser = 'browser-test';
@@ -110,13 +233,15 @@ try {
   })()`);
   await waitFor("document.querySelectorAll('.models-row').length === 4", 'four unique endpoint-model choices');
 
-  const state = await evaluate(`(() => ({
+  // Chromium's CDP structured clone can stall on this DOM-derived object even
+  // though each field is plain data. Serialize in-page, then parse in Node.
+  const state = JSON.parse(await evaluate(`(() => JSON.stringify({
     rowKeys: [...document.querySelectorAll('.models-row')].map(row => row.dataset.modelId),
     mids: [...document.querySelectorAll('.models-row')].map(row => row.dataset.modelMid),
     endpointLabels: [...document.querySelectorAll('.models-endpoint-label span:nth-child(2)')].map(node => node.textContent),
     favoriteRows: document.querySelectorAll('.models-category-header + .models-group-content .models-row').length,
     storedFavorites: JSON.parse(localStorage.getItem('odysseus-model-favorites:scope:browser-test') || '[]'),
-  }))()`);
+  }))()`));
   assert.equal(new Set(state.rowKeys).size, 4, 'one row per endpoint + model identity');
   assert.equal(state.mids.filter(mid => mid === 'shared-model').length, 2, 'distinct routes remain selectable');
   assert.deepEqual(state.endpointLabels, ['Same name', 'Same name'], 'same labels do not merge endpoint groups');
@@ -212,12 +337,105 @@ try {
     patch: window.__pickerPatch,
     session: window.__pickerSessions[0],
     label: document.getElementById('model-picker-label').textContent,
+    switchFencePending: Boolean(window.__odysseusModelSwitchPromise),
   }))()`);
   assert.equal(pickerState.patch.model, 'xiaomi/mimo-v2.5-pro/high');
   assert.equal(pickerState.patch.endpoint_url, 'mimo://acp');
   assert.equal(pickerState.session.endpoint_id, 'shared:grant');
   assert.equal(pickerState.session.model, 'xiaomi/mimo-v2.5-pro/high');
   assert.match(pickerState.label, /mimo-v2\.5-pro/);
+  assert.equal(pickerState.switchFencePending, false, 'successful picker PATCH releases the chat send fence');
+
+  const hierarchyState = JSON.parse(await evaluate(`(async () => {
+    const baseModelId = 'openai/gpt-5.6-luna';
+    const records = [
+      { model_id:baseModelId, display_name:'gpt-5.6-luna', base_model_id:baseModelId },
+      { model_id:baseModelId + '/low', display_name:'gpt-5.6-luna (low)', base_model_id:baseModelId, variant:'low' },
+      { model_id:'openai/gpt-5.6-luna-fast', display_name:'gpt-5.6-luna Fast', base_model_id:baseModelId, preset:'fast' },
+      { model_id:'openai/gpt-5.6-luna-fast/high', display_name:'gpt-5.6-luna Fast (high)', base_model_id:baseModelId, preset:'fast', variant:'high' },
+      { model_id:'openai/gpt-5.6-luna-pro', display_name:'gpt-5.6-luna Pro', base_model_id:baseModelId, preset:'pro' },
+    ];
+    window.__catalogItems = [{
+      endpoint_id:'mimo:openai', endpoint_name:'OpenAI', url:'mimo://acp',
+      category:'api', catalog:records,
+    }];
+    await window.__catalogModels.refreshModels(true);
+    const button = document.getElementById('model-picker-btn');
+    if (document.getElementById('model-picker-menu').classList.contains('hidden')) button.click();
+    const family = document.querySelector('.mp-model-family');
+    const parentRows = [...document.getElementById('model-picker-list').children]
+      .filter(node => node.classList.contains('mp-model-family'))
+      .flatMap(node => [...node.children].filter(child => child.classList.contains('model-switch-item')));
+    const optionsButton = family.querySelector('.mp-model-options-button');
+    optionsButton.click();
+    const mode = family.querySelector('select[aria-label$=" mode"]');
+    const thinking = family.querySelector('select[aria-label$=" thinking"]');
+    const modeLabels = [...mode.options].map(option => option.textContent);
+    mode.value = 'fast';
+    mode.dispatchEvent(new Event('change', { bubbles:true }));
+    const thinkingLabels = [...thinking.options].map(option => option.textContent);
+    thinking.value = 'high';
+    family.querySelector('.mp-model-use-button').click();
+    for (let i = 0; i < 50 && (
+      window.__pickerPatch?.model !== 'openai/gpt-5.6-luna-fast/high'
+      || window.__odysseusModelSwitchPromise
+    ); i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return JSON.stringify({
+      familyCount:document.querySelectorAll('.mp-model-family').length,
+      parentRows:parentRows.length,
+      modeLabels,
+      thinkingLabels,
+      patch:window.__pickerPatch,
+      switchFencePending:Boolean(window.__odysseusModelSwitchPromise),
+    });
+  })()`));
+  assert.equal(hierarchyState.familyCount, 1, 'Luna presets and thinking variants render as one model family');
+  assert.equal(hierarchyState.parentRows, 1, 'reasoning variants are not peer model rows');
+  assert.deepEqual(hierarchyState.modeLabels, ['Standard', 'Fast preset', 'Pro preset']);
+  assert.deepEqual(hierarchyState.thinkingLabels, ['Default', 'High']);
+  assert.equal(hierarchyState.patch.endpoint_id, 'mimo:openai');
+  assert.equal(hierarchyState.patch.model, 'openai/gpt-5.6-luna-fast/high');
+  assert.equal(hierarchyState.switchFencePending, false);
+
+  const routeSeparatedFamilies = await evaluate(`(async () => {
+    const source = window.__catalogItems[0];
+    window.__catalogItems = [source, {
+      ...source,
+      endpoint_id:'shared:grant',
+      endpoint_name:'OpenAI shared',
+      shared:true,
+      shared_by:'e',
+    }];
+    await window.__catalogModels.refreshModels(true);
+    const button = document.getElementById('model-picker-btn');
+    if (document.getElementById('model-picker-menu').classList.contains('hidden')) button.click();
+    return document.querySelectorAll('.mp-model-family').length;
+  })()`);
+  assert.equal(routeSeparatedFamilies, 2, 'personal and shared routes never merge into one model family');
+
+  const validFavoriteState = JSON.parse(await evaluate(`(async () => {
+    const key = 'odysseus-model-favorites:scope:browser-test';
+    localStorage.setItem(key, JSON.stringify([
+      'endpoint:' + encodeURIComponent('mimo:openai') + ':' + encodeURIComponent('openai/gpt-5.6-luna'),
+    ]));
+    const errors = [];
+    const onError = event => errors.push(event.error?.message || event.message);
+    window.addEventListener('error', onError);
+    const menu = document.getElementById('model-picker-menu');
+    if (!menu.classList.contains('hidden')) document.getElementById('model-picker-btn').click();
+    await new Promise(resolve => setTimeout(resolve, 250));
+    document.getElementById('model-picker-btn').click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    window.removeEventListener('error', onError);
+    return JSON.stringify({
+      errors,
+      text:document.getElementById('model-picker-list').textContent,
+    });
+  })()`));
+  assert.deepEqual(validFavoriteState.errors, [], 'a valid favorite does not crash picker rendering');
+  assert.match(validFavoriteState.text, /Favorites/);
 
   const raceState = await evaluate(`(async () => {
     const pending = [];
@@ -270,8 +488,91 @@ try {
   assert.equal(defaultRaceState.endpointId, 'newer');
   assert.equal(defaultRaceState.modelId, 'newer-model', 'an in-flight default cannot overwrite a manual pick');
 
+  const configuredDefaultState = JSON.parse(await evaluate(`(async () => {
+    const deepseek = 'deepseek/deepseek-v4-pro';
+    const xhigh = 'openai/gpt-5.6-sol/xhigh';
+    const high = 'openai/gpt-5.6-sol/high';
+    window.__pickerCurrentSessionId = null;
+    window.__pickerSessions.length = 0;
+    window.__pickerPending = null;
+    window.__configuredDefaultModel = xhigh;
+    window.__catalogItems = [
+      {
+        endpoint_id:'mimo:deepseek', endpoint_name:'DeepSeek', url:'mimo://acp',
+        category:'api', models:[deepseek],
+      },
+      {
+        endpoint_id:'mimo:openai', endpoint_name:'OpenAI', url:'mimo://acp',
+        category:'api', models:[xhigh, high],
+      },
+    ];
+    window.fetch = async input => {
+      const url = String(input);
+      if (url.includes('/api/models')) {
+        return new Response(JSON.stringify({ items:window.__catalogItems }), {
+          status:200, headers:{'Content-Type':'application/json'},
+        });
+      }
+      if (url.includes('/api/default-chat')) {
+        return new Response(JSON.stringify({
+          endpoint_url:'mimo://acp', endpoint_id:'mimo:auto',
+          model:window.__configuredDefaultModel,
+        }), { status:200, headers:{'Content-Type':'application/json'} });
+      }
+      return new Response('{}', { status:200, headers:{'Content-Type':'application/json'} });
+    };
+    await window.__catalogModels.refreshModels(true);
+    window.__modelPicker.updateModelPicker();
+    for (let i = 0; i < 50 && window.__pickerPending?.modelId !== xhigh; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const initial = { ...window.__pickerPending };
+
+    let resolveStaleDefault;
+    let defaultCalls = 0;
+    window.__pickerPending = null;
+    window.fetch = async input => {
+      const url = String(input);
+      if (url.includes('/api/default-chat')) {
+        defaultCalls += 1;
+        if (defaultCalls === 1) {
+          return new Promise(resolve => { resolveStaleDefault = resolve; });
+        }
+        return new Response(JSON.stringify({
+          endpoint_url:'mimo://acp', endpoint_id:'mimo:auto', model:high,
+        }), { status:200, headers:{'Content-Type':'application/json'} });
+      }
+      return new Response('{}', { status:200, headers:{'Content-Type':'application/json'} });
+    };
+    window.__modelPicker.updateModelPicker();
+    while (!resolveStaleDefault) await new Promise(resolve => setTimeout(resolve, 0));
+    window.__configuredDefaultModel = high;
+    window.dispatchEvent(new CustomEvent('openclank:default-chat-changed'));
+    resolveStaleDefault(new Response(JSON.stringify({
+      endpoint_url:'mimo://acp', endpoint_id:'mimo:auto', model:xhigh,
+    }), { status:200, headers:{'Content-Type':'application/json'} }));
+    for (let i = 0; i < 50 && window.__pickerPending?.modelId !== high; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return JSON.stringify({ initial, changed:{ ...window.__pickerPending }, defaultCalls });
+  })()`));
+  assert.equal(configuredDefaultState.initial.endpointId, 'mimo:auto');
+  assert.equal(
+    configuredDefaultState.initial.modelId,
+    'openai/gpt-5.6-sol/xhigh',
+    'mimo:auto resolves its configured model instead of the first DeepSeek catalogue row',
+  );
+  assert.equal(
+    configuredDefaultState.changed.modelId,
+    'openai/gpt-5.6-sol/high',
+    'saving a new default replaces an in-flight stale automatic selection',
+  );
+  assert.equal(configuredDefaultState.defaultCalls, 2, 'a settings change queues one fresh default lookup');
+
   const pendingState = await evaluate(`(async () => {
     const mid = 'xiaomi/mimo-v2.5-pro/high';
+    localStorage.setItem('odysseus-workspace-id', 'workspace-pending');
+    window.__pendingSessionBody = null;
     window.fetch = async (input, options = {}) => {
       const url = String(input);
       if (url.includes('/api/models')) {
@@ -281,8 +582,10 @@ try {
         }] }), { status:200, headers:{'Content-Type':'application/json'} });
       }
       if (options.method === 'POST' && url.includes('/api/session')) {
+        window.__pendingSessionBody = Object.fromEntries(options.body.entries());
         return new Response(JSON.stringify({
           id:'created-session', name:'New Chat', model:mid, rag:false, archived:false,
+          workspace_id:'workspace-pending',
         }), { status:200, headers:{'Content-Type':'application/json'} });
       }
       if (url.includes('/api/sessions')) return new Promise(() => {});
@@ -294,13 +597,16 @@ try {
     const before = sessionsModule.getCurrentModel();
     const ok = await sessionsModule.materializePendingSession();
     const created = sessionsModule.getSessions().find(item => item.id === 'created-session');
-    return { before, ok, created };
+    return { before, ok, created, body:window.__pendingSessionBody };
   })()`);
   assert.equal(pendingState.before, 'xiaomi/mimo-v2.5-pro/high');
   assert.equal(pendingState.ok, true);
   assert.equal(pendingState.created.endpoint_id, 'shared:grant');
   assert.equal(pendingState.created.endpoint_url, 'mimo://acp');
   assert.equal(pendingState.created.model, 'xiaomi/mimo-v2.5-pro/high');
+  assert.equal(pendingState.body.workspace_id, 'workspace-pending',
+    'pending chat materializes with its stable Workspace ID');
+  assert.equal(pendingState.created.workspace_id, 'workspace-pending');
   process.stdout.write(JSON.stringify(state) + '\n');
 } finally {
   if (socket) socket.close();

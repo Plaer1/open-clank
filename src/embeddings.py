@@ -1,20 +1,21 @@
-"""
-embeddings.py
+"""Embedding clients used by Open Clank indexes.
 
-Embedding clients for RAG and memory vector search.
-
-Priority order:
-  1. HTTP API (Ollama / vLLM / llama.cpp) — set EMBEDDING_URL in .env
-  2. Local fastembed (ONNX, ~50MB) — zero config fallback
-
-Set EMBEDDING_URL in .env, e.g.:
-  EMBEDDING_URL=http://localhost:11434/v1/embeddings   (ollama)
-  EMBEDDING_URL=http://localhost:8000/v1/embeddings    (vllm / llama.cpp)
+The application-facing client is deliberately only a synchronous adapter over
+the managed MiMo operation router.  It never accepts a URL, API key, provider
+environment variable, or a hidden local fallback.  Local FastEmbed execution
+is kept as an implementation detail of the registered host executor at
+``openclank.fastembed.v1``; callers reach it through the same normalized route
+binding as every remote embedding model.
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 import os
+import threading
 
-from src.constants import FASTEMBED_CACHE_DIR, EMBEDDING_ENDPOINT_FILE
+from src.constants import FASTEMBED_CACHE_DIR
 
 # Windows: force HuggingFace/fastembed to COPY model files rather than symlink
 # them. On a network-share/UNC cache dir Windows can't follow HF's symlinks
@@ -28,105 +29,246 @@ if os.name == "nt":
 
 import logging
 import numpy as np
-import httpx
-from typing import List, Optional
-
-from src.runtime_paths import get_app_root
+from typing import Any, Coroutine, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "all-minilm:l6-v2"
 _DEFAULT_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_T = TypeVar("_T")
 
 
-class EmbeddingClient:
-    """Drop-in replacement for SentenceTransformer.encode() using an HTTP API."""
+class ManagedEmbeddingError(RuntimeError):
+    """Safe failure raised by the managed embedding compatibility client."""
 
-    def __init__(self, url: Optional[str] = None, model: Optional[str] = None, api_key: Optional[str] = None):
-        self.url = url or os.getenv(
-            "EMBEDDING_URL",
-            f"http://{os.getenv('LLM_HOST', 'localhost')}:11434/v1/embeddings",
+
+def _run_managed(coroutine: Coroutine[Any, Any, _T]) -> _T:
+    """Run one router coroutine from legacy synchronous index code.
+
+    Most index mutations already run in FastAPI's worker pool.  A few call
+    sites are synchronous helpers invoked from an event-loop thread, so the
+    latter case uses one bounded helper thread instead of attempting a nested
+    event loop.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="managed-embed") as pool:
+        return pool.submit(asyncio.run, coroutine).result()
+
+
+def _route_identity(owner: str, model_route_id: str, connection_id: str) -> dict[str, Any]:
+    """Reload the exact normalized route selected by the engine."""
+
+    from core.database import SessionLocal
+    from core.provider_models import ProviderConnection, ProviderModelRoute
+
+    with SessionLocal() as db:
+        row = (
+            db.query(ProviderModelRoute, ProviderConnection)
+            .join(
+                ProviderConnection,
+                ProviderConnection.id == ProviderModelRoute.connection_id,
+            )
+            .filter(
+                ProviderModelRoute.id == model_route_id,
+                ProviderModelRoute.owner == owner,
+                ProviderModelRoute.connection_id == connection_id,
+                ProviderModelRoute.enabled.is_(True),
+                ProviderModelRoute.deleted_at.is_(None),
+                ProviderConnection.owner == owner,
+                ProviderConnection.enabled.is_(True),
+                ProviderConnection.deleted_at.is_(None),
+            )
+            .first()
         )
-        self.model = model or os.getenv("EMBEDDING_MODEL", _DEFAULT_MODEL)
-        self.api_key = api_key or os.getenv("EMBEDDING_API_KEY")
+        if row is None:
+            raise ManagedEmbeddingError("managed embedding route is no longer available")
+        route, connection = row
+        if "embeddings.create" not in set(route.operations or ()):
+            raise ManagedEmbeddingError("managed route does not support embeddings")
+        return {
+            "connection_id": connection.id,
+            "adapter_id": str(connection.adapter_id),
+            "kind": str(connection.kind),
+            "billing_lane": str(connection.billing_lane),
+            "model_route_id": route.id,
+            "model_id": str(route.provider_model_id),
+            "route_revision": int(route.revision),
+            "catalog_revision": int(route.catalog_revision),
+        }
+
+
+class ManagedEmbeddingClient:
+    """SentenceTransformer-shaped adapter for ``embeddings.create``.
+
+    One instance becomes pinned to the first exact model route selected for
+    it.  Account rotation remains engine-owned, while a later route/model/
+    adapter/dimension change fails closed so vectors from incompatible
+    generations can never be mixed.
+    """
+
+    url = "managed://openclank/embeddings"
+
+    def __init__(
+        self,
+        *,
+        owner: str,
+        model_route_id: Optional[str] = None,
+        content_purpose: str = "index",
+        root_operation_id: Optional[str] = None,
+    ) -> None:
+        self.owner = str(owner or "").strip().lower()
+        if not self.owner:
+            raise ManagedEmbeddingError("embedding owner is required")
+        self.model_route_id = str(model_route_id or "").strip() or None
+        self.content_purpose = str(content_purpose or "index").strip() or "index"
+        self.root_operation_id = str(root_operation_id or "").strip() or None
+        self.model = self.model_route_id or "managed-route-binding"
+        self.adapter_id = ""
+        self.billing_lane = ""
+        self.endpoint_class = "managed"
         self._dim: Optional[int] = None
-        # Short connect timeout so a DOWN embedding endpoint (e.g. Ollama not
-        # running on :11434) fast-fails to the local FastEmbed fallback instead
-        # of stalling startup ~30s per probe. Read stays generous for a real
-        # endpoint (embedding a short string returns in well under a second).
-        self._client = httpx.Client(timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0))
-        self._batch_size = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "8")))
-        self._max_chars = max(200, int(os.getenv("EMBEDDING_MAX_CHARS", "900")))
+        self._provider_ref = ""
+        self._engine_fingerprint = ""
+        self._lock = threading.RLock()
+
+    @property
+    def provider_ref(self) -> str:
+        if not self._provider_ref:
+            self.get_sentence_embedding_dimension()
+        return self._provider_ref
+
+    @property
+    def model_fingerprint(self) -> str:
+        return self.provider_ref
+
+    def for_root_operation(self, root_operation_id: str) -> "ManagedEmbeddingClient":
+        """Create a child client bound to an explicit canonical root ID."""
+
+        root = str(root_operation_id or "").strip()
+        if not root:
+            raise ManagedEmbeddingError("embedding root operation ID is required")
+        return ManagedEmbeddingClient(
+            owner=self.owner,
+            model_route_id=self.model_route_id,
+            content_purpose=self.content_purpose,
+            root_operation_id=root,
+        )
 
     def get_sentence_embedding_dimension(self) -> int:
-        """Probe the endpoint for embedding dimension if not yet known."""
-        if self._dim is not None:
-            return self._dim
-        # Embed a single word to discover the dimension
-        vec = self.encode(["hello"])
-        self._dim = vec.shape[1]
-        logger.info(f"Embedding dimension: {self._dim} (model={self.model})")
+        if self._dim is None:
+            self.encode(["dimension probe"], normalize_embeddings=True)
+        if self._dim is None:
+            raise ManagedEmbeddingError("managed embedding dimension is unavailable")
         return self._dim
 
+    def _accept_result(self, result: Any) -> list[list[float]]:
+        if result.state != "complete":
+            raise ManagedEmbeddingError("managed embedding operation did not complete")
+        vectors = result.output.get("embeddings")
+        if not isinstance(vectors, list) or not vectors:
+            raise ManagedEmbeddingError("managed embedding operation returned no vectors")
+        try:
+            dimension = int(result.dimension)
+        except (TypeError, ValueError):
+            raise ManagedEmbeddingError("managed embedding dimension is invalid") from None
+        engine_fingerprint = str(result.model_fingerprint or "").strip()
+        if not engine_fingerprint:
+            raise ManagedEmbeddingError("managed embedding fingerprint is missing")
+        identity = _route_identity(
+            self.owner,
+            str(result.model_route_id),
+            str(result.connection_id),
+        )
+        material = {
+            **identity,
+            "dimension": dimension,
+            "engine_model_fingerprint": engine_fingerprint,
+        }
+        provider_ref = "managed-embedding:" + hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        with self._lock:
+            if self.model_route_id and self.model_route_id != identity["model_route_id"]:
+                raise ManagedEmbeddingError("managed embedding route changed during a generation")
+            if self._dim is not None and self._dim != dimension:
+                raise ManagedEmbeddingError("managed embedding dimension changed during a generation")
+            if self._provider_ref and self._provider_ref != provider_ref:
+                raise ManagedEmbeddingError("managed embedding fingerprint changed during a generation")
+            self.model_route_id = identity["model_route_id"]
+            self.model = identity["model_id"]
+            self.adapter_id = identity["adapter_id"]
+            self.billing_lane = identity["billing_lane"]
+            self.endpoint_class = (
+                "managed-local-executor"
+                if identity["kind"] in {"local", "local_executor"}
+                else "managed-provider"
+            )
+            self._dim = dimension
+            self._provider_ref = provider_ref
+            self._engine_fingerprint = engine_fingerprint
+        return vectors
+
     def encode(
-        self, texts: List[str], normalize_embeddings: bool = True
+        self,
+        texts: List[str],
+        normalize_embeddings: bool = True,
     ) -> np.ndarray:
-        """Encode texts via the API. Returns (N, dim) float32 array."""
         if not texts:
             return np.array([], dtype="float32")
+        if len(texts) > 256 or any(not isinstance(value, str) for value in texts):
+            raise ManagedEmbeddingError("managed embeddings require 1 to 256 text values")
+        from src.openclank.modality_facade import create_embeddings
 
-        all_vecs = []
-        for i in range(0, len(texts), self._batch_size):
-            batch = texts[i : i + self._batch_size]
-            all_vecs.extend(self._embed_batch(batch))
+        request = {
+            "owner": self.owner,
+            "texts": texts,
+            "content_purpose": self.content_purpose,
+            "model_route_id": self.model_route_id,
+        }
+        if self.root_operation_id:
+            request["root_operation_id"] = self.root_operation_id
+        result = _run_managed(create_embeddings(**request))
+        vectors = np.asarray(self._accept_result(result), dtype="float32")
+        if vectors.ndim != 2 or vectors.shape[0] != len(texts):
+            raise ManagedEmbeddingError("managed embedding row count is invalid")
+        if not np.isfinite(vectors).all():
+            raise ManagedEmbeddingError("managed embedding result contains non-finite values")
+        if normalize_embeddings:
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+            if np.any(~np.isfinite(norms)) or np.any(norms <= 0):
+                raise ManagedEmbeddingError("managed embedding result has an invalid norm")
+            vectors = vectors / norms
+        return vectors
 
-        vecs = np.array(all_vecs, dtype="float32")
 
-        if normalize_embeddings and vecs.size > 0:
-            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1, norms)
-            vecs = vecs / norms
+class ManagedEmbeddingClientFactory:
+    """Owner-keyed client cache for the singleton document RAG projection."""
 
-        if self._dim is None and vecs.size > 0:
-            self._dim = vecs.shape[1]
+    def __init__(self) -> None:
+        self._clients: dict[str, ManagedEmbeddingClient] = {}
+        self._lock = threading.Lock()
 
-        return vecs
+    def for_owner(self, owner: str) -> ManagedEmbeddingClient:
+        normalized = str(owner or "").strip().lower()
+        if not normalized:
+            raise ManagedEmbeddingError("embedding owner is required")
+        with self._lock:
+            client = self._clients.get(normalized)
+            if client is None:
+                client = ManagedEmbeddingClient(owner=normalized)
+                self._clients[normalized] = client
+            return client
 
-    def _embed_batch(self, batch: List[str]) -> List[List[float]]:
-        try:
-            return self._post_embeddings(batch)
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status != 400:
-                raise
-            if len(batch) > 1:
-                vecs = []
-                for text in batch:
-                    vecs.extend(self._embed_batch([text]))
-                return vecs
-            text = batch[0]
-            trimmed = text[: self._max_chars]
-            if trimmed != text:
-                logger.warning(
-                    "Embedding input exceeded endpoint context; retrying with %d chars",
-                    len(trimmed),
-                )
-                return self._post_embeddings([trimmed])
-            raise
 
-    def _post_embeddings(self, batch: List[str]) -> List[List[float]]:
-        resp = self._client.post(
-            self.url,
-            headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
-            json={"input": batch, "model": self.model},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+class EmbeddingClient(ManagedEmbeddingClient):
+    """Compatibility name for the managed client; direct HTTP is retired."""
 
-        # OpenAI format: {"data": [{"embedding": [...], "index": 0}, ...]}
-        embeddings = data.get("data", [])
-        embeddings.sort(key=lambda e: e.get("index", 0))
-        return [emb["embedding"] for emb in embeddings]
+    def __init__(self, *, owner: str, model_route_id: Optional[str] = None) -> None:
+        super().__init__(owner=owner, model_route_id=model_route_id)
 
 
 class FastEmbedClient:
@@ -142,7 +284,10 @@ class FastEmbedClient:
                 "embeddings server."
             ) from e
 
-        self.model = model or os.getenv("FASTEMBED_MODEL", _DEFAULT_FASTEMBED_MODEL)
+        # The model is selected by a registered local-executor recipe.  A host
+        # environment variable must never silently change an existing vector
+        # generation's model or dimension.
+        self.model = model or _DEFAULT_FASTEMBED_MODEL
         # Persistent cache under data/ so the model survives reboots and so
         # the download lands exactly where the admin panel's _is_downloaded()
         # check looks (both default to this same path).
@@ -212,70 +357,39 @@ class FastEmbedClient:
 
 
 def _load_persisted_endpoint() -> dict:
-    """Load the custom embedding endpoint saved from the admin panel."""
-    try:
-        endpoint_file = EMBEDDING_ENDPOINT_FILE
-        if os.path.exists(endpoint_file):
-            import json
-            data = json.loads(open(endpoint_file, encoding="utf-8").read())
-            if data.get("url"):
-                return data
-    except Exception:
-        pass
+    """Retired compatibility hook.
+
+    Provider cutover imports the old file before normal application startup;
+    runtime code must never revive it as provider authority.
+    """
+
     return {}
 
 
-_http_embed_down = False  # process-level latch: skip re-probing a dead endpoint
-
-
 def reset_http_embed_state():
-    """Clear the 'HTTP embedding endpoint is down' latch so the next
-    get_embedding_client() re-probes. Call this when the embedding endpoint
-    setting changes (e.g. the user starts Ollama and saves the endpoint) —
-    otherwise a latch tripped at startup would keep us on FastEmbed for the
-    whole process even after the endpoint comes back."""
-    global _http_embed_down
-    _http_embed_down = False
+    """Retired no-op retained for import compatibility."""
 
 
-def get_embedding_client():
-    """Factory: try HTTP API first, fall back to local fastembed."""
-    global _http_embed_down
+_managed_factory = ManagedEmbeddingClientFactory()
 
-    # Check for a persisted custom endpoint (saved from admin panel)
-    persisted = _load_persisted_endpoint()
-    if persisted.get("url"):
-        url = persisted["url"]
-        model = persisted.get("model", "")
-        api_key = persisted.get("api_key", "")
-        # Also set in env so other code sees it
-        os.environ["EMBEDDING_URL"] = url
-        if model:
-            os.environ["EMBEDDING_MODEL"] = model
-        if api_key:
-            from src.secret_storage import decrypt
-            os.environ["EMBEDDING_API_KEY"] = decrypt(api_key)
-    # Try the HTTP embedding API — unless we already found it down this process
-    # (avoids paying the connect timeout again on every RAG/memory/tool probe).
-    if not _http_embed_down:
-        try:
-            client = EmbeddingClient()
-            client.get_sentence_embedding_dimension()  # health check
-            logger.info(f"Using HTTP embedding API: {client.url} model={client.model}")
-            return client
-        except Exception as e:
-            _http_embed_down = True
-            logger.warning(f"HTTP embedding API unavailable ({e}); using local FastEmbed for the rest of this process")
 
-    # Fall back to local fastembed
-    try:
-        client = FastEmbedClient()
-        client.get_sentence_embedding_dimension()
-        logger.info(f"Using local FastEmbed: model={client.model}")
-        return client
-    except ImportError:
-        logger.error("fastembed not installed — run: pip install fastembed")
-    except Exception as e:
-        logger.error(f"FastEmbed init failed: {e}")
+def get_embedding_client(owner: Optional[str] = None):
+    """Return only the managed client factory or one exact owner client.
 
-    return None
+    Missing normalized routes are surfaced when that owner first requests an
+    embedding.  There is intentionally no HTTP-to-local fallback.
+    """
+
+    if owner is None:
+        return _managed_factory
+    return _managed_factory.for_owner(owner)
+
+
+__all__ = [
+    "EmbeddingClient",
+    "FastEmbedClient",
+    "ManagedEmbeddingClient",
+    "ManagedEmbeddingClientFactory",
+    "ManagedEmbeddingError",
+    "get_embedding_client",
+]

@@ -9,6 +9,12 @@ import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js';
 import { sortModelObjects } from './modelSort.js';
 import Storage from './storage.js';
+import { catalogEntries } from './modelCatalog.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
 
 let API_BASE = '';
 let _active = false;
@@ -464,11 +470,27 @@ export async function showModelPicker() {
       const seen = new Set();
       items.forEach(item => {
         if (item.offline) return;
-        (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
+        catalogEntries(item).forEach(entry => {
+          const mid = entry.mid;
           if (seen.has(mid)) return;
           seen.add(mid);
-          const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
-          result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id, epName: item.endpoint_name || '' });
+          const provider = providerDisplayName(
+            entry.providerDisplayName || item.provider_display_name || entry.family,
+          );
+          const secondary = sharedSecondaryLabel({
+            label: item.share_label,
+            owner: item.shared_by,
+          });
+          const epName = item.shared === true
+            ? [sharedProviderLabel(provider), secondary].filter(Boolean).join(' · ')
+            : (item.endpoint_name || '');
+          result.push({
+            mid,
+            display: (entry.displayName || mid).split('/').pop(),
+            url: item.url,
+            endpointId: item.endpoint_id,
+            epName,
+          });
         });
       });
       _cachedModels = sortModelObjects(result);
@@ -949,7 +971,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
     bodyEl.innerHTML = markdownModule.processWithThinking(
       markdownModule.squashOutsideCode(accumulated)
     );
-    if (window.hljs) holderEl.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(holderEl);
     if (markdownModule.renderMermaid) markdownModule.renderMermaid(holderEl);
     holderEl.appendChild(chatRenderer.createMsgFooter(holderEl));
   } else if (!bodyEl.querySelector('.agent-tool-event') && !bodyEl.querySelector('img')) {

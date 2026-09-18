@@ -99,6 +99,7 @@ def test_brain_markup_carries_graph_and_digest_tabs():
     assert 'id="memory-graph-detail"' in html
     assert 'id="memory-digest-trusted"' in html
     assert 'id="memory-digest-untrusted"' in html
+    assert 'id="memory-digest-edit-list"' in html
 
 
 def test_memory_js_wires_graph_and_digest():
@@ -109,6 +110,20 @@ def test_memory_js_wires_graph_and_digest():
     assert "digest-preview" in source
     for external in ("d3js.org", "cdn.jsdelivr", "unpkg.com"):
         assert external not in source, "canvas must stay self-contained (T4)"
+
+
+def test_sessions_module_uses_one_canonical_browser_url():
+    html = (_REPO / "static" / "index.html").read_text()
+    app = (_REPO / "static" / "app.js").read_text()
+    feature_sources = "\n".join(
+        path.read_text()
+        for path in (_REPO / "static" / "js").rglob("*.js")
+    )
+
+    assert 'href="/static/js/sessions.js"' in html
+    assert 'src="/static/js/sessions.js"' in html
+    assert "from './js/sessions.js'" in app
+    assert "sessions.js?" not in f"{html}\n{app}\n{feature_sources}"
 
 
 def test_graph_load_resets_stale_view_and_renders_an_honest_empty_state():
@@ -149,3 +164,11 @@ def test_digest_cluster_filter_is_applied_after_the_async_overview_load():
     assert "graphState.tagFilter = cluster.label;" not in digest
     assert "const tagFilter = graphState.nextTagFilter;" in tabs
     assert "loadMemoryGraph({ tagFilter });" in tabs
+
+
+def test_single_imported_memory_save_refetches_browse_state():
+    source = (_REPO / "static" / "js" / "memory.js").read_text()
+    marker = "btn.textContent = result.pending_review ? 'in review' : 'saved';"
+    start = source.index(marker, source.index("async function handleImportFile"))
+    save = source[start:source.index("showToast(result.pending_review", start)]
+    assert "await loadMemories();" in save

@@ -1,8 +1,6 @@
 import z from "zod"
 import { Effect, Option, Scope } from "effect"
-import { createReadStream } from "fs"
 import * as path from "path"
-import { createInterface } from "readline"
 import * as Tool from "./tool"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { LSP } from "../lsp"
@@ -13,6 +11,7 @@ import { SessionCwd } from "./session-cwd"
 import { Instruction } from "../session/instruction"
 import { Provider } from "@/provider"
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+import { fileResult, type FileResult } from "./file-contract"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -26,6 +25,27 @@ const parameters = z.object({
   offset: z.coerce.number().describe("The line number to start reading from (1-indexed)").optional(),
   limit: z.coerce.number().describe("The maximum number of lines to read (defaults to 2000)").optional(),
 })
+
+type ReadMetadata = {
+  preview: string
+  truncated: boolean
+  loaded: string[]
+  fingerprint?: string
+  encoding?: string
+  newline?: string
+  path: string
+  media_type: string
+  bytes_considered?: number
+  lines_considered?: number
+  truncation_reason?: "byte_limit" | "line_limit"
+  file: FileResult
+  page: {
+    cursor: number
+    next_cursor?: number
+    has_more: boolean
+    total: number
+  }
+}
 
 export const ReadTool = Tool.define(
   "read",
@@ -148,13 +168,14 @@ export const ReadTool = Tool.define(
         return yield* Effect.fail(new Error("offset must be greater than or equal to 1"))
       }
 
-      let filepath = params.file_path
-      if (!path.isAbsolute(filepath)) {
-        filepath = path.resolve(SessionCwd.get(ctx.sessionID), filepath)
+      let requested = params.file_path
+      if (!path.isAbsolute(requested)) {
+        requested = path.resolve(SessionCwd.get(ctx.sessionID), requested)
       }
       if (process.platform === "win32") {
-        filepath = AppFileSystem.normalizePath(filepath)
+        requested = AppFileSystem.normalizePath(requested)
       }
+      const filepath = AppFileSystem.resolve(requested)
       const title = path.relative(Instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(
@@ -185,6 +206,10 @@ export const ReadTool = Tool.define(
         const start = offset - 1
         const sliced = items.slice(start, start + limit)
         const truncated = start + sliced.length < items.length
+        const contractItems = sliced.map((item) => ({
+          path: AppFileSystem.resolve(path.join(filepath, item.replace(/\/$/, ""))),
+          kind: item.endsWith("/") ? "directory" : "file",
+        }))
 
         return {
           title,
@@ -202,7 +227,37 @@ export const ReadTool = Tool.define(
             preview: sliced.slice(0, 20).join("\n"),
             truncated,
             loaded: [] as string[],
-          },
+            fingerprint: undefined as string | undefined,
+            encoding: undefined as string | undefined,
+            newline: undefined as string | undefined,
+            path: filepath,
+            media_type: "inode/directory",
+            file: fileResult({
+              operation: "list",
+              path: filepath,
+              kind: "directory",
+              range: sliced.length
+                ? { unit: "entry", start: offset, end: offset + sliced.length - 1 }
+                : null,
+              page: {
+                unit: "entry",
+                cursor: offset,
+                next_cursor: truncated ? offset + sliced.length : null,
+                has_more: truncated,
+                returned: sliced.length,
+                total: items.length,
+              },
+              truncation_reason: truncated ? "result_limit" : null,
+              media_type: "inode/directory",
+              items: contractItems,
+            }),
+            page: {
+              cursor: offset,
+              next_cursor: truncated ? offset + sliced.length : undefined,
+              has_more: truncated,
+              total: items.length,
+            },
+          } as ReadMetadata,
         }
       }
 
@@ -231,11 +286,11 @@ export const ReadTool = Tool.define(
             : undefined)
         const supportsImage = model?.capabilities.input.image ?? false
         if (!supportsImage) {
-        const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
-        const preferredRef = preferred ? `${preferred.providerID}/${preferred.id}` : undefined
-        const dispatch = preferredRef
-          ? `dispatch a vision-capable subagent: actor run <type> "<desc>" "analyze the image at ${filepath}" --model ${preferredRef} (run \`actor models --vision\` for the full list)`
-          : `no vision-capable model is configured — ask the user to configure one or use an OCR tool`
+          const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
+          const preferredRef = preferred ? `${preferred.providerID}/${preferred.id}` : undefined
+          const dispatch = preferredRef
+            ? `dispatch a vision-capable subagent: actor run <type> "<desc>" "analyze the image at ${filepath}" --model ${preferredRef} (run \`actor models --vision\` for the full list)`
+            : `no vision-capable model is configured — ask the user to configure one or use an OCR tool`
           const warning = [
             `Cannot read image "${path.basename(filepath)}" — the current model has no vision support, so its visual content is unavailable.`,
             `If you need to understand the image visually, ${dispatch}.`,
@@ -244,7 +299,39 @@ export const ReadTool = Tool.define(
           return {
             title,
             output: warning,
-            metadata: { preview: warning, truncated: false, loaded: [] as string[] },
+            metadata: {
+              preview: warning,
+              truncated: false,
+              loaded: [] as string[],
+              fingerprint: undefined as string | undefined,
+              encoding: undefined as string | undefined,
+              newline: undefined as string | undefined,
+              path: filepath,
+              media_type: mime,
+              file: fileResult({
+                operation: "read",
+                path: filepath,
+                kind: "image",
+                range: sample.byteLength ? { unit: "byte", start: 0, end: sample.byteLength - 1 } : null,
+                page: {
+                  unit: "byte",
+                  cursor: 0,
+                  next_cursor: null,
+                  has_more: false,
+                  returned: 0,
+                  total: Number(stat.size),
+                },
+                bytes_considered: sample.byteLength,
+                media_type: mime,
+                diagnostics: [{ code: "vision_unavailable", message: warning }],
+              }),
+              page: {
+                cursor: 0,
+                next_cursor: undefined,
+                has_more: false,
+                total: Number(stat.size),
+              },
+            } as ReadMetadata,
           }
         }
         const bytes = yield* fs.readFile(filepath)
@@ -255,7 +342,36 @@ export const ReadTool = Tool.define(
             preview: "Image read successfully",
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
-          },
+            fingerprint: AppFileSystem.fingerprintBytes(bytes),
+            encoding: undefined as string | undefined,
+            newline: undefined as string | undefined,
+            path: filepath,
+            media_type: mime,
+            bytes_considered: bytes.byteLength,
+            file: fileResult({
+              operation: "read",
+              path: filepath,
+              kind: "image",
+              range: bytes.byteLength ? { unit: "byte", start: 0, end: bytes.byteLength - 1 } : null,
+              page: {
+                unit: "byte",
+                cursor: 0,
+                next_cursor: null,
+                has_more: false,
+                returned: bytes.byteLength,
+                total: bytes.byteLength,
+              },
+              bytes_considered: bytes.byteLength,
+              media_type: mime,
+              fingerprint: AppFileSystem.fingerprintBytes(bytes),
+            }),
+            page: {
+              cursor: 0,
+              next_cursor: undefined,
+              has_more: false,
+              total: Number(stat.size),
+            },
+          } as ReadMetadata,
           attachments: [
             {
               type: "file" as const,
@@ -275,7 +391,36 @@ export const ReadTool = Tool.define(
             preview: "PDF read successfully",
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
-          },
+            fingerprint: AppFileSystem.fingerprintBytes(bytes),
+            encoding: undefined as string | undefined,
+            newline: undefined as string | undefined,
+            path: filepath,
+            media_type: mime,
+            bytes_considered: bytes.byteLength,
+            file: fileResult({
+              operation: "read",
+              path: filepath,
+              kind: "pdf",
+              range: bytes.byteLength ? { unit: "byte", start: 0, end: bytes.byteLength - 1 } : null,
+              page: {
+                unit: "byte",
+                cursor: 0,
+                next_cursor: null,
+                has_more: false,
+                returned: bytes.byteLength,
+                total: bytes.byteLength,
+              },
+              bytes_considered: bytes.byteLength,
+              media_type: mime,
+              fingerprint: AppFileSystem.fingerprintBytes(bytes),
+            }),
+            page: {
+              cursor: 0,
+              next_cursor: undefined,
+              has_more: false,
+              total: Number(stat.size),
+            },
+          } as ReadMetadata,
           attachments: [
             {
               type: "file" as const,
@@ -287,12 +432,53 @@ export const ReadTool = Tool.define(
       }
 
       if (isBinaryFile(filepath, sample)) {
-        return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
+        const warning = `Cannot read binary file: ${filepath}`
+        return {
+          title,
+          output: warning,
+          metadata: {
+            preview: warning,
+            truncated: false,
+            loaded: loaded.map((item) => item.filepath),
+            fingerprint: undefined as string | undefined,
+            encoding: undefined as string | undefined,
+            newline: undefined as string | undefined,
+            path: filepath,
+            media_type: mime,
+            bytes_considered: sample.byteLength,
+            file: fileResult({
+              operation: "read",
+              path: filepath,
+              kind: "binary",
+              page: {
+                unit: "byte",
+                cursor: 0,
+                next_cursor: null,
+                has_more: false,
+                returned: 0,
+                total: Number(stat.size),
+              },
+              bytes_considered: sample.byteLength,
+              media_type: mime,
+              diagnostics: [
+                {
+                  code: "unsupported_media",
+                  message: "The read tool accepts supported text, image, and PDF files only.",
+                },
+              ],
+            }),
+            page: {
+              cursor: 0,
+              next_cursor: undefined,
+              has_more: false,
+              total: Number(stat.size),
+            },
+          } as ReadMetadata,
+        }
       }
 
-      const file = yield* Effect.promise(() =>
-        lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset ?? 1 }),
-      )
+      const snapshot = yield* fs.readTextSnapshot(filepath)
+      const file = lines(snapshot.text, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset ?? 1 })
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -327,57 +513,93 @@ export const ReadTool = Tool.define(
           preview: file.raw.slice(0, 20).join("\n"),
           truncated,
           loaded: loaded.map((item) => item.filepath),
-        },
+          fingerprint: snapshot.fingerprint,
+          encoding: snapshot.encoding,
+          newline: snapshot.newline === "\n" ? "lf" : snapshot.newline === "\r\n" ? "crlf" : "cr",
+          path: filepath,
+          media_type: mime,
+          bytes_considered: snapshot.size,
+          lines_considered: file.raw.length,
+          truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : undefined,
+          file: fileResult({
+            operation: "read",
+            path: filepath,
+            kind: "text",
+            range: file.raw.length ? { unit: "line", start: file.offset, end: last } : null,
+            page: {
+              unit: "line",
+              cursor: file.offset,
+              next_cursor: truncated ? next : null,
+              has_more: truncated,
+              returned: file.raw.length,
+              total: file.count,
+            },
+            bytes_considered: snapshot.size,
+            lines_considered: file.raw.length,
+            truncation_reason: file.cut ? "byte_limit" : file.more ? "line_limit" : null,
+            encoding: snapshot.encoding,
+            newline: snapshot.newline === "\n" ? "lf" : snapshot.newline === "\r\n" ? "crlf" : "cr",
+            media_type: mime,
+            fingerprint: snapshot.fingerprint,
+            diagnostics: truncated
+              ? [{ code: "truncated", message: `Continue at line cursor ${next}.` }]
+              : [],
+          }),
+          page: {
+            cursor: file.offset,
+            next_cursor: truncated ? next : undefined,
+            has_more: truncated,
+            total: file.count,
+          },
+        } as ReadMetadata,
       }
     })
 
     return {
       description: DESCRIPTION,
       parameters,
+      resources: (params: z.infer<typeof parameters>, ctx: Tool.Context) => ({
+        reads: [
+          path.isAbsolute(params.file_path)
+            ? params.file_path
+            : path.resolve(SessionCwd.get(ctx.sessionID), params.file_path),
+        ],
+      }),
       execute: (params: z.infer<typeof parameters>, ctx: Tool.Context) => run(params, ctx).pipe(Effect.orDie),
     }
   }),
 )
 
-async function lines(filepath: string, opts: { limit: number; offset: number }) {
-  const stream = createReadStream(filepath, { encoding: "utf8" })
-  const rl = createInterface({
-    input: stream,
-    // Note: we use the crlfDelay option to recognize all instances of CR LF
-    // ('\r\n') in file as a single line break.
-    crlfDelay: Infinity,
-  })
-
+function lines(text: string, opts: { limit: number; offset: number }) {
   const start = opts.offset - 1
   const raw: string[] = []
   let bytes = 0
   let count = 0
   let cut = false
   let more = false
-  try {
-    for await (const text of rl) {
-      count += 1
-      if (count <= start) continue
+  const source = text ? text.split(/\r\n|\n|\r/) : []
+  if (source.length && source.at(-1) === "") source.pop()
+  for (const textLine of source) {
+    count += 1
+    if (count <= start) continue
 
-      if (raw.length >= opts.limit) {
-        more = true
-        continue
-      }
-
-      const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
-      const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-      if (bytes + size > MAX_BYTES) {
-        cut = true
-        more = true
-        break
-      }
-
-      raw.push(line)
-      bytes += size
+    if (raw.length >= opts.limit) {
+      more = true
+      continue
     }
-  } finally {
-    rl.close()
-    stream.destroy()
+    if (cut) continue
+
+    const line =
+      textLine.length > MAX_LINE_LENGTH ? textLine.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : textLine
+    const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
+    if (bytes + size > MAX_BYTES) {
+      cut = true
+      more = true
+      continue
+    }
+
+    raw.push(line)
+    bytes += size
   }
 
   return { raw, count, cut, more, offset: opts.offset }

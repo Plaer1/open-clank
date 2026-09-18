@@ -1,3 +1,39 @@
+# ---- builder: compile the exact vendored Open Clank managed engine ----
+# The shared build driver fetches Bun's pinned per-platform archive and checks
+# the vendor-manifest SHA-256 before execution; no mutable toolchain image is
+# trusted as an input.
+FROM python:3.14-slim AS openclank-bun-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+    annotated-types==0.8.0 \
+    pydantic==2.13.4 \
+    pydantic-core==2.46.4 \
+    typing-extensions==4.16.0 \
+    typing-inspection==0.4.2
+WORKDIR /build
+COPY packages/mimo-code/ packages/mimo-code/
+COPY contracts/openclank/managed-provider-v1.schema.json contracts/openclank/managed-provider-v1.schema.json
+COPY scripts/openclank_engine.py scripts/openclank_engine.py
+COPY src/constants.py src/constants.py
+COPY src/openclank/engine_build.py src/openclank/engine_build.py
+COPY src/openclank/managed_protocol.py src/openclank/managed_protocol.py
+RUN python scripts/openclank_engine.py \
+    --repo-root /build \
+    --install-root /engine \
+    build
+
+# ---- builder: compile the authenticated history writer shipped in Linux images ----
+# Keeping this in a dedicated Rust stage makes the final image independent of
+# a host target/debug tree while preserving the vendored Lore provenance.
+FROM rust:1.89-bookworm AS openclank-history-builder
+WORKDIR /build/packages/openclank-history
+COPY packages/openclank-history/ ./
+RUN cargo build --locked --release --bin openclank-history-service
+
 # ---- builder: patch + build wheels for Real-ESRGAN's broken-on-3.14 deps ----
 # basicsr/gfpgan/facexlib read their version via exec()+locals()['__version__'],
 # which raises KeyError on Python 3.13+ (PEP 667). Build patched wheels here so
@@ -18,8 +54,9 @@ FROM python:3.14-slim
 # launch inside Docker.
 # nodejs/npm provide npx for the built-in Browser MCP server.
 # chromium provides the actual browser binary used by that MCP server.
-# gosu lets the entrypoint drop privileges cleanly so signals still reach
-# uvicorn directly (no extra shell layer like `su`/`sudo` would add).
+# gosu lets the entrypoint drop privileges cleanly so signals still reach the
+# pre-app bootstrap and, after its exec, uvicorn directly (no extra shell layer
+# like `su`/`sudo` would add).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -94,6 +131,9 @@ RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
 
 # Copy app code
 COPY . .
+COPY --from=openclank-bun-builder /engine/ /app/libexec/openclank/engine/
+COPY --from=openclank-history-builder /build/packages/openclank-history/target/release/openclank-history-service /app/libexec/openclank/history/openclank-history-service
+ENV APP_RESOURCES=/app
 
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
@@ -107,7 +147,7 @@ RUN mkdir -p data logs services/cache/search
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-EXPOSE 7000
+EXPOSE 7777
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7000"]
+CMD ["python", "scripts/openclank_bootstrap.py", "serve", "--host", "0.0.0.0", "--port", "7777"]

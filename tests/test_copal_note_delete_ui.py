@@ -23,4 +23,5 @@ def test_note_delete_saves_pending_edits_and_rejects_read_only_notes():
     assert "notesFeature?.prepareDelete" in app
     assert "async function prepareDelete(docId)" in feature
     assert "if (!await saveDraft(docId))" in feature
-    assert "acceptSavedDocument, prepareDelete" in feature
+    assert "acceptSavedDocument" in feature
+    assert "prepareDelete" in feature

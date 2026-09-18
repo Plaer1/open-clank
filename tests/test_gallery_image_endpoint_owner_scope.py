@@ -1,126 +1,65 @@
-"""Owner-scope regression for gallery image endpoint selection.
+"""Owner-scope regressions for the managed Gallery image router.
 
-The image editor/upscale proxies select ``ModelEndpoint`` rows and may copy the
-row's stored ``api_key`` for OpenAI-compatible image endpoints. That lookup must
-only consider endpoints visible to the caller, otherwise users sharing the same
-base URL can borrow another account's private image API key.
+Legacy Gallery code selected ``ModelEndpoint`` rows and copied their API keys
+into direct HTTP requests.  The hard cut instead delegates owner-scoped route
+selection and credential leasing to the managed operation router.
 """
 
-from types import SimpleNamespace
+import inspect
+
+import pytest
 
 import routes.gallery_routes as gallery_routes
 
 
-class _Predicate:
-    def __init__(self, check):
-        self._check = check
-
-    def __call__(self, row):
-        return self._check(row)
-
-    def __or__(self, other):
-        return _Predicate(lambda row: self(row) or other(row))
+def _source(value) -> str:
+    return inspect.getsource(value)
 
 
-class _Column:
-    def __init__(self, name):
-        self.name = name
+def test_gallery_module_has_no_legacy_endpoint_or_secret_transport():
+    body = inspect.getsource(gallery_routes)
 
-    def __eq__(self, value):
-        return _Predicate(lambda row: getattr(row, self.name) == value)
-
-
-class _ModelEndpoint:
-    base_url = _Column("base_url")
-    model_type = _Column("model_type")
-    is_enabled = _Column("is_enabled")
-    owner = _Column("owner")
+    assert "ModelEndpoint" not in body
+    assert "api_key" not in body
+    assert "httpx" not in body
+    assert "_first_visible_image_endpoint" not in body
+    assert "_visible_image_endpoint_for_base" not in body
 
 
-class _Query:
-    def __init__(self, rows):
-        self._rows = list(rows)
+@pytest.mark.asyncio
+async def test_managed_transform_passes_owner_and_affinity(monkeypatch):
+    seen = {}
 
-    def filter(self, *predicates):
-        self._rows = [row for row in self._rows if all(pred(row) for pred in predicates)]
-        return self
+    async def capture(**kwargs):
+        seen.update(kwargs)
+        return b"managed", "image/png", object()
 
-    def all(self):
-        return list(self._rows)
+    monkeypatch.setattr(gallery_routes, "transform_image", capture)
 
-
-class _DB:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def query(self, model):
-        assert model is _ModelEndpoint
-        return _Query(self._rows)
-
-
-def _ep(base_url, owner, *, enabled=True, model_type="image", api_key="sk-secret"):
-    return SimpleNamespace(
-        base_url=base_url,
-        owner=owner,
-        is_enabled=enabled,
-        model_type=model_type,
-        api_key=api_key,
+    content, media_type, _result = await gallery_routes._managed_gallery_transform(
+        owner="alice",
+        operation="image.edit",
+        image=b"source",
+        input={"prompt": "make it blue"},
+        model_route_id="route_image",
+        root_operation_id="op_root",
+        grant_id="grant_shared",
+        idempotency_key="idem-1",
     )
 
-
-def _patch_model(monkeypatch):
-    monkeypatch.setattr(gallery_routes, "ModelEndpoint", _ModelEndpoint)
-
-
-URL = "https://api.example.com/v1"
-
-
-def test_first_visible_image_endpoint_rejects_another_owner(monkeypatch):
-    _patch_model(monkeypatch)
-    rows = [_ep(URL, "bob")]
-
-    assert gallery_routes._first_visible_image_endpoint(_DB(rows), "alice") is None
+    assert (content, media_type) == (b"managed", "image/png")
+    assert seen["owner"] == "alice"
+    assert seen["model_route_id"] == "route_image"
+    assert seen["root_operation_id"] == "op_root"
+    assert seen["grant_id"] == "grant_shared"
+    assert seen["idempotency_key"] == "idem-1"
 
 
-def test_first_visible_image_endpoint_prefers_callers_own_row(monkeypatch):
-    _patch_model(monkeypatch)
-    rows = [_ep(URL, None, api_key="shared"), _ep(URL, "alice", api_key="own")]
+def test_gallery_model_selectors_are_normalized_route_ids_only():
+    assert gallery_routes._managed_route_id({"model_route_id": "route_123"}) == "route_123"
+    assert gallery_routes._managed_route_id({"modelRouteID": "route_456"}) == "route_456"
 
-    ep = gallery_routes._first_visible_image_endpoint(_DB(rows), "alice")
+    with pytest.raises(Exception) as caught:
+        gallery_routes._managed_route_id({"endpoint": "https://provider.invalid/v1"})
 
-    assert ep is not None
-    assert ep.owner == "alice"
-    assert ep.api_key == "own"
-
-
-def test_visible_image_endpoint_for_base_rejects_same_url_other_owner(monkeypatch):
-    _patch_model(monkeypatch)
-    rows = [_ep(URL, "bob")]
-
-    assert gallery_routes._visible_image_endpoint_for_base(_DB(rows), URL, "alice") is None
-
-
-def test_visible_image_endpoint_for_base_allows_shared_or_own(monkeypatch):
-    _patch_model(monkeypatch)
-    rows = [
-        _ep("https://other.example/v1", "alice"),
-        _ep(URL, None, api_key="shared"),
-        _ep(URL, "alice", api_key="own"),
-    ]
-
-    ep = gallery_routes._visible_image_endpoint_for_base(_DB(rows), "https://api.example.com", "alice")
-
-    assert ep is not None
-    assert ep.owner == "alice"
-    assert ep.api_key == "own"
-    assert ep.base_url == URL
-
-
-def test_image_endpoint_unresolved_owner_only_sees_legacy_null_owner(monkeypatch):
-    _patch_model(monkeypatch)
-    rows = [_ep(URL, "bob"), _ep(URL, None)]
-
-    ep = gallery_routes._visible_image_endpoint_for_base(_DB(rows), URL, None)
-
-    assert ep is not None
-    assert ep.owner is None
+    assert getattr(caught.value, "status_code", None) == 400

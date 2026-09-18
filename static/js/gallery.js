@@ -10,8 +10,262 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { topPortalZ } from './toolWindowZOrder.js';
 import sessionModule from './sessions.js';
 import fileHandlerModule from './fileHandler.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
+import { downloadExactResource, showResourceInFiles } from './showInFiles.js';
+import { registerAdapter } from './custom-context-menu.js';
+import { createResourcePicker } from './copal/resourcePicker.js';
 
 const API_BASE = window.location.origin;
+export const GALLERY_EXPORT_MAX_BYTES = 64 * 1024 * 1024;
+export const GALLERY_EXPORT_MAX_NAME = 240;
+
+const _capSet = (value) => {
+  if (Array.isArray(value)) return new Set(value.map(item => String(item).toLowerCase()));
+  if (value && typeof value === 'object') return new Set(Object.entries(value).filter(([, enabled]) => enabled).map(([key]) => key.toLowerCase()));
+  return new Set();
+};
+
+/** Classify a native Gallery item without treating its database id as a ref. */
+export function classifyGalleryExport(image, destination = null, { maxBytes = GALLERY_EXPORT_MAX_BYTES } = {}) {
+  const item = image && typeof image === 'object' ? image : {};
+  const destinationCaps = _capSet(destination?.capabilities);
+  const itemCaps = _capSet(item.capabilities);
+  const mime = String(item.mime_type || item.mime || item.type || '').toLowerCase();
+  const readable = item.readable_bytes === true || item.readable === true || item.can_read === true || itemCaps.has('read');
+  const exportable = item.exportable === true || item.can_export === true || itemCaps.has('export') || itemCaps.has('download');
+  const imageId = item.id;
+  if (!((typeof imageId === 'string' && imageId.trim()) || (typeof imageId === 'number' && Number.isSafeInteger(imageId) && imageId >= 0)) || String(imageId).length > 128 || /[\u0000-\u001f\u007f]/u.test(String(imageId))) return { ok: false, code: 'missing_identity', reason: 'This Gallery image is unavailable.' };
+  if (!mime.startsWith('image/')) return { ok: false, code: 'unsupported_media', reason: 'Only readable images can be exported to Files.' };
+  if (!readable || !exportable) return { ok: false, code: 'export_denied', reason: 'This image cannot be exported to the selected destination.' };
+  const rawSize = item.file_size ?? item.size ?? 0;
+  const size = Number(rawSize);
+  if (!Number.isSafeInteger(size) || size < 0) return { ok: false, code: 'invalid_size', reason: 'This Gallery image is unavailable.' };
+  if (size > maxBytes) return { ok: false, code: 'oversize', reason: 'This image is too large for the selected Files destination.' };
+  const destinationRef = String(destination?.resource_ref || destination?.resourceRef || '').trim();
+  const destinationProvider = String(destination?.provider || '').trim();
+  const destinationKey = String(destination?.resource_key || destination?.resourceKey || '').trim();
+  const destinationRevision = destination?.revision;
+  if (!destinationRef || !destinationProvider || !destinationKey || !destinationRevision || typeof destinationRevision !== 'object' || Array.isArray(destinationRevision) || Object.keys(destinationRevision).some(key => !['kind', 'value'].includes(key)) || typeof destinationRevision.kind !== 'string' || typeof destinationRevision.value !== 'string' || !destinationRevision.kind || !destinationRevision.value) return { ok: false, code: 'missing_destination', reason: 'Choose an authorized Files destination folder.' };
+  if (!(destinationCaps.has('write') && (destinationCaps.has('children') || destinationCaps.has('import')))) {
+    return { ok: false, code: 'destination_denied', reason: 'This image cannot be exported to the selected destination.' };
+  }
+  return { ok: true, mime, size: Number.isFinite(size) ? size : null };
+}
+
+async function _readBoundedGalleryBlob(response, maxBytes, signal = null) {
+  if (!response?.ok) throw Object.assign(new Error('Gallery image is unavailable.'), { code: 'source_unavailable', status: response?.status });
+  const advertised = Number(response.headers?.get?.('content-length') || 0);
+  if (advertised > maxBytes) throw Object.assign(new Error('This image is too large for the selected Files destination.'), { code: 'oversize' });
+  if (!response.body?.getReader) {
+    const blob = await response.blob();
+    if (blob.size > maxBytes) throw Object.assign(new Error('This image is too large for the selected Files destination.'), { code: 'oversize' });
+    return blob;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  let complete = false;
+  try {
+    while (true) {
+      if (signal?.aborted) throw Object.assign(new Error('Gallery export was cancelled.'), { name: 'AbortError' });
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value?.byteLength || 0;
+      if (total > maxBytes) throw Object.assign(new Error('This image is too large for the selected Files destination.'), { code: 'oversize' });
+      chunks.push(part.value);
+    }
+    complete = true;
+  } finally {
+    if (!complete || signal?.aborted) { try { await reader.cancel(); } catch (_) {} }
+    try { reader.releaseLock(); } catch (_) {}
+  }
+  return new Blob(chunks, { type: response.headers?.get?.('content-type') || 'application/octet-stream' });
+}
+
+/** Explicit Gallery-native export through the current Files import receipt. */
+const _galleryExportReservations = new Map();
+
+function _sameRevision(a, b) {
+  return a && b && typeof a === 'object' && typeof b === 'object'
+    && Object.keys(a).length === 2 && Object.keys(b).length === 2
+    && a.kind === b.kind && a.value === b.value;
+}
+
+function _strictGalleryReceipt(receipt, operation, itemId, generation) {
+  if (!receipt || typeof receipt !== 'object' || receipt.operation_id !== operation || receipt.generation !== generation || !['complete', 'partial', 'pending'].includes(receipt.state) || !Array.isArray(receipt.items) || receipt.items.length !== 1 || receipt.items[0]?.item_id !== itemId) {
+    throw Object.assign(new Error('Files import receipt did not confirm this Gallery image.'), { code: 'receipt_unconfirmed', receipt });
+  }
+  const outcome = receipt.items[0].outcome;
+  if (!['committed', 'unchanged', 'conflict', 'denied', 'failed', 'pending', 'stale'].includes(outcome) || (receipt.state === 'pending' && outcome !== 'pending') || (receipt.state === 'complete' && outcome === 'pending')) throw Object.assign(new Error('Files import receipt is invalid.'), { code: 'receipt_invalid', receipt });
+  return receipt;
+}
+
+function _galleryExportResult(receipt, operation, itemId, bytes, provenance) {
+  const outcome = receipt?.items?.[0]?.outcome || 'unknown';
+  const status = outcome === 'committed' || outcome === 'unchanged' ? 'committed' : outcome === 'pending' ? 'pending' : outcome === 'conflict' ? 'conflict' : outcome === 'denied' ? 'denied' : outcome === 'failed' || outcome === 'stale' ? 'failed' : 'unknown';
+  return { status, outcome, operation_id: operation, item_id: itemId, bytes, provenance, receipt };
+}
+
+export async function exportGalleryImageToFiles(image, destination, {
+  filesClient = filesFacadeClient,
+  fetchImpl = globalThis.fetch?.bind(globalThis),
+  operationId = null,
+  generation = 0,
+  account = null,
+  workspace = null,
+  policyGeneration = generation,
+  collision = 'fail',
+  maxBytes = GALLERY_EXPORT_MAX_BYTES,
+  signal = null,
+  authorizeDestination = null,
+  getContext = null,
+} = {}) {
+  const advertisedDestinationLimit = Number(destination?.max_bytes || destination?.max_import_bytes || destination?.limits?.max_bytes || 0);
+  const effectiveMaxBytes = Number.isFinite(advertisedDestinationLimit) && advertisedDestinationLimit > 0
+    ? Math.min(maxBytes, advertisedDestinationLimit) : maxBytes;
+  const check = classifyGalleryExport(image, destination, { maxBytes: effectiveMaxBytes });
+  if (!check.ok) throw Object.assign(new Error(check.reason), { code: check.code });
+  const operation = String(operationId || `gallery-export-${Date.now()}-${Math.random().toString(16).slice(2)}`).slice(0, 128);
+  const itemId = `gallery-${String(image.id).trim()}`.slice(0, 128);
+  const reservationKey = `${operation}:${itemId}`;
+  if (_galleryExportReservations.has(reservationKey)) return _galleryExportReservations.get(reservationKey);
+  const task = (async () => {
+  const destinationRef = String(destination.resource_ref || destination.resourceRef || '').trim();
+  const currentGeneration = Number(generation);
+  if (!Number.isSafeInteger(currentGeneration) || currentGeneration < 0) throw new TypeError('Files policy generation is invalid');
+  const sourceUrl = String(image.export_url || image.url || '').trim();
+  if (!sourceUrl || typeof fetchImpl !== 'function') throw Object.assign(new Error('Gallery image bytes are unavailable.'), { code: 'source_unavailable' });
+  const assertLive = () => {
+    if (signal?.aborted) throw Object.assign(new Error('Gallery export was cancelled.'), { name: 'AbortError' });
+    if (typeof getContext !== 'function') throw Object.assign(new Error('File access changed; the Gallery export was stopped.'), { code: 'stale_context' });
+    const current = getContext();
+    if (!current || String(current.account ?? current.account_id ?? '') !== String(account ?? '') || String(current.workspace ?? current.workspace_id ?? '') !== String(workspace ?? '') || String(current.provider ?? destination.provider) !== String(destination.provider) || Number(current.generation ?? current.policyGeneration) !== currentGeneration || Number(current.policyGeneration ?? current.generation) !== Number(policyGeneration)) throw Object.assign(new Error('File access changed; the Gallery export was stopped.'), { code: 'stale_context' });
+  };
+  assertLive();
+  const validateDestination = async () => {
+  if (typeof authorizeDestination === 'function') {
+    const current = await authorizeDestination(destinationRef, { signal });
+    const currentKey = String(current?.resource_key || current?.resourceKey || current?.id || '').trim();
+    const expectedKey = String(destination.resource_key || destination.resourceKey || '').trim();
+    const normalizedCurrentKey = currentKey === expectedKey || currentKey.startsWith(`${account}|${workspace}|${destination.provider}:`) ? currentKey : `${account}|${workspace}|${destination.provider}:${currentKey}`;
+    if (!current || String(current.resource_ref || current.resourceRef || '') !== destinationRef || String(current.provider || '') !== String(destination.provider || '') || normalizedCurrentKey !== expectedKey || !_sameRevision(current.revision, destination.revision) || !(_capSet(current.capabilities).has('write'))) {
+      throw Object.assign(new Error('This image cannot be exported to the selected destination.'), { code: 'destination_denied' });
+    }
+  } else if (typeof filesClient.stat === 'function') {
+    const current = await filesClient.stat(destinationRef, { signal });
+    const caps = _capSet(current?.resource?.capabilities || current?.capabilities);
+    const currentResource = current?.resource || {};
+    const revision = currentResource.revision;
+    const currentKey = String(currentResource.resource_key || currentResource.resourceKey || currentResource.id || '').trim();
+    const expectedKey = String(destination.resource_key || destination.resourceKey || '').trim();
+    const normalizedCurrentKey = currentKey === expectedKey || currentKey.startsWith(`${account}|${workspace}|${destination.provider}:`) ? currentKey : `${account}|${workspace}|${destination.provider}:${currentKey}`;
+    if (String(currentResource.ref || '').trim() !== destinationRef || String(currentResource.provider || '') !== String(destination.provider || '') || normalizedCurrentKey !== expectedKey || !_sameRevision(revision, destination.revision) || !caps.has('write') || !caps.has('children') && !caps.has('import')) {
+      throw Object.assign(new Error('This image cannot be exported to the selected destination.'), { code: 'destination_denied' });
+    }
+    }
+  };
+  await validateDestination();
+  assertLive();
+  const response = await fetchImpl(sourceUrl, { credentials: 'same-origin', signal });
+  const blob = await _readBoundedGalleryBlob(response, effectiveMaxBytes, signal);
+  assertLive();
+  if (!String(blob.type || check.mime).toLowerCase().startsWith('image/')) throw Object.assign(new Error('Only readable images can be exported to Files.'), { code: 'unsupported_media' });
+  await validateDestination();
+  assertLive();
+  const filename = String(image.filename || `image-${image.id}.png`).replace(/[\\/\0]/g, '_').slice(0, GALLERY_EXPORT_MAX_NAME) || 'gallery-image.png';
+  const file = typeof File === 'function' ? new File([blob], filename, { type: check.mime }) : Object.assign(blob, { name: filename, lastModified: Date.now() });
+  const provenance = Object.freeze({ domain: 'gallery', gallery_id: String(image.id), source_provider: String(image.provider || 'gallery'), source_revision: image.revision || null, destination_provider: String(destination.provider || 'unknown'), destination_revision: destination.revision || null, account, workspace, policy_generation: Number(policyGeneration), operation_id: operation });
+  assertLive();
+  try {
+    const receipt = await filesClient.importFile(file, { operationId: operation, itemId, generation: currentGeneration, destinationRef, name: filename, collision, signal });
+    _strictGalleryReceipt(receipt, operation, itemId, currentGeneration);
+    return _galleryExportResult(receipt, operation, itemId, blob.size, provenance);
+  } catch (error) {
+    // A lost response is recoverable. Querying the operation receipt prevents
+    // a second import and avoids claiming success without exact accounting.
+    if (typeof filesClient.operationReceipt === 'function' && error?.name !== 'AbortError') {
+      try {
+        const receipt = await filesClient.operationReceipt(operation, { signal });
+        _strictGalleryReceipt(receipt, operation, itemId, currentGeneration);
+        return _galleryExportResult(receipt, operation, itemId, blob.size, provenance);
+      } catch (_) {
+        return { status: 'unknown', outcome: 'unknown', operation_id: operation, item_id: itemId, bytes: blob.size, provenance, receipt: null };
+      }
+    }
+    if (error?.code === 'receipt_unconfirmed' || error?.code === 'receipt_invalid') return { status: 'unknown', outcome: 'unknown', operation_id: operation, item_id: itemId, bytes: blob.size, provenance, receipt: error.receipt || null };
+    throw error;
+  }
+  })();
+  _galleryExportReservations.set(reservationKey, task);
+  return task;
+}
+
+async function _requestGalleryExport(image) {
+  const event = new CustomEvent('openclank-gallery-export-requested', {
+    bubbles: true,
+    detail: Object.freeze({
+      image,
+      source: 'gallery',
+      chooseDestination: true,
+      exportToFiles: (destination, options = {}) => exportGalleryImageToFiles(image, destination, options),
+    }),
+  });
+  document.dispatchEvent(event);
+  const filesContext = (() => {
+    try { return window.__odysseusGetActiveFilesContext?.() || {}; } catch (_) { return {}; }
+  })();
+  const account = String(filesContext.accountId || filesContext.account_id || '').trim();
+  const workspace = String(filesContext.workspace || filesContext.workspaceId || 'default').trim() || 'default';
+  const picker = createResourcePicker({
+    client: filesFacadeClient,
+    purpose: 'folder',
+    accountScope: account,
+    workspaceScope: workspace,
+    generation: Number(filesContext.generation ?? filesContext.policyGeneration ?? 0),
+    getGeneration: () => {
+      try { return Number(window.__odysseusGetActiveFilesContext?.()?.generation ?? filesContext.generation ?? 0); } catch (_) { return Number(filesContext.generation ?? 0); }
+    },
+    getAccountScope: () => {
+      try { return String(window.__odysseusGetActiveFilesContext?.()?.accountId || account); } catch (_) { return account; }
+    },
+    rootLabel: 'Files destination',
+    onSelect: async selected => {
+      const destination = {
+        resource_ref: selected.ref,
+        resource_key: selected.resourceKey,
+        provider: selected.provider,
+        capabilities: selected.capabilities,
+        revision: selected.revision,
+        name: selected.name,
+        max_bytes: filesContext.importCapabilities?.host?.max_total_bytes,
+      };
+      try {
+        const result = await exportGalleryImageToFiles(image, destination, {
+          generation: selected.generation,
+          policyGeneration: selected.generation,
+          account,
+          workspace,
+          getContext: () => {
+            try {
+              const current = window.__odysseusGetActiveFilesContext?.() || {};
+              return { account: current.accountId || current.account_id || account, workspace: current.workspace || workspace, provider: current.provider || destination.provider, generation: current.generation ?? current.policyGeneration ?? selected.generation, policyGeneration: current.policyGeneration ?? current.generation ?? selected.generation };
+            } catch (_) { return { account, workspace }; }
+          },
+        });
+        if (result?.status === 'committed') uiModule?.showToast?.(`Exported ${selected.name || 'image'} to Files.`);
+      } catch (error) {
+        uiModule?.showToast?.(error?.message || 'Gallery image could not be exported to Files.');
+      } finally {
+        picker.destroy();
+      }
+    },
+  });
+  await picker.open();
+}
+
+// Public command seam used by the Gallery button and mounted integration
+// checks. The picker remains the only way to obtain the destination DTO.
+export const requestGalleryExport = _requestGalleryExport;
 let _open = false;
 let _galleryResizeHandler = null;
 
@@ -1319,6 +1573,8 @@ function _renderGrid() {
 function _openDetail(img) {
   const detail = document.getElementById('gallery-detail');
   if (!detail) return;
+  try { detail._galleryContextDispose?.(); } catch (_) {}
+  detail._galleryContextDispose = null;
   // Drop any face-overlay resize listener from the previous photo
   // before the new render attaches its own.
 
@@ -1388,6 +1644,11 @@ function _openDetail(img) {
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>
             Download
           </button>
+          ${img.exportable === true || img.can_export === true || _capSet(img.capabilities).has('export') || _capSet(img.capabilities).has('download')
+            ? `<button class="dropdown-item-compact" id="gallery-export-files-btn">
+            <span class="dropdown-icon">⇥</span>
+            Export to Files…
+          </button>` : ''}
           ${img.album_id ? `<button class="dropdown-item-compact" id="gallery-set-cover-btn">
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span>
             Set as album cover
@@ -1469,6 +1730,70 @@ function _openDetail(img) {
     </div>
   `;
   detail.style.display = 'flex';
+
+  if (!img.read_only && (img.exportable === true || img.can_export === true || _capSet(img.capabilities).has('export') || _capSet(img.capabilities).has('download'))) {
+    detail._galleryContextDispose = registerAdapter(detail, {
+      capture: () => ({ gallery_id: String(img.id || '') }),
+      commands: () => [{ id: 'gallery-export-files', label: 'Export to Files…' }],
+      execute: command => {
+        if (command !== 'gallery-export-files') return false;
+        _requestGalleryExport(img);
+        return true;
+      },
+    });
+  }
+
+  if (img.read_only && img.resource_ref) {
+    // Exact Files opens intentionally omit the Gallery database ID. Keep the
+    // familiar Open Clank detail viewer, but admit only read/download behavior
+    // until every mutation below has an opaque facade action.
+    detail.dataset.galleryOpaqueDetail = 'true';
+    const showInFiles = document.createElement('button');
+    showInFiles.type = 'button';
+    showInFiles.className = 'gallery-detail-back gallery-show-in-files';
+    showInFiles.textContent = 'Show in Files';
+    showInFiles.addEventListener('click', () => { void showResourceInFiles(img.resource_ref); });
+    document.querySelector('.gallery-detail-header > div[style*="flex:1"]')?.after(showInFiles);
+    document.getElementById('gallery-detail-back')?.addEventListener('click', () => {
+      detail.style.display = 'none';
+    });
+    for (const id of [
+      'gallery-edit-direct-btn', 'gallery-chat-photo-btn', 'gallery-detail-fav-header',
+      'gallery-fav-detail', 'gallery-ai-tag-btn', 'gallery-set-cover-btn', 'gallery-delete-btn',
+      'gallery-rotate-btn', 'gallery-rotate-ccw-btn', 'gallery-detail-prev', 'gallery-detail-next', 'gallery-export-files-btn',
+    ]) document.getElementById(id)?.remove();
+    const nameInput = document.getElementById('gallery-detail-name-input');
+    if (nameInput) nameInput.readOnly = true;
+    document.getElementById('gallery-tag-input')?.closest('.gallery-tag-input-wrap')?.remove();
+    document.querySelectorAll('#gallery-user-tag-chips button').forEach(button => {
+      button.disabled = true;
+      button.querySelector('.gallery-tag-x')?.remove();
+    });
+    const album = document.getElementById('gallery-detail-album');
+    if (album) album.disabled = true;
+    const menuBtn = document.getElementById('gallery-detail-menu-btn');
+    const menu = document.getElementById('gallery-detail-menu');
+    if (menuBtn && menu) {
+      const setMenu = show => {
+        menu.hidden = !show;
+        menu.style.display = show ? 'block' : 'none';
+      };
+      setMenu(false);
+      menuBtn.addEventListener('click', event => {
+        event.stopPropagation();
+        setMenu(menu.hidden);
+      });
+      menu.addEventListener('click', () => setMenu(false));
+    }
+    document.getElementById('gallery-download-btn')?.addEventListener('click', async () => {
+      try {
+        await downloadExactResource(img.resource_ref, img.filename || 'gallery-image');
+      } catch (error) {
+        uiModule?.showToast?.(error?.message || 'Download could not be started', 3000);
+      }
+    });
+    return;
+  }
 
   document.getElementById('gallery-detail-back').addEventListener('click', () => {
     detail.style.display = 'none';
@@ -1650,6 +1975,11 @@ function _openDetail(img) {
       a.remove();
     }
   });
+
+  // Gallery-native export is an explicit command. A destination picker/menu
+  // owns the destination ref; this adapter never invents one from a path or
+  // from the Gallery database id.
+  document.getElementById('gallery-export-files-btn')?.addEventListener('click', () => _requestGalleryExport(img));
 
   // Whirlpool while the (newly opened/navigated) image loads — cached images
   // report `complete` immediately, so no spinner flash for those.
@@ -2878,6 +3208,33 @@ export async function openGalleryImage(imageId) {
   }
 }
 
+export async function openResource(resourceRef) {
+  const response = await filesFacadeClient.openResource(resourceRef);
+  if (response?.target?.app !== 'gallery' || !response?.resource?.ref || !response?.payload?.read_only) {
+    throw new Error('Gallery resource response is invalid');
+  }
+  const currentRef = String(response.resource.ref);
+  const payload = response.payload;
+  const exactName = String(response.resource.name || payload.name || payload.filename || 'gallery-image');
+  const urls = {
+    preview: filesFacadeClient.contentUrl(currentRef, { purpose: 'preview' }),
+    download: filesFacadeClient.contentUrl(currentRef, { purpose: 'download' }),
+  };
+  openGallery();
+  _showImagesTab();
+  _openDetail({
+    ...payload,
+    id: currentRef,
+    resource_ref: currentRef,
+    name: exactName,
+    filename: exactName,
+    url: urls.preview,
+    download_url: urls.download,
+    read_only: true,
+  });
+  return Object.freeze({ resourceRef: currentRef, name: exactName, previewUrl: urls.preview, downloadUrl: urls.download, readOnly: true });
+}
+
 function _doCloseGallery() {
   const editorMounted = !!document.querySelector('#gallery-editor-container .gallery-editor');
   if ((window.__galleryEditLive || isEditorOpen() || editorMounted) && !window.__galleryAllowCloseEditor) {
@@ -2951,6 +3308,11 @@ function _humanSize(bytes) {
 const galleryModule = {
   openGallery,
   openGalleryImage,
+  openResource,
+  classifyGalleryExport,
+  exportGalleryImageToFiles,
+  requestGalleryExport,
+  exportToFiles: exportGalleryImageToFiles,
   closeGallery,
   isGalleryOpen,
 };

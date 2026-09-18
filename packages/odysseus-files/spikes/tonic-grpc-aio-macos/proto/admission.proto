@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package openclank.files.admission.v1;
+
+service Admission {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Browse(BrowseRequest) returns (BrowseResponse);
+  rpc Transfer(TransferRequest) returns (stream TransferChunk);
+  rpc Metrics(MetricsRequest) returns (MetricsResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string transport = 2;
+  uint32 chunk_limit_bytes = 3;
+  uint32 producer_queue_chunks = 4;
+}
+
+message BrowseRequest {
+  uint32 page_size = 1;
+}
+
+message BrowseEntry {
+  string opaque_id = 1;
+  string display_name = 2;
+  uint64 size = 3;
+}
+
+message BrowseResponse {
+  repeated BrowseEntry entries = 1;
+  string next_cursor = 2;
+}
+
+message TransferRequest {
+  string transfer_id = 1;
+  uint64 total_bytes = 2;
+  uint32 chunk_bytes = 3;
+  uint32 producer_delay_micros = 4;
+}
+
+message TransferChunk {
+  string transfer_id = 1;
+  uint64 sequence = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+  bool final_chunk = 5;
+}
+
+message MetricsRequest {}
+
+message MetricsResponse {
+  uint64 active_transfers = 1;
+  uint64 completed_transfers = 2;
+  uint64 cancelled_transfers = 3;
+  uint64 emitted_bytes = 4;
+  uint64 max_producer_queue_chunks = 5;
+  uint32 producer_queue_capacity = 6;
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {
+  bool accepted = 1;
+}
+

@@ -63,7 +63,7 @@ describe("session.system", () => {
       }),
     )[0]
 
-    expect(prompt).toContain("You are MiMoCode, an agent based on the GPT-5 family")
+    expect(prompt).toContain("You and the user share the same workspace")
   })
 
   test("does not add GPT tool guidance to non-GPT or tool-less subagents", () => {

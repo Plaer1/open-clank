@@ -48,12 +48,19 @@ export function catalogEntries(item) {
       .map(entry => ({
         mid: entry.model_id,
         displayName: entry.display_name || entry.model_id,
+        baseModelId: entry.base_model_id || null,
+        preset: entry.preset || null,
+        variant: entry.variant || null,
         family: entry.family || null,
+        providerFamilyId: entry.provider_family_id || null,
+        providerDisplayName: entry.provider_display_name || null,
         extra: entry.curated === false,
         stale: entry.stale === true,
         entitled: entry.entitled,
         compatible: entry.compatible,
         capabilities: entry.capabilities || {},
+        operations: entry.operations || [],
+        providerModelId: entry.provider_model_id || null,
       }));
   }
   const models = item?.models || [];
@@ -71,10 +78,15 @@ export function catalogModelIds(item) {
 export function catalogHasModelChoice(items, modelId, endpointId = '', url = '') {
   if (!modelId) return false;
   const targetEndpointId = String(endpointId || '');
+  const targetIsMimoSelector = targetEndpointId === 'mimo' || targetEndpointId === 'mimo:auto';
   const targetUrl = String(url || '').replace(/\/+$/, '');
   return (Array.isArray(items) ? items : []).some(item => {
     if (!item || item.offline || !catalogModelIds(item).includes(modelId)) return false;
-    if (targetEndpointId) return String(item.endpoint_id || '') === targetEndpointId;
+    if (targetEndpointId) {
+      const itemEndpointId = String(item.endpoint_id || '');
+      if (targetIsMimoSelector) return itemEndpointId === 'mimo' || itemEndpointId.startsWith('mimo:');
+      return itemEndpointId === targetEndpointId;
+    }
     if (targetUrl) return String(item.url || '').replace(/\/+$/, '') === targetUrl;
     return true;
   });

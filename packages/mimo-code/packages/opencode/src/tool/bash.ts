@@ -25,6 +25,9 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import * as BashInteractive from "./bash-interactive"
 import * as BashTokenEfficient from "./bash_token_efficient_pipeline"
 import * as BashTokenEfficientHeuristic from "./bash_token_efficient_heuristic"
+import { filterShellEnvironment, minimalShellEnvironment, resolveShellInvocation } from "./shell-containment"
+import { StreamingSecurityRedactor } from "@/util/security-redact"
+import { assertProjectShellPolicy } from "./project-policy"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.MIMOCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
@@ -71,9 +74,7 @@ export function bashDescription(gpt = false) {
 }
 
 export function sanitizeShellEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(env).filter(([name]) => !/(KEY|TOKEN|SECRET|PASSWORD)/i.test(name)),
-  )
+  return filterShellEnvironment(env)
 }
 
 // Irreversible file/directory removal commands. Names are matched
@@ -92,9 +93,9 @@ const DELETE_COMMANDS = new Set([
   "ri",
 ])
 
-// git subcommands that destroy history, working tree state, or remote branches.
+// Git subcommands that replace history, working-tree state, or remote refs.
 // Value is the set of tokens (flag or subcommand keyword) that must appear
-// anywhere in the argv for the invocation to count as destructive. An empty
+// anywhere in the argv for the invocation to require confirmation. An empty
 // set means the subcommand is destructive on its own.
 const GIT_DESTRUCTIVE = new Map<string, Set<string>>([
   ["reset", new Set(["--hard"])],
@@ -102,12 +103,81 @@ const GIT_DESTRUCTIVE = new Map<string, Set<string>>([
   ["branch", new Set(["-D", "--delete"])],
   ["tag", new Set(["-d", "--delete"])],
   ["worktree", new Set(["remove"])],
-  ["push", new Set(["--force", "-f"])],
+  ["push", new Set(["--force", "--force-with-lease", "-f"])],
   ["stash", new Set(["drop", "clear"])],
+  ["checkout", new Set()],
+  ["restore", new Set()],
+  ["rebase", new Set()],
+  ["cherry-pick", new Set()],
+  ["revert", new Set()],
+  ["switch", new Set(["-f", "--force", "--discard-changes"])],
+  ["commit", new Set(["--amend"])],
+])
+const INDIRECT_COMMANDS = new Set([
+  "alias",
+  "builtin",
+  "busybox",
+  "busybox.exe",
+  "chroot",
+  "chrt",
+  "command",
+  "env",
+  "exec",
+  "fakeroot",
+  "ionice",
+  "nice",
+  "nohup",
+  "setsid",
+  "stdbuf",
+  "systemd-run",
+  "taskset",
+  "time",
+  "timeout",
+  "unshare",
+  "watch",
+  "xargs",
+])
+const SHELL_INTERPRETERS = new Set(["bash", "cmd", "cmd.exe", "dash", "fish", "ksh", "powershell", "powershell.exe", "pwsh", "sh", "zsh"])
+const CODE_EVAL = new Map<string, Set<string>>([
+  ["node", new Set(["-e", "--eval"])],
+  ["node.exe", new Set(["-e", "--eval"])],
+  ["nodejs", new Set(["-e", "--eval"])],
+  ["bun", new Set(["-e", "--eval"])],
+  ["bun.exe", new Set(["-e", "--eval"])],
+  ["deno", new Set(["eval"])],
+  ["deno.exe", new Set(["eval"])],
+  ["perl", new Set(["-e", "-E"])],
+  ["php", new Set(["-r"])],
+  ["python", new Set(["-c"])],
+  ["python3", new Set(["-c"])],
+  ["ruby", new Set(["-e"])],
+])
+const INTERPRETER_INSPECTION_FLAGS = new Set(["--help", "--version"])
+const SCRIPT_SUFFIXES = [".bash", ".bat", ".cmd", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".zsh"]
+const FILESYSTEM_MUTATORS = new Set(["chmod", "chown", "chgrp", "setfacl", "takeown", "icacls"])
+const REMOTE_CONTROL_COMMANDS = new Set(["crictl", "ctr", "docker", "kubectl", "machinectl", "nerdctl", "podman", "virsh"])
+const PERSISTENCE_COMMANDS = new Set(["at", "batch", "crontab", "launchctl", "schtasks"])
+const NETWORK_COMMANDS = new Set(["curl", "ftp", "nc", "ncat", "netcat", "rsync", "scp", "sftp", "socat", "ssh", "telnet", "wget"])
+const PACKAGE_COMMANDS = new Set([
+  "apk", "apt", "apt-get", "brew", "cargo", "choco", "dnf", "dotnet", "gem", "go", "npm", "pacman",
+  "pip", "pip3", "pipx", "pnpm", "poetry", "scoop", "uv", "winget", "yarn", "yum", "zypper",
+])
+const PACKAGE_MUTATIONS = new Set([
+  "add", "build", "develop", "global", "install", "link", "publish", "remove", "sync", "uninstall", "unlink",
+  "update", "upgrade",
+])
+const SERVICE_COMMANDS = new Set(["launchctl", "rc-service", "sc", "service", "systemctl"])
+const SERVICE_MUTATIONS = new Set([
+  "add-wants", "daemon-reexec", "daemon-reload", "delete", "disable", "edit", "enable", "kill", "link", "mask",
+  "preset", "reload", "restart", "revert", "set-default", "start", "stop", "unmask",
 ])
 
 const Parameters = z.object({
   command: z.string().describe("The command to execute"),
+  network: z
+    .enum(["enabled", "disabled"])
+    .describe("Network policy for this command. Defaults to enabled.")
+    .optional(),
   timeout: z.number().describe("Optional timeout in milliseconds").optional(),
   workdir: z
     .string()
@@ -137,7 +207,7 @@ type Scan = {
   dirs: Set<string>
   patterns: Set<string>
   always: Set<string>
-  deletes: Set<string>
+  destructive: Set<string>
 }
 
 type Chunk = {
@@ -190,21 +260,186 @@ function commands(node: Node) {
   return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
 }
 
-// Returns true when `tokens` (the flat argv of a single command node) invokes
-// an irreversible deletion — either a direct removal command (rm, remove-item,
-// …) or a destructive git subcommand (git reset --hard, git clean -f, …).
-// `ps` toggles PowerShell case-insensitive matching.
-function isDelete(tokens: string[], ps: boolean) {
+// Returns true when one command directly removes data or invokes a Git
+// operation that can replace history or working-tree state.
+function gitCommand(tokens: string[]) {
+  const optionsWithValue = new Set([
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+  ])
+  let index = 1
+  while (index < tokens.length) {
+    const token = tokens[index]
+    if (token === "--") {
+      index++
+      break
+    }
+    if (!token.startsWith("-")) break
+    const key = token.includes("=") ? token.slice(0, token.indexOf("=")) : token
+    index += optionsWithValue.has(key) && !token.includes("=") ? 2 : 1
+  }
+  const subcommand = tokens[index]?.toLowerCase()
+  if (!subcommand) return
+  return { subcommand, args: tokens.slice(index + 1) }
+}
+
+function isDestructiveCommand(tokens: string[], ps: boolean) {
   if (tokens.length === 0) return false
   const head = ps ? tokens[0].toLowerCase() : tokens[0]
   if (DELETE_COMMANDS.has(head)) return true
   if (head === "git" && tokens.length >= 2) {
-    const sub = tokens[1]
-    const flags = GIT_DESTRUCTIVE.get(sub)
+    const invocation = gitCommand(tokens)
+    if (!invocation) return false
+    const flags = GIT_DESTRUCTIVE.get(invocation.subcommand)
     if (!flags) return false
     if (flags.size === 0) return true
-    return tokens.slice(2).some((tok) => flags.has(tok))
+    return invocation.args.some((token) => flags.has(token))
   }
+  return false
+}
+
+function staticShellWord(text: string, ps: boolean) {
+  let out = ""
+  let quote = ""
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (quote) {
+      if (char === quote) quote = ""
+      else out += char
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      continue
+    }
+    if (!ps && char === "\\") {
+      index++
+      if (index >= text.length) return
+      out += text[index]
+      continue
+    }
+    if (char === "$" || char === "`" || "*?[]{}".includes(char)) return
+    out += char
+  }
+  if (quote) return
+  return ps ? out.toLowerCase() : out
+}
+
+function activeDynamicShell(text: string) {
+  let quote = ""
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (quote === "'") {
+      if (char === "'") quote = ""
+      continue
+    }
+    if (char === "\\") {
+      escaped = true
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = quote === char ? "" : quote || char
+      continue
+    }
+    if (char === "`") return true
+    const next = text[index + 1]
+    if ((char === "$" && next === "(") || (!quote && (char === "<" || char === ">") && next === "(")) return true
+  }
+  return false
+}
+
+function activeOutputRedirect(text: string) {
+  let quote = ""
+  let escaped = false
+  for (const char of text) {
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (quote === "'") {
+      if (char === "'") quote = ""
+      continue
+    }
+    if (char === "\\") {
+      escaped = true
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = quote === char ? "" : quote || char
+      continue
+    }
+    if (!quote && char === ">") return true
+  }
+  return false
+}
+
+function approvalWorthy(tokens: string[], ps: boolean) {
+  if (!tokens.length) return false
+  const command = staticShellWord(tokens[0], ps)
+  if (!command) return true
+  const words = [command, ...tokens.slice(1).map((token) => staticShellWord(token, ps) ?? token)]
+  const head = path.basename(words[0]).toLowerCase()
+  const args = words.slice(1)
+  const loweredArgs = args.map((arg) => arg.toLowerCase())
+  if (isDestructiveCommand(words, ps)) return true
+  if (["clear-content", "truncate"].includes(head)) return true
+  if (head === "dd" && args.some((arg) => arg.startsWith("of="))) return true
+  if (head.startsWith("mkfs") || ["format", "format-volume", "wipefs", "clear-disk"].includes(head)) return true
+  if (["sudo", "doas", "pkexec", "su", "eval", "source", ".", "trap"].includes(head)) return true
+  if (INDIRECT_COMMANDS.has(head)) return true
+  const pythonInterpreter = /^(?:python|pypy)\d*(?:\.\d+)*(?:\.exe)?$/.test(head)
+  const codeInterpreter = /^(?:python|pypy|node|nodejs|bun|deno|perl|php|ruby)\d*(?:\.\d+)*(?:\.exe)?$/.test(head)
+  const shellInterpreter = /^(?:bash|dash|fish|ksh|zsh)\d*(?:\.\d+)*(?:\.exe)?$/.test(head)
+  const inspectionOnly =
+    args.length > 0 &&
+    args.every((arg) => INTERPRETER_INSPECTION_FLAGS.has(arg) || (pythonInterpreter && arg === "-V"))
+  if ((SHELL_INTERPRETERS.has(head) || shellInterpreter) && !inspectionOnly) return true
+  const evalFlags = CODE_EVAL.get(head)
+  if ((evalFlags || codeInterpreter) && !inspectionOnly) return true
+  const executable = words[0].replaceAll("\\", "/").toLowerCase()
+  if (SCRIPT_SUFFIXES.some((suffix) => executable.endsWith(suffix))) return true
+  if (
+    executable.includes("/") &&
+    !["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"].some((prefix) => executable.startsWith(prefix))
+  ) return true
+  if (FILESYSTEM_MUTATORS.has(head)) return true
+  if (["cp", "mv", "install", "patch", "tee", "unzip"].includes(head)) return true
+  if (head === "ln" && args.some((arg) => arg === "-f" || arg === "--force" || (/^-[^-]/.test(arg) && arg.includes("f")))) return true
+  if (head === "sed" && args.some((arg) => arg === "--in-place" || arg.startsWith("-i"))) return true
+  if (
+    ["tar", "bsdtar", "gtar"].includes(head) &&
+    args.some((arg) => ["--extract", "--get"].includes(arg) || (/^-[^-]/.test(arg) && arg.slice(1).includes("x")))
+  ) return true
+  if (head === "git" && loweredArgs.includes("apply")) return true
+  if (args.some((arg) => arg.includes(">"))) return true
+  if (REMOTE_CONTROL_COMMANDS.has(head)) return true
+  if (PERSISTENCE_COMMANDS.has(head)) return true
+  if (NETWORK_COMMANDS.has(head)) return true
+  if (PACKAGE_COMMANDS.has(head) && loweredArgs.some((arg) => PACKAGE_MUTATIONS.has(arg))) return true
+  if (SERVICE_COMMANDS.has(head) && loweredArgs.some((arg) => SERVICE_MUTATIONS.has(arg))) return true
+  if (
+    ["passwd", "chpasswd", "htpasswd", "git-credential", "kinit"].includes(head) ||
+    (head === "gh" && loweredArgs.includes("auth")) ||
+    (head === "gcloud" && loweredArgs.includes("auth")) ||
+    (head === "npm" && loweredArgs.some((arg) => ["login", "logout", "token"].includes(arg))) ||
+    (head === "security" && loweredArgs.some((arg) => ["add-generic-password", "delete-generic-password"].includes(arg)))
+  ) return true
+  if (
+    (["npm", "pnpm", "yarn"].includes(head) && loweredArgs.some((arg) => ["exec", "dlx"].includes(arg))) ||
+    (["uv", "pipx"].includes(head) && loweredArgs.includes("run"))
+  ) return true
+  if (head === "find" && args.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg))) return true
   return false
 }
 
@@ -379,45 +614,80 @@ const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan) 
   })
 })
 
-// Secondary confirmation for irreversible deletion commands. Uses its own
-// permission type ("bash_delete"), which the Permission layer flags as
+// Secondary confirmation for commands that can overwrite state, cross a
+// trust boundary, or produce external side effects. Uses its own permission
+// type ("bash_destructive"), which the Permission layer flags as
 // forced-ask: no `allow` rule (not even a broad `"*": allow`) can silently
 // pre-approve it — only an explicit `deny` blocks. `always` is empty because
-// a persisted "allow all deletes" rule is exactly what forced-ask exists to
-// prevent. The delete UI shows the full command, so this ask FULLY replaces
+// a persisted blanket grant is exactly what forced-ask exists to prevent.
+// The confirmation UI shows the full command, so this ask fully replaces
 // the regular bash/external_directory prompts when it fires (see the caller
-// below) — deletion is authorized in a single, unambiguous confirmation.
-const askDelete = Effect.fn("BashTool.askDelete")(function* (ctx: Tool.Context, scan: Scan, command: string) {
-  const patterns = Array.from(scan.deletes)
+// below) — the action is authorized in one unambiguous confirmation.
+const askDestructive = Effect.fn("BashTool.askDestructive")(function* (
+  ctx: Tool.Context,
+  scan: Scan,
+  command: string,
+  workdir: string,
+) {
+  const patterns = Array.from(scan.destructive)
   yield* ctx.ask({
-    permission: "bash_delete",
+    permission: "bash_destructive",
     patterns,
     always: [],
-    metadata: { command, deletes: patterns },
+    metadata: { command, workdir, actions: patterns },
   })
 })
 
-function cmd(shell: string, name: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-  if (process.platform === "win32" && PS.has(name)) {
-    const prefixed = `${Shell.POWERSHELL_UTF8_PREFIX}${command}`
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", prefixed], {
+function cmd(
+  shell: string,
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  writableRoots: string[],
+  network: "enabled" | "disabled" | undefined,
+) {
+  const invocation = resolveShellInvocation({
+    shell,
+    command,
+    cwd,
+    workspace: Instance.directory,
+    writableRoots,
+    network,
+  })
+  return {
+    containment: invocation.containment,
+    network: invocation.network,
+    process: ChildProcess.make(invocation.executable, invocation.args, {
       cwd,
       env,
       stdin: "ignore",
-      detached: false,
-    })
+      detached: process.platform !== "win32",
+    }),
   }
+}
 
-  const finalCommand =
-    process.platform === "win32" && name === "cmd" ? `${Shell.CMD_UTF8_PREFIX}${command}` : command
+function shellEnvironment(env: NodeJS.ProcessEnv, cwd: string) {
+  return minimalShellEnvironment(env, cwd)
+}
 
-  return ChildProcess.make(finalCommand, [], {
-    shell,
-    cwd,
-    env,
-    stdin: "ignore",
-    detached: process.platform !== "win32",
-  })
+function safeOutput(text: string) {
+  return BashTokenEfficient.securityRedact(text)
+}
+
+function shellProcess(
+  shell: string,
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  writableRoots: string[],
+  network: "enabled" | "disabled" | undefined,
+) {
+  const invocation = cmd(shell, command, cwd, env, writableRoots, network)
+  return {
+    containment: invocation.containment,
+    network: invocation.network,
+    process: invocation.process,
+  }
 }
 
 const parser = lazy(async () => {
@@ -469,11 +739,11 @@ export const BashTool = Tool.define(
       if (process.platform === "win32") {
         if (Shell.posix(shell) && text.startsWith("/") && AppFileSystem.windowsPath(text) === text) {
           const file = yield* cygpath(shell, text)
-          if (file) return file
+          if (file) return AppFileSystem.resolve(file)
         }
-        return AppFileSystem.normalizePath(path.resolve(root, AppFileSystem.windowsPath(text)))
+        return AppFileSystem.resolve(path.resolve(root, AppFileSystem.windowsPath(text)))
       }
-      return path.resolve(root, text)
+      return AppFileSystem.resolve(path.resolve(root, text))
     })
 
     const argPath = Effect.fn("BashTool.argPath")(function* (arg: string, cwd: string, ps: boolean, shell: string) {
@@ -490,7 +760,7 @@ export const BashTool = Tool.define(
         dirs: new Set<string>(),
         patterns: new Set<string>(),
         always: new Set<string>(),
-        deletes: new Set<string>(),
+        destructive: new Set<string>(),
       }
 
       for (const node of commands(root)) {
@@ -511,9 +781,12 @@ export const BashTool = Tool.define(
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
           scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
-        }
+      }
 
-        if (isDelete(tokens, ps)) scan.deletes.add(source(node))
+        const commandSource = source(node)
+        if (approvalWorthy(tokens, ps) || activeDynamicShell(commandSource) || activeOutputRedirect(commandSource)) {
+          scan.destructive.add(commandSource)
+        }
       }
 
       return scan
@@ -525,14 +798,14 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return sanitizeShellEnvironment({
+      return shellEnvironment({
         ...process.env,
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.
         ...(process.platform === "win32" ? { PYTHONIOENCODING: "utf-8" } : {}),
         ...extra.env,
-      })
+      }, cwd)
     })
 
     const run = Effect.fn("BashTool.run")(function* (
@@ -542,6 +815,8 @@ export const BashTool = Tool.define(
         command: string
         cwd: string
         env: NodeJS.ProcessEnv
+        writableRoots: string[]
+        network?: "enabled" | "disabled"
         timeout: number
         description: string
       },
@@ -559,65 +834,91 @@ export const BashTool = Tool.define(
       let cut = false
       let expired = false
       let aborted = false
+      const redactor = new StreamingSecurityRedactor()
+      const invocation = shellProcess(
+        input.shell,
+        input.command,
+        input.cwd,
+        input.env,
+        input.writableRoots,
+        input.network,
+      )
+      const containment: string = invocation.containment
+      const network = invocation.network
+      const ownership: Truncate.Ownership = {
+        owner: process.env.OPEN_CLANK_OWNER ?? "",
+        workspace: input.cwd,
+        sessionID: ctx.sessionID,
+        ...(ctx.callID ? { callID: ctx.callID } : {}),
+      }
 
       yield* ctx.metadata({
         metadata: {
           output: "",
           description: input.description,
+          containment,
+          network,
         },
       })
 
+      const retain = (safeChunk: string) => {
+        if (!safeChunk) return Effect.void
+        const size = Buffer.byteLength(safeChunk, "utf-8")
+        list.push({ text: safeChunk, size })
+        used += size
+        while (used > keep && list.length > 1) {
+          const item = list.shift()
+          if (!item) break
+          used -= item.size
+          cut = true
+        }
+
+        last = preview(last + safeChunk)
+
+        if (file) {
+          sink?.write(safeChunk)
+        } else {
+          full += safeChunk
+          if (Buffer.byteLength(full, "utf-8") > bytes) {
+            return trunc.write(full, ownership).pipe(
+              Effect.andThen((next) =>
+                Effect.sync(() => {
+                  file = next
+                  cut = true
+                  sink = createWriteStream(next, { flags: "a" })
+                  full = ""
+                }),
+              ),
+              Effect.andThen(
+                ctx.metadata({
+                  metadata: {
+                    output: last,
+                    description: input.description,
+                    containment,
+                    network,
+                  },
+                }),
+              ),
+            )
+          }
+        }
+
+        return ctx.metadata({
+          metadata: {
+            output: last,
+            description: input.description,
+            containment,
+            network,
+          },
+        })
+      }
+
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
-          const handle = yield* spawner.spawn(cmd(input.shell, input.name, input.command, input.cwd, input.env))
+          const handle = yield* spawner.spawn(invocation.process)
 
           yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > bytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                          description: input.description,
-                        },
-                      }),
-                    ),
-                  )
-                }
-              }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                  description: input.description,
-                },
-              })
-            }),
+            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => retain(redactor.push(chunk))),
           )
 
           const abort = Effect.callback<void>((resume) => {
@@ -647,6 +948,7 @@ export const BashTool = Tool.define(
           return exit.kind === "exit" ? exit.code : null
         }),
       ).pipe(Effect.orDie)
+      yield* retain(redactor.finish())
 
       const meta: string[] = []
       if (expired) {
@@ -659,14 +961,12 @@ export const BashTool = Tool.define(
       const end = tail(raw, lines, bytes)
       if (end.cut) cut = true
       if (!file && end.cut) {
-        file = yield* trunc.write(raw)
+        file = yield* trunc.write(raw, ownership)
       }
 
       // Token-efficient post-cleanse: RTK-style ANSI strip / progress fold /
-      // secret redact / long-line elide. Only applied when no tool storage is
-      // involved — once the output spills to a truncation file, the on-disk
-      // archive stays raw and cleaning is skipped to keep the inline preview
-      // consistent with the archive.
+      // secret redact / long-line elide. Spill files already contain mandatory
+      // sink-redacted output, so optional cleaning only affects inline output.
       const cleaned =
         !file && Flag.MIMOCODE_EXPERIMENTAL_TOKEN_EFFICIENCY
           ? BashTokenEfficient.clean(end.text, { command: input.command })
@@ -743,6 +1043,8 @@ export const BashTool = Tool.define(
           exit: code,
           description: input.description,
           truncated: cut,
+          containment,
+          network,
           ...(cut && file ? { outputPath: file } : {}),
         },
         output,
@@ -763,29 +1065,32 @@ export const BashTool = Tool.define(
               const effectiveCwd = SessionCwd.get(ctx.sessionID)
               const cwd = params.workdir
                 ? yield* resolvePath(params.workdir, effectiveCwd, shell)
-                : effectiveCwd
+                : AppFileSystem.resolve(effectiveCwd)
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }
               const timeout = params.timeout ?? DEFAULT_TIMEOUT
+              yield* Effect.promise(() => assertProjectShellPolicy(ctx))
               const ps = PS.has(name)
               const root = yield* parse(params.command, ps)
               const scan = yield* collect(root, cwd, ps, shell)
               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
-              // Delete-containing commands are authorized by askDelete alone —
-              // the delete UI shows the full command (including any external
+              // Sensitive/destructive commands are authorized by one forced
+              // ask. Its UI shows the full command (including any external
               // paths it touches), so a separate bash/external_directory
               // prompt would just be a second confirmation of the same thing.
-              // MIMOCODE_AUTO_APPROVE_DELETE trusts deletes and falls back to
-              // the regular ask (where a `bash: deny` rule still blocks).
-              if (scan.deletes.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DELETE) {
-                yield* askDelete(ctx, scan, params.command)
+              // The explicit auto-approve escape hatch falls back to the
+              // regular ask, where a `bash: deny` rule still blocks.
+              if (scan.destructive.size > 0 && !Flag.MIMOCODE_AUTO_APPROVE_DESTRUCTIVE) {
+                yield* askDestructive(ctx, scan, params.command, cwd)
               } else {
                 yield* ask(ctx, scan)
               }
 
               // Interactive mode: hand terminal to user for direct interaction
               if (params.interactive) {
+                const callID = ctx.callID
+                if (!callID) throw new Error("Interactive shell requires a bound tool call")
                 const env = yield* shellEnv(ctx, cwd)
                 yield* ctx.metadata({
                   metadata: {
@@ -795,22 +1100,39 @@ export const BashTool = Tool.define(
                 })
                 const interactiveResult = yield* Effect.tryPromise(() =>
                   BashInteractive.request({
+                    sessionID: ctx.sessionID,
+                    callID,
                     command: params.command,
                     cwd,
+                    workspace: Instance.directory,
+                    writableRoots: [Instance.directory, ...scan.dirs],
+                    shell,
+                    network: params.network,
+                    timeout: Math.max(timeout, 1000),
                     env: env as Record<string, string>,
                     description: params.description,
                   }),
-                ).pipe(Effect.orDie)
+                ).pipe(
+                  Effect.catch((error) =>
+                    Effect.succeed({
+                      output: `(interactive command ended without a reply: ${String(error)})`,
+                      exitCode: 124,
+                    }),
+                  ),
+                )
+                const output = safeOutput(interactiveResult.output)
                 return {
                   title: params.description,
                   metadata: {
-                    output: interactiveResult.output || "(interactive command completed)",
+                    output: output || "(interactive command completed)",
                     exit: interactiveResult.exitCode,
                     description: params.description,
                     truncated: false,
+                    containment: "interactive-client",
+                    network: params.network ?? "enabled",
                   },
                   output:
-                    interactiveResult.output ||
+                    output ||
                     `(interactive command completed with exit code ${interactiveResult.exitCode})`,
                 }
               }
@@ -822,6 +1144,8 @@ export const BashTool = Tool.define(
                   command: params.command,
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
+                  writableRoots: [Instance.directory, ...scan.dirs],
+                  network: params.network,
                   timeout,
                   description: params.description,
                 },

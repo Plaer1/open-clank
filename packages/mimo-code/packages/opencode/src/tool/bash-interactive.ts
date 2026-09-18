@@ -15,16 +15,32 @@ export const Event = {
     "bash.interactive.asked",
     z.object({
       id: z.string(),
+      sessionID: z.string(),
+      callID: z.string(),
       command: z.string(),
       cwd: z.string(),
+      workspace: z.string(),
+      writableRoots: z.array(z.string()),
+      shell: z.string(),
+      network: z.enum(["enabled", "disabled"]),
+      timeout: z.number(),
       env: z.record(z.string(), z.string()).optional(),
       description: z.string(),
+    }),
+  ),
+  Cancelled: BusEvent.define(
+    "bash.interactive.cancelled",
+    z.object({
+      id: z.string(),
+      reason: z.string(),
     }),
   ),
   Replied: BusEvent.define(
     "bash.interactive.replied",
     z.object({
       id: z.string(),
+      sessionID: z.string(),
+      callID: z.string(),
       output: z.string(),
       exitCode: z.number(),
     }),
@@ -35,8 +51,15 @@ export const Event = {
 
 export interface InteractiveRequest {
   id: string
+  sessionID: string
+  callID: string
   command: string
   cwd: string
+  workspace: string
+  writableRoots: string[]
+  shell: string
+  network: "enabled" | "disabled"
+  timeout: number
   env?: Record<string, string>
   description: string
 }
@@ -66,12 +89,25 @@ interface State {
 
 export interface Interface {
   readonly request: (input: {
+    sessionID: string
+    callID: string
     command: string
     cwd: string
+    workspace: string
+    writableRoots: string[]
+    shell: string
+    network?: "enabled" | "disabled"
+    timeout: number
     env?: Record<string, string>
     description: string
   }) => Effect.Effect<InteractiveResult, InteractiveError>
-  readonly reply: (input: { id: string; output: string; exitCode: number }) => Effect.Effect<void>
+  readonly reply: (input: {
+    id: string
+    sessionID: string
+    callID: string
+    output: string
+    exitCode: number
+  }) => Effect.Effect<void, InteractiveError>
   readonly list: () => Effect.Effect<ReadonlyArray<InteractiveRequest>>
 }
 
@@ -89,7 +125,11 @@ export const layer = Layer.effect(
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
-            for (const item of state.pending.values()) {
+            for (const [id, item] of state.pending) {
+              yield* bus.publish(Event.Cancelled, {
+                id,
+                reason: "instance disposed",
+              })
               yield* Deferred.fail(item.deferred, new InteractiveError("Instance disposed"))
             }
             state.pending.clear()
@@ -101,8 +141,15 @@ export const layer = Layer.effect(
     )
 
     const request = Effect.fn("BashInteractive.request")(function* (input: {
+      sessionID: string
+      callID: string
       command: string
       cwd: string
+      workspace: string
+      writableRoots: string[]
+      shell: string
+      network?: "enabled" | "disabled"
+      timeout: number
       env?: Record<string, string>
       description: string
     }) {
@@ -113,24 +160,45 @@ export const layer = Layer.effect(
       const deferred = yield* Deferred.make<InteractiveResult, InteractiveError>()
       const req: InteractiveRequest = {
         id,
+        sessionID: input.sessionID,
+        callID: input.callID,
         command: input.command,
         cwd: input.cwd,
+        workspace: input.workspace,
+        writableRoots: input.writableRoots,
+        shell: input.shell,
+        network: input.network ?? "enabled",
+        timeout: input.timeout,
         env: input.env,
         description: input.description,
       }
       pending.set(id, { request: req, deferred })
       yield* bus.publish(Event.Asked, req)
 
+      const result = Deferred.await(deferred).pipe(
+        Effect.timeout(input.timeout),
+        Effect.catchTag(
+          "TimeoutError",
+          () => Effect.fail(new InteractiveError(`Interactive command timed out after ${input.timeout} ms`)),
+        ),
+      )
       return yield* Effect.ensuring(
-        Deferred.await(deferred),
-        Effect.sync(() => {
+        result,
+        Effect.gen(function* () {
+          if (!pending.has(id)) return
           pending.delete(id)
+          yield* bus.publish(Event.Cancelled, {
+            id,
+            reason: "request ended before the interactive process replied",
+          })
         }),
       )
     })
 
     const reply = Effect.fn("BashInteractive.reply")(function* (input: {
       id: string
+      sessionID: string
+      callID: string
       output: string
       exitCode: number
     }) {
@@ -138,12 +206,20 @@ export const layer = Layer.effect(
       const existing = pending.get(input.id)
       if (!existing) {
         log.warn("reply for unknown request", { id: input.id })
-        return
+        return yield* Effect.fail(new InteractiveError("Interactive request is no longer pending"))
+      }
+      if (
+        existing.request.sessionID !== input.sessionID ||
+        existing.request.callID !== input.callID
+      ) {
+        return yield* Effect.fail(new InteractiveError("Interactive reply does not match its session and tool call"))
       }
       pending.delete(input.id)
       log.info("replied", { id: input.id, exitCode: input.exitCode })
       yield* bus.publish(Event.Replied, {
         id: existing.request.id,
+        sessionID: existing.request.sessionID,
+        callID: existing.request.callID,
         output: input.output,
         exitCode: input.exitCode,
       })
@@ -170,14 +246,31 @@ import { makeRuntime } from "@/effect/run-service"
 const { runPromise } = makeRuntime(Service, defaultLayer)
 
 export function request(input: {
+  sessionID: string
+  callID: string
   command: string
   cwd: string
+  workspace: string
+  writableRoots: string[]
+  shell: string
+  network?: "enabled" | "disabled"
+  timeout: number
   env?: Record<string, string>
   description: string
 }): Promise<InteractiveResult> {
   return runPromise((svc) => svc.request(input))
 }
 
-export function reply(input: { id: string; output: string; exitCode: number }): Promise<void> {
+export function reply(input: {
+  id: string
+  sessionID: string
+  callID: string
+  output: string
+  exitCode: number
+}): Promise<void> {
   return runPromise((svc) => svc.reply(input))
+}
+
+export function list(): Promise<ReadonlyArray<InteractiveRequest>> {
+  return runPromise((svc) => svc.list())
 }

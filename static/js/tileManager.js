@@ -241,7 +241,7 @@ function _findDragTarget(e) {
   return content || null;
 }
 
-document.addEventListener('pointerdown', (e) => {
+if (typeof document !== 'undefined') document.addEventListener('pointerdown', (e) => {
   if (!_isDesktop()) return;
   const content = _findDragTarget(e);
   if (!content) return;
@@ -256,7 +256,7 @@ document.addEventListener('pointerdown', (e) => {
   }
 });
 
-document.addEventListener('pointermove', (e) => {
+if (typeof document !== 'undefined') document.addEventListener('pointermove', (e) => {
   if (!_tracking) return;
   if (!_isDesktop()) return;
   const dx = e.clientX - _tracking.startX;
@@ -280,7 +280,7 @@ document.addEventListener('pointermove', (e) => {
   }
 });
 
-document.addEventListener('pointerup', () => {
+if (typeof document !== 'undefined') document.addEventListener('pointerup', () => {
   if (!_tracking) return;
   const t = _tracking;
   _tracking = null;
@@ -334,23 +334,42 @@ function _reclampAllThrottled(animate) {
   });
 }
 
-window.addEventListener('resize', () => _reclampAllThrottled(false));
+if (typeof window !== 'undefined') window.addEventListener('resize', () => _reclampAllThrottled(false));
 
 // Watch the sidebar's class attribute so toggling hidden/right-side re-tiles
-// any snapped modal that was anchored to the old safe-rect.
+// any snapped modal that was anchored to the old safe-rect. The shell may
+// mount the sidebar after this module loads, so observe DOM insertions instead
+// of polling an absent sidebar once per animation frame.
+let _sidebarClassObserver = null;
+let _sidebarDomObserver = null;
+let _watchedSidebar = null;
 function _watchSidebar() {
-  const sidebar = document.getElementById('sidebar');
-  if (!sidebar) {
-    // Sidebar may not be in the DOM yet during early init.
-    requestAnimationFrame(_watchSidebar);
-    return;
-  }
-  const mo = new MutationObserver(() => _reclampAllThrottled(true));
-  mo.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
+  if (_sidebarDomObserver) return;
+  const wire = sidebar => {
+    if (!sidebar || sidebar === _watchedSidebar) return;
+    _sidebarClassObserver?.disconnect();
+    _sidebarClassObserver = new MutationObserver(() => _reclampAllThrottled(true));
+    _sidebarClassObserver.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
+    _watchedSidebar = sidebar;
+  };
+  const sync = () => {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) wire(sidebar);
+    else {
+      _sidebarClassObserver?.disconnect();
+      _sidebarClassObserver = null;
+      _watchedSidebar = null;
+    }
+  };
+  sync();
+  const root = document.body || document.documentElement;
+  if (!root) return;
+  _sidebarDomObserver = new MutationObserver(sync);
+  _sidebarDomObserver.observe(root, { childList: true, subtree: true });
 }
-if (document.readyState === 'loading') {
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _watchSidebar);
-} else {
+} else if (typeof document !== 'undefined') {
   _watchSidebar();
 }
 

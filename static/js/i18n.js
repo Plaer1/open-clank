@@ -51,6 +51,8 @@ let catalog = {};
 let locale = 'en';
 let observer;
 let applying = false;
+let translationQueued = false;
+const pendingTranslationRoots = new Set();
 const originals = new WeakMap();
 const rendered = new WeakMap();
 const originalAttrs = new WeakMap();
@@ -143,6 +145,7 @@ function translateElement(element) {
 }
 
 function translateTree(root = document.documentElement) {
+  if (root.nodeType === Node.ELEMENT_NODE && root !== document.documentElement && shouldSkip(root)) return;
   applying = true;
   try {
     if (root.nodeType === Node.TEXT_NODE) translateText(root);
@@ -163,8 +166,36 @@ function translateTree(root = document.documentElement) {
   }
 }
 
+function queueTranslation(root) {
+  if (!root) return;
+  pendingTranslationRoots.add(root);
+  if (translationQueued) return;
+  translationQueued = true;
+  queueMicrotask(() => {
+    translationQueued = false;
+    const roots = [...pendingTranslationRoots];
+    pendingTranslationRoots.clear();
+    for (const candidate of roots) translateTree(candidate);
+  });
+}
+
 function syncLanguageControls() {
-  document.querySelectorAll('[data-language-select]').forEach(select => { select.value = locale; });
+  document.querySelectorAll('[data-language-select]').forEach(select => {
+    // Keep the selector registry-driven so adding a catalog never requires a
+    // second hand-maintained HTML list. Existing endonyms remain untouched;
+    // fallback entries use the registry's canonical display name.
+    if (registry?.locales) {
+      const known = new Set([...select.options].map(option => option.value));
+      for (const [id, descriptor] of Object.entries(registry.locales)) {
+        if (known.has(id)) continue;
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = descriptor.name || id;
+        select.appendChild(option);
+      }
+    }
+    select.value = locale;
+  });
   for (const [property, source] of Object.entries(CSS_MESSAGES)) {
     document.documentElement.style.setProperty(property, JSON.stringify(locale === 'en' ? source : translateValue(source)));
   }
@@ -172,14 +203,23 @@ function syncLanguageControls() {
 
 async function setLocale(next, { persist = true } = {}) {
   if (!registry?.locales[next]) next = 'en';
-  const nextCatalog = next === 'en' ? english : await fetchJson(next);
+  const descriptor = registry.locales[next];
+  // New locale entries may intentionally point at the English source while
+  // their translated catalog is being prepared.  This keeps selection,
+  // aliases, directionality, and formatting usable without pretending that
+  // untranslated strings are complete translations.
+  const catalogName = descriptor.catalog || next;
+  const nextCatalog = catalogName === 'en' ? english : await fetchJson(catalogName);
   locale = next;
   catalog = nextCatalog;
   rebuildIndex();
   document.documentElement.lang = next;
   document.documentElement.dir = registry.locales[next].dir;
   const manifest = document.querySelector('link[rel="manifest"]');
-  if (manifest && !manifest.href.startsWith('blob:')) manifest.href = `/static/manifest.${next}.json`;
+  if (manifest && !manifest.href.startsWith('blob:')) {
+    const manifestLocale = descriptor.manifest || descriptor.catalog || next;
+    manifest.href = `/static/manifest.${manifestLocale}.json`;
+  }
   if (persist) localStorage.setItem(STORAGE_KEY, next);
   translateTree();
   syncLanguageControls();
@@ -195,27 +235,34 @@ async function setLocale(next, { persist = true } = {}) {
     }
     status.lang = next;
     status.dir = registry.locales[next].dir;
-    status.textContent = LANGUAGE_CHANGED[next];
+    status.textContent = LANGUAGE_CHANGED[next] || `Language changed to ${descriptor.name}.`;
   }
   document.dispatchEvent(new CustomEvent('openclank:languagechange', { detail: { locale: next } }));
   return next;
 }
 
 function browserLocale() {
+  const aliasFor = value => {
+    const exact = registry.aliases?.[value];
+    if (exact) return exact;
+    const wanted = String(value || '').toLowerCase();
+    const match = Object.entries(registry.aliases || {}).find(([key]) => key.toLowerCase() === wanted);
+    return match?.[1];
+  };
   for (const requested of navigator.languages || [navigator.language]) {
     if (!requested) continue;
     if (registry.do_not_auto_map.some(blocked => requested.toLowerCase().startsWith(blocked.toLowerCase()))) continue;
     if (registry.locales[requested]) return requested;
-    if (registry.aliases[requested]) return registry.aliases[requested];
+    if (aliasFor(requested)) return aliasFor(requested);
     const base = requested.split('-')[0];
     if (registry.locales[base]) return base;
-    if (registry.aliases[base]) return registry.aliases[base];
+    if (aliasFor(base)) return aliasFor(base);
   }
   return 'en';
 }
 
 function offerLocale(candidate) {
-  if (!PROMPTS[candidate] || localStorage.getItem(`${STORAGE_KEY}.prompted.${candidate}`)) return;
+  if (!registry?.locales[candidate] || candidate === 'en' || localStorage.getItem(`${STORAGE_KEY}.prompted.${candidate}`)) return;
   localStorage.setItem(`${STORAGE_KEY}.prompted.${candidate}`, '1');
   if (!document.getElementById('i18n-offer-style')) {
     const style = document.createElement('style');
@@ -223,7 +270,9 @@ function offerLocale(candidate) {
     style.textContent = '.i18n-offer{position:fixed;inset:0;z-index:var(--i18n-offer-z,100000);display:grid;place-items:center;padding:20px;background:#0009}.i18n-offer-card{width:min(420px,100%);box-sizing:border-box;padding:22px;border:1px solid #666;border-radius:14px;background:#181818;color:#f5f5f5;box-shadow:0 18px 60px #0006}.i18n-offer-card p{margin:0 0 18px;font:16px/1.5 system-ui,sans-serif}.i18n-offer-card div{display:flex;justify-content:flex-end;gap:9px}.i18n-offer-card button{min-height:38px;padding:7px 14px;border:1px solid #666;border-radius:8px;background:transparent;color:inherit;cursor:pointer}.i18n-offer-card button[data-accept]{background:#b83232;border-color:#b83232;color:#fff}.i18n-offer-card button:focus-visible{outline:2px solid #e55;outline-offset:2px}';
     document.head.appendChild(style);
   }
-  const [message, acceptLabel, declineLabel] = PROMPTS[candidate];
+  const [message, acceptLabel, declineLabel] = PROMPTS[candidate] || [
+    `Switch the interface to ${registry.locales[candidate].name || candidate}?`, 'Switch', 'Not now',
+  ];
   const modal = document.createElement('div');
   modal.className = 'i18n-offer';
   modal.dir = registry.locales[candidate].dir;
@@ -267,9 +316,8 @@ async function init() {
   observer = new MutationObserver(records => {
     if (applying) return;
     for (const record of records) {
-      if (record.type === 'characterData') translateText(record.target);
-      else if (record.type === 'attributes') translateElement(record.target);
-      else record.addedNodes.forEach(translateTree);
+      if (record.type === 'characterData' || record.type === 'attributes') queueTranslation(record.target);
+      else record.addedNodes.forEach(queueTranslation);
     }
   });
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ATTRIBUTES });

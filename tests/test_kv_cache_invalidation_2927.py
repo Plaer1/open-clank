@@ -80,7 +80,6 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
     monkeypatch.setattr(chat_helpers, "add_user_message", fake_add_user_message)
     monkeypatch.setattr(chat_helpers, "load_prefs_for_user", lambda user: {})
     monkeypatch.setattr(chat_helpers, "effective_user", lambda request: "tester")
-    monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
 
@@ -283,9 +282,11 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
     # Stub out the modules run_post_response_tasks lazily imports.
     mem_extractor_mod = types.ModuleType("services.memory.memory_extractor")
     calls = {"memory": 0, "skill": 0}
+    owners = {}
 
     async def fake_extract_and_store(*a, **k):
         calls["memory"] += 1
+        owners["memory"] = k.get("owner")
 
     mem_extractor_mod.extract_and_store = fake_extract_and_store
     monkeypatch.setitem(sys.modules, "services.memory.memory_extractor", mem_extractor_mod)
@@ -294,13 +295,10 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
 
     async def fake_maybe_extract_skill(*a, **k):
         calls["skill"] += 1
+        owners["skill"] = k.get("owner")
 
     skill_extractor_mod.maybe_extract_skill = fake_maybe_extract_skill
     monkeypatch.setitem(sys.modules, "services.memory.skill_extractor", skill_extractor_mod)
-
-    task_endpoint_mod = types.ModuleType("src.task_endpoint")
-    task_endpoint_mod.resolve_task_endpoint = lambda url, model, headers, owner=None: (url, model, headers)
-    monkeypatch.setitem(sys.modules, "src.task_endpoint", task_endpoint_mod)
 
     captured_jobs = {}
 
@@ -338,6 +336,7 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
     assert captured_jobs.get("session_id") == "sess-Y"
     assert captured_jobs.get("names") == ["memory", "skill"]
     assert calls == {"memory": 1, "skill": 1}
+    assert owners == {"memory": "tester", "skill": "tester"}
 
 
 # --------------------------------------------------------------------------- #
@@ -404,9 +403,9 @@ def test_payload_includes_stable_session_id_for_local_backend(monkeypatch):
     url = "http://192.168.1.50:1234/v1/chat/completions"
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
 
-    _drain(llm_core.stream_llm(url, "local-model", messages, session_id="session-A"))
-    _drain(llm_core.stream_llm(url, "local-model", messages, session_id="session-A"))
-    _drain(llm_core.stream_llm(url, "local-model", messages, session_id="session-B"))
+    _drain(llm_core._legacy_stream_llm(url, "local-model", messages, session_id="session-A"))
+    _drain(llm_core._legacy_stream_llm(url, "local-model", messages, session_id="session-A"))
+    _drain(llm_core._legacy_stream_llm(url, "local-model", messages, session_id="session-B"))
 
     assert len(captured) == 3
     p1, p2, p3 = captured
@@ -435,7 +434,7 @@ def test_payload_omits_session_id_for_official_openai_api(monkeypatch):
     url = "https://api.openai.com/v1/chat/completions"
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
 
-    _drain(llm_core.stream_llm(url, "gpt-4o", messages, session_id="session-A"))
+    _drain(llm_core._legacy_stream_llm(url, "gpt-4o", messages, session_id="session-A"))
 
     assert len(captured) == 1
     assert "session_id" not in captured[0]
@@ -456,7 +455,7 @@ def test_payload_omits_session_id_when_not_provided(monkeypatch):
     url = "http://192.168.1.50:1234/v1/chat/completions"
     messages = [{"role": "user", "content": "hi"}]
 
-    _drain(llm_core.stream_llm(url, "local-model", messages))
+    _drain(llm_core._legacy_stream_llm(url, "local-model", messages))
 
     assert len(captured) == 1
     assert "session_id" not in captured[0]

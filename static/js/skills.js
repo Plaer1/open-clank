@@ -208,9 +208,57 @@ function _statusPill(sk) {
 // hand-authored vs auto-generated so they can audit (and demote /
 // edit / publish) before trusting them.
 function _sourcePill(sk) {
-  if (sk.source !== 'teacher-escalation') return '';
-  const teacher = sk.teacher_model || 'teacher';
-  return `<span class="memory-cat-badge" title="Created by teacher escalation: ${esc(teacher)}" style="background:color-mix(in srgb, var(--color-warning, #f0ad4e) 22%, transparent);">teacher-created</span>`;
+  if (sk.source === 'teacher-escalation') {
+    const teacher = sk.teacher_model || 'teacher';
+    return `<span class="memory-cat-badge" title="Created by teacher escalation: ${esc(teacher)}" style="background:color-mix(in srgb, var(--color-warning, #f0ad4e) 22%, transparent);">teacher-created</span>`;
+  }
+  if (sk.source === 'memory-promotion') {
+    return '<span class="memory-cat-badge" title="Drafted from cited curated memories">memory-backed</span>';
+  }
+  if (sk.source === 'imported' || sk.source === 'remote') {
+    return `<span class="memory-cat-badge" title="${esc(sk.source_uri || 'External source')}">${esc(sk.source)}</span>`;
+  }
+  return '';
+}
+
+function _trustPill(sk) {
+  const trust = sk.trust || 'staged';
+  const auditedAt = Number(sk.audited_at);
+  const auditTime = Number.isFinite(auditedAt) && auditedAt > 0
+    ? new Date(auditedAt * 1000).toLocaleString()
+    : '';
+  const colors = {
+    verified: 'var(--color-success, #4ade80)',
+    waived: 'var(--color-warning, #f0ad4e)',
+    evaluated: 'var(--accent, #60a5fa)',
+    untrusted: 'var(--color-warning, #f0ad4e)',
+    legacy: 'var(--color-warning, #f0ad4e)',
+    staged: 'var(--fg-muted, #999)',
+  };
+  const detail = [
+    `Trust: ${trust}`,
+    `owner: ${sk.owner || 'local'}`,
+    `revision: ${sk.revision || 1}`,
+    `status: ${sk.status || 'draft'}`,
+    `source: ${sk.source || 'unknown'}`,
+    sk.source_status ? `source status: ${sk.source_status}` : '',
+    sk.source_revision ? `source revision: ${sk.source_revision}` : '',
+    `hash: ${String(sk.content_hash || '').slice(0, 12) || 'legacy'}`,
+    sk.published_revision ? `active revision: ${sk.published_revision}` : '',
+    sk.head_trust && sk.active ? `head trust: ${sk.head_trust}` : '',
+    sk.active_trust ? `active trust: ${sk.active_trust}` : '',
+    sk.audit_evaluator ? `evaluator: ${sk.audit_evaluator}` : '',
+    auditTime ? `last audit: ${auditTime}` : '',
+    (sk.platforms || []).length ? `platforms: ${sk.platforms.join(', ')}` : '',
+    (sk.requires_toolsets || []).length ? `required tools: ${sk.requires_toolsets.join(', ')}` : '',
+    sk.waiver?.reason ? `admin waiver: ${sk.waiver.reason}` : '',
+  ].filter(Boolean).join('\n');
+  return `<span class="memory-cat-badge skill-trust-pill" title="${esc(detail)}" style="color:${colors[trust] || colors.staged}">${esc(trust)}</span>`;
+}
+
+function _activeRevisionPill(sk) {
+  if (!sk.active) return '';
+  return `<span class="memory-cat-badge" title="Immutable revision currently used by agents">active r${esc(sk.published_revision || sk.revision || 1)}</span>`;
 }
 
 function _modelShortName(model) {
@@ -703,6 +751,8 @@ function renderSkillsList() {
       </div>
       <div class="skill-card-right">
         ${_statusPill(sk)}
+        ${_activeRevisionPill(sk)}
+        ${_trustPill(sk)}
         ${_sourcePill(sk)}
         ${_auditModelPills(sk)}
         ${_necessityPill(sk)}
@@ -724,6 +774,24 @@ function renderSkillsList() {
     // Preview (hidden until expanded) — SKILL.md goes here + footer.
     const preview = document.createElement('div');
     preview.className = 'doclib-card-preview skill-card-preview';
+    const trustDetails = document.createElement('div');
+    trustDetails.className = 'skill-trust-details';
+    trustDetails.textContent = [
+      `ID ${sk.skill_id || sk.id}`,
+      `head r${sk.revision || 1} ${String(sk.content_hash || '').slice(0, 12)}`,
+      sk.published_revision ? `active r${sk.published_revision} ${String(sk.published_hash || '').slice(0, 12)}` : 'not active',
+      `status ${sk.status || 'draft'}`,
+      `source ${sk.source || 'unknown'}`,
+      sk.source_status ? `source status ${sk.source_status}` : '',
+      sk.source_revision ? `source revision ${sk.source_revision}` : '',
+      sk.source_uri || '',
+      sk.audited_at ? `last audit ${new Date(Number(sk.audited_at) * 1000).toLocaleString()}` : '',
+      (sk.platforms || []).length ? `platforms ${(sk.platforms || []).join(', ')}` : '',
+      (sk.requires_toolsets || []).length ? `tools ${(sk.requires_toolsets || []).join(', ')}` : '',
+      sk.waiver?.reason ? `WAIVER ${sk.waiver.reason}` : '',
+    ].filter(Boolean).join(' · ');
+    trustDetails.style.cssText = 'font-size:.78rem;opacity:.72;padding:8px 12px 0;overflow-wrap:anywhere;';
+    preview.appendChild(trustDetails);
     const pre = document.createElement('pre');
     pre.className = 'skill-md-pre';
     pre.textContent = '';  // filled on expand
@@ -754,6 +822,17 @@ function renderSkillsList() {
       pubBtn.title = 'Publish — appears in the skills index';
       pubBtn.style.color = 'var(--color-success, #4caf50)';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'published'); });
+    }
+    let unpublishActiveBtn = null;
+    if (sk.active && !isPublished) {
+      unpublishActiveBtn = document.createElement('button');
+      unpublishActiveBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
+      unpublishActiveBtn.textContent = `Unpublish active r${sk.published_revision || '?'}`;
+      unpublishActiveBtn.title = 'Stop agents using the previously published revision';
+      unpublishActiveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _setSkillStatus(name, 'draft');
+      });
     }
 
     // Test/audit this one skill — same action that's in the kebab, surfaced in
@@ -795,6 +874,7 @@ function renderSkillsList() {
     rightGroup.appendChild(btnRow);
 
     actions.appendChild(pubBtn);
+    if (unpublishActiveBtn) actions.appendChild(unpublishActiveBtn);
     actions.appendChild(rightGroup);
     preview.appendChild(actions);
     card.appendChild(preview);
@@ -1102,11 +1182,24 @@ async function _deleteSkill(name, card = null) {
 
 async function _setSkillStatus(name, status) {
   try {
-    await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
+    const skill = skills.find(s => (s.name || s.id) === name) || {};
+    const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({
+        status,
+        expected_revision: skill.revision,
+        expected_hash: skill.content_hash,
+      }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const detail = data.detail || data.message || `HTTP ${res.status}`;
+      const message = typeof detail === 'string'
+        ? detail
+        : (detail.message || (detail.blockers || []).join('; ') || `HTTP ${res.status}`);
+      throw new Error(message);
+    }
     await loadSkills();
     uiModule.showToast(status === 'published' ? 'Skill approved' : 'Skill moved to draft');
   } catch (e) { uiModule.showError('Update failed: ' + e.message); }
@@ -1770,7 +1863,11 @@ async function _bulkApprove() {
       const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'published' }),
+        body: JSON.stringify({
+          status: 'published',
+          expected_revision: sk.revision,
+          expected_hash: sk.content_hash,
+        }),
       });
       if (res.ok) published++;
     } catch {}

@@ -16,9 +16,13 @@ import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
 import { Format } from "../format"
 import { Global } from "../global"
+import { RecoverableError } from "./recoverable"
+import { assertProjectFilePolicy } from "./project-policy"
+import { randomUUID } from "crypto"
 
 const PatchParams = z.object({
   patch_text: z.string().describe("The full patch text that describes all changes to be made"),
+  expected_fingerprints: z.record(z.string(), z.string()).optional().describe("Optional path-to-fingerprint CAS map"),
 })
 
 export const ApplyPatchTool = Tool.define(
@@ -61,16 +65,23 @@ export const ApplyPatchTool = Tool.define(
         diff: string
         additions: number
         deletions: number
+        oldFingerprint?: string
+        newFingerprint?: string
       }> = []
+      const atomicChanges: AppFileSystem.AtomicChange[] = []
+      const actionId = randomUUID()
 
       let totalDiff = ""
 
       for (const hunk of hunks) {
-        const filePath = path.resolve(SessionCwd.get(ctx.sessionID), hunk.path)
-        yield* assertWriteAllowed(ctx, filePath)
+        const requestedPath = path.resolve(SessionCwd.get(ctx.sessionID), hunk.path)
+        const filePath = (yield* assertWriteAllowed(ctx, requestedPath))!
 
         switch (hunk.type) {
           case "add": {
+            if (yield* afs.existsSafe(filePath)) {
+              return yield* Effect.fail(new RecoverableError(`apply_patch: add target already exists: ${filePath}`))
+            }
             const oldContent = ""
             const newContent =
               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
@@ -92,6 +103,11 @@ export const ApplyPatchTool = Tool.define(
               additions,
               deletions,
             })
+            atomicChanges.push({
+              path: filePath,
+              content: newContent,
+              requireMissing: true,
+            })
 
             totalDiff += diff + "\n"
             break
@@ -106,13 +122,21 @@ export const ApplyPatchTool = Tool.define(
               )
             }
 
-            const oldContent = yield* afs.readFileString(filePath)
+            const snapshot = yield* afs.readTextSnapshot(filePath)
+            const suppliedFingerprint = params.expected_fingerprints?.[hunk.path] ?? params.expected_fingerprints?.[filePath]
+            if (suppliedFingerprint && snapshot.fingerprint !== suppliedFingerprint) {
+              return yield* Effect.fail(
+                new RecoverableError(`apply_patch: ${filePath} changed since the supplied fingerprint. Read it again and retry.`),
+              )
+            }
+            const oldContent = snapshot.text
             let newContent = oldContent
 
             // Apply the update chunks to get new content
             try {
-              const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks)
-              newContent = fileUpdate.content
+              const normalized = oldContent.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
+              const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, normalized)
+              newContent = AppFileSystem.preserveNewlines(fileUpdate.content, snapshot.newline)
             } catch (error) {
               return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
             }
@@ -126,8 +150,15 @@ export const ApplyPatchTool = Tool.define(
               if (change.removed) deletions += change.count || 0
             }
 
-            const movePath = hunk.move_path ? path.resolve(SessionCwd.get(ctx.sessionID), hunk.move_path) : undefined
-            yield* assertWriteAllowed(ctx, movePath)
+            const movePath = hunk.move_path
+              ? (yield* assertWriteAllowed(
+                  ctx,
+                  path.resolve(SessionCwd.get(ctx.sessionID), hunk.move_path),
+                ))!
+              : undefined
+            if (movePath && (yield* afs.existsSafe(movePath))) {
+              return yield* Effect.fail(new RecoverableError(`apply_patch: move target already exists: ${movePath}`))
+            }
 
             fileChanges.push({
               filePath,
@@ -138,24 +169,45 @@ export const ApplyPatchTool = Tool.define(
               diff,
               additions,
               deletions,
+              oldFingerprint: snapshot.fingerprint,
             })
+            if (movePath) {
+              atomicChanges.push({
+                path: movePath,
+                content: AppFileSystem.encodeText(snapshot, newContent),
+                requireMissing: true,
+                mode: snapshot.mode,
+              })
+              atomicChanges.push({
+                path: filePath,
+                content: null,
+                expectedFingerprint: snapshot.fingerprint,
+                expectedMode: snapshot.mode,
+                mode: snapshot.mode,
+              })
+            } else {
+              atomicChanges.push({
+                path: filePath,
+                content: AppFileSystem.encodeText(snapshot, newContent),
+                expectedFingerprint: snapshot.fingerprint,
+                expectedMode: snapshot.mode,
+                mode: snapshot.mode,
+              })
+            }
 
             totalDiff += diff + "\n"
             break
           }
 
           case "delete": {
-            const contentToDelete = yield* afs
-              .readFileString(filePath)
-              .pipe(
-                Effect.catch((error) =>
-                  Effect.fail(
-                    new Error(
-                      `apply_patch verification failed: ${error instanceof Error ? error.message : String(error)}`,
-                    ),
-                  ),
-                ),
+            const snapshot = yield* afs.readTextSnapshot(filePath)
+            const suppliedFingerprint = params.expected_fingerprints?.[hunk.path] ?? params.expected_fingerprints?.[filePath]
+            if (suppliedFingerprint && snapshot.fingerprint !== suppliedFingerprint) {
+              return yield* Effect.fail(
+                new RecoverableError(`apply_patch: ${filePath} changed since the supplied fingerprint. Read it again and retry.`),
               )
+            }
+            const contentToDelete = snapshot.text
             const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
 
             const deletions = contentToDelete.split("\n").length
@@ -168,6 +220,14 @@ export const ApplyPatchTool = Tool.define(
               diff: deleteDiff,
               additions: 0,
               deletions,
+              oldFingerprint: snapshot.fingerprint,
+            })
+            atomicChanges.push({
+              path: filePath,
+              content: null,
+              expectedFingerprint: snapshot.fingerprint,
+              expectedMode: snapshot.mode,
+              mode: snapshot.mode,
             })
 
             totalDiff += deleteDiff + "\n"
@@ -175,6 +235,57 @@ export const ApplyPatchTool = Tool.define(
           }
         }
       }
+
+      // Format temporary copies before asking permission or committing. The
+      // permission prompt and returned audit metadata must describe the exact
+      // bytes that the atomic batch will publish, not the pre-format patch.
+      const history = atomicChanges.length
+        ? AppFileSystem.historyContextFromTool(ctx, atomicChanges[0]!.path)
+        : undefined
+      const preparedChanges = yield* Effect.acquireUseRelease(
+        afs.makeTempDirectory({ prefix: "open-clank-apply-patch-" }),
+        (stageDir) =>
+          Effect.gen(function* () {
+            const prepared = atomicChanges.map((change) => ({ ...change, actionId, history }))
+            for (const [fileIndex, change] of fileChanges.entries()) {
+              if (change.type === "delete") continue
+              const target = change.movePath ?? change.filePath
+              const atomicIndex = prepared.findIndex((item) => item.path === target && item.content !== null)
+              const atomic = prepared[atomicIndex]
+              if (!atomic || atomic.content === null) {
+                return yield* Effect.fail(new Error(`apply_patch: missing staged content for ${target}`))
+              }
+              const staged = path.join(stageDir, `${fileIndex}-${path.basename(target)}`)
+              yield* afs.writeWithDirs(staged, atomic.content, atomic.mode)
+              yield* format.file(staged)
+              const finalSnapshot = yield* afs.readTextSnapshot(staged)
+              prepared[atomicIndex] = {
+                ...atomic,
+                content: yield* afs.readFile(staged),
+              }
+              change.newContent = finalSnapshot.text
+              change.diff = trimDiff(createTwoFilesPatch(target, target, change.oldContent, change.newContent))
+              change.additions = 0
+              change.deletions = 0
+              for (const delta of diffLines(change.oldContent, change.newContent)) {
+                if (delta.added) change.additions += delta.count || 0
+                if (delta.removed) change.deletions += delta.count || 0
+              }
+            }
+            return prepared
+          }),
+        (stageDir) => afs.remove(stageDir, { recursive: true, force: true }).pipe(Effect.ignore),
+      )
+      totalDiff = fileChanges.map((change) => change.diff).join("\n") + "\n"
+      yield* Effect.promise(() =>
+        assertProjectFilePolicy(
+          ctx,
+          preparedChanges.map((change) => ({
+            path: change.path,
+            content: change.content,
+          })),
+        ),
+      )
 
       // Build per-file metadata for UI rendering (used for both permission and result)
       const files = fileChanges.map((change) => ({
@@ -185,6 +296,8 @@ export const ApplyPatchTool = Tool.define(
         additions: change.additions,
         deletions: change.deletions,
         movePath: change.movePath,
+        old_fingerprint: change.oldFingerprint,
+        fingerprint: change.newFingerprint,
       }))
       const title = files.length === 1 ? files[0]!.relativePath : `${files.length} files`
 
@@ -197,7 +310,15 @@ export const ApplyPatchTool = Tool.define(
       // memory writes — the askEditUnlessMemory deferral used by write.ts/edit.ts
       // is structurally already satisfied here. Left as a direct ctx.ask.
       if (permissionChanges.length > 0) {
-        const relativePaths = permissionChanges.map((c) => path.relative(Instance.worktree, c.filePath).replaceAll("\\", "/"))
+        const relativePaths = [
+          ...new Set(
+            permissionChanges.flatMap((change) =>
+              [change.filePath, change.movePath]
+                .filter((target): target is string => target !== undefined)
+                .map((target) => path.relative(Instance.worktree, target).replaceAll("\\", "/")),
+            ),
+          ),
+        ]
         yield* ctx.ask({
           permission: "edit",
           patterns: relativePaths,
@@ -212,45 +333,46 @@ export const ApplyPatchTool = Tool.define(
         })
       }
 
-      // Apply the changes
+      // Apply the changes as one staged transaction. The shared filesystem
+      // restores every prior target if any rename fails.
       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
+      yield* afs.atomicBatch(preparedChanges).pipe(
+        Effect.catchIf(
+          (error) => error instanceof AppFileSystem.AtomicConflict,
+          () => Effect.fail(new RecoverableError("apply_patch: a target changed during commit. Read the files and retry.")),
+        ),
+      )
 
       for (const change of fileChanges) {
         const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
         switch (change.type) {
           case "add":
-            // Create parent directories (recursive: true is safe on existing/root dirs)
-
-            yield* afs.writeWithDirs(change.filePath, change.newContent)
             updates.push({ file: change.filePath, event: "add" })
             break
 
           case "update":
-            yield* afs.writeWithDirs(change.filePath, change.newContent)
             updates.push({ file: change.filePath, event: "change" })
             break
 
           case "move":
             if (change.movePath) {
-              // Create parent directories (recursive: true is safe on existing/root dirs)
-
-              yield* afs.writeWithDirs(change.movePath!, change.newContent)
-              yield* afs.remove(change.filePath)
               updates.push({ file: change.filePath, event: "unlink" })
               updates.push({ file: change.movePath, event: "add" })
             }
             break
 
           case "delete":
-            yield* afs.remove(change.filePath)
             updates.push({ file: change.filePath, event: "unlink" })
             break
         }
 
         if (edited) {
-          yield* format.file(edited)
+          change.newFingerprint = (yield* afs.readTextSnapshot(edited)).fingerprint
           yield* bus.publish(File.Event.Edited, { file: edited })
         }
+      }
+      for (const [index, change] of fileChanges.entries()) {
+        files[index]!.fingerprint = change.newFingerprint
       }
 
       // Publish file change events
@@ -294,6 +416,8 @@ export const ApplyPatchTool = Tool.define(
           diff: totalDiff,
           files,
           diagnostics,
+          action_id: actionId,
+          history: history?.status ?? { status: "unconfigured", durable: false, coverage: "NoCapture" },
         },
         output,
       }
@@ -302,6 +426,23 @@ export const ApplyPatchTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: PatchParams,
+      resources: (params: z.infer<typeof PatchParams>, ctx: Tool.Context) => {
+        try {
+          const reads: string[] = []
+          const writes: string[] = []
+          for (const hunk of Patch.parsePatch(params.patch_text).hunks) {
+            const source = path.resolve(SessionCwd.get(ctx.sessionID), hunk.path)
+            writes.push(source)
+            if (hunk.type !== "add") reads.push(source)
+            if (hunk.type === "update" && hunk.move_path) {
+              writes.push(path.resolve(SessionCwd.get(ctx.sessionID), hunk.move_path))
+            }
+          }
+          return { reads, writes }
+        } catch {
+          return {}
+        }
+      },
       execute: (params: z.infer<typeof PatchParams>, ctx: Tool.Context) => run(params, ctx).pipe(Effect.orDie),
     }
   }),

@@ -8,8 +8,8 @@
  *
  *  - Button busy state: swap label for "<verbing>…" + whirlpool
  *    spinner, lock width so the button doesn't visually jump.
- *  - Endpoint+model selection from the tool's own picker (or the
- *    global fallback) so the backend knows which model to invoke.
+ *  - Stable managed model-route selection from the tool's own picker (or
+ *    the global fallback). Provider URLs and credentials never enter it.
  *  - Response handling: decode the returned PNG, push it as a new
  *    layer, save state, composite, refresh the layer panel.
  *  - Error reporting: surface failures via toast. Detects "needs
@@ -23,7 +23,7 @@
  *   composite:                  () => void,
  *   renderLayerPanel:           () => void,
  *   deriveBusyLabel:            (layerName: string) => string,
- *   getSelectedAIEndpoint:      (type: string | null) => { endpoint?: string, model?: string },
+ *   getSelectedAIEndpoint:      (type: string | null) => { modelRouteId?: string },
  *   openCookbookForDependency:  (pkg: string) => void,
  *   openCookbookForImg2img:     () => void,
  *   spinnerModule:              object,
@@ -64,15 +64,13 @@ export function createApplyImageTool({
       btn.appendChild(txt);
       btnSpinner.start();
     } catch { btn.textContent = busyLabel; }
-    // Tool-specific model picker — pulled from the per-tool select
-    // (harmonize/style) if available, otherwise the global
-    // fallback. Derived from the endpoint URL.
-    if (!extraPayload._endpoint) {
+    // Tool-specific managed route picker. A blank selection delegates to the
+    // owner's ordered Images bindings in the operation router.
+    if (!extraPayload.model_route_id) {
       const m = /\/api\/image\/([\w-]+)/.exec(endpoint || '');
       const type = m ? m[1].replace('upscale-ai', 'upscale').replace('remove-bg', 'rembg') : null;
       const sel = getSelectedAIEndpoint(type);
-      if (sel.endpoint) extraPayload._endpoint = sel.endpoint;
-      if (sel.model && !extraPayload._model) extraPayload._model = sel.model;
+      if (sel.modelRouteId) extraPayload.model_route_id = sel.modelRouteId;
     }
     try {
       const flatCanvas = flatten();

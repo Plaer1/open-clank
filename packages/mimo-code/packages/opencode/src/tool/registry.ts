@@ -38,6 +38,7 @@ import { Log } from "@/util"
 import { errorMessage } from "@/util/error"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
+import { SessionCwd } from "./session-cwd"
 import { ApplyPatchTool } from "./apply_patch"
 import { ChangeDirectoryTool } from "./change-directory"
 import { Glob } from "@mimo-ai/shared/util/glob"
@@ -75,6 +76,7 @@ import { BuiltinWorkflow } from "@/workflow/builtin"
 import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
 import { toolScriptRegistry } from "./tool-script-ref"
 import { usesGPTToolset } from "./gpt"
+import { ManageFilesTool } from "./manage-files"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -117,6 +119,12 @@ type State = {
 
 export interface Interface {
   readonly ids: () => Effect.Effect<string[]>
+  readonly metadata: () => Effect.Effect<Array<{
+    id: string
+    source: "builtin" | "extension"
+    registered: boolean
+    reason: string
+  }>>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ actor: ActorDef; read: ReadDef }>
   readonly tools: (model: { providerID: ProviderID; modelID: ModelID; agent: Agent.Info }) => Effect.Effect<Tool.Def[]>
@@ -167,6 +175,7 @@ export const layer = Layer.effect(
     const sessiontool = yield* SessionTool
     const workflowtool = yield* WorkflowTool
     const toolscript = yield* ToolScriptTool
+    const managefiles = yield* ManageFilesTool
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -190,7 +199,12 @@ export const layer = Layer.effect(
                 const output = typeof result === "string" ? result : result.output
                 const metadata = typeof result === "string" ? {} : (result.metadata ?? {})
                 const info = yield* agent.get(toolCtx.agent)
-                const out = yield* truncate.output(output, {}, info)
+                const out = yield* truncate.output(output, {}, info, {
+                  owner: process.env.OPEN_CLANK_OWNER ?? "",
+                  workspace: SessionCwd.get(toolCtx.sessionID),
+                  sessionID: toolCtx.sessionID,
+                  ...(toolCtx.callID ? { callID: toolCtx.callID } : {}),
+                })
                 return {
                   title: "",
                   output: out.truncated ? out.content : output,
@@ -267,6 +281,7 @@ export const layer = Layer.effect(
           session: Tool.init(sessiontool),
           workflow: Tool.init(workflowtool),
           toolscript: Tool.init(toolscript),
+          managefiles: Tool.init(managefiles),
         })
 
         return {
@@ -298,6 +313,7 @@ export const layer = Layer.effect(
             tool.history,
             tool.task,
             tool.toolscript,
+            tool.managefiles,
             ...(Flag.MIMOCODE_EXPERIMENTAL_CRON ? [tool.cron] : []),
             ...(Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR ? [tool.session] : []),
             ...(Flag.MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL ? [tool.workflow] : []),
@@ -325,6 +341,18 @@ export const layer = Layer.effect(
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
       return (yield* all()).map((tool) => tool.id)
+    })
+
+    const metadata: Interface["metadata"] = Effect.fn("ToolRegistry.metadata")(function* () {
+      const s = yield* InstanceState.get(state)
+      const customIds = new Set(s.custom.map((tool) => tool.id))
+      const tools = yield* all()
+      return tools.map((tool) => ({
+        id: tool.id,
+        source: customIds.has(tool.id) ? "extension" as const : "builtin" as const,
+        registered: true,
+        reason: customIds.has(tool.id) ? "Registered by a loaded extension" : "Registered native built-in",
+      }))
     })
 
     const describeSkill = Effect.fn("ToolRegistry.describeSkill")(function* (agent: Agent.Info) {
@@ -480,7 +508,7 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ ids, all, named, tools, reload })
+    return Service.of({ ids, metadata, all, named, tools, reload })
   }),
 ).pipe(Layer.provide(Git.defaultLayer))
 

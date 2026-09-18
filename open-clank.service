@@ -7,7 +7,7 @@ After=network.target
 Type=simple
 User=YOURUSER
 WorkingDirectory=/home/YOURUSER/open-clank
-ExecStart=/home/YOURUSER/open-clank/.venv/bin/uvicorn app:app --port 7000 --host 127.0.0.1
+ExecStart=/home/YOURUSER/open-clank/.venv/bin/python scripts/openclank_bootstrap.py serve --port 7777 --host 127.0.0.1
 Restart=always
 RestartSec=3
 Environment=OPEN_CLANK_DATA_DIR=/home/YOURUSER/open-clank/data

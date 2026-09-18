@@ -6,6 +6,8 @@ import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { RecoverableError } from "./recoverable"
 import { Agent } from "@/agent/agent"
+import { SessionCwd } from "./session-cwd"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 
 export interface Metadata {
   [key: string]: any
@@ -39,6 +41,7 @@ export interface Def<Parameters extends z.ZodType = z.ZodType, M extends Metadat
   id: string
   description: string
   parameters: Parameters
+  resources?(args: z.infer<Parameters>, ctx: Context): AppFileSystem.FileResources
   execute(args: z.infer<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
   formatValidationError?(error: z.ZodError): string
   shell?: {
@@ -119,12 +122,21 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
               return new RecoverableError(validationErrorMessage(id, error), { cause: error })
             },
           })
-          const result = yield* execute(args, ctx)
+          const execution = execute(args, ctx)
+          const resources = toolInfo.resources?.(args, ctx)
+          const result = yield* resources
+            ? AppFileSystem.scheduleFileResources(resources, execution, ctx.abort)
+            : execution
           if (result.metadata.truncated !== undefined) {
             return result
           }
           const agent = yield* agents.get(ctx.agent)
-          const truncated = yield* truncate.output(result.output, {}, agent)
+          const truncated = yield* truncate.output(result.output, {}, agent, {
+            owner: process.env.OPEN_CLANK_OWNER ?? "",
+            workspace: SessionCwd.get(ctx.sessionID),
+            sessionID: ctx.sessionID,
+            ...(ctx.callID ? { callID: ctx.callID } : {}),
+          })
           return {
             ...result,
             output: truncated.content,

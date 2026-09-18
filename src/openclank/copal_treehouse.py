@@ -25,6 +25,27 @@ LEGACY_NAMESPACE = uuid.UUID("a60667fd-0c92-5b5f-ac62-bde89d19497b")
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 ROLES = {"admin", "instructor", "learner"}
 
+# Keep the native manage_copal secondary command contract closed and aligned
+# with the canonical command engine below.  The engine remains the authority
+# for payload/role/revision validation; this manifest prevents a model from
+# inventing an unsupported command string at the tool boundary.
+TREEHOUSE_COMMAND_TYPES = (
+    "profile.create", "profile.update",
+    "course.create", "course.update", "course.publish", "course.archive",
+    "course.author.add", "course.reorder_modules", "course.delete",
+    "module.create", "module.update", "module.reorder_items", "module.delete",
+    "activity.create", "activity.update", "activity.complete", "activity.delete",
+    "enrollment.enroll", "enrollment.unenroll",
+    "assignment.create", "assignment.update", "assignment.publish", "assignment.delete",
+    "submission.submit", "submission.grade",
+    "skill.create", "skill.update", "skill.delete",
+    "evidence.submit", "evidence.review",
+    "badge.create", "badge.update", "badge.delete",
+    "quest.create", "quest.update", "quest.delete",
+    "progress.reset",
+    "course.share", "course.revoke_share", "course.accept_share",
+)
+
 
 class TreeHouseError(ValueError):
     def __init__(self, message: str, *, code: str = "invalid", status: int = 400, details: dict[str, Any] | None = None):
@@ -122,6 +143,13 @@ def new_treehouse_state(owner: str, *, now: datetime | None = None) -> dict[str,
         "events": [],
         "processedCommands": {},
         "migrations": {"legacyFrontmatter": {"sources": {}}},
+        # Reset is represented by an immutable event.  The derived projection
+        # uses its generation boundary so historical evidence stays available
+        # to audit/export code while active learner progress starts empty.
+        "progressResets": {},
+        # Grants are owner-authored capabilities.  A grant never changes the
+        # course owner and learner evidence remains keyed by profile.
+        "courseGrants": {},
         "extensions": {},
     }
 
@@ -155,12 +183,39 @@ def _require_role(state: dict[str, Any], actor_id: str, *roles: str) -> dict[str
 
 
 def _course_author(state: dict[str, Any], actor_id: str, course_id: str) -> dict[str, Any]:
-    actor = _require_role(state, actor_id, "admin", "instructor")
+    actor = _profile(state, actor_id)
     course = state["courses"].get(course_id)
     if not course:
         raise TreeHouseError("Course not found", code="course_not_found", status=404)
-    if "admin" not in actor["roles"] and actor_id not in course.get("authorIds", []):
+    if actor_id != course.get("ownerId") and not _course_access(state, actor_id, course_id, "edit"):
         raise TreeHouseError("Only a course author can change this course", code="forbidden", status=403)
+    return course
+
+
+def _course_access(state: dict[str, Any], actor_id: str, course_id: str, capability: str = "learn") -> bool:
+    """One predicate for every learner/admin course surface.
+
+    The owner and authors retain full access.  A live grant can provide learn
+    or edit access; revoked and expired grants are denied consistently.
+    """
+    course = state.get("courses", {}).get(course_id)
+    if not course or course.get("deletedAt"):
+        return False
+    if actor_id in course.get("authorIds", []) or actor_id == course.get("ownerId"):
+        return True
+    wanted = "edit" if capability == "edit" else "learn"
+    for grant in state.get("courseGrants", {}).values():
+        if grant.get("courseId") != course_id or grant.get("recipientId") != actor_id or grant.get("revokedAt") or not grant.get("acceptedAt"):
+            continue
+        if grant.get("capability") in {wanted, "edit"}:
+            return True
+    return False
+
+
+def _require_course_access(state: dict[str, Any], actor_id: str, course_id: str, capability: str = "learn") -> dict[str, Any]:
+    course = _entity(state, "courses", course_id, "Course")
+    if not _course_access(state, actor_id, course_id, capability):
+        raise TreeHouseError("This course is not available to this account", code="course_forbidden", status=403)
     return course
 
 
@@ -223,6 +278,22 @@ def _require_enrollment(state: dict[str, Any], course_id: str, actor_id: str) ->
     return enrollment
 
 
+def _attempt_generation(state: dict[str, Any], actor_id: str, course_id: str, payload: dict[str, Any]) -> int:
+    """Validate and return the reset generation captured by a learner call."""
+    generation = max(
+        int(state.get("progressResets", {}).get(f"{actor_id}:{course_id}", 0)),
+        int(state.get("progressResets", {}).get(f"{actor_id}:*", 0)),
+    )
+    if "resetGeneration" in payload and int(payload.get("resetGeneration")) != generation:
+        raise TreeHouseError(
+            "This completion belongs to an older learning attempt",
+            code="stale_completion",
+            status=409,
+            details={"generation": generation},
+        )
+    return generation
+
+
 def _skill_cycle(skills: dict[str, dict[str, Any]]) -> list[str] | None:
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -278,14 +349,30 @@ def compute_treehouse_projections(state: dict[str, Any]) -> dict[str, Any]:
             "gradedSubmissionIds": [],
             "skills": {},
             "badges": [],
+            "achievements": [],
             "quests": [],
             "streak": 0,
             "courses": {},
         })
 
-    for event in state["events"]:
+    reset_positions: dict[tuple[str, str | None], int] = {}
+    for index, event in enumerate(state["events"]):
+        if event.get("type") == "progress.reset":
+            subject = str(event.get("subjectId") or "")
+            course_id = event.get("data", {}).get("courseId")
+            reset_positions[(subject, course_id)] = index
+
+    def active_after_reset(index: int, subject: str, event: dict[str, Any]) -> bool:
+        global_reset = reset_positions.get((subject, None), -1)
+        course_id = event.get("data", {}).get("courseId")
+        course_reset = reset_positions.get((subject, course_id), -1) if course_id else -1
+        return index > max(global_reset, course_reset)
+
+    for index, event in enumerate(state["events"]):
         subject = event.get("subjectId")
         if subject not in state["profiles"]:
+            continue
+        if event.get("type") == "progress.reset" or not active_after_reset(index, subject, event):
             continue
         if event["type"] == "activity.completed":
             completed_events[(subject, event["entityId"])] = event
@@ -391,6 +478,22 @@ def compute_treehouse_projections(state: dict[str, Any]) -> dict[str, Any]:
                 evidence_ids = match.get("evidenceEventIds", []) if match else []
             if achieved:
                 projection["badges"].append({"badgeId": badge_id, "evidenceEventIds": evidence_ids})
+
+        # Field Guide achievements are projections over the same earned badge
+        # evidence.  They are computed on every read, so replaying a command
+        # cannot duplicate an award and reset generation naturally removes
+        # evidence earned before the reset.
+        earned_field_badges = {
+            state.get("badges", {}).get(item["badgeId"], {}).get("fieldGuideKey")
+            for item in projection["badges"]
+        }
+        for achievement in (state.get("fieldGuide", {}).get("achievements") or []):
+            required = set(achievement.get("requiredBadges") or [])
+            if required and required.issubset(earned_field_badges):
+                projection["achievements"].append({
+                    "achievementKey": achievement.get("key"),
+                    "evidenceBadgeKeys": sorted(required),
+                })
 
         days = sorted(learning_days.get(profile_id, set()), reverse=True)
         if days:
@@ -519,6 +622,47 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         emit("profile.updated", profile_id, "profile", profile_id, {"roles": profile["roles"]})
         return {"profileId": profile_id}
 
+    if kind == "progress.reset":
+        # A learner may reset only their own active record.  Admin/instructor
+        # presentation mode never becomes authority to erase another learner.
+        _require_role(state, actor_id, "learner", "admin")
+        target_id = _id(payload.get("profileId") or actor_id, "profileId")
+        if target_id != actor_id:
+            raise TreeHouseError("Progress reset must be requested by that learner", code="forbidden", status=403)
+        course_id = payload.get("courseId")
+        if course_id is not None:
+            course_id = _id(course_id, "courseId")
+            _entity(state, "courses", course_id, "Course")
+        removed_submissions = 0
+        for submission_id, submission in list(state["submissions"].items()):
+            if submission.get("profileId") != actor_id:
+                continue
+            if course_id is None or submission.get("courseId") == course_id:
+                del state["submissions"][submission_id]
+                removed_submissions += 1
+        removed_evidence = 0
+        for evidence_id, evidence in list(state["evidence"].items()):
+            if evidence.get("profileId") == actor_id and (course_id is None or evidence.get("courseId") in {None, course_id}):
+                del state["evidence"][evidence_id]
+                removed_evidence += 1
+        for enrollment in state["enrollments"].values():
+            if enrollment.get("profileId") == actor_id and (course_id is None or enrollment.get("courseId") == course_id):
+                enrollment["status"] = "active"
+                enrollment.pop("completedAt", None)
+                enrollment["updatedAt"] = at
+        generation_key = f"{actor_id}:{course_id or '*'}"
+        generation = int(state.setdefault("progressResets", {}).get(generation_key, 0)) + 1
+        state["progressResets"][generation_key] = generation
+        event = emit("progress.reset", actor_id, "progress", generation_key, {"courseId": course_id, "generation": generation})
+        return {
+            "profileId": actor_id,
+            "courseId": course_id,
+            "generation": generation,
+            "eventId": event["id"],
+            "removedSubmissions": removed_submissions,
+            "removedEvidence": removed_evidence,
+        }
+
     if kind == "course.create":
         _require_role(state, actor_id, "admin", "instructor")
         course_id = _id(payload.get("id") or _new_id("course"), "courseId")
@@ -527,10 +671,63 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
             "id": course_id, "title": _text(payload.get("title"), "title", maximum=256),
             "description": _text(payload.get("description"), "description", maximum=16_384, required=False),
             "tags": [_text(item, "tag", maximum=64) for item in (payload.get("tags") or [])[:32]],
-            "status": "draft", "authorIds": [actor_id], "moduleIds": [], "createdAt": at, "updatedAt": at,
+            "status": "draft", "ownerId": actor_id, "authorIds": [actor_id],
+            "moduleIds": [], "createdAt": at, "updatedAt": at,
         }
         emit("course.created", actor_id, "course", course_id, {})
         return {"courseId": course_id}
+
+    if kind == "course.share":
+        state.setdefault("courseGrants", {})
+        course_id = _id(payload.get("courseId"), "courseId")
+        course = _entity(state, "courses", course_id, "Course")
+        owner_id = course.get("ownerId") or (course.get("authorIds") or [None])[0]
+        if actor_id != owner_id:
+            raise TreeHouseError("Only the course owner can share it", code="forbidden", status=403)
+        recipient_id = _id(payload.get("recipientId"), "recipientId")
+        if recipient_id == owner_id:
+            raise TreeHouseError("The course owner already has access", code="invalid_recipient")
+        _profile(state, recipient_id)
+        capability = str(payload.get("capability") or "learn")
+        if capability not in {"learn", "edit"}:
+            raise TreeHouseError("Course capability must be learn or edit", code="invalid_capability")
+        grant_id = _id(payload.get("grantId") or _new_id("grant"), "grantId")
+        if grant_id in state["courseGrants"]:
+            raise TreeHouseError("Course grant already exists", code="already_exists", status=409)
+        token = str(uuid.uuid4())
+        state["courseGrants"][grant_id] = {
+            "id": grant_id, "courseId": course_id, "ownerId": owner_id,
+            "recipientId": recipient_id, "capability": capability,
+            "tokenHash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "createdAt": at, "acceptedAt": None, "revokedAt": None,
+        }
+        emit("course.shared", actor_id, "courseGrant", grant_id, {"courseId": course_id, "recipientId": recipient_id, "capability": capability})
+        return {"grantId": grant_id, "courseId": course_id, "recipientId": recipient_id, "capability": capability, "shareToken": token}
+
+    if kind == "course.accept_share":
+        state.setdefault("courseGrants", {})
+        token = _text(payload.get("shareToken"), "shareToken", maximum=256)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        grant = next((item for item in state["courseGrants"].values() if item.get("tokenHash") == digest and not item.get("revokedAt")), None)
+        if not grant or grant.get("recipientId") != actor_id:
+            raise TreeHouseError("Share link is invalid or revoked", code="share_unavailable", status=403)
+        grant["acceptedAt"] = at
+        emit("course.share_accepted", actor_id, "courseGrant", grant["id"], {"courseId": grant["courseId"]})
+        return {"grantId": grant["id"], "courseId": grant["courseId"], "capability": grant["capability"]}
+
+    if kind == "course.revoke_share":
+        state.setdefault("courseGrants", {})
+        grant_id = _id(payload.get("grantId"), "grantId")
+        grant = _entity(state, "courseGrants", grant_id, "Course grant")
+        course = _entity(state, "courses", grant["courseId"], "Course")
+        owner_id = course.get("ownerId") or (course.get("authorIds") or [None])[0]
+        if actor_id != owner_id:
+            raise TreeHouseError("Only the course owner can revoke access", code="forbidden", status=403)
+        if grant.get("revokedAt"):
+            return {"grantId": grant_id, "alreadyRevoked": True}
+        grant["revokedAt"] = at
+        emit("course.share_revoked", actor_id, "courseGrant", grant_id, {"courseId": grant["courseId"], "recipientId": grant["recipientId"]})
+        return {"grantId": grant_id, "revoked": True}
 
     if kind == "course.delete":
         course_id = _id(payload.get("courseId"), "courseId")
@@ -687,7 +884,14 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
 
     if kind == "enrollment.enroll":
         _require_role(state, actor_id, "learner")
-        course_id = _id(payload.get("courseId"), "courseId"); _published_course(state, course_id)
+        course_id = _id(payload.get("courseId"), "courseId"); _published_course(state, course_id); _require_course_access(state, actor_id, course_id, "learn")
+        course = state["courses"][course_id]
+        unmet = [
+            prerequisite for prerequisite in course.get("prerequisites", [])
+            if state["enrollments"].get(_enrollment_key(prerequisite, actor_id), {}).get("status") != "completed"
+        ]
+        if unmet:
+            raise TreeHouseError("Complete prerequisite courses first", code="course_prerequisites_unmet", status=409, details={"courseIds": unmet})
         key = _enrollment_key(course_id, actor_id)
         existing = state["enrollments"].get(key)
         if existing and existing.get("status") == "active":
@@ -699,6 +903,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
     if kind == "enrollment.unenroll":
         _require_role(state, actor_id, "learner", "admin")
         course_id = _id(payload.get("courseId"), "courseId")
+        _require_course_access(state, actor_id, course_id, "learn")
         key = _enrollment_key(course_id, actor_id)
         enrollment = state["enrollments"].get(key)
         if not enrollment:
@@ -715,14 +920,16 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         _require_role(state, actor_id, "learner")
         activity_id = _id(payload.get("activityId"), "activityId")
         activity = _entity(state, "activities", activity_id, "Activity")
-        _published_course(state, activity["courseId"]); _require_enrollment(state, activity["courseId"], actor_id)
+        _published_course(state, activity["courseId"]); _require_course_access(state, actor_id, activity["courseId"], "learn"); _require_enrollment(state, activity["courseId"], actor_id)
         if activity.get("status") != "published": raise TreeHouseError("Activity is not published", code="activity_not_published", status=409)
-        if any(event["type"] == "activity.completed" and event["subjectId"] == actor_id and event["entityId"] == activity_id for event in state["events"]):
+        course_generation = _attempt_generation(state, actor_id, activity["courseId"], payload)
+        reset_cutoff = max((index for index, event in enumerate(state["events"]) if event.get("type") == "progress.reset" and event.get("subjectId") == actor_id and event.get("data", {}).get("courseId") in {None, activity["courseId"]}), default=-1)
+        if any(index > reset_cutoff and event["type"] == "activity.completed" and event["subjectId"] == actor_id and event["entityId"] == activity_id for index, event in enumerate(state["events"])):
             return {"activityId": activity_id, "alreadyComplete": True}
         _require_skills_unlocked(state, actor_id, activity.get("skillIds", []))
         _require_module_order(state, actor_id, activity["moduleId"], activity_id, "activity")
         skills = [{"skillId": item, "points": activity["points"]} for item in activity.get("skillIds", [])]
-        event = emit("activity.completed", actor_id, "activity", activity_id, {"courseId": activity["courseId"], "points": activity["points"], "skills": skills})
+        event = emit("activity.completed", actor_id, "activity", activity_id, {"courseId": activity["courseId"], "points": activity["points"], "skills": skills, "generation": course_generation})
         sync_course_completion(activity["courseId"], actor_id)
         return {"activityId": activity_id, "eventId": event["id"]}
 
@@ -781,7 +988,8 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         _require_role(state, actor_id, "learner")
         assignment_id = _id(payload.get("assignmentId"), "assignmentId")
         assignment = _entity(state, "assignments", assignment_id, "Assignment")
-        _published_course(state, assignment["courseId"]); _require_enrollment(state, assignment["courseId"], actor_id)
+        _published_course(state, assignment["courseId"]); _require_course_access(state, actor_id, assignment["courseId"], "learn"); _require_enrollment(state, assignment["courseId"], actor_id)
+        course_generation = _attempt_generation(state, actor_id, assignment["courseId"], payload)
         if assignment.get("status") != "published": raise TreeHouseError("Assignment is not published", code="assignment_not_published", status=409)
         if assignment.get("dueAt") and datetime.fromisoformat(assignment["dueAt"].replace("Z", "+00:00")) < datetime.fromisoformat(at.replace("Z", "+00:00")):
             raise TreeHouseError("Assignment deadline has passed", code="assignment_past_due", status=409)
@@ -798,9 +1006,9 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         state["submissions"][key] = {
             "id": key, "assignmentId": assignment_id, "courseId": assignment["courseId"], "profileId": actor_id,
             "answer": copy.deepcopy(answer), "status": "submitted", "attempts": attempts,
-            "submittedAt": at, "updatedAt": at, "grade": None, "feedback": "",
+            "submittedAt": at, "updatedAt": at, "grade": None, "feedback": "", "resetGeneration": course_generation,
         }
-        event = emit("submission.submitted", actor_id, "submission", key, {"assignmentId": assignment_id, "attempt": attempts})
+        event = emit("submission.submitted", actor_id, "submission", key, {"assignmentId": assignment_id, "courseId": assignment["courseId"], "attempt": attempts, "generation": course_generation})
         return {"submissionId": key, "eventId": event["id"], "attempt": attempts}
 
     if kind == "submission.grade":
@@ -812,7 +1020,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         percent = round(score / assignment["maxPoints"] * 100, 2)
         submission.update({"status": "graded", "grade": score, "feedback": feedback, "gradedAt": at, "gradedBy": actor_id, "updatedAt": at})
         skills = [{"skillId": item, "points": round(score / max(1, len(assignment.get("skillIds", []))))} for item in assignment.get("skillIds", [])]
-        event = emit("submission.graded", submission["profileId"], "submission", submission_id, {"assignmentId": assignment["id"], "score": score, "maxPoints": assignment["maxPoints"], "percent": percent, "points": score, "skills": skills, "feedback": feedback})
+        event = emit("submission.graded", submission["profileId"], "submission", submission_id, {"assignmentId": assignment["id"], "courseId": assignment["courseId"], "score": score, "maxPoints": assignment["maxPoints"], "percent": percent, "points": score, "skills": skills, "feedback": feedback, "generation": int(submission.get("resetGeneration", 0))})
         sync_course_completion(assignment["courseId"], submission["profileId"])
         return {"submissionId": submission_id, "eventId": event["id"], "percent": percent}
 
@@ -864,9 +1072,12 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         _require_role(state, actor_id, "learner")
         skill_id = _id(payload.get("skillId"), "skillId"); _entity(state, "skills", skill_id, "Skill")
         _require_skills_unlocked(state, actor_id, [skill_id])
+        evidence_generation = int(state.get("progressResets", {}).get(f"{actor_id}:*", 0))
+        if "resetGeneration" in payload and int(payload.get("resetGeneration")) != evidence_generation:
+            raise TreeHouseError("This evidence belongs to an older learning attempt", code="stale_completion", status=409, details={"generation": evidence_generation})
         evidence_id = _id(payload.get("id") or _new_id("evidence"), "evidenceId")
-        state["evidence"][evidence_id] = {"id": evidence_id, "skillId": skill_id, "profileId": actor_id, "description": _text(payload.get("description"), "description", maximum=32_768), "sourceUrl": _text(payload.get("sourceUrl"), "sourceUrl", maximum=2_048, required=False), "status": "pending", "createdAt": at, "updatedAt": at}
-        emit("evidence.submitted", actor_id, "evidence", evidence_id, {"skillId": skill_id})
+        state["evidence"][evidence_id] = {"id": evidence_id, "skillId": skill_id, "profileId": actor_id, "description": _text(payload.get("description"), "description", maximum=32_768), "sourceUrl": _text(payload.get("sourceUrl"), "sourceUrl", maximum=2_048, required=False), "status": "pending", "generation": evidence_generation, "createdAt": at, "updatedAt": at}
+        emit("evidence.submitted", actor_id, "evidence", evidence_id, {"skillId": skill_id, "generation": evidence_generation})
         return {"evidenceId": evidence_id}
 
     if kind == "evidence.review":
@@ -1007,7 +1218,15 @@ def apply_treehouse_command(
     result = _command_result(next_state, command, actor_id, command_id, timestamp)
     next_state["revision"] += 1
     next_state["updatedAt"] = timestamp
-    next_state["processedCommands"][command_id] = {"result": copy.deepcopy(result), "revision": next_state["revision"], "at": timestamp}
+    next_state["processedCommands"][command_id] = {
+        "result": copy.deepcopy(result),
+        "revision": next_state["revision"],
+        "at": timestamp,
+        # Progress projections are stored separately from owner curriculum.
+        # Retaining the immutable actor lets the projection keep learner
+        # replays while excluding author/admin command receipts.
+        "actorId": actor_id,
+    }
     while len(next_state["processedCommands"]) > MAX_PROCESSED_COMMANDS:
         next_state["processedCommands"].pop(next(iter(next_state["processedCommands"])))
     return next_state, {**result, "revision": next_state["revision"], "replayed": False}, True
@@ -1017,9 +1236,10 @@ def public_treehouse_snapshot(state: dict[str, Any], actor_id: str) -> dict[str,
     validate_treehouse_state(state)
     actor = _profile(state, actor_id)
     projection = compute_treehouse_projections(state)
-    is_staff = _has_role(actor, "admin", "instructor")
     snapshot = copy.deepcopy(state)
     snapshot.pop("processedCommands", None)
+    if actor_id != "owner" and actor_id in snapshot.get("profiles", {}):
+        snapshot["profiles"] = {actor_id: snapshot["profiles"][actor_id]}
     # Filter deleted entities from snapshot
     snapshot["courses"] = {k: v for k, v in snapshot["courses"].items() if not v.get("deletedAt")}
     snapshot["modules"] = {k: v for k, v in snapshot["modules"].items() if not v.get("deletedAt")}
@@ -1028,12 +1248,86 @@ def public_treehouse_snapshot(state: dict[str, Any], actor_id: str) -> dict[str,
     snapshot["skills"] = {k: v for k, v in snapshot["skills"].items() if not v.get("deletedAt")}
     snapshot["badges"] = {k: v for k, v in snapshot["badges"].items() if not v.get("deletedAt")}
     snapshot["quests"] = {k: v for k, v in snapshot["quests"].items() if not v.get("deletedAt")}
+    snapshot["courseGrants"] = {
+        key: value for key, value in snapshot.get("courseGrants", {}).items()
+        if value.get("recipientId") == actor_id
+        or value.get("ownerId") == actor_id
+        or actor_id in snapshot["courses"].get(value.get("courseId"), {}).get("authorIds", [])
+    }
     snapshot["enrollments"] = {k: v for k, v in snapshot["enrollments"].items() if v.get("status") != "withdrawn"}
-    if not is_staff:
-        snapshot["courses"] = {key: value for key, value in snapshot["courses"].items() if value.get("status") == "published" or actor_id in value.get("authorIds", [])}
-        visible_courses = set(snapshot["courses"])
-        for collection in ("modules", "activities", "assignments"):
-            snapshot[collection] = {key: value for key, value in snapshot[collection].items() if value.get("courseId") in visible_courses and (collection != "assignments" or value.get("status") == "published")}
+    snapshot["courses"] = {
+        key: value for key, value in snapshot["courses"].items()
+        if _course_access(state, actor_id, key, "edit")
+        or _course_access(state, actor_id, key, "learn")
+    }
+    # UI controls must use the capability of the individual course.  A global
+    # admin/instructor role is insufficient for a recipient's learn-only
+    # grant, and keeping this projection beside the access predicate prevents
+    # the mounted client from reconstructing authority from profile roles.
+    snapshot["courseCapabilities"] = {
+        key: {
+            "learn": _course_access(state, actor_id, key, "learn"),
+            "edit": _course_access(state, actor_id, key, "edit"),
+            "owner": actor_id == value.get("ownerId"),
+            "author": actor_id in value.get("authorIds", []),
+        }
+        for key, value in snapshot["courses"].items()
+    }
+    visible_courses = set(snapshot["courses"])
+    for collection in ("modules", "activities", "assignments"):
+        snapshot[collection] = {
+            key: value for key, value in snapshot[collection].items()
+            if value.get("courseId") in visible_courses
+            and (collection != "assignments" or value.get("status") == "published" or _course_access(state, actor_id, value.get("courseId"), "edit"))
+    }
+    # A caller can administer their own catalogue while only learning from a
+    # shared course.  Keep owner/other-learner records out of every shared
+    # progress projection even when the caller has a global admin role.
+    authoritative_courses = {
+        course_id for course_id, capability in snapshot["courseCapabilities"].items()
+        if capability.get("edit") or capability.get("owner") or capability.get("author")
+    }
+    skill_courses = {}
+    for item in (*snapshot["activities"].values(), *snapshot["assignments"].values()):
+        for skill_id in item.get("skillIds", []):
+            skill_courses.setdefault(skill_id, set()).add(item.get("courseId"))
+    snapshot["submissions"] = {
+        key: value for key, value in snapshot["submissions"].items()
+        if value.get("profileId") == actor_id or value.get("courseId") in authoritative_courses
+    }
+    snapshot["evidence"] = {
+        key: value for key, value in snapshot["evidence"].items()
+        if value.get("profileId") == actor_id or bool(skill_courses.get(value.get("skillId"), set()) & authoritative_courses)
+    }
+    entity_courses = {}
+    for collection in ("courses", "modules", "activities", "assignments"):
+        for entity_id, value in snapshot[collection].items():
+            entity_courses[entity_id] = value.get("courseId") or (entity_id if collection == "courses" else None)
+    curriculum_events = {"course.created", "course.updated", "course.published", "course.archived", "module.created", "module.updated", "activity.created", "activity.updated", "assignment.created", "assignment.updated", "assignment.published", "skill.created", "badge.created", "quest.created"}
+    snapshot["events"] = [
+        event for event in snapshot["events"]
+        if event.get("subjectId") == actor_id
+        or event.get("data", {}).get("courseId") in authoritative_courses
+        or entity_courses.get(event.get("entityId")) in authoritative_courses
+        or (event.get("type") in curriculum_events and not authoritative_courses and event.get("data", {}).get("courseId") in visible_courses)
+    ]
+    projection_source = copy.deepcopy(state)
+    projection_source["submissions"] = snapshot["submissions"]
+    projection_source["evidence"] = snapshot["evidence"]
+    projection_source["events"] = snapshot["events"]
+    projection = compute_treehouse_projections(projection_source)
+    allowed_learners = {actor_id}
+    allowed_learners.update(value.get("profileId") for value in snapshot["submissions"].values() if value.get("courseId") in authoritative_courses)
+    allowed_learners.update(value.get("profileId") for value in snapshot["evidence"].values() if bool(skill_courses.get(value.get("skillId"), set()) & authoritative_courses))
+    allowed_learners.update(
+        event.get("subjectId") for event in snapshot["events"]
+        if event.get("data", {}).get("courseId") in authoritative_courses
+        or entity_courses.get(event.get("entityId")) in authoritative_courses
+    )
+    projection["learners"] = {key: value for key, value in projection["learners"].items() if key in allowed_learners}
+    projection["leaderboard"] = [item for item in projection["leaderboard"] if item.get("profileId") in allowed_learners]
+    projection["courses"] = {key: value for key, value in projection["courses"].items() if key in authoritative_courses}
+    if not _has_role(actor, "admin", "instructor"):
         snapshot["submissions"] = {key: value for key, value in snapshot["submissions"].items() if value.get("profileId") == actor_id}
         snapshot["evidence"] = {key: value for key, value in snapshot["evidence"].items() if value.get("profileId") == actor_id}
         snapshot["events"] = [event for event in snapshot["events"] if event.get("subjectId") == actor_id or event.get("type") in {"course.published", "skill.created", "badge.created", "quest.created"}]
@@ -1045,7 +1339,15 @@ def public_treehouse_snapshot(state: dict[str, Any], actor_id: str) -> dict[str,
         "grade": _has_role(actor, "admin", "instructor"),
         "analytics": _has_role(actor, "admin", "instructor"),
     }
-    return {"state": snapshot, "projection": projection, "actor": copy.deepcopy(actor), "permissions": permissions}
+    return {
+        "state": snapshot,
+        "projection": projection,
+        "actor": copy.deepcopy(actor),
+        "permissions": permissions,
+        # Keep this at the envelope level for clients that must decide which
+        # controls to render before traversing the state projection.
+        "courseCapabilities": copy.deepcopy(snapshot.get("courseCapabilities", {})),
+    }
 
 
 def plan_legacy_migration(documents: Iterable[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any]:

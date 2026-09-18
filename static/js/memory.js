@@ -9,6 +9,10 @@ import { snapModalToZone } from './tileManager.js';
 import { topPortalZ } from './toolWindowZOrder.js';
 import { memoryChips, isTrusted, DEFAULT_KIND_TRUST } from './util/memoryTrust.js';
 import { forceLayout, hitTest, tagCounts, mergeExpansion } from './util/memoryGraph.js';
+import { contextualErrorMessage, responseError } from './util/httpError.js';
+import { memoryAssetUrl } from './util/memoryExport.js';
+import { createMemoryExportDialog, downloadMemoryAsset } from './memoryExportDialog.js';
+import { dismissAllPendingImportBatches } from './memoryImportDismiss.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -17,9 +21,13 @@ let activeCategory = 'all';
 let sortOrder = 'newest';
 let selectMode = false;
 let selectedIds = new Set();
+let memoriesLoading = false;
 let memoryLoadError = null;
 let memoryProviderStatus = '';
 let inspectedMemories = [];
+let pendingMemoryImportFile = null;
+let pendingMemoryImportFiles = [];
+let memoryImportRetrying = false;
 // Per-user trust prefs (memory_trust_auto + memory_trust_auto_kinds),
 // loaded with the list so the trusted/reference chip reflects reality.
 let trustPrefsState = {};
@@ -223,6 +231,7 @@ async function syncToggles() {
   await syncPrefToggle('auto-approve-skills-toggle', 'auto_approve_skills', 'Auto-approve skills enabled', 'Auto-approve skills disabled', false);
   await syncPrefSlider('skill-confidence-slider', 'skill_min_confidence', 'skill-confidence-label', 0.85);
   await syncPrefNumber('skill-max-input', 'skill_max_injected', 3);
+  await syncMobileControlSide();
 
   // Reflect the header toggle into the sidebar dim + modal body opacity.
   const headerToggle = document.getElementById('memory-enabled-header-toggle');
@@ -252,9 +261,407 @@ async function syncToggles() {
   }
 }
 
+const _MOBILE_CONTROL_SIDES = new Set(['left', 'right', 'system']);
+
+async function syncMobileControlSide() {
+  const select = document.getElementById('memory-mobile-control-side');
+  if (!select) return;
+  let saved = 'system';
+  try {
+    const response = await fetch('/api/prefs/mobile_control_side', { credentials: 'same-origin' });
+    if (response.ok) {
+      const payload = await response.json();
+      if (_MOBILE_CONTROL_SIDES.has(payload?.value)) saved = payload.value;
+    }
+  } catch (error) {
+    console.debug('Unable to load mobile-control-side preference:', error);
+  }
+  select.value = saved;
+  select.dataset.saved = saved;
+  if (select.dataset.bound === '1') return;
+  select.dataset.bound = '1';
+  select.addEventListener('change', async () => {
+    const next = _MOBILE_CONTROL_SIDES.has(select.value) ? select.value : 'system';
+    const previous = _MOBILE_CONTROL_SIDES.has(select.dataset.saved)
+      ? select.dataset.saved
+      : 'system';
+    select.disabled = true;
+    try {
+      const response = await fetch('/api/prefs/mobile_control_side', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: next }),
+      });
+      if (!response.ok) throw new Error((await responseError(response, 'Failed to save mobile control preference')).message);
+      select.value = next;
+      select.dataset.saved = next;
+      showToast(next === 'system'
+        ? 'Mobile controls follow the device setting'
+        : `Mobile controls: ${next}`);
+    } catch (error) {
+      console.error('Failed to save mobile-control-side preference:', error);
+      select.value = previous;
+      showError(error?.message || 'Failed to save mobile control preference');
+    } finally {
+      select.disabled = false;
+    }
+  });
+}
+
+function _setProfileQuestionStatus(message, tone = '') {
+  const status = document.getElementById('memory-profile-question-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = tone === 'error'
+    ? 'var(--color-error, var(--red))'
+    : (tone === 'success' ? 'var(--color-success, var(--green))' : '');
+}
+
+async function _addHandlerProfileQuestions() {
+  const button = document.getElementById('memory-add-profile-questions');
+  if (button?.dataset.busy === '1') return;
+  if (button) {
+    button.dataset.busy = '1';
+    button.disabled = true;
+  }
+  _setProfileQuestionStatus('Preparing Handler questions…');
+  try {
+    const response = await fetch('/api/memory/principals', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error((await responseError(response, 'Handler identity is unavailable')).message);
+    const payload = await response.json();
+    const handler = (Array.isArray(payload?.principals) ? payload.principals : [])
+      .find((principal) => principal?.role === 'Handler');
+    if (!handler?.id) throw new Error('Handler identity is unavailable; try again after Memory reconnects.');
+    const target = { kind: 'entity', id: String(handler.id) };
+    const questions = [
+      {
+        text: "What name should I use for my Handler?",
+        category: 'unknown',
+        question_context: {
+          mode: 'missing_slot',
+          target,
+          predicate: 'preferred_name',
+          predicate_version: '1',
+          claim_slot: 'identity.preferred_name',
+          expected_value_type: 'string',
+          question_id: 'handler-preferred-name',
+        },
+      },
+      {
+        text: 'Which side should my Handler prefer for mobile controls: left, right, or system default?',
+        category: 'unknown',
+        question_context: {
+          mode: 'missing_slot',
+          target,
+          predicate: 'mobile_control_side',
+          predicate_version: '1',
+          claim_slot: 'ui.mobile_control_side',
+          expected_value_type: 'string',
+          question_id: 'handler-mobile-control-side',
+        },
+      },
+    ];
+    let added = 0;
+    let already = 0;
+    const failures = [];
+    for (const question of questions) {
+      try {
+        const result = await fetch('/api/memory/add', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(question),
+        });
+        if (!result.ok) throw new Error((await responseError(result, 'Could not add profile question')).message);
+        const saved = await result.json();
+        if (saved?.memory_id || saved?.candidate_id) added += 1;
+        else already += 1;
+      } catch (error) {
+        failures.push(error?.message || 'Could not add a profile question');
+      }
+    }
+    if (failures.length) {
+      const message = `${added + already} profile question${added + already === 1 ? '' : 's'} ready; ${failures.length} need attention.`;
+      _setProfileQuestionStatus(message, 'error');
+      showError(`${message} ${failures[0]}`);
+      return;
+    }
+    const message = added
+      ? `${added} profile question${added === 1 ? '' : 's'} added${already ? `; ${already} already existed` : ''}.`
+      : 'Profile questions already exist.';
+    _setProfileQuestionStatus(message, 'success');
+    await loadMemories();
+    showToast(message);
+  } catch (error) {
+    const message = error?.message || 'Could not prepare Handler profile questions';
+    _setProfileQuestionStatus(message, 'error');
+    showError(message);
+  } finally {
+    if (button) {
+      button.dataset.busy = '0';
+      button.disabled = false;
+    }
+  }
+}
+
+function _wireHandlerProfileControls() {
+  document.getElementById('memory-add-profile-questions')?.addEventListener('click', _addHandlerProfileQuestions);
+}
+
 function reflectMemoryToggleInSidebar(enabled) {
   const btn = document.getElementById('tool-memory-btn');
   if (btn) btn.classList.toggle('tool-disabled', !enabled);
+}
+
+const MEMORY_NUKE_COMPONENTS = Object.freeze({
+  memories: 'Memories',
+  graph: 'Graph view data',
+  ingest: 'Ingest pipeline state',
+  skills: 'Skills',
+});
+let memoryNukeBusy = false;
+
+function _memoryNukeCheckboxes() {
+  return Array.from(document.querySelectorAll('[data-memory-nuke-component]'));
+}
+
+function _selectedMemoryNukeComponents() {
+  return _memoryNukeCheckboxes()
+    .filter(input => input.checked && Object.hasOwn(MEMORY_NUKE_COMPONENTS, input.dataset.memoryNukeComponent))
+    .map(input => input.dataset.memoryNukeComponent);
+}
+
+function _setMemoryNukeStatus(message, tone = '') {
+  const status = document.getElementById('memory-nuke-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = tone === 'error'
+    ? 'var(--color-error)'
+    : (tone === 'success' ? 'var(--color-success, #62c48d)' : '');
+}
+
+function _updateMemoryNukeControls() {
+  const selected = _selectedMemoryNukeComponents();
+  const nukeButton = document.getElementById('memory-nuke-btn');
+  if (nukeButton) {
+    nukeButton.disabled = memoryNukeBusy || selected.length === 0;
+    nukeButton.textContent = memoryNukeBusy
+      ? 'Working…'
+      : (selected.length === Object.keys(MEMORY_NUKE_COMPONENTS).length ? 'Nuke all my Brain data' : 'Nuke selected');
+    nukeButton.setAttribute('aria-busy', String(memoryNukeBusy));
+  }
+  for (const input of _memoryNukeCheckboxes()) input.disabled = memoryNukeBusy;
+  for (const id of ['memory-nuke-all', 'memory-nuke-none']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = memoryNukeBusy;
+  }
+}
+
+function _setMemoryNukeSelection(checked) {
+  for (const input of _memoryNukeCheckboxes()) input.checked = checked;
+  _updateMemoryNukeControls();
+}
+
+function _boundedMemoryNukeText(value, maxLength = 280) {
+  const compact = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (!compact) return '';
+  return compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}…` : compact;
+}
+
+function _memoryNukeCount(detail) {
+  const value = typeof detail === 'number' ? detail : detail?.count;
+  return Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : null;
+}
+
+function _memoryNukeExpandedComponents(value) {
+  if (Array.isArray(value)) return value.filter(key => typeof key === 'string');
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value)
+    .filter(([, included]) => included !== false && included !== null)
+    .map(([key]) => key);
+}
+
+function _memoryNukeImplications(value) {
+  const items = Array.isArray(value) ? value : (value && typeof value === 'object' ? Object.values(value) : []);
+  return items.map(item => {
+    if (typeof item === 'string') return _boundedMemoryNukeText(item);
+    return _boundedMemoryNukeText(item?.message || item?.detail || item?.description);
+  }).filter(Boolean);
+}
+
+function _memoryNukeLabel(component) {
+  return MEMORY_NUKE_COMPONENTS[component]
+    || String(component || '').replaceAll('_', ' ').replace(/^./, char => char.toUpperCase());
+}
+
+function _memoryNukeConfirmationMessage(preview, requested) {
+  const expanded = _memoryNukeExpandedComponents(preview.expanded_components);
+  const components = preview.components && typeof preview.components === 'object'
+    ? preview.components
+    : {};
+  const included = [...new Set((expanded.length ? expanded : requested).filter(Boolean))];
+  const lines = ['This permanently deletes the following data owned by your account:'];
+  for (const component of included) {
+    const count = _memoryNukeCount(components[component]);
+    lines.push(`• ${_memoryNukeLabel(component)}${count === null ? '' : ` — ${count} ${count === 1 ? 'record' : 'records'}`}`);
+  }
+  const added = included.filter(component => !requested.includes(component));
+  if (added.length) {
+    lines.push('', `Required additions: ${added.map(_memoryNukeLabel).join(', ')}`);
+  }
+  const implications = _memoryNukeImplications(preview.implications);
+  if (implications.length) {
+    lines.push('', 'What this means:');
+    for (const implication of implications.slice(0, 6)) lines.push(`• ${implication}`);
+    if (implications.length > 6) lines.push(`• ${implications.length - 6} more implications`);
+  }
+  lines.push('', 'This cannot be undone in the live Brain. Existing exports, backups, and source files remain. Other users and built-in or shared skills are not touched.');
+  return lines.join('\n');
+}
+
+async function _postMemoryNuke(payload, fallback) {
+  const response = await fetch('/api/memory/nuke', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const failure = await responseError(response, fallback);
+    const error = new Error(failure.message);
+    error.problem = failure.problem;
+    throw error;
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`${fallback}; server returned an invalid response`);
+  }
+}
+
+function _validateMemoryNukePreview(preview) {
+  const valid = preview
+    && preview.status === 'preview'
+    && preview.complete === false
+    && typeof preview.operation_id === 'string'
+    && preview.operation_id.length > 0
+    && typeof preview.preview_token === 'string'
+    && preview.preview_token.length > 0
+    && typeof preview.confirmation === 'string'
+    && preview.confirmation.length > 0
+    && preview.components
+    && typeof preview.components === 'object';
+  if (!valid) throw new Error('Could not preview Brain reset; server returned an incomplete response');
+}
+
+function _validateMemoryNukeCommit(result) {
+  const valid = result
+    && typeof result.complete === 'boolean'
+    && ((result.complete === true && result.status === 'complete')
+      || (result.complete === false && result.status === 'partial'))
+    && result.categories
+    && typeof result.categories === 'object';
+  if (!valid) throw new Error('Could not verify Brain reset; server returned an incomplete response');
+}
+
+function _memoryNukeResultSummary(result) {
+  const parts = [];
+  for (const component of Object.keys(MEMORY_NUKE_COMPONENTS)) {
+    const detail = result.categories?.[component];
+    if (!detail) continue;
+    const count = _memoryNukeCount(detail);
+    const state = _boundedMemoryNukeText(detail.state, 60);
+    const error = _boundedMemoryNukeText(detail.error, 180);
+    parts.push(`${_memoryNukeLabel(component)}${count === null ? '' : ` ${count}`}${state ? ` (${state})` : ''}${error ? ` — ${error}` : ''}`);
+  }
+  const serverMessage = _boundedMemoryNukeText(result.message, 400);
+  if (serverMessage && parts.length) return `${serverMessage} ${parts.join(' · ')}`;
+  if (serverMessage) return serverMessage;
+  if (parts.length) return parts.join(' · ');
+  return result.complete ? 'Selected Brain data was deleted.' : 'Brain reset finished only partially.';
+}
+
+async function _refreshMemoryNukeSurfaces() {
+  const refreshes = [
+    Promise.resolve().then(() => loadMemories()),
+    Promise.resolve().then(() => loadMemoryInspect()),
+    Promise.resolve().then(() => loadMemoryGraph()),
+    Promise.resolve().then(() => loadDigestPreview()),
+    import('./skills.js').then(module => {
+      const loadSkills = module.loadSkills || module.default?.loadSkills;
+      return typeof loadSkills === 'function' ? loadSkills(false) : undefined;
+    }),
+  ];
+  await Promise.allSettled(refreshes);
+}
+
+async function _nukeSelectedMemoryData() {
+  if (memoryNukeBusy) return;
+  const components = _selectedMemoryNukeComponents();
+  if (!components.length) {
+    _updateMemoryNukeControls();
+    return;
+  }
+
+  memoryNukeBusy = true;
+  _setMemoryNukeStatus('Counting the selected data…');
+  _updateMemoryNukeControls();
+  try {
+    const preview = await _postMemoryNuke({ action: 'preview', components }, 'Could not preview Brain reset');
+    _validateMemoryNukePreview(preview);
+    const confirmed = await uiModule.styledConfirm(
+      _memoryNukeConfirmationMessage(preview, components),
+      {
+        title: 'Nuke selected Brain data?',
+        confirmText: 'Nuke selected data',
+        cancelText: 'Keep my data',
+        danger: true,
+      },
+    );
+    if (!confirmed) {
+      _setMemoryNukeStatus('Nothing was deleted.');
+      return;
+    }
+
+    _setMemoryNukeStatus('Permanently deleting the selected data…');
+    const result = await _postMemoryNuke({
+      action: 'commit',
+      operation_id: preview.operation_id,
+      preview_token: preview.preview_token,
+      confirmation: preview.confirmation,
+    }, 'Could not complete Brain reset');
+    _validateMemoryNukeCommit(result);
+
+    // Even a partial commit may have changed every visible Brain surface.
+    await _refreshMemoryNukeSurfaces();
+    const summary = _memoryNukeResultSummary(result);
+    if (result.complete === true) {
+      _setMemoryNukeSelection(false);
+      _setMemoryNukeStatus(summary, 'success');
+      showToast('Selected Brain data deleted');
+    } else {
+      _setMemoryNukeStatus(summary, 'error');
+      showError(contextualErrorMessage('Brain reset was only partially completed', summary));
+    }
+  } catch (error) {
+    const message = contextualErrorMessage('Could not nuke Brain data', error?.message);
+    _setMemoryNukeStatus(message, 'error');
+    showError(message);
+  } finally {
+    memoryNukeBusy = false;
+    _updateMemoryNukeControls();
+  }
+}
+
+function _wireMemoryNukeControls() {
+  for (const input of _memoryNukeCheckboxes()) {
+    input.addEventListener('change', _updateMemoryNukeControls);
+  }
+  document.getElementById('memory-nuke-all')?.addEventListener('click', () => _setMemoryNukeSelection(true));
+  document.getElementById('memory-nuke-none')?.addEventListener('click', () => _setMemoryNukeSelection(false));
+  document.getElementById('memory-nuke-btn')?.addEventListener('click', _nukeSelectedMemoryData);
+  _updateMemoryNukeControls();
 }
 
 // T7 trust panel: six per-kind switches under the master toggle. Kind
@@ -601,11 +1008,15 @@ export async function loadMemories() {
   }
   // Always wire toggles, even if memory API failed
   syncToggles();
+  // Surface durable import batches whose review was stranded (for example by
+  // a proxy read timeout on the long-running import POST).
+  _refreshPendingImportNotice();
 }
 
 function _inspectText(item, tier) {
   if (tier === 'candidate') return item.content || '';
   if (tier === 'quarantine') return item.content || '';
+  if (tier === 'history') return item.current?.text || item.latest?.text || '';
   return item.content || item.text || '';
 }
 
@@ -614,8 +1025,9 @@ function _inspectMeta(item, tier) {
   const provenance = meta.provenance || {};
   const sessionId = item.session_id || provenance.session_id;
   const parts = [
-    tier === 'raw' ? meta.role : item.status,
-    item.kind || item.tier,
+    tier === 'raw' ? meta.role : (item.current?.status || item.status),
+    item.current?.kind || item.kind || item.tier,
+    tier === 'history' ? `revision ${item.current_revision || item.latest_revision || '?'}` : null,
     item.source_type,
     item.owner || 'ownerless legacy',
     item.workspace_id || 'global',
@@ -624,6 +1036,85 @@ function _inspectMeta(item, tier) {
     item.reason || meta.admission_reason,
   ].filter(Boolean);
   return parts.join(' · ');
+}
+
+function _memoryError(data, fallback) {
+  if (typeof data?.detail === 'string') return data.detail;
+  if (typeof data?.detail?.message === 'string') return data.detail.message;
+  return fallback;
+}
+
+async function _runVersionedAction(item, action, fields = {}) {
+  const id = item.id || item.block_id;
+  const body = new URLSearchParams({
+    expected_revision: String(item.current_revision || item.latest_revision),
+    ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, String(value)])),
+  });
+  const response = await fetch(`/api/memory/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(_memoryError(data, `Memory ${action} failed`));
+  await Promise.all([loadMemoryInspect(), loadMemories()]);
+  return data;
+}
+
+function _editInspectedCandidate(card, item) {
+  const editor = document.createElement('div');
+  editor.className = 'memory-inline-editor';
+  const text = document.createElement('textarea');
+  text.className = 'memory-item-edit-input';
+  text.rows = 3;
+  // The candidate list renders identity tokens for display; the editor must
+  // round-trip the stored (raw) form.
+  text.value = item.raw_content || item.content || '';
+  text.setAttribute('aria-label', 'Candidate text');
+  const category = document.createElement('select');
+  category.className = 'memory-edit-cat-select';
+  category.setAttribute('aria-label', 'Candidate category');
+  for (const name of MEMORY_CATEGORIES) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = categoryLabel(name);
+    option.selected = name === (item.kind || item.category);
+    category.append(option);
+  }
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'memory-toolbar-btn';
+  save.textContent = 'Save candidate';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'memory-toolbar-btn';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', renderMemoryInspect);
+  save.addEventListener('click', async () => {
+    const content = text.value.trim();
+    if (!content) return showError('Candidate text cannot be empty');
+    save.disabled = true;
+    try {
+      const response = await fetch(`/api/memory/candidate/${encodeURIComponent(item.id)}`, {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: content, category: category.value }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(_memoryError(data, 'Candidate edit failed'));
+      showToast('Candidate updated');
+      await loadMemoryInspect();
+    } catch (error) {
+      showError(error.message || 'Candidate edit failed');
+      save.disabled = false;
+    }
+  });
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+  actions.append(save, cancel);
+  editor.append(text, category, actions);
+  card.replaceChildren(editor);
 }
 
 async function reviewInspectedCandidate(item, accept, button) {
@@ -673,9 +1164,38 @@ function renderMemoryInspect() {
     meta.style.marginTop = '6px';
     meta.textContent = _inspectMeta(item, tier);
     card.append(text, meta);
+    if (tier === 'curated') {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'memory-toolbar-btn';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', () => {
+        const record = {
+          ...item,
+          text: _inspectText(item, tier),
+          // The editor round-trips the stored form, not the rendered display.
+          raw_text: item.raw_text || item.raw_content || item.raw_headline
+            || _inspectText(item, tier),
+          category: item.category || _categoryForRecord(item),
+        };
+        _startMemoryCardEditor(card, record, {
+          cancel: renderMemoryInspect,
+          refreshInspect: true,
+        });
+      });
+      actions.append(edit);
+      card.append(actions);
+    }
     if (tier === 'candidate' && item.status === 'pending') {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'memory-toolbar-btn';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', () => _editInspectedCandidate(card, item));
       const accept = document.createElement('button');
       accept.type = 'button';
       accept.className = 'memory-toolbar-btn';
@@ -686,8 +1206,63 @@ function renderMemoryInspect() {
       reject.className = 'memory-toolbar-btn danger';
       reject.textContent = 'Reject';
       reject.addEventListener('click', () => reviewInspectedCandidate(item, false, reject));
-      actions.append(accept, reject);
+      actions.append(edit, accept, reject);
       card.append(actions);
+    }
+    if (tier === 'history') {
+      const revisions = document.createElement('div');
+      revisions.className = 'memory-details-drawer';
+      for (const revision of (item.history || []).slice(0, 5)) {
+        revisions.appendChild(_detailRow(
+          `Revision ${revision.revision} · ${revision.status}`,
+          revision.text || '(no value)',
+        ));
+      }
+      card.append(revisions);
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:6px;margin-top:8px;flex-wrap:wrap';
+      const current = item.current || item.latest || {};
+      if (current.kind === 'open_question' && current.status === 'active') {
+        const reopen = document.createElement('button');
+        reopen.type = 'button';
+        reopen.className = 'memory-toolbar-btn';
+        reopen.textContent = 'Reopen question';
+        reopen.addEventListener('click', async () => {
+          try {
+            await _runVersionedAction(item, 'reopen');
+            showToast('Question reopened');
+          } catch (error) { showError(error.message); }
+        });
+        actions.append(reopen);
+      }
+      if (['active', 'open'].includes(current.status)) {
+        const retract = document.createElement('button');
+        retract.type = 'button';
+        retract.className = 'memory-toolbar-btn danger';
+        retract.textContent = 'Retract';
+        retract.addEventListener('click', async () => {
+          try {
+            await _runVersionedAction(item, 'retract', { reason: 'retracted by user' });
+            showToast('Memory retracted');
+          } catch (error) { showError(error.message); }
+        });
+        actions.append(retract);
+      }
+      const prior = (item.history || []).find(revision => revision.revision !== item.current_revision);
+      if (prior) {
+        const revert = document.createElement('button');
+        revert.type = 'button';
+        revert.className = 'memory-toolbar-btn';
+        revert.textContent = `Restore revision ${prior.revision}`;
+        revert.addEventListener('click', async () => {
+          try {
+            await _runVersionedAction(item, 'revert', { target_revision: prior.revision });
+            showToast(`Restored revision ${prior.revision}`);
+          } catch (error) { showError(error.message); }
+        });
+        actions.append(revert);
+      }
+      if (actions.childNodes.length) card.append(actions);
     }
     list.append(card);
   });
@@ -696,8 +1271,23 @@ function renderMemoryInspect() {
 export async function loadMemoryInspect() {
   const tier = document.getElementById('memory-inspect-tier')?.value || 'raw';
   const statusSelect = document.getElementById('memory-inspect-status');
-  if (statusSelect) statusSelect.hidden = tier !== 'candidate';
-  const status = tier === 'candidate' ? (statusSelect?.value || '') : '';
+  if (statusSelect) {
+    const mode = statusSelect.dataset.mode;
+    if (mode !== tier && ['candidate', 'history'].includes(tier)) {
+      const values = tier === 'candidate'
+        ? [['', 'All candidate states'], ['pending', 'Pending'], ['accepted', 'Accepted'], ['rejected', 'Rejected'], ['quarantined', 'Quarantined']]
+        : [['', 'All knowledge states'], ['open', 'Open'], ['active', 'Active'], ['superseded', 'Superseded'], ['retracted', 'Retracted']];
+      statusSelect.replaceChildren(...values.map(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        return option;
+      }));
+      statusSelect.dataset.mode = tier;
+    }
+    statusSelect.hidden = !['candidate', 'history'].includes(tier);
+  }
+  const status = ['candidate', 'history'].includes(tier) ? (statusSelect?.value || '') : '';
   const list = document.getElementById('memory-inspect-list');
   if (list) list.textContent = 'Loading…';
   try {
@@ -834,16 +1424,19 @@ export async function tidyMemories() {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Audit failed');
+      throw new Error((await responseError(res, 'Tidy failed')).message);
     }
 
     const data = await res.json();
-    if ((data.removed || 0) === 0) {
-      if (tidySpinner) tidySpinner.destroy();
-      if (tidyBtn) { tidyBtn.disabled = false; tidyBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;color:var(--accent, var(--red));"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Tidy'; }
+    if (data?.ok !== true) {
+      throw new Error(data?.error?.message || 'Tidy did not complete. No memories were changed.');
+    }
+    if (data.status === 'unchanged') {
       showToast('Already clean');
       return;
+    }
+    if (data.status !== 'applied') {
+      throw new Error('Tidy did not apply any changes.');
     }
 
     // Fetch the new state
@@ -873,10 +1466,13 @@ export async function tidyMemories() {
     renderMemoryList();
     updateMemoryCount();
 
-    showToast(`Tidied: ${data.removed} removed (${data.before} \u2192 ${data.after})`);
+    const changes = [];
+    if (data.updated) changes.push(`${data.updated} edited`);
+    if (data.removed) changes.push(`${data.removed} removed`);
+    showToast(`Tidied: ${changes.join(', ') || 'changes applied'} (${data.before} \u2192 ${data.after})`);
   } catch (error) {
     console.error('Tidy failed:', error);
-    showError('Tidy failed — check console');
+    showError(contextualErrorMessage('Tidy failed', error?.message));
   } finally {
     if (tidySpinner) tidySpinner.destroy();
     if (tidyBtn) {
@@ -1341,6 +1937,7 @@ export async function loadDigestPreview() {
   const untrustedEl = document.getElementById('memory-digest-untrusted');
   const countsEl = document.getElementById('memory-digest-counts');
   const clustersEl = document.getElementById('memory-digest-clusters');
+  const editListEl = document.getElementById('memory-digest-edit-list');
   if (!trustedEl || !untrustedEl) return;
   try {
     const response = await fetch('/api/memory/digest-preview', { credentials: 'same-origin' });
@@ -1354,6 +1951,7 @@ export async function loadDigestPreview() {
       stamp.textContent = at ? `Generated ${at}.` : '';
     }
     if (countsEl) countsEl.textContent = JSON.stringify(data.digest?.counts || {}, null, 2);
+    if (editListEl) _renderDigestEditors(editListEl, data.digest || {});
     if (clustersEl) {
       clustersEl.innerHTML = '';
       const clusters = data.digest?.clusters || [];
@@ -1382,6 +1980,79 @@ export async function loadDigestPreview() {
   } catch (error) {
     trustedEl.textContent = 'Digest unavailable — is the frankenmemory provider running?';
     untrustedEl.textContent = '—';
+    if (editListEl) editListEl.replaceChildren();
+  }
+}
+
+function _categoryForRecord(record) {
+  if (record?.category) return record.category;
+  const kind = String(record?.kind || '');
+  if (kind === 'persona') return 'identity';
+  if (kind === 'instruction') return 'preference';
+  if (kind === 'unknown') return 'unknown';
+  return MEMORY_CATEGORIES.includes(kind) ? kind : 'fact';
+}
+
+function _digestEditableRecords(digest) {
+  const records = new Map();
+  for (const item of digest?.pinned || []) {
+    if (!item || !item.id) continue;
+    const full = memories.find((memory) => String(memory.id) === String(item.id));
+    records.set(String(item.id), {
+      ...item,
+      ...full,
+      id: item.id,
+      // `text` is the display projection; raw_text is the stored form the
+      // editor must round-trip. Digest entries carry raw_content/raw_headline
+      // companions for the same reason.
+      text: full?.text || item.content || item.headline || '',
+      raw_text: full?.raw_text || full?.text || item.raw_content || item.raw_headline || item.content || item.headline || '',
+      category: full?.category || _categoryForRecord(item),
+    });
+  }
+  for (const item of digest?.open_questions || []) {
+    if (!item || !item.id) continue;
+    const key = String(item.id);
+    const full = memories.find((memory) => String(memory.id) === key);
+    records.set(key, {
+      ...item,
+      ...full,
+      id: item.id,
+      text: full?.text || item.content || '',
+      raw_text: full?.raw_text || full?.text || item.raw_content || item.content || '',
+      category: full?.category || 'unknown',
+    });
+  }
+  return [...records.values()].filter((record) => record.text);
+}
+
+function _renderDigestEditors(host, digest) {
+  host.replaceChildren();
+  const records = _digestEditableRecords(digest);
+  if (!records.length) return;
+
+  const label = document.createElement('div');
+  label.className = 'admin-toggle-sub';
+  label.style.cssText = 'margin:0 0 6px 0;opacity:0.65';
+  label.textContent = 'Edit the source memories surfaced in this digest:';
+  host.append(label);
+
+  for (const record of records) {
+    const card = document.createElement('div');
+    card.className = 'memory-item';
+    const text = document.createElement('span');
+    text.className = 'memory-item-text';
+    text.textContent = record.text;
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'memory-toolbar-btn';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => _startMemoryCardEditor(card, record, {
+      cancel: () => _renderDigestEditors(host, digest),
+      refreshDigest: true,
+    }));
+    card.append(text, edit);
+    host.append(card);
   }
 }
 
@@ -1410,11 +2081,85 @@ function _buildMemoryDetails(memory) {
   drawer.style.cssText = 'flex-basis:100%;width:100%;margin-top:6px;padding:8px 10px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:2px;';
   const metadata = memory.metadata || {};
 
+  // Trust is an explicit owner decision, not an inferred confidence score.
+  // Keep an unreviewed value blank rather than inventing a midpoint.
+  if (memory.source_type) {
+    const trustRow = document.createElement('div');
+    trustRow.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:11px;line-height:1.6;';
+    const trustLabel = document.createElement('span');
+    trustLabel.style.cssText = 'opacity:0.6;min-width:92px;flex-shrink:0;';
+    trustLabel.textContent = 'Trust';
+    trustLabel.title = 'How much do I trust this information?';
+    const trustSelect = document.createElement('select');
+    trustSelect.className = 'memory-trust-editor';
+    trustSelect.title = 'How much do I trust this information?';
+    for (const [value, label] of [['unreviewed', 'unreviewed'], ['0.25', 'low'], ['0.5', 'medium'], ['0.75', 'high']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      trustSelect.appendChild(option);
+    }
+    const assignment = memory.trust && typeof memory.trust === 'object' ? memory.trust : null;
+    if (assignment?.state === 'assigned' && Number.isFinite(Number(assignment.value))) {
+      const value = Number(assignment.value);
+      trustSelect.value = value < 0.34 ? '0.25' : value < 0.67 ? '0.5' : '0.75';
+    } else {
+      trustSelect.value = 'unreviewed';
+    }
+    const saveTrust = document.createElement('button');
+    saveTrust.type = 'button';
+    saveTrust.className = 'memory-item-btn';
+    saveTrust.textContent = 'Save Trust';
+    saveTrust.title = 'Append an owner Trust revision';
+    saveTrust.addEventListener('click', async () => {
+      saveTrust.disabled = true;
+      try {
+        const selected = trustSelect.value;
+        const body = selected === 'unreviewed'
+          ? { state: 'unreviewed', reason_code: 'owner_review' }
+          : { state: 'assigned', trust: Number(selected), reason_code: 'owner_review' };
+        const response = await fetch(`/api/memory/${encodeURIComponent(memory.id)}/trust`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const detail = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(_memoryError(detail, 'Trust update failed'));
+        const saved = detail.trust && typeof detail.trust === 'object' ? detail.trust : null;
+        memory.trust = saved ? { ...saved, value: saved.value ?? saved.trust ?? null } : null;
+        showToast('Trust saved as an owner revision');
+        await loadMemories();
+      } catch (error) {
+        showError(error.message || 'Trust update failed');
+      } finally {
+        saveTrust.disabled = false;
+      }
+    });
+    trustRow.append(trustLabel, trustSelect, saveTrust);
+    drawer.appendChild(trustRow);
+  }
+
   if (Array.isArray(memory.tags) && memory.tags.length) {
     drawer.appendChild(_detailRow('Tags', memory.tags.join(', ')));
   }
   if (memory.scene_name) drawer.appendChild(_detailRow('Scene', memory.scene_name));
   if (memory.source) drawer.appendChild(_detailRow('Source', memory.source));
+  if (memory.source_uri) drawer.appendChild(_detailRow('Source URI', memory.source_uri));
+  if (memory.source_revision !== null && memory.source_revision !== undefined) {
+    drawer.appendChild(_detailRow('Source revision', String(memory.source_revision)));
+  }
+  if (memory.content_hash) drawer.appendChild(_detailRow('Content hash', memory.content_hash));
+  if (memory.provenance_conflict) {
+    drawer.appendChild(_detailRow('Provenance', 'Conflicting source revisions need review'));
+  }
+  if (memory.recall_explanation && typeof memory.recall_explanation === 'object') {
+    const explanation = Object.entries(memory.recall_explanation)
+      .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+      .map(([key, value]) => `${key.replaceAll('_', ' ')}: ${value}`)
+      .join(' · ');
+    if (explanation) drawer.appendChild(_detailRow('Why recalled', explanation));
+  }
   if (memory.workspace_id && memory.workspace_id !== 'global') {
     drawer.appendChild(_detailRow('Workspace', memory.workspace_id));
   }
@@ -1453,6 +2198,38 @@ function _buildMemoryDetails(memory) {
   if (memory.last_accessed_at) drawer.appendChild(_detailRow('Last recalled', memory.last_accessed_at));
   if (memory.created_at) drawer.appendChild(_detailRow('Created', memory.created_at));
   if (memory.updated_at) drawer.appendChild(_detailRow('Updated', memory.updated_at));
+  const history = document.createElement('div');
+  history.className = 'memory-version-history';
+  history.appendChild(_detailRow('History', 'Loading…'));
+  drawer.appendChild(history);
+  fetch(`/api/memory/${encodeURIComponent(memory.id)}/history`, {
+    credentials: 'same-origin',
+  }).then(async response => {
+    const detail = await response.json().catch(() => ({}));
+    history.replaceChildren();
+    if (!response.ok) {
+      history.appendChild(_detailRow('History', _memoryError(detail, 'Unavailable')));
+      return;
+    }
+    history.appendChild(_detailRow(
+      'Current',
+      `revision ${detail.current_revision} · ${detail.current?.status || 'unknown'}`,
+    ));
+    for (const revision of (detail.history || []).slice(0, 10)) {
+      history.appendChild(_detailRow(
+        `Revision ${revision.revision}`,
+        `${revision.status} · ${revision.text || '(no value)'}`,
+      ));
+    }
+    if (Array.isArray(detail.evidence)) {
+      history.appendChild(_detailRow('Evidence', String(detail.evidence.length)));
+    }
+    if (Array.isArray(detail.conflicts) && detail.conflicts.length) {
+      history.appendChild(_detailRow('Conflicts', String(detail.conflicts.length)));
+    }
+  }).catch(() => {
+    history.replaceChildren(_detailRow('History', 'Unavailable'));
+  });
   if (!drawer.childNodes.length) drawer.appendChild(_detailRow('Signals', 'None recorded for this memory.'));
   return drawer;
 }
@@ -1608,7 +2385,7 @@ export function renderMemoryList() {
       // from the shared helper, raw values on hover. Rare signals
       // (workspace scope, exemptions, archived) live in the Details
       // drawer instead of the card — chip soup reads as noise.
-      const CARD_CHIPS = new Set(['trusted', 'reference', 'kind', 'provenance']);
+      const CARD_CHIPS = new Set(['trusted', 'reference', 'kind', 'provenance', 'trust-assignment']);
       for (const chip of memoryChips(memory, trustPrefsState)) {
         const base = chip.cls.split(' ')[0];
         if (!CARD_CHIPS.has(base) && base !== 'score') continue;
@@ -1697,14 +2474,13 @@ export function renderMemoryList() {
         item.appendChild(_buildMemoryDetails(memory));
       });
 
-      // Resolve (U7a): open questions close with provenance, never a
-      // plain delete. Only offered on kind=unknown records.
+      // Answer open questions by revising their stable block, never deleting it.
       let resolveItem = null;
-      if ((memory.kind === 'unknown' || memory.category === 'unknown') && !memory.archived) {
+      if ((memory.kind === 'unknown' || memory.kind === 'open_question' || memory.category === 'unknown') && !memory.archived) {
         resolveItem = document.createElement('div');
         resolveItem.className = 'dropdown-item-compact';
         resolveItem.textContent = '✓ Resolve';
-        resolveItem.title = 'Mark this question answered — archives it with provenance';
+        resolveItem.title = 'Answer this question in the same memory block';
         resolveItem.addEventListener('click', () => {
           dropdown.style.display = 'none';
           resolveQuestion(memory.id);
@@ -1869,7 +2645,9 @@ function startInlineEdit(item, memory) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'memory-item-edit-input';
-  input.value = memory.text;
+  // Edit buffers always start from the stored (raw) text; `text` may be the
+  // identity-rendered display projection.
+  input.value = memory.raw_text || memory.text;
 
   const catSelect = document.createElement('select');
   catSelect.className = 'memory-edit-cat-select';
@@ -1917,15 +2695,78 @@ function startInlineEdit(item, memory) {
   });
 }
 
-async function saveInlineEdit(id, newText, newCategory) {
-  newText = newText.trim();
-  if (!newText) return;
+function _startMemoryCardEditor(card, memory, {
+  cancel,
+  refreshInspect = false,
+  refreshDigest = false,
+} = {}) {
+  card.replaceChildren();
+  card.className = 'memory-item memory-item-editing';
 
-  const memory = memories.find(m => m.id === id);
+  const editRow = document.createElement('div');
+  editRow.className = 'memory-edit-row';
+  const input = document.createElement('textarea');
+  input.className = 'memory-item-edit-input';
+  input.rows = 3;
+  // Edit buffers always start from the stored (raw) text; `text` may be the
+  // identity-rendered display projection.
+  input.value = memory.raw_text || memory.text || '';
+  const category = document.createElement('select');
+  category.className = 'memory-edit-cat-select';
+  for (const value of MEMORY_CATEGORIES) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = categoryLabel(value);
+    option.selected = value === _categoryForRecord(memory);
+    category.append(option);
+  }
+  editRow.append(input, category);
+
+  const actions = document.createElement('div');
+  actions.className = 'memory-item-actions';
+  actions.style.opacity = '1';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'memory-item-btn save';
+  save.textContent = 'save';
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    const updated = await saveInlineEdit(
+      memory.id,
+      input.value,
+      category.value,
+      { refreshInspect, refreshDigest, currentMemory: memory },
+    );
+    if (!updated) save.disabled = false;
+  });
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'memory-item-btn';
+  cancelButton.textContent = 'cancel';
+  cancelButton.addEventListener('click', () => cancel?.());
+  actions.append(save, cancelButton);
+  card.append(editRow, actions);
+  input.focus();
+  input.select();
+}
+
+async function saveInlineEdit(id, newText, newCategory, {
+  refreshInspect = false,
+  refreshDigest = false,
+  currentMemory = null,
+} = {}) {
+  newText = newText.trim();
+  if (!newText) return false;
+
+  const memory = memories.find(m => String(m.id) === String(id))
+    || inspectedMemories.find(m => String(m.id) === String(id))
+    || currentMemory;
   const catChanged = newCategory && newCategory !== (memory?.category || 'fact');
-  if (!memory || (newText === memory.text && !catChanged)) {
-    renderMemoryList();
-    return;
+  const storedText = memory ? (memory.raw_text || memory.text) : null;
+  if (!memory || (newText === storedText && !catChanged)) {
+    if (refreshInspect) renderMemoryInspect();
+    else if (!refreshDigest) renderMemoryList();
+    return true;
   }
 
   try {
@@ -1934,19 +2775,24 @@ async function saveInlineEdit(id, newText, newCategory) {
 
     const response = await fetch(`${window.location.origin}/api/memory/${id}`, {
       method: 'PUT',
+      credentials: 'same-origin',
       body: params
     });
 
     if (response.ok) {
       await loadMemories();
+      if (refreshInspect) await loadMemoryInspect();
+      if (refreshDigest) await loadDigestPreview();
       showToast('Memory updated');
+      return true;
     } else {
-      const errorData = await response.json();
+      const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || 'Failed to update memory');
     }
   } catch (error) {
     console.error('Error updating memory:', error);
-    showError('Failed to update memory');
+    showError(error.message || 'Failed to update memory');
+    return false;
   }
 }
 
@@ -2021,24 +2867,38 @@ export async function editMemory(id) {
   const memory = memories.find(m => m.id === id);
   if (!memory) return;
 
-  const newText = prompt('Edit memory:', memory.text);
-  if (!newText || newText === memory.text) return;
+  const storedText = memory.raw_text || memory.text;
+  const newText = prompt('Edit memory:', storedText);
+  if (!newText || newText === storedText) return;
 
   await saveInlineEdit(id, newText);
 }
 
 async function resolveQuestion(id) {
+  const answer = prompt('Answer this open question:');
+  if (!answer?.trim()) return;
   try {
+    let expectedRevision = '';
+    const history = await fetch(`/api/memory/${encodeURIComponent(id)}/history`, {
+      credentials: 'same-origin',
+    });
+    if (history.ok) {
+      const detail = await history.json();
+      expectedRevision = String(detail.current_revision || '');
+    }
+    const form = new URLSearchParams({ answer: answer.trim() });
+    if (expectedRevision) form.set('expected_revision', expectedRevision);
     const res = await fetch(`${window.location.origin}/api/memory/${id}/resolve`, {
       method: 'POST',
-      body: new URLSearchParams({}),
+      credentials: 'same-origin',
+      body: form,
     });
     if (res.ok) {
       await loadMemories();
-      showToast('Question resolved — archived with provenance');
+      showToast('Question answered in the same memory');
     } else {
       const err = await res.json().catch(() => ({}));
-      showError(err.detail || 'Failed to resolve question');
+      showError(_memoryError(err, 'Failed to resolve question'));
     }
   } catch (e) {
     console.error('Failed to resolve question:', e);
@@ -2166,20 +3026,33 @@ export async function extractMemory(sessionId) {
 
 // ---- Export ----
 
+// EC-D04: the Export button opens a dialog that assembles the S00 filter
+// query; untouched defaults still download today's full v3 bundle.
+let _memoryExportDialog = null;
+
 export function exportMemories() {
-  if (!memories || memories.length === 0) {
-    showToast('No memories to export');
-    return;
+  if (!_memoryExportDialog) {
+    _memoryExportDialog = createMemoryExportDialog({
+      document,
+      host: document.body,
+      fetchImpl: fetch,
+      urlApi: URL,
+      showToast: (message, opts) => showToast(message, opts),
+      showError: (message, opts) => showError(message, opts),
+    });
   }
-  const data = JSON.stringify(memories, null, 2);
-  const blob = new Blob([data], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'memories.json';
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast(`Exported ${memories.length} memories`);
+  _memoryExportDialog.open();
+}
+
+// EC-D05: single owner-scoped photo download through the S00 asset endpoint.
+export async function downloadMemoryPhoto(assetId, filename) {
+  await downloadMemoryAsset({
+    document,
+    fetchImpl: fetch,
+    urlApi: URL,
+    showToast: (message, opts) => showToast(message, opts),
+    showError: (message, opts) => showError(message, opts),
+  }, assetId, filename);
 }
 
 // ---- Import from file ----
@@ -2190,7 +3063,611 @@ export async function importMemories() {
   fileInput.click();
 }
 
+function _memoryBindingIdempotencyKey() {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `memory-import-route-${suffix}`;
+}
+
+async function _configureMemoryRoute(problem, route, file) {
+  const files = Array.isArray(file) ? file : [file];
+  const routeId = route?.model_route_id;
+  if (!routeId) throw new Error('The selected Memory model route is no longer available.');
+  showToast(`Configuring ${route.display_name || 'the selected model'} for Memory…`, {
+    duration: 15000,
+    leadingIcon: 'spinner',
+  });
+  const response = await fetch('/api/v1/providers/bindings/memory', {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'If-Match': `"${Number(problem.binding_revision || 0)}"`,
+      'Idempotency-Key': _memoryBindingIdempotencyKey(),
+    },
+    body: JSON.stringify({
+      routes: [{ model_route_id: routeId, enabled: true }],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error((await responseError(response, 'Memory model setup failed')).message);
+  }
+  pendingMemoryImportFile = null;
+  pendingMemoryImportFiles = [];
+  document.dispatchEvent(new CustomEvent('open-clank:providers-updated'));
+  showToast(`${route.display_name || 'Model'} is now the Memory model. Retrying import…`, {
+    duration: 5000,
+    leadingIcon: 'check',
+  });
+  await handleImportFiles(files);
+}
+
+async function _openMemoryRouteSettings(problem, file) {
+  const files = Array.isArray(file) ? file : [file];
+  pendingMemoryImportFiles = files.filter(Boolean);
+  pendingMemoryImportFile = pendingMemoryImportFiles[0] || null;
+  const settingsModule = await import('./settings.js');
+  settingsModule.open(problem.settings_target || 'added-models');
+  showToast('Choose and save a Memory model route; this file will retry automatically.', {
+    duration: 12000,
+  });
+}
+
+function _showMemoryRouteProblem(problem, file, detail) {
+  const files = Array.isArray(file) ? file : [file];
+  pendingMemoryImportFiles = files.filter(Boolean);
+  pendingMemoryImportFile = pendingMemoryImportFiles[0] || null;
+  const routes = Array.isArray(problem.eligible_routes) ? problem.eligible_routes : [];
+  const only = routes.length === 1 ? routes[0] : null;
+  const label = only?.display_name || only?.model_id || 'available model';
+  showError(contextualErrorMessage('Import failed', detail), {
+    duration: 20000,
+    action: only ? `Use ${label}` : 'Open model settings',
+    actionHint: only
+      ? `Set ${label} as the dedicated Memory model and retry this file`
+      : 'Choose a dedicated Memory model and retry this file',
+    onAction: () => only
+      ? _configureMemoryRoute(problem, only, file)
+      : _openMemoryRouteSettings(problem, file),
+  });
+}
+
+// ── Import batch recovery ────────────────────────────────────────────────
+// The import POST is long-running on purpose (one extraction per file). A
+// proxy read timeout can sever that response while the durable batch keeps
+// processing server-side. These helpers rediscover unresolved batches via
+// the owner-scoped list endpoint so review is never stranded.
+
+async function _fetchPendingImportBatches() {
+  try {
+    const response = await fetch('/api/memory/import-batches', { credentials: 'same-origin' });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return Array.isArray(data?.batches) ? data.batches : [];
+  } catch (error) {
+    console.warn('Pending import batch check failed:', error);
+    return [];
+  }
+}
+
+function _importBatchReviewPending(batch) {
+  const reviewCounts = batch?.review_counts && typeof batch.review_counts === 'object'
+    ? batch.review_counts
+    : {};
+  return Number(reviewCounts.pending || 0) > 0;
+}
+
+async function _waitForImportBatch(batchId, { timeoutMs = 300000, intervalMs = 3000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(
+        `/api/memory/import-batches/${encodeURIComponent(batchId)}`,
+        { credentials: 'same-origin' },
+      );
+      if (response.ok) {
+        last = await response.json();
+        if (String(last?.state || '') !== 'active') return last;
+      }
+    } catch (error) {
+      console.warn('Import batch status poll failed:', error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return last;
+}
+
+async function _openImportBatchReview(batchId) {
+  const data = await _waitForImportBatch(batchId);
+  if (!data) return false;
+  _renderBatchReview(data);
+  _refreshPendingImportNotice();
+  return true;
+}
+
+async function _recoverImportBatchAfterTimeout() {
+  showToast('Import is still processing — watching for it to finish…');
+  const deadline = Date.now() + 240000;
+  while (Date.now() < deadline) {
+    const batches = await _fetchPendingImportBatches();
+    // Only recover a batch the server touched recently; a stale pending
+    // batch from an earlier session is resumed via the notice, not here.
+    const latest = batches.find((batch) => {
+      const updated = Date.parse(String(batch?.updated_at || ''));
+      return batch?.batch_id && Number.isFinite(updated) && Date.now() - updated < 15 * 60 * 1000;
+    });
+    if (latest) {
+      return _openImportBatchReview(latest.batch_id);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  return false;
+}
+
+async function _refreshPendingImportNotice() {
+  const notice = document.getElementById('memory-import-pending');
+  if (!notice) return;
+  const batches = await _fetchPendingImportBatches();
+  const actionable = batches.find((batch) => String(batch?.state) === 'active')
+    || batches.find((batch) => _importBatchReviewPending(batch));
+  if (!actionable) {
+    notice.classList.add('hidden');
+    notice.replaceChildren();
+    return;
+  }
+  notice.classList.remove('hidden');
+  notice.replaceChildren();
+  const label = document.createElement('span');
+  label.className = 'memory-import-pending-text';
+  const files = Array.isArray(actionable.filenames) && actionable.filenames.length
+    ? ` (${actionable.filenames.join(', ')})`
+    : '';
+  if (String(actionable.state) === 'active') {
+    label.textContent = `Import still processing${files} — review opens when it finishes…`;
+    notice.appendChild(label);
+    _waitForImportBatch(actionable.batch_id).then((data) => {
+      if (data && String(data.state) !== 'active') showToast('Import finished — ready for review');
+      _refreshPendingImportNotice();
+    });
+    return;
+  }
+  const pending = Number(actionable.review_counts?.pending || 0);
+  label.textContent = `${pending} imported suggestion${pending === 1 ? '' : 's'} waiting for review${files}`;
+  const review = document.createElement('button');
+  review.className = 'memory-item-btn save';
+  review.textContent = 'review';
+  review.addEventListener('click', () => _openImportBatchReview(actionable.batch_id));
+  const dismiss = document.createElement('button');
+  dismiss.className = 'memory-item-btn';
+  dismiss.textContent = 'dismiss';
+  dismiss.addEventListener('click', async () => {
+    // Dismiss the whole queue, not just the batch the banner happens to
+    // show: a pre-fix nuke can leave several awaiting_review batches behind.
+    const ok = await dismissAllPendingImportBatches({
+      fetchImpl: fetch,
+      origin: window.location.origin,
+      showToast,
+      showError,
+    });
+    if (ok) await _refreshPendingImportNotice();
+  });
+  notice.append(label, review, dismiss);
+}
+
+function _batchReviewItems(data) {
+  const items = [];
+  const batchId = String(data?.batch_id || '');
+  for (const item of Array.isArray(data?.items) ? data.items : []) {
+    const suggestions = item?.result?.suggestions;
+    if (!Array.isArray(suggestions)) continue;
+    for (const suggestion of suggestions) {
+      const text = typeof suggestion === 'string' ? suggestion : suggestion?.text;
+      if (!text) continue;
+      const review = typeof suggestion === 'object'
+        && suggestion?.review
+        && typeof suggestion.review === 'object'
+        ? suggestion.review
+        : null;
+      const reviewState = String(review?.state || 'awaiting_review');
+      items.push({
+        batchId,
+        suggestionId: (typeof suggestion === 'object' && suggestion?.suggestion_id) || null,
+        text: String(text),
+        category: (typeof suggestion === 'object' && suggestion?.category) || 'fact',
+        filename: item.filename || 'upload',
+        itemId: item.item_id || null,
+        questionContext: (typeof suggestion === 'object' && suggestion?.question_context) || null,
+        review,
+        reviewState,
+        reviewKey: null,
+        active: !['accepted', 'reused', 'rejected'].includes(reviewState),
+      });
+    }
+  }
+  return items;
+}
+
+function _batchPhotoItems(data) {
+  return (Array.isArray(data?.items) ? data.items : [])
+    .filter((item) => item?.result?.media?.asset_id)
+    .map((item) => ({
+      assetId: String(item.result.media.asset_id),
+      filename: String(item.result.media.filename || item.filename || 'photo'),
+      associatedText: String(item.result.associated_text || '').trim(),
+    }));
+}
+
+function _batchReviewIdempotencyKey(item) {
+  if (!item.reviewKey) {
+    const suffix = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    item.reviewKey = `memory-import-review-${item.suggestionId || item.itemId || 'unknown'}-${suffix}`;
+  }
+  return item.reviewKey;
+}
+
+async function _submitBatchReview(item, action) {
+  if (!item.batchId || !item.suggestionId) {
+    throw new Error('This imported suggestion is missing its review receipt. Re-upload the source file.');
+  }
+  const proposal = {
+    text: String(item.text || '').trim(),
+    category: String(item.category || 'fact').trim().toLowerCase(),
+  };
+  if (item.questionContext) proposal.question_context = item.questionContext;
+  const key = _batchReviewIdempotencyKey(item);
+  const response = await fetch(
+    `${window.location.origin}/api/memory/import-batches/${encodeURIComponent(item.batchId)}/review`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({
+        suggestion_id: item.suggestionId,
+        action,
+        idempotency_key: key,
+        proposal,
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error((await responseError(response, 'Imported-memory review failed')).message);
+  }
+  const result = await response.json();
+  item.review = result?.review?.review || result?.review || item.review;
+  item.reviewState = String(item.review?.state || action);
+  item.active = !['accepted', 'reused', 'rejected'].includes(item.reviewState);
+  return result;
+}
+
+function _appendBatchItemError(card, message) {
+  const existing = card.querySelector('.memory-import-error');
+  const errorText = existing || document.createElement('small');
+  errorText.textContent = message;
+  errorText.className = 'memory-import-error';
+  if (!existing) card.appendChild(errorText);
+}
+
+function _batchFailedItems(data) {
+  return (Array.isArray(data?.items) ? data.items : [])
+    .filter((item) => item?.state === 'failed_terminal')
+    .map((item) => ({
+      batchId: String(data?.batch_id || ''),
+      itemId: String(item?.item_id || ''),
+      filename: String(item?.filename || 'upload'),
+      error: item?.error && typeof item.error === 'object'
+        ? String(item.error.message || 'This file could not be imported.')
+        : 'This file could not be imported.',
+    }))
+    .filter((item) => item.batchId && item.itemId);
+}
+
+function _renderBatchReview(data) {
+  const body = document.getElementById('memory-suggestions-body');
+  const modal = document.getElementById('memory-modal');
+  const memList = document.getElementById('memory-list');
+  if (!body || !modal) return;
+  const reviewItems = _batchReviewItems(data);
+  const failedItems = _batchFailedItems(data);
+  body.innerHTML = '';
+  body.classList.remove('hidden');
+  if (memList) memList.classList.add('hidden');
+  if (reviewItems.length === 0 && failedItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'memory-empty';
+    empty.textContent = 'No useful information found in the selected files.';
+    body.appendChild(empty);
+    modal.classList.remove('hidden');
+    return;
+  }
+
+  const header = document.createElement('div');
+  header.className = 'memory-suggestions-header';
+  const title = document.createElement('span');
+  const updateTitle = () => {
+    const remaining = reviewItems.filter((item) => item.active).length;
+    const failed = failedItems.length;
+    title.textContent = failed
+      ? `Imported ${reviewItems.length} suggestions (${remaining} remaining; ${failed} file${failed === 1 ? '' : 's'} need attention)`
+      : `Imported ${reviewItems.length} suggestions (${remaining} remaining)`;
+  };
+  updateTitle();
+  const actions = document.createElement('div');
+  actions.className = 'memory-suggestions-actions';
+  const saveAll = document.createElement('button');
+  saveAll.className = 'memory-item-btn save';
+  saveAll.textContent = 'save all';
+  saveAll.addEventListener('click', async () => {
+    saveAll.disabled = true;
+    let saved = 0;
+    let failed = 0;
+    for (const item of reviewItems) {
+      if (!item.active || !item.text) continue;
+      try {
+        await _submitBatchReview(item, 'accept');
+        saved += 1;
+      } catch (error) {
+        item.error = error?.message || 'Failed to save memory';
+        failed += 1;
+      }
+    }
+    updateTitle();
+    saveAll.disabled = false;
+    if (saved) await loadMemories();
+    showToast(failed ? `Saved ${saved}; ${failed} still need attention` : `Saved ${saved} imported memories`);
+  });
+  const back = document.createElement('button');
+  back.className = 'memory-item-btn';
+  back.textContent = 'back';
+  back.addEventListener('click', () => {
+    body.classList.add('hidden');
+    body.innerHTML = '';
+    if (memList) memList.classList.remove('hidden');
+  });
+  actions.append(saveAll, back);
+  header.append(title, actions);
+  body.appendChild(header);
+
+  // EC-D05: photo imports carry the admitted asset in item.result.media —
+  // render each photo with a per-photo download button hitting the S00
+  // single-asset endpoint (thumbnails stream from the same owner-scoped URL).
+  for (const photo of _batchPhotoItems(data)) {
+    const card = document.createElement('div');
+    card.className = 'memory-suggestion-item memory-photo-item';
+    const thumb = document.createElement('img');
+    thumb.className = 'memory-photo-thumb';
+    thumb.src = memoryAssetUrl(photo.assetId);
+    thumb.alt = photo.filename;
+    thumb.loading = 'lazy';
+    const content = document.createElement('div');
+    content.className = 'memory-item-content';
+    const source = document.createElement('small');
+    source.className = 'memory-import-source';
+    source.textContent = photo.filename;
+    content.appendChild(source);
+    if (photo.associatedText) {
+      const text = document.createElement('small');
+      text.className = 'memory-item-text';
+      text.textContent = photo.associatedText;
+      content.appendChild(text);
+    }
+    const controls = document.createElement('div');
+    controls.className = 'memory-suggestion-actions';
+    const download = document.createElement('button');
+    download.className = 'memory-item-btn save';
+    download.textContent = 'download';
+    download.addEventListener('click', async () => {
+      download.disabled = true;
+      try {
+        await downloadMemoryPhoto(photo.assetId, photo.filename);
+      } finally {
+        download.disabled = false;
+      }
+    });
+    controls.appendChild(download);
+    card.append(thumb, content, controls);
+    body.appendChild(card);
+  }
+
+  for (const item of reviewItems) {
+    if (!item.active) continue;
+    const card = document.createElement('div');
+    card.className = 'memory-suggestion-item';
+    const content = document.createElement('div');
+    content.className = 'memory-item-content';
+    const source = document.createElement('small');
+    source.textContent = item.filename;
+    source.className = 'memory-import-source';
+    const text = document.createElement('textarea');
+    text.className = 'memory-item-edit-input';
+    text.rows = 2;
+    text.value = item.text;
+    text.setAttribute('aria-label', `Imported memory text from ${item.filename}`);
+    text.addEventListener('input', () => { item.text = text.value.trim(); });
+    const category = document.createElement('select');
+    category.className = 'memory-edit-cat-select';
+    category.setAttribute('aria-label', `Imported memory category from ${item.filename}`);
+    for (const value of MEMORY_CATEGORIES) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = categoryLabel(value);
+      option.selected = value === item.category;
+      category.appendChild(option);
+    }
+    category.addEventListener('change', () => { item.category = category.value; });
+    let about = null;
+    if (item.category === 'unknown') {
+      about = document.createElement('select');
+      about.className = 'memory-question-about-select';
+      about.setAttribute('aria-label', `Question subject from ${item.filename}`);
+      const none = document.createElement('option');
+      none.value = '';
+      none.textContent = 'unassociated question';
+      about.appendChild(none);
+      for (const principal of (data?.principal_context?.principals || [])) {
+        const option = document.createElement('option');
+        option.value = JSON.stringify({ kind: principal.kind, id: principal.id });
+        option.textContent = `about ${principal.label}`;
+        about.appendChild(option);
+      }
+      about.addEventListener('change', () => {
+        item.questionContext = about.value
+          ? { mode: 'missing_slot', target: JSON.parse(about.value) }
+          : null;
+      });
+    }
+    content.append(source, text, category);
+    if (about) content.appendChild(about);
+    const controls = document.createElement('div');
+    controls.className = 'memory-suggestion-actions';
+    const save = document.createElement('button');
+    save.className = 'memory-item-btn save';
+    save.textContent = 'save';
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        const result = await _submitBatchReview(item, 'accept');
+        card.remove();
+        updateTitle();
+        await loadMemories();
+        const outcome = result?.review?.review?.state || result?.review?.state;
+        showToast(outcome === 'reused' ? 'Already represented in Memory; kept this source receipt' : 'Saved to memory');
+      } catch (error) {
+        item.error = error?.message || 'Failed to save memory';
+        _appendBatchItemError(card, item.error);
+        showError(item.error);
+      } finally {
+        if (item.active) save.disabled = false;
+      }
+    });
+    const remove = document.createElement('button');
+    remove.className = 'memory-item-btn delete';
+    remove.textContent = 'delete';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        await _submitBatchReview(item, 'reject');
+        card.remove();
+        updateTitle();
+        showToast('Import suggestion rejected');
+      } catch (error) {
+        item.error = error?.message || 'Failed to reject import suggestion';
+        _appendBatchItemError(card, item.error);
+        showError(item.error);
+        remove.disabled = false;
+      }
+    });
+    controls.append(save, remove);
+    card.append(content, controls);
+    body.appendChild(card);
+  }
+
+  for (const item of failedItems) {
+    const card = document.createElement('div');
+    card.className = 'memory-suggestion-item memory-import-failed-item';
+    const content = document.createElement('div');
+    content.className = 'memory-item-content';
+    const source = document.createElement('small');
+    source.className = 'memory-import-source';
+    source.textContent = item.filename;
+    const reason = document.createElement('small');
+    reason.className = 'memory-import-error';
+    reason.textContent = item.error;
+    content.append(source, reason);
+    const controls = document.createElement('div');
+    controls.className = 'memory-suggestion-actions';
+    const retry = document.createElement('button');
+    retry.className = 'memory-item-btn save';
+    retry.textContent = 'retry file';
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      try {
+        const form = new FormData();
+        form.append('item_id', item.itemId);
+        if (data?.session_id) form.append('session', String(data.session_id));
+        const response = await fetch(
+          `${window.location.origin}/api/memory/import-batches/${encodeURIComponent(item.batchId)}/retry`,
+          { method: 'POST', credentials: 'same-origin', body: form },
+        );
+        if (!response.ok) throw new Error((await responseError(response, 'Import retry failed')).message);
+        _renderBatchReview(await response.json());
+      } catch (error) {
+        _appendBatchItemError(card, error?.message || 'Import retry failed');
+        retry.disabled = false;
+      }
+    });
+    controls.appendChild(retry);
+    card.append(content, controls);
+    body.appendChild(card);
+  }
+  modal.classList.remove('hidden');
+}
+
+async function handleImportFiles(files) {
+  const selected = Array.from(files || []).filter(Boolean);
+  if (!selected.length) return;
+  // Every interactive import uses the durable batch/review authority, even
+  // for one text file. The legacy route remains an API compatibility shim,
+  // but its client-side /add flow cannot preserve server-owned provenance or
+  // proposed entity matches.
+  const sessionId = sessionModule?.getCurrentSessionId?.();
+  const importBtn = document.getElementById('memory-import-btn');
+  const original = importBtn ? importBtn.innerHTML : '';
+  let spin = null;
+  if (importBtn) {
+    importBtn.disabled = true;
+    importBtn.innerHTML = '';
+    spin = spinnerModule.createWhirlpool(12);
+    spin.element.style.cssText = 'width:12px;height:12px;margin:0 5px 0 0;display:inline-flex;vertical-align:-2px;';
+    importBtn.append(spin.element, document.createTextNode(`Importing ${selected.length}`));
+  }
+  try {
+    const formData = new FormData();
+    for (const file of selected) formData.append('files', file);
+    if (sessionId) formData.append('session', sessionId);
+    const response = await fetch(`${window.location.origin}/api/memory/import-batches`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const failure = await responseError(response, 'Import failed');
+      const error = new Error(failure.message);
+      error.problem = failure.problem;
+      throw error;
+    }
+    pendingMemoryImportFiles = [];
+    pendingMemoryImportFile = null;
+    const data = await response.json();
+    _renderBatchReview(data);
+  } catch (error) {
+    console.error('Batch import failed:', error);
+    if (error?.problem?.code === 'MEMORY_ROUTE_UNCONFIGURED') {
+      _showMemoryRouteProblem(error.problem, selected, error.message);
+    } else {
+      // A proxy read timeout can sever the response while the durable batch
+      // keeps processing server-side; recover it instead of lying "failed".
+      // Structured server rejections (413/400 problems) never created a
+      // batch, so only unstructured failures are worth recovering.
+      const recovered = error?.problem ? false : await _recoverImportBatchAfterTimeout();
+      if (!recovered) showError(contextualErrorMessage('Import failed', error?.message));
+    }
+  } finally {
+    if (spin) spin.destroy();
+    if (importBtn) { importBtn.disabled = false; importBtn.innerHTML = original; }
+    const input = document.getElementById('memory-import-file');
+    if (input) input.value = '';
+  }
+}
+
 async function handleImportFile(file) {
+  return handleImportFiles([file]);
+}
+
+async function handleImportFileLegacy(file) {
   if (!file) return;
 
   const sessionId = sessionModule?.getCurrentSessionId?.();
@@ -2220,12 +3697,15 @@ async function handleImportFile(file) {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Import failed');
+      const failure = await responseError(res, 'Import failed');
+      const error = new Error(failure.message);
+      error.problem = failure.problem;
+      throw error;
     }
 
     const data = await res.json();
     const suggestions = data.suggestions || [];
+    pendingMemoryImportFile = null;
 
     // Show suggestions using the existing suggestions UI
     const modal = document.getElementById('memory-modal');
@@ -2309,14 +3789,28 @@ async function handleImportFile(file) {
 
         const content = document.createElement('div');
         content.className = 'memory-item-content';
-        const txt = document.createElement('span');
-        txt.className = 'memory-item-text';
-        txt.textContent = item.text;
-        const catBadge = document.createElement('span');
-        catBadge.className = 'memory-cat-badge memory-cat-' + item.category;
-        catBadge.textContent = item.category;
+        const txt = document.createElement('textarea');
+        txt.className = 'memory-item-edit-input';
+        txt.rows = 2;
+        txt.value = item.text;
+        txt.setAttribute('aria-label', 'Imported memory text');
+        txt.addEventListener('input', () => {
+          item.text = txt.value.trim();
+          btn.disabled = !item.text;
+        });
+        const catSelect = document.createElement('select');
+        catSelect.className = 'memory-edit-cat-select';
+        catSelect.setAttribute('aria-label', 'Imported memory category');
+        for (const category of MEMORY_CATEGORIES) {
+          const option = document.createElement('option');
+          option.value = category;
+          option.textContent = categoryLabel(category);
+          option.selected = category === item.category;
+          catSelect.append(option);
+        }
+        catSelect.addEventListener('change', () => { item.category = catSelect.value; });
         content.appendChild(txt);
-        content.appendChild(catBadge);
+        content.appendChild(catSelect);
 
         const actionWrap = document.createElement('div');
         actionWrap.className = 'memory-suggestion-actions';
@@ -2337,6 +3831,11 @@ async function handleImportFile(file) {
             updateHeaderTitle();
             btn.disabled = true;
             btn.textContent = result.pending_review ? 'in review' : 'saved';
+            // Keep the Browse tab backed by the committed provider result.
+            // The save-all path already refetches; single-item saves must do
+            // the same or the new memory appears saved but remains absent
+            // until a later full reload.
+            await loadMemories();
             showToast(result.pending_review ? 'Sent to Candidates for review' : 'Saved to memory');
           } catch (error) {
             console.error('Failed to save imported memory:', error);
@@ -2364,7 +3863,11 @@ async function handleImportFile(file) {
     document.querySelector('.memory-tab[data-memory-tab="browse"]')?.click();
   } catch (error) {
     console.error('Import failed:', error);
-    showError('Import failed — ' + error.message);
+    if (error?.problem?.code === 'MEMORY_ROUTE_UNCONFIGURED') {
+      _showMemoryRouteProblem(error.problem, file, error.message);
+    } else {
+      showError(contextualErrorMessage('Import failed', error?.message));
+    }
   } finally {
     if (importSpin) importSpin.destroy();
     if (importBtn) {
@@ -2384,6 +3887,8 @@ var showError = uiModule.showError;
 // Event listeners
 document.addEventListener('DOMContentLoaded', () => {
   _wireMemoryDrag();
+  _wireMemoryNukeControls();
+  _wireHandlerProfileControls();
 
   // Memory modal tabs
   document.querySelectorAll('.memory-tab[data-memory-tab]').forEach(tab => {
@@ -2449,7 +3954,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const importFile = document.getElementById('memory-import-file');
   if (importFile) importFile.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleImportFile(e.target.files[0]);
+    const selected = Array.from(e.target.files || []);
+    if (selected.length) handleImportFiles(selected);
   });
 
   window.addEventListener('memory-refresh', () => {
@@ -2461,6 +3967,17 @@ document.addEventListener('DOMContentLoaded', () => {
   if (inspectTier) inspectTier.addEventListener('change', loadMemoryInspect);
   if (inspectStatus) inspectStatus.addEventListener('change', loadMemoryInspect);
   if (inspectRefresh) inspectRefresh.addEventListener('click', loadMemoryInspect);
+});
+
+document.addEventListener('open-clank:providers-updated', () => {
+  const files = pendingMemoryImportFiles.length
+    ? [...pendingMemoryImportFiles]
+    : (pendingMemoryImportFile ? [pendingMemoryImportFile] : []);
+  if (!files.length || memoryImportRetrying) return;
+  memoryImportRetrying = true;
+  setTimeout(() => {
+    handleImportFiles(files).finally(() => { memoryImportRetrying = false; });
+  }, 0);
 });
 
 const memoryModule = {

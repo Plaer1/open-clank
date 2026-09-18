@@ -4,12 +4,15 @@ import os from "os"
 import { Global } from "../global"
 import { Database } from "../storage"
 import { Config } from "../config"
+import { Log } from "../util"
 import { reconcileMemory } from "./reconcile"
 import { buildFtsQuery } from "./fts-query"
 import { resolveProjectId } from "./paths"
-import { anyMemorySessionScope, memorySessionScope } from "./session-scope"
+import { memorySessionScope, uniqueMemorySessionScope } from "./session-scope"
 
-type SearchRow = {
+const log = Log.create({ service: "memory.service" })
+
+export type SearchRow = {
   path: string
   scope: string
   scope_id: string
@@ -19,6 +22,86 @@ type SearchRow = {
   source?: string
   trust?: string
   backend?: "mimo" | "frankenmemory"
+  source_uri?: string
+  source_revision?: string | number
+  content_hash?: string
+  authored_path?: string
+  explanation?: Record<string, unknown>
+  provenance_conflict?: boolean
+}
+
+export function mergeSearchRows(fmRows: SearchRow[], nativeRows: SearchRow[], limit: number): SearchRow[] {
+  const normalize = (rows: SearchRow[], backend: SearchRow["backend"]) => {
+    const top = Math.max(...rows.map((row) => row.score), 0)
+    return rows.map((row) => ({
+      ...row,
+      score: top > 0 ? row.score / top : row.score,
+      source: row.source ?? (backend === "mimo" ? "markdown" : "unknown"),
+      trust: row.trust ?? (backend === "mimo" ? "authored" : "unknown"),
+      backend,
+    }))
+  }
+  const combined = [
+    ...normalize(fmRows, "frankenmemory"),
+    ...normalize(nativeRows, "mimo"),
+  ]
+  // Cross-backend identity is the AUTHORED FILE, not source_uri: FM projects
+  // one row per section (source_uri file://path#anchor + a section content
+  // hash, with metadata.authored_path = path) while native emits one row per
+  // file (source_uri file://path + a size-mtime fingerprint). The two hash
+  // schemes never collide, so keying on source_uri + content_hash never
+  // matched across backends. FM's section content hash stays FM-internal
+  // identity; only the file path is shared.
+  const fileOf = (row: SearchRow) => (row.backend === "frankenmemory" ? row.authored_path : row.path)
+  const fmHashesByPath = new Map<string, Set<string>>()
+  for (const row of combined) {
+    if (row.backend !== "frankenmemory" || !row.authored_path || !row.content_hash) continue
+    const hashes = fmHashesByPath.get(row.authored_path) ?? new Set<string>()
+    hashes.add(row.content_hash)
+    fmHashesByPath.set(row.authored_path, hashes)
+  }
+  // A file surfaced by both backends whose native fingerprint matches no FM
+  // section hash is a provenance conflict: both rows stay visible, flagged.
+  const conflictPaths = new Set<string>()
+  for (const row of combined) {
+    if (row.backend !== "mimo" || !row.content_hash) continue
+    const hashes = fmHashesByPath.get(row.path)
+    if (hashes && !hashes.has(row.content_hash)) conflictPaths.add(row.path)
+  }
+  const dedupKey = (row: SearchRow) => {
+    const file = fileOf(row)
+    if (!file || !row.content_hash) return `${row.backend}:${row.path}`
+    if (row.backend === "frankenmemory") return `source:${file}\u001f${row.content_hash}`
+    // A native row only collapses onto FM's key when its fingerprint equals a
+    // section hash; otherwise it is a distinct (possibly conflicting) row.
+    if (fmHashesByPath.get(file)?.has(row.content_hash)) return `source:${file}\u001f${row.content_hash}`
+    return `${row.backend}:${row.path}`
+  }
+  const canonical = new Map<string, SearchRow>()
+  for (const item of combined) {
+    const file = fileOf(item)
+    const row = {
+      ...item,
+      provenance_conflict: item.provenance_conflict || (file !== undefined && conflictPaths.has(file)),
+    }
+    const key = dedupKey(row)
+    const prior = canonical.get(key)
+    if (
+      !prior ||
+      (row.backend === "frankenmemory" && prior.backend !== "frankenmemory") ||
+      (row.backend === prior.backend && row.score > prior.score)
+    ) {
+      canonical.set(key, row)
+    }
+  }
+  return [...canonical.values()]
+    .sort((a, b) => {
+      const score = b.score - a.score
+      if (score !== 0) return score
+      if (a.backend !== b.backend) return a.backend === "frankenmemory" ? -1 : 1
+      return a.path.localeCompare(b.path)
+    })
+    .slice(0, limit)
 }
 
 export interface Interface {
@@ -50,7 +133,7 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
     // capture.ts — no owner, no writes).
     const fmIngestScope = (cfg: { memory?: { provider?: string } }) => {
       if (cfg.memory?.provider !== "frankenmemory") return undefined
-      const scope = anyMemorySessionScope()
+      const scope = uniqueMemorySessionScope()
       return scope?.owner ? { owner: scope.owner, workspaceId: scope.workspaceId } : undefined
     }
 
@@ -72,7 +155,17 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
       const cfg = yield* config.get()
       if (cfg.checkpoint?.memory_reconcile_on_search ?? true) {
         const cc = cfg.memory?.cc_index ? ccBase : undefined
-        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg)))
+        // Non-fatal like authored-ingest / compaction-capture: reconcile is a
+        // maintenance mirror, never a search blocker. A scoped-ingest failure
+        // (e.g. a mixed-tenant process tripping uniqueMemorySessionScope)
+        // degrades to serving the last good index instead of failing search.
+        yield* Effect.promise(() => reconcileMemory({ mimo: root, cc }, fmIngestScope(cfg))).pipe(
+          Effect.catchCause((cause) =>
+            Effect.sync(() =>
+              log.warn("reconcile-on-search failed; serving last index", { cause: String(cause) }),
+            ),
+          ),
+        )
       }
 
       const limit = input.limit ?? 10
@@ -113,6 +206,7 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
 
       const sql = `
         SELECT memory_fts.path, memory_fts.scope, memory_fts.scope_id, memory_fts.type,
+               memory_fts.fingerprint,
                snippet(memory_fts_idx, 0, '<<', '>>', '...', 32) AS snippet,
                bm25(memory_fts_idx) AS score
         FROM memory_fts_idx
@@ -136,6 +230,17 @@ export const make: Effect.Effect<Interface, never, Config.Service> = Effect.gen(
         scope: r.scope,
         scope_id: r.scope_id,
         type: r.type,
+        source: "markdown",
+        trust: "authored",
+        source_uri: `file://${r.path}`,
+        source_revision: (r as SearchRow & { fingerprint?: string }).fingerprint,
+        content_hash: (r as SearchRow & { fingerprint?: string }).fingerprint,
+        explanation: {
+          strategy: "fts_bm25",
+          lexical: -r.score,
+          vector: null,
+          graph: 0,
+        },
       }))
       if (mapped.length === 0) return []
       // Rows are ORDER BY score (best first), so mapped[0] is the top hit.
@@ -206,29 +311,7 @@ export const defaultLayer = Layer.suspend(() =>
               Effect.catchCause(() => Effect.succeed([] as SearchRow[])),
             )
 
-            const normalize = (rows: SearchRow[], backend: SearchRow["backend"]) => {
-              const top = Math.max(...rows.map((row) => row.score), 0)
-              return rows.map((row) => ({
-                ...row,
-                score: top > 0 ? row.score / top : row.score,
-                source: row.source ?? (backend === "mimo" ? "markdown" : "unknown"),
-                trust: row.trust ?? (backend === "mimo" ? "authored" : "unknown"),
-                backend,
-              }))
-            }
-            const combined = [
-              ...normalize(fmRows, "frankenmemory"),
-              ...normalize(nativeRows, "mimo"),
-            ].sort((a, b) => b.score - a.score)
-            const seen = new Set<string>()
-            return combined
-              .filter((row) => {
-                const key = `${row.backend}:${row.path}`
-                if (seen.has(key)) return false
-                seen.add(key)
-                return true
-              })
-              .slice(0, limit)
+            return mergeSearchRows(fmRows, nativeRows, limit)
           }),
       })
     }),

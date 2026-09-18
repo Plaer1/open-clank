@@ -124,16 +124,14 @@ class TestMaybeCompactFourthMessage:
         # Force compaction to trigger and stub the summary LLM call so the test
         # is hermetic (no network, no real endpoint resolution).
         orig_ctx = cc.get_context_length
-        orig_call = cc.llm_call_async
-        orig_resolve = cc.resolve_endpoint
+        orig_call = cc._complete_text
         orig_update = cc._update_session_history
 
         async def _fake_summary(*a, **k):
             return "compact summary text"
 
         cc.get_context_length = lambda url, model: context_length
-        cc.llm_call_async = _fake_summary
-        cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
+        cc._complete_text = _fake_summary
         cc._update_session_history = lambda *a, **k: None
         try:
             return asyncio.run(
@@ -147,8 +145,7 @@ class TestMaybeCompactFourthMessage:
             )
         finally:
             cc.get_context_length = orig_ctx
-            cc.llm_call_async = orig_call
-            cc.resolve_endpoint = orig_resolve
+            cc._complete_text = orig_call
             cc._update_session_history = orig_update
 
     def _four_turn_history_with_tool_call(self):

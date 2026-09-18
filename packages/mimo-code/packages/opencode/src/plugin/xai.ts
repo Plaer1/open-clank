@@ -1,5 +1,5 @@
 import type { Hooks, PluginInput } from "@mimo-ai/plugin"
-import { OAUTH_DUMMY_KEY } from "../auth"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import { createServer } from "http"
 import { InstallationVersion } from "../installation/version"
 import { Log } from "../util"
@@ -181,6 +181,20 @@ async function refreshAccessToken(refreshToken: string, options: XaiAuthPluginOp
     throw new Error(`xAI token refresh failed (${response.status})${detail ? `: ${detail}` : ""}`)
   }
   return response.json() as Promise<TokenResponse>
+}
+
+/** Managed Open Clank refresh exchange; the host owns the lease and CAS. */
+export async function refreshXaiOAuthCredential(
+  credential: Auth.Oauth,
+  options: XaiAuthPluginOptions = {},
+): Promise<Auth.Oauth> {
+  const tokens = await refreshAccessToken(credential.refresh, options)
+  return {
+    ...credential,
+    access: tokens.access_token,
+    refresh: tokens.refresh_token || credential.refresh,
+    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+  }
 }
 
 export interface DeviceCodeResponse {

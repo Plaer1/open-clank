@@ -40,17 +40,18 @@ export async function ingestAuthoredFile(
   scope: FmIngestScope,
 ): Promise<boolean> {
   try {
-    const { getSharedMcpClient } = await import("./mcp-client")
-    const client = await getSharedMcpClient()
-    await client.callTool({
-      name: "ingest_authored",
-      arguments: {
+    const { callMemoryTool, getSharedMcpClient } = await import("./mcp-client")
+    const client = await getSharedMcpClient(undefined, scope)
+    await callMemoryTool(
+      client,
+      "ingest_authored",
+      {
         source_path: absPath,
         sections: body === null ? [] : splitSections(body),
         owner: scope.owner,
         workspace_id: scope.workspaceId,
       },
-    })
+    )
     return true
   } catch (err) {
     log.warn("fm authored ingest failed", { path: absPath, error: String(err) })

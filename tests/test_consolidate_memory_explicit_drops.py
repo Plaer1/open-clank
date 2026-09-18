@@ -30,25 +30,19 @@ class _FakeMM:
 def test_omitted_memory_survives_only_explicit_drop(monkeypatch):
     import src.ai_interaction
     import src.memory
-    import src.llm_core
-    import src.task_endpoint
+    from src.openclank import modality_facade
 
     _FakeMM.saved = None
     monkeypatch.setattr(src.ai_interaction, "_memory_provider", None)
     monkeypatch.setattr(src.memory, "MemoryManager", _FakeMM)
-    monkeypatch.setattr(
-        src.task_endpoint, "resolve_task_candidates",
-        lambda owner=None: [("http://x/v1", "model", {})],
-    )
-
-    async def fake_llm(_candidates, **kwargs):
+    async def fake_llm(**kwargs):
         # Model keeps 'a', drops 'b', and OMITS 'c' entirely.
         return json.dumps({
             "keep": [{"id": "a", "text": "Likes dark roast coffee", "category": "preference"}],
             "drop": [{"id": "b", "reason": "duplicate of a"}],
         })
 
-    monkeypatch.setattr(src.llm_core, "llm_call_async_with_fallback", fake_llm)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_llm)
 
     msg, ok = asyncio.run(ba.action_consolidate_memory("alice"))
 

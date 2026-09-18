@@ -299,14 +299,6 @@ def test_pop_notifications_owner_filtered():
     # Build a minimal scheduler instance that we can hit directly.
     # Reuse the real class so the test catches future regressions of
     # the filter logic.
-    import sys, types
-    from unittest.mock import MagicMock as _MM
-    # `task_scheduler` pulls in lots of helpers — stub the ones it uses.
-    for s in ["src.builtin_actions", "src.ai_interaction", "src.endpoint_resolver",
-              "src.agent_loop", "src.session_manager"]:
-        if s not in sys.modules:
-            mod = types.ModuleType(s)
-            sys.modules[s] = mod
     from src.task_scheduler import TaskScheduler
     sch = TaskScheduler.__new__(TaskScheduler)  # bypass __init__ network etc.
     sch._pending_notifications = []
@@ -314,10 +306,20 @@ def test_pop_notifications_owner_filtered():
     sch.add_notification("t2", "error",   "id2", owner="bob")
     sch.add_notification("t3", "success", "id3", owner=None)
     sch.add_notification("t4", "success", "id4", owner="alice")
+    sch.add_notification(
+        "Shared model removed",
+        "success",
+        "model-share:s1",
+        owner="alice",
+        kind="model_share",
+    )
     alice = sch.pop_notifications(owner="alice")
     alice_names = {n["task_name"] for n in alice}
     # alice gets only her own rows; bob's row and legacy null-owner rows stay.
-    assert alice_names == {"t1", "t4"}
+    assert alice_names == {"t1", "t4", "Shared model removed"}
+    assert next(
+        n for n in alice if n["task_name"] == "Shared model removed"
+    )["kind"] == "model_share"
     # bob's row and the legacy ownerless row are still queued.
     remaining = sch._pending_notifications
     assert {n["task_name"] for n in remaining} == {"t2", "t3"}

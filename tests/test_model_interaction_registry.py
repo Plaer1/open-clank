@@ -9,10 +9,8 @@ through the registry rather than the legacy dispatch_ai_tool elif.
 """
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
-import src.ai_interaction as ai_interaction
-import src.llm_core as llm_core
-import src.database as database
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools import model_interaction_tools as mit
 
@@ -27,17 +25,24 @@ def test_model_interaction_tools_registered():
 def test_chat_with_model_threads_owner_and_returns(monkeypatch):
     seen = {}
 
-    def fake_resolve(spec, owner=None):
-        seen["spec"] = spec
+    def fake_resolve(*, model_spec, owner=None):
+        seen["spec"] = model_spec
         seen["owner"] = owner
-        return ("http://x", "model-x", {})
+        return SimpleNamespace(
+            model_route_id="route-x",
+            provider_grant_id="grant-x",
+            provider_model_id="model-x",
+        )
 
-    async def fake_call(url, model, messages, headers=None, timeout=None, **kwargs):
+    async def fake_call(**kwargs):
+        messages = kwargs["messages"]
         seen["message"] = messages[-1]["content"]
+        seen["route"] = kwargs["model_route_id"]
+        seen["grant"] = kwargs["grant_id"]
         return "hi back"
 
-    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_model_spec", fake_resolve)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", fake_call)
 
     res = asyncio.run(mit.ChatWithModelTool().execute(
         "model-x\nhello there", {"owner": "alice", "session_id": "s1"}))
@@ -46,20 +51,26 @@ def test_chat_with_model_threads_owner_and_returns(monkeypatch):
     assert seen["owner"] == "alice"
     assert seen["spec"] == "model-x"
     assert seen["message"] == "hello there"
+    assert seen["route"] == "route-x"
+    assert seen["grant"] == "grant-x"
 
 
 def test_ask_teacher_threads_owner_and_marks_teacher(monkeypatch):
     seen = {}
 
-    def fake_resolve(spec, owner=None):
+    def fake_resolve(*, model_spec, owner=None):
         seen["owner"] = owner
-        return ("http://x", "teacher-x", {})
+        return SimpleNamespace(
+            model_route_id="teacher-route",
+            provider_grant_id=None,
+            provider_model_id="teacher-x",
+        )
 
-    async def fake_call(url, model, messages, headers=None, timeout=None, **kwargs):
+    async def fake_call(**kwargs):
         return "do this and that"
 
-    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_model_spec", fake_resolve)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", fake_call)
 
     res = asyncio.run(mit.AskTeacherTool().execute(
         "teacher-x\nI am stuck", {"owner": "bob"}))
@@ -70,24 +81,10 @@ def test_ask_teacher_threads_owner_and_marks_teacher(monkeypatch):
 
 
 def test_list_models_no_endpoints(monkeypatch):
-    class _Q:
-        def filter(self, *a, **k):
-            return self
-
-        def all(self):
-            return []
-
-    class _S:
-        def query(self, *a, **k):
-            return _Q()
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(database, "SessionLocal", lambda: _S())
+    monkeypatch.setattr("src.openclank.chat_routing.list_chat_routes", lambda owner: ([], []))
 
     res = asyncio.run(mit.ListModelsTool().execute("", {}))
-    assert res == {"results": "No enabled model endpoints configured."}
+    assert res == {"results": "No models found."}
 
 
 def test_dispatched_via_registry_not_dispatch_ai_tool():

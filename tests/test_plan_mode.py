@@ -102,3 +102,29 @@ def test_active_plan_note_pins_checklist():
     # Empty input → no note (so we never inject a blank pin).
     assert build_active_plan_note("") == ""
     assert build_active_plan_note("   ") == ""
+
+
+# ---------------------------------------------------------------------------
+# Chat mode (QOL-pass slice 3): plan mode's read-only surface without the
+# plan machinery.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_mode_matches_plan_mode_readonly_surface():
+    from src.tool_security import chat_mode_disabled_tools
+
+    # Same fail-closed read-only gate as plan mode today; the named entry
+    # point exists so the modes can diverge deliberately later.
+    assert chat_mode_disabled_tools() == plan_mode_disabled_tools()
+
+
+def test_chat_mode_blocks_shell_and_mutators():
+    from src.tool_security import chat_mode_disabled_tools
+
+    disabled = chat_mode_disabled_tools()
+    # bash/python stay out even if the composer's shell toggle is on — the
+    # read-only gate is structural, not a pref.
+    for name in ("bash", "python", "write_file", "edit_file", "send_email", "manage_settings"):
+        assert name in disabled, f"{name} must be blocked in chat mode"
+    for name in ("read_file", "grep", "glob", "ls", "web_search", "web_fetch"):
+        assert name not in disabled, f"{name} should be usable in chat mode"

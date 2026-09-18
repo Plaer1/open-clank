@@ -11,13 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import logging
-import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-LANE_FASTEMBED = "fastembed"
-LANE_CUSTOM = "custom"
+LANE_FASTEMBED = "fastembed"  # retired collection-provenance label
+LANE_CUSTOM = "custom"  # retired collection-provenance label
+LANE_MANAGED = "managed"
 
 
 @dataclass
@@ -88,44 +88,24 @@ def _metadata(lane_name: str, url: str, model: str, dimension: int, fingerprint:
 
 
 def _load_custom_endpoint() -> Dict[str, str]:
-    try:
-        from src.embeddings import _load_persisted_endpoint
-        persisted = _load_persisted_endpoint()
-    except Exception:
-        persisted = {}
+    """Retired compatibility hook; migration owns the old settings file."""
 
-    url = persisted.get("url") or os.environ.get("EMBEDDING_URL", "")
-    if not url:
-        return {}
-
-    model = persisted.get("model") or os.environ.get("EMBEDDING_MODEL", "")
-    api_key = persisted.get("api_key") or os.environ.get("EMBEDDING_API_KEY", "")
-    if persisted.get("api_key"):
-        try:
-            from src.secret_storage import decrypt
-            api_key = decrypt(api_key)
-        except Exception:
-            logger.warning("Could not decrypt saved embedding endpoint API key")
-            api_key = ""
-
-    return {"url": url, "model": model, "api_key": api_key}
+    return {}
 
 
 def _build_fastembed_client():
-    from src.embeddings import FastEmbedClient
-
-    client = FastEmbedClient()
-    client.get_sentence_embedding_dimension()
-    return client
+    raise RuntimeError(
+        "direct FastEmbed lanes are retired; configure a normalized local-executor route"
+    )
 
 
-def _build_custom_client():
-    from src.embeddings import EmbeddingClient, get_embedding_client
+def _build_custom_client(owner: Optional[str] = None):
+    from src.embeddings import get_embedding_client
 
-    client = get_embedding_client()
-    if isinstance(client, EmbeddingClient):
-        return client
-    raise RuntimeError("HTTP embedding lane unavailable")
+    normalized_owner = str(owner or "").strip().lower()
+    if not normalized_owner:
+        raise RuntimeError("an owner is required for managed embeddings")
+    return get_embedding_client(normalized_owner)
 
 
 def _encode_with_client(client: Any, texts: Sequence[str]) -> List[List[float]]:
@@ -249,27 +229,54 @@ def _create_lane(chroma_client, base_name: str, lane_name: str, client: Any) -> 
     )
 
 
-def build_embedding_lanes(base_name: str) -> List[EmbeddingLane]:
-    """Return healthy lanes in retrieval preference order: custom, fastembed."""
+def build_embedding_lanes(base_name: str, *, owner: Optional[str] = None) -> List[EmbeddingLane]:
+    """Return one owner-scoped immutable managed embedding generation.
+
+    Legacy callers that cannot provide an owner fail closed.  In particular,
+    this function never probes a URL and never falls back to FastEmbed outside
+    the registered local-executor route.
+    """
     from src.chroma_client import get_chroma_client
 
+    normalized_owner = str(owner or "").strip().lower()
+    if not normalized_owner:
+        logger.warning("Managed embedding lane unavailable for %s: owner is required", base_name)
+        return []
     chroma_client = get_chroma_client()
-    lanes: List[EmbeddingLane] = []
-
     try:
-        custom = _build_custom_client()
-        if custom is not None:
-            lanes.append(_create_lane(chroma_client, base_name, LANE_CUSTOM, custom))
+        client = _build_custom_client(normalized_owner)
+        dimension = int(client.get_sentence_embedding_dimension())
+        model = str(getattr(client, "model", "") or "").strip()
+        provider_ref = str(getattr(client, "provider_ref", "") or "").strip()
+        if dimension < 1 or not model or not provider_ref:
+            raise RuntimeError("managed embedding identity is incomplete")
+        fingerprint = hashlib.sha256(provider_ref.encode("utf-8")).hexdigest()[:16]
+        owner_slot = hashlib.sha256(normalized_owner.encode("utf-8")).hexdigest()[:12]
+        name = f"{base_name}_{LANE_MANAGED}_{owner_slot}_{fingerprint}"
+        metadata = _metadata(
+            LANE_MANAGED,
+            "managed://openclank/embeddings",
+            model,
+            dimension,
+            fingerprint,
+        )
+        metadata["embedding_provider_ref"] = provider_ref
+        collection = chroma_client.get_or_create_collection(name=name, metadata=metadata)
+        return [
+            EmbeddingLane(
+                name=LANE_MANAGED,
+                client=client,
+                collection=collection,
+                collection_name=name,
+                model=model,
+                url="managed://openclank/embeddings",
+                dimension=dimension,
+                fingerprint=fingerprint,
+            )
+        ]
     except Exception as e:
-        logger.warning("Custom embedding lane unavailable for %s: %s", base_name, e)
-
-    try:
-        fastembed = _build_fastembed_client()
-        lanes.append(_create_lane(chroma_client, base_name, LANE_FASTEMBED, fastembed))
-    except Exception as e:
-        logger.warning("FastEmbed lane unavailable for %s: %s", base_name, e)
-
-    return lanes
+        logger.warning("Managed embedding lane unavailable for %s: %s", base_name, e)
+        return []
 
 
 def migrate_legacy_collection(base_name: str, lanes: Sequence[EmbeddingLane]) -> None:

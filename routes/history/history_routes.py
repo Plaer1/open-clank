@@ -790,8 +790,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
         try:
             from src.model_context import estimate_tokens, get_context_length
-            from src.llm_core import llm_call_async
-            from src.endpoint_resolver import resolve_endpoint
+            from src.openclank.modality_facade import complete_text
 
             if len(session.history) < 6:
                 return {"status": "ok", "message": "Not enough messages to compact"}
@@ -814,25 +813,26 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 for m in older
             )
 
-            # Use utility model if available
-            util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner or None)
-            compact_url = util_url or session.endpoint_url
-            compact_model = util_model or session.model
-            compact_headers = util_headers if util_url else session.headers
-
             from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
             compaction_count = sum(1 for m in session.history if isinstance(m, ChatMessage) and "[Conversation summary" in (m.content or ""))
             sys_prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(older))).replace("{n}", str(compaction_count + 1))
-            summary = await llm_call_async(
-                compact_url, compact_model,
-                [
+            import hashlib
+
+            summary = await complete_text(
+                owner=owner or "local-installation",
+                purpose="utility",
+                messages=[
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": convo_text},
                 ],
-                temperature=0.2, max_tokens=1024,
-                headers=compact_headers, timeout=30,
-                owner=owner or None,
-                session_id=session_id,
+                temperature=0.2,
+                max_output_tokens=1024,
+                idempotency_key=(
+                    "history-compact-"
+                    + hashlib.sha256(
+                        f"{session_id}\0{convo_text}".encode("utf-8")
+                    ).hexdigest()[:32]
+                ),
             )
             summary = normalize_compaction_summary(summary)
 
@@ -913,5 +913,290 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             logger.error(f"Manual compact error {session_id}: {e}")
             raise HTTPException(500, str(e))
+
+    return router
+
+
+def setup_history_settings_routes() -> APIRouter:
+    """Authenticated policy/usage API for the Lore history foundation."""
+    import os
+    from src.auth_helpers import effective_user, get_current_user, require_user
+    from src.openclank import file_policy as file_policy_module
+    from src.openclank.filesystem_registry import FilesystemRootRegistry
+    from src.openclank.history_client import HistoryClient, HistoryClientError
+    from src.openclank.history_settings import scope_id
+
+    router = APIRouter(prefix="/api/history", tags=["history-settings"])
+
+    def is_admin(request: Request, user: str) -> bool:
+        if os.environ.get("AUTH_ENABLED", "true").lower() == "false":
+            return True
+        manager = getattr(request.app.state, "auth_manager", None)
+        return bool(manager and user and manager.is_admin(user))
+
+    def account_id_for(request: Request, user: str) -> str:
+        manager = getattr(request.app.state, "auth_manager", None)
+        resolver = getattr(manager, "account_id", None)
+        if callable(resolver) and user:
+            try:
+                resolved = resolver(user)
+                if resolved:
+                    return str(resolved)
+            except Exception:
+                pass
+        return str(user or "local-installation")
+
+    def authorized_roots(owner: str, admin: bool) -> list[dict[str, Any]]:
+        registry = FilesystemRootRegistry()
+        roots: list[dict[str, Any]] = []
+        if admin:
+            roots.extend(registry.list(owner))
+        roots.extend(
+            item.get("root") or {}
+            for item in registry.visibility_for_subject(owner)
+        )
+        return [
+            root for root in roots
+            if root.get("kind") == "recursive_directory"
+            and root.get("enabled")
+            and root.get("availability") == "available"
+            and "read" in set(root.get("capabilities") or [])
+        ]
+
+    def is_authorized_directory(value: str, roots: list[dict[str, Any]]) -> bool:
+        import os
+        candidate = os.path.realpath(os.path.expanduser(value))
+        for root in roots:
+            base = os.path.realpath(str(root.get("canonical_path") or ""))
+            try:
+                if base and os.path.commonpath((base, candidate)) == base:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def service_client(account_id: str, request: Request) -> HistoryClient:
+        socket_path = os.environ.get("OPENCLANK_HISTORY_SOCKET")
+        if not socket_path:
+            raise HTTPException(503, "history service is unavailable")
+        actor_id = str(get_current_user(request) or account_id)
+        return HistoryClient(socket_path, actor_id=actor_id, account_id=account_id)
+
+    def visible_snapshot(owner: str, admin: bool, request: Request) -> dict[str, Any]:
+        account_id = account_id_for(request, owner)
+        client = service_client(account_id, request)
+        try:
+            policy_response = client.get_policy()
+            usage_response = client.get_usage()
+            status_response = client.get_status()
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        policy = dict(policy_response.get("Policy") or {})
+        if not admin:
+            inherited_global = dict(policy.get("global") or {})
+            inherited_global["inherited"] = True
+            policy["global"] = inherited_global
+        roots = authorized_roots(owner, admin)
+        visible_scopes = []
+        for scope in policy.get("scopes") or []:
+            if not isinstance(scope, dict):
+                continue
+            if not admin and scope.get("owner_account_id") != account_id:
+                continue
+            if scope.get("kind") in {"Global", "Workspace", "Directory"}:
+                scope["kind"] = str(scope["kind"]).lower()
+            if scope.get("kind") == "directory" and not is_authorized_directory(str(scope.get("root") or scope.get("value") or ""), roots):
+                continue
+            if scope.get("kind") == "directory":
+                canonical = os.path.realpath(str(scope.get("root") or ""))
+                match = next((root for root in roots if os.path.realpath(str(root.get("canonical_path"))) == canonical), None)
+                if not match:
+                    continue
+                scope["root_id"] = match.get("id")
+                scope["display_path"] = match.get("display_path")
+            visible_scopes.append(scope)
+        policy["scopes"] = visible_scopes
+        result = {
+            "policy": policy,
+            "usage": usage_response.get("Usage") or {},
+            "status": status_response.get("Status") or {},
+            "directory_options": [
+                {"id": root.get("id"), "label": root.get("display_path") or root.get("canonical_path")}
+                for root in roots
+            ],
+        }
+        return result
+
+    def workspace_options(owner: str, request: Request, policy: Dict[str, Any], *, admin: bool = False) -> list[str]:
+        account_id = account_id_for(request, owner)
+        # Workspace choices come from the canonical Files policy repository,
+        # so a newly-created workspace is available to History before a
+        # history scope has been configured for it. Existing scope IDs remain
+        # visible as edit targets during migration or after a workspace was
+        # archived, but they never broaden account visibility.
+        options = {
+            str(scope.get("workspace_id"))
+            for scope in (policy.get("scopes") or [])
+            if isinstance(scope, dict)
+            and (admin or scope.get("owner_account_id") == account_id)
+            and str(scope.get("kind") or "").lower() == "workspace"
+            and scope.get("workspace_id")
+        }
+        try:
+            repository = file_policy_module.FilePolicyRepository()
+            workspaces = repository.list_workspaces(
+                owner_subject_id=None if admin else account_id,
+                include_archived=False,
+            )
+            options.update(str(workspace.id) for workspace in workspaces if workspace.id)
+        except (file_policy_module.FilePolicyError, OSError, ValueError) as exc:
+            # History settings remain readable when the canonical policy store
+            # is temporarily unavailable; configured scope IDs still support
+            # safe editing and the next request can retry discovery.
+            logger.warning("canonical workspace discovery unavailable: %s", exc)
+        options.add("default")
+        return sorted(item for item in options if item)
+
+    @router.post("/restore")
+    async def restore_history_resource(request: Request) -> Dict[str, Any]:
+        """Forward an authenticated restore through the Rust provider boundary.
+
+        ``destination_path`` is only an untrusted routing hint. The service
+        resolves it against its private ResourceKey registry and rejects it
+        unless it names the registered resource in the typed request.
+        """
+        user = require_user(request)
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "history restore must be a JSON object") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(422, "history restore must be a JSON object")
+        restore_request = body.get("request")
+        source = body.get("source")
+        destination_path = body.get("destination_path")
+        if not isinstance(restore_request, dict) or not isinstance(source, dict) or not isinstance(destination_path, str) or not destination_path.strip():
+            raise HTTPException(422, "restore request, source receipt, and destination hint are required")
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        if str(restore_request.get("account_id") or "") != account_id:
+            raise HTTPException(403, "restore request belongs to another account")
+        destination = restore_request.get("destination")
+        if not isinstance(destination, dict) or str(destination.get("account_id") or "") != account_id:
+            raise HTTPException(403, "restore destination belongs to another account")
+        if not all(str(restore_request.get(field) or "").strip() for field in ("restore_id", "source_action_id", "source_version_id")):
+            raise HTTPException(422, "restore request identifiers are required")
+        client = service_client(account_id, request)
+        try:
+            return client.restore_host(
+                restore_request,
+                source,
+                destination_path=destination_path,
+                source_host_metadata=body.get("source_host_metadata") if isinstance(body.get("source_host_metadata"), dict) else None,
+            )
+        except HistoryClientError as exc:
+            message = str(exc)
+            status = 409 if "conflict" in message.lower() else 422
+            raise HTTPException(status, message) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+
+    @router.get("/settings")
+    async def get_history_settings(request: Request) -> Dict[str, Any]:
+        user = require_user(request)
+        owner = effective_user(request) or user or "local-installation"
+        result = visible_snapshot(owner, is_admin(request, user), request)
+        result["owner"] = owner
+        result["workspace_options"] = workspace_options(owner, request, result.get("policy") or {}, admin=is_admin(request, user))
+        return result
+
+    @router.put("/settings")
+    async def put_history_settings(request: Request) -> Dict[str, Any]:
+        user = require_user(request)
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "history settings must be a JSON object") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(422, "history settings must be a JSON object")
+        try:
+            expected = int(body.get("expected_revision"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(428, "expected_revision is required") from exc
+        requested = body.get("policy", body)
+        if not isinstance(requested, dict):
+            raise HTTPException(422, "policy must be an object")
+        admin = is_admin(request, user)
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        client = service_client(account_id, request)
+        try:
+            current_response = client.get_policy()
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        current = dict(current_response.get("Policy") or {})
+        if not admin and "global" in requested:
+            raise HTTPException(403, "installation history target requires administration")
+        roots = authorized_roots(owner, admin)
+        patch = dict(requested)
+        if "scopes" in requested:
+            requested_scopes = requested.get("scopes") or []
+            if not isinstance(requested_scopes, list):
+                raise HTTPException(422, "scopes must be an array")
+            options = set(workspace_options(owner, request, current, admin=admin))
+            for scope in requested_scopes:
+                if not isinstance(scope, dict):
+                    raise HTTPException(422, "scope must be an object")
+                scope_owner = str(scope.get("owner_account_id") or account_id).strip()
+                if not admin and scope_owner != account_id:
+                    raise HTTPException(403, "workspace history settings belong to their owner")
+                kind = str(scope.get("kind") or "").strip().lower()
+                if kind == "workspace" and str(scope.get("workspace_id") or "").strip() not in options:
+                    raise HTTPException(403, "workspace is not assigned to this account")
+                if kind == "workspace" and not str(scope.get("workspace_id") or "").strip():
+                    raise HTTPException(422, "workspace history settings require a workspace id")
+                if kind == "directory":
+                    root_id = str(scope.get("root_id") or "")
+                    selected = next((root for root in roots if root.get("id") == root_id and root.get("kind") == "recursive_directory"), None)
+                    if selected is None:
+                        raise HTTPException(403, "directory history settings require an assigned Files root")
+                    candidate = os.path.realpath(str(selected.get("canonical_path")))
+                scope["scope_id"] = scope_id(
+                    kind,
+                    candidate if kind == "directory" else str(scope.get("workspace_id") or ""),
+                    str(scope.get("workspace_id") or "") or None,
+                    scope_owner,
+                )
+                scope["revision"] = int(current.get("revision") or expected) + 1
+                scope["enabled"] = bool(scope.get("enabled", True))
+                scope["kind"] = {"global": "Global", "workspace": "Workspace", "directory": "Directory"}.get(kind, scope.get("kind"))
+                scope["owner_account_id"] = scope_owner
+                if scope["kind"] == "Directory":
+                    scope["root"] = candidate
+                    scope.pop("root_id", None)
+                    scope.pop("value", None)
+            if not admin:
+                preserved = [
+                    scope for scope in current.get("scopes") or []
+                    if isinstance(scope, dict) and scope.get("owner_account_id") != account_id
+                ]
+                patch["scopes"] = preserved + requested_scopes
+        merged = dict(current)
+        if isinstance(requested.get("global"), dict):
+            merged["global"] = {**(current.get("global") or {}), **requested["global"]}
+        if "scopes" in patch:
+            merged["scopes"] = patch["scopes"]
+        for key in ("revision",):
+            merged[key] = current.get(key)
+        try:
+            client.set_policy(merged, expected_revision=expected)
+        except HistoryClientError as exc:
+            message = str(exc)
+            status = 409 if "RevisionMismatch" in message or "revision" in message.lower() else 422
+            raise HTTPException(status, message) from exc
+        result = visible_snapshot(owner, admin, request)
+        result["owner"] = owner or "local-installation"
+        result["workspace_options"] = workspace_options(owner, request, result.get("policy") or {}, admin=admin)
+        return result
 
     return router

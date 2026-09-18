@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package lore.thin_client.v1;
+
+import "lore/model/v1/model.proto";
+import "lore/thin_client/v1/model.proto";
+
+// Thin-client presentation helpers — describe / tree / diff RPCs that are
+// convenience helpers for clients that lack local cache or compute ( web UIs).
+// Sits alongside the baseline lore.revision.v1.RevisionService and shares the
+// same backing revision-graph state.
+service ThinClientService {
+  // Stream a unified diff or 3-way merge of two CAS blobs as header +
+  // chunked text.
+  rpc ContentDiff (ContentDiffRequest)  returns (stream ContentDiffResponse);
+  // Return the full Revision record for a specific revision.
+  rpc RevisionInfo(RevisionInfoRequest) returns (RevisionInfoResponse);
+  // Stream a unified 2-way / 3-way diff between two revisions as
+  // header + DiffChange / DiffConflict items.
+  rpc RevisionDiff(RevisionDiffRequest) returns (stream RevisionDiffResponse);
+  // Stream the file/directory tree at a revision as header + TreeNode
+  // items.
+  rpc RevisionTree(RevisionTreeRequest) returns (stream RevisionTreeResponse);
+}
+
+// Request to describe a single revision by identifier or signature.
+message RevisionInfoRequest {
+  oneof query {
+    // Identifier-based lookup; `number == 0` resolves to the tip of
+    // the branch.
+    lore.model.v1.RevisionIdentifier identifier = 1;
+    // Signature-based lookup.
+    bytes signature = 2;
+  }
+}
+
+// Response carrying the resolved Revision record. Self-describing —
+// includes the resolved RevisionIdentifier even when queried by
+// signature.
+message RevisionInfoResponse {
+  // The full Revision record.
+  Revision revision = 1;
+}
+
+// Request to diff two revisions. Server picks the diff mode (2-way vs
+// 3-way) from revision metadata; callers do not declare it.
+message RevisionDiffRequest {
+  // "From" side specifier.
+  oneof query_from {
+    // Identifier-based "from" (`number == 0` = tip).
+    lore.model.v1.RevisionIdentifier identifier_from = 1;
+    // Signature-based "from".
+    bytes signature_from = 2;
+  }
+  // "To" side specifier.
+  oneof query_to {
+    // Identifier-based "to" (`number == 0` = tip).
+    lore.model.v1.RevisionIdentifier identifier_to = 3;
+    // Signature-based "to".
+    bytes signature_to = 4;
+  }
+  // When true and the server picks 3-way mode, auto-resolved
+  // DiffChange entries are flagged via `automerged = true`. Silently
+  // ignored in 2-way mode.
+  bool autoresolve = 5;
+}
+
+// Header for a RevisionDiff stream. Echoes the resolved revisions so
+// callers querying by signature learn the (branch, number) and vice
+// versa. Optional `_base` fields are populated only when the server
+// selected a 3-way diff.
+message RevisionDiffHeader {
+  // Resolved (branch, number) of the "from" side.
+  lore.model.v1.RevisionIdentifier identifier_from = 1;
+  // Resolved signature of the "from" side.
+  bytes signature_from = 2;
+  // Resolved (branch, number) of the "to" side.
+  lore.model.v1.RevisionIdentifier identifier_to = 3;
+  // Resolved signature of the "to" side.
+  bytes signature_to = 4;
+  // Resolved (branch, number) of the common ancestor base. Set only
+  // in 3-way mode.
+  optional lore.model.v1.RevisionIdentifier identifier_base = 5;
+  // Resolved signature of the common ancestor base. Set only in
+  // 3-way mode.
+  optional bytes signature_base = 6;
+}
+
+// Server-streamed response for RevisionDiff. First message carries
+// `payload.header`; subsequent messages stream `DiffChange` always,
+// `DiffConflict` only in 3-way mode, and `DiffPartition` lazily as the
+// server discovers linked repositories during the walk. Each
+// `DiffPartition` is emitted strictly before the first `DiffChange` or
+// `DiffConflict` half that references its index.
+message RevisionDiffResponse {
+  oneof payload {
+    // Header echoing the resolved revisions.
+    RevisionDiffHeader header = 1;
+    // A per-path change.
+    DiffChange change = 2;
+    // A 3-way merge conflict pair (3-way mode only).
+    DiffConflict conflict = 3;
+    // A linked-repository announcement.
+    DiffPartition partition = 4;
+  }
+}
+
+// Request to walk the file/directory tree at a specific revision.
+message RevisionTreeRequest {
+  // Revision specifier.
+  oneof query {
+    // Identifier-based lookup; `number == 0` resolves to the tip of
+    // the branch.
+    lore.model.v1.RevisionIdentifier identifier = 1;
+    // Signature-based lookup.
+    bytes signature = 2;
+  }
+  // If set and non-empty, only entries at or under this path are
+  // emitted. The prefix itself is emitted as a DIRECTORY node when
+  // it exists. If unset or empty, the walk covers the full tree from
+  // the repository root.
+  optional string path_prefix = 3;
+  // If set, limits the depth of descent below the prefix root. 1
+  // emits only direct children of the prefix root; 2 emits direct
+  // children plus grandchildren; etc. 0 or unset means unbounded.
+  optional uint32 max_depth = 4;
+}
+
+// Header for a RevisionTree stream. Echoes the resolved revision so
+// callers querying by signature learn the (branch, number) and vice
+// versa.
+message RevisionTreeHeader {
+  // Resolved (branch, number) of the revision being walked.
+  lore.model.v1.RevisionIdentifier identifier = 1;
+  // Resolved signature of the revision being walked.
+  bytes signature = 2;
+}
+
+// Server-streamed response for RevisionTree. First message carries
+// `payload.header`; subsequent messages stream `TreeNode` items in
+// server-natural order.
+message RevisionTreeResponse {
+  oneof payload {
+    // Header echoing the resolved revision.
+    RevisionTreeHeader header = 1;
+    // A tree entry (directory, file, or link).
+    TreeNode node = 2;
+  }
+}

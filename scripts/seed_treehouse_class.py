@@ -108,7 +108,7 @@ MODULES = [
                     "2. Loads settings, validates config\n"
                     "3. Initializes database (SQLite via SQLAlchemy)\n"
                     "4. Connects Frankenmemory provider (fm-mcp over MCP stdio)\n"
-                    "5. Starts FastAPI server on `127.0.0.1:7000`\n\n"
+                    "5. Starts FastAPI server on `127.0.0.1:7777`\n\n"
                     "## Health check\n"
                     "Visit `/health` or use the Diagnostics view in the UI to verify all services are running.\n\n"
                     "---\n\n"

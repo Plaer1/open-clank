@@ -1,4 +1,6 @@
 """Tests for providers_health — probe logic, status classification, sanitization, and bounded timeout."""
+import inspect
+
 import pytest
 
 from src import service_health as sh
@@ -14,6 +16,23 @@ def _ep(name):
 
 def test_providers_disabled_without_endpoints():
     assert sh.providers_health([])["status"] == sh.DISABLED
+
+
+def test_normalized_provider_snapshot_never_uses_legacy_endpoint_probe():
+    source = inspect.getsource(sh)
+    assert "ModelEndpoint" not in source
+    assert "routes.model_routes" not in source
+
+    report = sh.providers_health([
+        {"name": "Managed local", "ready": True, "model_count": 2, "error": None},
+        {"name": "Needs account", "ready": False, "model_count": 1, "error": "no_accounts"},
+    ])
+    assert report["status"] == sh.DEGRADED
+    entries = report["meta"]["endpoints"]
+    assert entries[0] == {
+        "name": "Managed local", "ok": True, "model_count": 2, "error": None,
+    }
+    assert entries[1]["error"] == "no_accounts"
 
 
 def test_providers_ok_all_reachable():

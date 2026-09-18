@@ -436,28 +436,16 @@ def test_spinoff_detected_from_chatmessage_history():
     assert _session_is_research_spinoff(sess) is True
 
 
-def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch):
-    import src.llm_core as llm_core
-    import src.task_endpoint as task_endpoint
+def test_auto_name_session_uses_managed_utility_route(monkeypatch):
+    from src.openclank import modality_facade
 
-    resolver_calls = []
     llm_calls = []
 
-    def fake_resolve_task_endpoint(
-        fallback_url=None,
-        fallback_model=None,
-        fallback_headers=None,
-        owner=None,
-    ):
-        resolver_calls.append((fallback_url, fallback_model, fallback_headers, owner))
-        return fallback_url, fallback_model, fallback_headers
-
-    async def fake_llm_call(url, model, messages, **kwargs):
-        llm_calls.append((url, model, messages, kwargs))
+    async def fake_complete_text(**kwargs):
+        llm_calls.append(kwargs)
         return "Focused Fix"
 
-    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
 
     session_headers = {"Authorization": "Bearer session"}
     sess = SimpleNamespace(
@@ -466,6 +454,7 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
         endpoint_url="http://session.example/v1/chat/completions",
         model="session-model",
         headers=session_headers,
+        mimo_state={"last_root_operation_id": "root-turn-1"},
         history=[SimpleNamespace(role="user", content="Please fix the endpoint fallback bug.")],
     )
     updates = []
@@ -475,15 +464,12 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
 
     asyncio.run(auto_name_session(session_manager, sess))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
-    assert llm_calls[0][0] == "http://session.example/v1/chat/completions"
-    assert llm_calls[0][1] == "session-model"
-    assert llm_calls[0][3]["headers"] == session_headers
+    assert llm_calls[0]["owner"] == "alice"
+    assert llm_calls[0]["purpose"] == "utility"
+    assert llm_calls[0]["root_operation_id"] == "root-turn-1"
+    assert llm_calls[0]["idempotency_key"] == "auto-name-session-session-1"
+    assert "endpoint_url" not in llm_calls[0]
+    assert "headers" not in llm_calls[0]
     assert updates == [("session-1", "Focused Fix")]
 
 
@@ -569,8 +555,6 @@ async def _build_context_owner_probe(
     monkeypatch.setattr(chat_helpers, "extract_preset", fake_extract_preset)
     monkeypatch.setattr(chat_helpers, "add_user_message", fake_add_user_message)
     monkeypatch.setattr(chat_helpers, "load_prefs_for_user", fake_load_prefs)
-    monkeypatch.setattr(chat_helpers, "_normalize_model_id_from_cache", lambda sess: None)
-    monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
 

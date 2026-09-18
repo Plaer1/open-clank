@@ -1,6 +1,5 @@
 """Preset routes — /api/presets GET, /api/presets/custom POST, user templates CRUD."""
 
-import asyncio
 import logging
 import uuid
 from typing import Dict, Any, List
@@ -117,8 +116,7 @@ def setup_preset_routes(preset_manager) -> APIRouter:
     @router.post("/api/presets/expand")
     async def expand_character_prompt(request: Request) -> Dict[str, Any]:
         """Use AI to expand a rough character description into a full system prompt."""
-        from src.ai_interaction import _resolve_model
-        from src.llm_core import llm_call_async
+        from src.openclank.modality_facade import complete_text
 
         data = await request.json()
         draft = (data.get("prompt") or "").strip()
@@ -145,17 +143,14 @@ def setup_preset_routes(preset_manager) -> APIRouter:
         ]
 
         try:
-            model_spec = data.get("model") or ""
             user = effective_user(request)
-            url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=user)
-            result = await llm_call_async(
-                url,
-                model,
-                messages,
+            result = await complete_text(
+                owner=user or "local-installation",
+                purpose="utility",
+                messages=messages,
+                model_route_id=(str(data.get("model_route_id") or "").strip() or None),
                 temperature=0.8,
-                max_tokens=500,
-                headers=headers,
-                owner=user,
+                max_output_tokens=500,
             )
             return {"success": True, "prompt": result.strip()}
         except Exception as e:

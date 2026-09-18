@@ -92,6 +92,6 @@ user data and never appear in first-party source (ruling R9, enforced by
 ## Rulings
 
 R1-R16, canonized 2026-07-16 in
-`.futures/AGENT-IDENTITY-METAPLAN-INDEX-2026-07-16.md` (evidence in
-`.robonotes/identity-audit-2026-07-16-*`). Tool disposition:
+`.clanker/futures/AGENT-IDENTITY-METAPLAN-INDEX-2026-07-16.md` (evidence in
+`.clankers/robonotes/identity-audit-2026-07-16-*`). Tool disposition:
 `docs/agent-tool-parity.md`.

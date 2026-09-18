@@ -1,0 +1,103 @@
+{
+  "operation": [
+    {"name": "scope resolution is versioned", "valid": true, "value": "scope.resolve"},
+    {"name": "knowledge history is versioned", "valid": true, "value": "knowledge.history"},
+    {"name": "unknown writes fail closed", "valid": false, "value": "knowledge.patch"}
+  ],
+  "scope": [
+    {
+      "name": "owner scope carries transport session context",
+      "valid": true,
+      "value": {
+        "owner_id": "e",
+        "workspace_id": null,
+        "project_id": null,
+        "session_id": "chat-1"
+      }
+    },
+    {
+      "name": "project scope carries transport session context",
+      "valid": true,
+      "value": {
+        "owner_id": "e",
+        "workspace_id": "workspace-1",
+        "project_id": "project-1",
+        "session_id": "chat-2"
+      }
+    },
+    {
+      "name": "project scope requires workspace",
+      "valid": false,
+      "value": {
+        "owner_id": "e",
+        "workspace_id": null,
+        "project_id": "project-1",
+        "session_id": null
+      }
+    },
+    {
+      "name": "scope rejects a whitespace-only owner",
+      "valid": false,
+      "value": {
+        "owner_id": "   ",
+        "workspace_id": null,
+        "project_id": null,
+        "session_id": null
+      }
+    },
+    {
+      "name": "scope rejects unknown authority fields",
+      "valid": false,
+      "value": {
+        "owner_id": "e",
+        "workspace_id": null,
+        "project_id": null,
+        "session_id": null,
+        "tenant_id": "other"
+      }
+    }
+  ],
+  "typed_value": [
+    {
+      "name": "object value is an object",
+      "valid": true,
+      "value": {
+        "type": "object",
+        "value": {"about": "user", "data": {"name": "e"}}
+      }
+    },
+    {
+      "name": "list value is an array",
+      "valid": true,
+      "value": {
+        "type": "list",
+        "value": ["one", {"two": 2}, null]
+      }
+    },
+    {
+      "name": "entity reference carries a non-empty identifier",
+      "valid": true,
+      "value": {"type": "entity_ref", "value": {"entity_id": "entity-e"}}
+    },
+    {
+      "name": "entity reference rejects an empty identifier",
+      "valid": false,
+      "value": {"type": "entity_ref", "value": {"entity_id": ""}}
+    },
+    {
+      "name": "object rejects scalar payload",
+      "valid": false,
+      "value": {"type": "object", "value": "not-an-object"}
+    },
+    {
+      "name": "list rejects object payload",
+      "valid": false,
+      "value": {"type": "list", "value": {"not": "a-list"}}
+    },
+    {
+      "name": "typed value rejects unknown fields",
+      "valid": false,
+      "value": {"type": "object", "value": {}, "extra": true}
+    }
+  ]
+}

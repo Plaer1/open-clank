@@ -136,11 +136,11 @@ export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 export PATH="/app/.local/bin:$PATH"
 
 # Run first-time setup as the app user so data/ files get the right ownership.
-# setup.py is idempotent — skips auth.json / .env if they already exist.
-# || true so a setup failure never prevents the container from starting.
-"$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py || true
+# setup.py is idempotent and now verifies the managed engine. A setup failure
+# is a startup failure: the container must never advertise degraded readiness.
+"$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py
 
-# Drop root and run the actual app. `gosu` is preferred over `su` /
-# `sudo` because it cleans up the process tree (no extra shell layer)
-# so signals (SIGTERM from `docker stop`) reach uvicorn directly.
+# Drop root and run the bootstrap. `gosu` is preferred over `su` / `sudo`
+# because it cleans up the process tree (no extra shell layer), and the
+# bootstrap then execs uvicorn so SIGTERM from `docker stop` reaches it.
 exec "$GOSU_BIN" "$ODY_USER" "$@"

@@ -12,13 +12,13 @@ def test_services_memory_manager_is_canonical_src_class():
     assert hasattr(package_manager, "claim_ownerless")
 
 
-def test_services_memory_vector_is_canonical_src_class():
-    from services.memory import MemoryVectorStore as package_vector_store
+def test_legacy_memory_vector_requires_explicit_import():
+    import services.memory as package
     from services.memory.memory_vector import MemoryVectorStore as module_vector_store
     from src.memory_vector import MemoryVectorStore as canonical_vector_store
 
     assert module_vector_store is canonical_vector_store
-    assert package_vector_store is canonical_vector_store
+    assert not hasattr(package, "MemoryVectorStore")
 
 
 def test_memory_service_uses_canonical_manager_api(tmp_path):
@@ -41,6 +41,15 @@ def test_memory_service_uses_canonical_manager_api(tmp_path):
     assert service.delete(remembered.id) is True
     assert service.delete(remembered.id) is False
     assert service.get_all() == []
+
+
+def test_memory_service_does_not_reactivate_legacy_vector_store(tmp_path):
+    from services.memory import MemoryService
+
+    (tmp_path / "memory_vectors").mkdir()
+    service = MemoryService(str(tmp_path))
+
+    assert service.vector_store is None
 
 
 def test_canonical_manager_keeps_ownerless_claim_helper(tmp_path):

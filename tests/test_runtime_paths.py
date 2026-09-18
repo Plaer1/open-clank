@@ -3,7 +3,14 @@ import sys
 from pathlib import Path
 from unittest import mock
 import pytest
-from src.runtime_paths import get_app_root, get_default_data_dir
+from src.runtime_paths import (
+    RuntimeResolutionError,
+    get_app_root,
+    get_default_data_dir,
+    resolve_browser,
+    resolve_python,
+    resolve_runtime_bundle,
+)
 
 
 def test_get_app_root_normal_run():
@@ -61,3 +68,41 @@ def test_get_default_data_dir_migrates_legacy_frozen_root(tmp_path):
     assert result == tmp_path / ".open-clank" / "data"
     assert (result / "proof.txt").read_text() == "kept"
     assert not legacy.exists()
+
+
+def test_resolve_python_uses_bootstrap_probe(monkeypatch):
+    monkeypatch.setenv("OPEN_CLANK_RUNTIME_PYTHON", sys.executable)
+    identity = resolve_python(required_modules=("json",))
+    assert Path(identity.path).resolve() == Path(sys.executable).resolve()
+    assert identity.prefix
+    assert identity.version
+
+
+def test_resolve_python_reports_missing_dependency(monkeypatch, tmp_path):
+    missing = tmp_path / "missing-python"
+    missing.write_text("#!/bin/sh\nexit 0\n")
+    missing.chmod(0o755)
+    monkeypatch.setenv("OPEN_CLANK_RUNTIME_PYTHON", str(missing))
+    monkeypatch.setattr("src.runtime_paths._python_candidate_paths", lambda _root: [missing])
+    with pytest.raises(RuntimeResolutionError) as caught:
+        resolve_python(required_modules=("module_that_does_not_exist",))
+    assert caught.value.code in {"child_import_failed", "bootstrap_dependency_missing"}
+    assert caught.value.diagnostics[0]["path"] == str(missing)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shell executable fixture is POSIX-only")
+def test_resolve_browser_honors_explicit_override(monkeypatch, tmp_path):
+    browser = tmp_path / "browser"
+    browser.write_text("#!/bin/sh\nprintf 'test-browser 1.0\\n'\n")
+    browser.chmod(0o755)
+    monkeypatch.setenv("OPEN_CLANK_BROWSER_EXECUTABLE", str(browser))
+    identity = resolve_browser()
+    assert identity.path == str(browser.resolve())
+    assert identity.version == "test-browser 1.0"
+
+
+def test_resolve_runtime_bundle_has_admitted_components(tmp_path):
+    bundle = resolve_runtime_bundle(Path(__file__).resolve().parents[1])
+    assert bundle["python"]["path"]
+    assert bundle["lifetools"]["path"].endswith("src/openclank/lifetools_server.py")
+    assert bundle["fm_mcp"]["path"].endswith(("fm-mcp", "fm-mcp.exe"))

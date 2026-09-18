@@ -12,6 +12,8 @@ import markdownModule from './markdown.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { langIcon } from './langIcons.js';
 import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
+import { downloadExactResource, showResourceInFiles } from './showInFiles.js';
 
 // ── Injected references from documentModule ──
 let API_BASE = '';
@@ -886,8 +888,10 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const pre = document.createElement('pre');
     const code = document.createElement('code');
     try {
-      if (doc.language && doc.language !== 'text' && window.hljs && !_librarySearch) {
-        code.innerHTML = window.hljs.highlight(doc.preview || '', { language: doc.language }).value;
+      if (doc.language && doc.language !== 'text' && !_librarySearch) {
+        code.textContent = doc.preview || '';
+        code.dataset.lang = doc.language;
+        window.odysseusHighlight?.highlight(code);
       } else if (_librarySearch) {
         // While searching, highlight matched terms in the preview (plain
         // text) rather than syntax-highlighting — the match is what matters.
@@ -1065,8 +1069,10 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // highlighting anyway, so skip it there.
       const HL_CAP = 20000;
       try {
-        if (lang && lang !== 'text' && lang !== 'markdown' && window.hljs && content.length <= HL_CAP) {
-          code.innerHTML = window.hljs.highlight(content, { language: lang }).value;
+        if (lang && lang !== 'text' && lang !== 'markdown' && content.length <= HL_CAP) {
+          code.textContent = content;
+          code.dataset.lang = lang;
+          window.odysseusHighlight?.highlight(code);
         } else {
           code.textContent = content;
         }
@@ -1922,6 +1928,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
 
     // Tab switching — Chats / Documents / Archive / Research
     let _activeLibTab = (opts && opts.tab) || 'documents';
+    let _exactResource = opts?.exactResource || null;
     const _tabBtns = modal.querySelectorAll('[data-doclib-tab]');
     const _tabPanels = modal.querySelectorAll('[data-doclib-panel]');
 
@@ -1985,9 +1992,149 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         if (ico) ico.innerHTML = hdr.svg;
         if (txt) txt.textContent = hdr.label;
       }
-      if (tab === 'chats') _renderLibChats();
+      if (_exactResource && (
+        (_exactResource.target?.app === 'chat' && tab === 'chats')
+        || (_exactResource.target?.app === 'research' && tab === 'research')
+      )) {
+        _renderExactResource(tab, _exactResource);
+      } else if (tab === 'chats') _renderLibChats();
       else if (tab === 'archive') _renderLibArchive();
       else if (tab === 'research') _renderLibResearch();
+    }
+
+    function _renderExactResource(tab, response) {
+      const panel = document.querySelector(`[data-doclib-panel="${tab}"]`);
+      const grid = panel?.querySelector('.doclib-grid');
+      if (!panel || !grid) return;
+      panel.querySelectorAll('.memory-toolbar, .memory-bulk-bar, .doclib-desc').forEach((node) => {
+        node.dataset.exactHidden = 'true';
+        node.style.display = 'none';
+      });
+      grid.replaceChildren();
+      const payload = response?.payload || {};
+      const resourceRef = String(response?.resource?.ref || '');
+      const article = document.createElement('article');
+      article.className = 'doclib-exact-resource';
+      article.setAttribute('aria-label', String(payload.title || response?.resource?.name || 'Resource'));
+
+      const actions = document.createElement('div');
+      actions.className = 'doclib-exact-actions';
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'memory-toolbar-btn';
+      back.textContent = `Back to ${tab === 'chats' ? 'Chats' : 'Research'}`;
+      back.addEventListener('click', () => {
+        _exactResource = null;
+        panel.querySelectorAll('[data-exact-hidden="true"]').forEach((node) => {
+          node.style.removeProperty('display');
+          delete node.dataset.exactHidden;
+        });
+        _switchLibTab(tab);
+      });
+      const download = document.createElement('button');
+      download.type = 'button';
+      download.className = 'memory-toolbar-btn';
+      download.textContent = 'Download';
+      download.addEventListener('click', async () => {
+        download.disabled = true;
+        try {
+          await downloadExactResource(resourceRef, String(payload.title || response?.resource?.name || 'download'));
+        } catch (error) {
+          uiModule?.showToast?.(error?.message || 'Download could not be started', 3000);
+        } finally {
+          download.disabled = false;
+        }
+      });
+      const show = document.createElement('button');
+      show.type = 'button';
+      show.className = 'memory-toolbar-btn doclib-show-in-files';
+      show.textContent = 'Show in Files';
+      show.addEventListener('click', () => { void showResourceInFiles(resourceRef); });
+      actions.append(back, show, download);
+
+      const title = document.createElement('h2');
+      title.textContent = String(payload.title || response?.resource?.name || 'Untitled');
+      const meta = document.createElement('div');
+      meta.className = 'admin-toggle-sub doclib-exact-meta';
+      if (tab === 'chats') {
+        meta.textContent = [
+          payload.model || '',
+          `${Number(payload.message_count || 0)} messages`,
+          payload.archived ? 'Archived' : 'Active',
+          'Read only',
+        ].filter(Boolean).join(' · ');
+      } else {
+        meta.textContent = [
+          payload.category || '',
+          `${Number(payload.source_count || 0)} sources`,
+          payload.archived ? 'Archived' : 'Active',
+          'Read only',
+        ].filter(Boolean).join(' · ');
+      }
+      article.append(actions, title, meta);
+
+      if (tab === 'chats') {
+        const messages = document.createElement('div');
+        messages.className = 'doclib-exact-messages';
+        for (const item of Array.isArray(payload.messages) ? payload.messages : []) {
+          const row = document.createElement('section');
+          row.className = `doclib-exact-message ${String(item?.role || '').toLowerCase() === 'user' ? 'user' : 'assistant'}`;
+          const role = document.createElement('div');
+          role.className = 'doclib-exact-role';
+          role.textContent = String(item?.role || 'message');
+          const body = document.createElement('div');
+          body.className = 'doclib-exact-body';
+          body.textContent = String(item?.text || '');
+          row.append(role, body);
+          messages.append(row);
+        }
+        if (!messages.childElementCount) {
+          const empty = document.createElement('div');
+          empty.className = 'doclib-empty';
+          empty.textContent = 'No text messages in this bounded view.';
+          messages.append(empty);
+        }
+        article.append(messages);
+      } else {
+        const report = document.createElement('div');
+        report.className = 'doclib-exact-report';
+        report.textContent = String(payload.report || 'No report text is available.');
+        article.append(report);
+        const sources = Array.isArray(payload.sources) ? payload.sources : [];
+        if (sources.length) {
+          const heading = document.createElement('h3');
+          heading.textContent = 'Sources';
+          const list = document.createElement('ol');
+          list.className = 'doclib-exact-sources';
+          for (const source of sources) {
+            const item = document.createElement('li');
+            let href = '';
+            try {
+              const parsed = new URL(String(source?.url || ''), window.location.origin);
+              if (parsed.protocol === 'http:' || parsed.protocol === 'https:') href = parsed.href;
+            } catch { /* text-only source */ }
+            if (href) {
+              const link = document.createElement('a');
+              link.href = href;
+              link.target = '_blank';
+              link.rel = 'noopener';
+              link.textContent = String(source?.title || href);
+              item.append(link);
+            } else {
+              item.textContent = String(source?.title || 'Source');
+            }
+            list.append(item);
+          }
+          article.append(heading, list);
+        }
+      }
+      if (payload.truncated) {
+        const notice = document.createElement('div');
+        notice.className = 'admin-toggle-sub doclib-exact-truncated';
+        notice.textContent = 'This in-app view is bounded. Download opens the complete owner-authorized export on this device.';
+        article.append(notice);
+      }
+      grid.append(article);
     }
 
     _tabBtns.forEach(btn => {
@@ -3528,4 +3675,21 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
 
   export function isLibraryOpen() {
     return _libraryOpen;
+  }
+
+  /** Open a chat or research report without exposing its provider id. */
+  export async function openLibraryResource(resourceRef) {
+    const response = await filesFacadeClient.openResource(resourceRef);
+    const app = response?.target?.app;
+    if (!['chat', 'research'].includes(app) || !response?.resource?.ref || !response?.payload?.read_only) {
+      throw new Error('This Files resource cannot be opened in Library');
+    }
+    if (_libraryOpen) {
+      document.getElementById('doclib-modal')?.remove();
+      if (_libraryEscHandler) document.removeEventListener('keydown', _libraryEscHandler);
+      _libraryEscHandler = null;
+      _libraryOpen = false;
+    }
+    openLibrary({ tab: app === 'chat' ? 'chats' : 'research', exactResource: response });
+    return String(response.resource.ref);
   }

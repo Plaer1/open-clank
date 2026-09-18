@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual">
 <meta name="theme-color" content="#191A1E">
 <title>Open Clank — Login</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 29 27H3Z' fill='none' stroke='%234A91FF' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='%234A91FF' fill-rule='evenodd' clip-rule='evenodd'/%3E%3Ccircle cx='16' cy='17' r='1.2' fill='%234A91FF'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 29 27H3Z' fill='none' stroke='%23B83B78' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='%23B83B78' fill-rule='evenodd' clip-rule='evenodd'/%3E%3Ccircle cx='16' cy='17' r='1.2' fill='%23B83B78'/%3E%3C/svg%3E">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <script nonce="{{CSP_NONCE}}">
@@ -32,8 +32,8 @@
     var s = document.documentElement.style;
     var name = 'clanker-dark';
     var c = {
-      bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5',
-      advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#5A9EF5',sendBtnHover:'#3276D4',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
+      bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#B83B78',
+      advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
     };
     if (c) {
       // Base palette
@@ -117,7 +117,7 @@
      of the app instead of a different greys+offwhite scheme. */
   :root {
     --bg: #191A1E; --fg: #FFF4D6; --panel: #25272C; --border: #555A62;
-    --red: #5A9EF5; --green: #A8DE53;
+    --red: #B83B78; --green: #A8DE53;
     --brand-color: #F6BE48; --brand-mix-to: #ED6AB0;
     --clanker-outline: #0E0F12; --clanker-raised: #34373E;
     --clanker-cobalt: #397FD9; --clanker-sky: #62C7E8;
@@ -203,12 +203,12 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 28%, transparent);
   }
   body.theme-clanker-dark #submitBtn {
-    background: var(--send-btn-bg, #5A9EF5);
+    background: var(--send-btn-bg, #B83B78);
     color: var(--clanker-outline);
     border: 2px solid var(--clanker-outline);
     box-shadow: inset 0 1px color-mix(in srgb, #FFF 40%, transparent), 0 3px 0 var(--clanker-outline);
   }
-  body.theme-clanker-dark #submitBtn:hover { background: var(--send-btn-hover, #3276D4); color: #FFF4D6; }
+  body.theme-clanker-dark #submitBtn:hover { background: var(--send-btn-hover, #8E285B); color: #FFF4D6; }
   body.theme-clanker-dark #submitBtn:active { transform: translateY(2px); box-shadow: inset 0 1px color-mix(in srgb, #FFF 24%, transparent), 0 1px 0 var(--clanker-outline); }
   body.theme-clanker-dark .toggle a { color: var(--clanker-gold); }
   .logo {
@@ -363,7 +363,7 @@
 
     <label for="password">Password</label>
     <div class="pw-wrapper">
-      <input id="password" name="password" type="password" required autocomplete="current-password">
+      <input id="password" name="password" type="password" autocomplete="current-password">
       <button type="button" class="pw-toggle" id="pwToggle" tabindex="-1" aria-label="Show password">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>
       </button>
@@ -403,6 +403,8 @@
 
   // Prefill last username
   const usernameInput = document.getElementById('username');
+  const passwordInput = document.getElementById('password');
+  const confirmPasswordInput = document.getElementById('confirmPassword');
   const savedUser = localStorage.getItem('odysseus-last-user');
   if (savedUser && usernameInput) {
     usernameInput.value = savedUser;
@@ -427,6 +429,10 @@
   function setMode(m) {
     mode = m;
     errEl.style.display = 'none';
+    const creatingAccount = m === 'setup' || m === 'signup';
+    passwordInput.required = creatingAccount;
+    confirmPasswordInput.required = creatingAccount;
+    passwordInput.autocomplete = creatingAccount ? 'new-password' : 'current-password';
     if (m === 'setup') {
       setupNote.textContent = 'First-time setup — create your admin account';
       setupNote.style.display = 'block';

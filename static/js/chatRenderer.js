@@ -2412,7 +2412,8 @@ export function renderAskUserCard(payload, options) {
 /**
  * Inline permission prompt (C1). The agent's turn is blocked server-side
  * until one of the three buttons answers the request — there is no timeout.
- * 'Always allow' persists a durable grant (subtree for file requests).
+ * Chat/workspace/always choices persist a grant at the selected lifetime;
+ * once is consumed only by this request.
  */
 export function renderPermissionCard(payload, sessionId) {
   const pq = payload || {};
@@ -2426,15 +2427,20 @@ export function renderPermissionCard(payload, sessionId) {
 
   const title = document.createElement('div');
   title.className = 'ask-user-question';
-  title.textContent = `Agent requests permission: ${pq.permission_type || 'unknown'}`;
+  title.textContent = pq.sudo_password
+    ? 'Approved command needs your sudo password'
+    : `Agent requests permission: ${pq.permission_type || 'unknown'}`;
   card.appendChild(title);
 
   const d = pq.detail || {};
-  const detailText = d.filepath || d.command || (Object.keys(d).length ? JSON.stringify(d) : '');
+  const detailText = d.filepath
+    || (d.command
+      ? [d.command, d.workdir ? `Working directory: ${d.workdir}` : ''].filter(Boolean).join('\n')
+      : (Object.keys(d).length ? JSON.stringify(d) : ''));
   if (detailText) {
     const detail = document.createElement('div');
     detail.className = 'permission-detail';
-    detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;margin:2px 0 8px;font-family:inherit;';
+    detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;white-space:pre-wrap;margin:2px 0 8px;font-family:inherit;';
     detail.textContent = detailText;
     card.appendChild(detail);
   }
@@ -2451,11 +2457,12 @@ export function renderPermissionCard(payload, sessionId) {
     card.appendChild(done);
   };
 
-  const answer = async (optionId, label) => {
+  const answer = async (optionId, label, secret) => {
     list.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     const body = new FormData();
     body.append('request_id', pq.request_id);
     body.append('option_id', optionId);
+    if (secret) body.append('secret', secret);
     try {
       const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/permission`, {
         method: 'POST', body, credentials: 'same-origin',
@@ -2472,11 +2479,46 @@ export function renderPermissionCard(payload, sessionId) {
     }
   };
 
+  if (pq.sudo_password) {
+    // The exact command was already approved; this card only collects the
+    // password sudo needs. The value goes straight to the single-use server
+    // stash — it is never rendered back or persisted client-side.
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.className = 'styled-prompt-input ask-user-other-input';
+    input.placeholder = 'sudo password (never stored)';
+    input.autocomplete = 'off';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); answer('once', 'Submit password', input.value); }
+    });
+    list.appendChild(input);
+    [
+      { id: 'once', label: 'Submit password', withSecret: true },
+      { id: 'reject', label: 'Run without password', withSecret: false },
+    ].forEach((b) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ask-user-option';
+      const labelText = document.createElement('span');
+      labelText.className = 'ask-user-option-label';
+      labelText.textContent = b.label;
+      row.appendChild(labelText);
+      row.addEventListener('click', () => answer(b.id, b.label, b.withSecret ? input.value : ''));
+      list.appendChild(row);
+    });
+    chatBox.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    try { input.focus(); } catch (_) {}
+    return card;
+  }
+
   const alwaysDesc = pq.always_pattern && pq.always_pattern !== '*'
     ? `${pq.always_pattern}/**`
     : `all “${pq.permission_type || 'unknown'}” requests`;
   [
     { id: 'once', label: 'Allow once', desc: '' },
+    { id: 'chat', label: 'Allow in this chat', desc: 'Until this chat is reset' },
+    { id: 'workspace', label: 'Allow in this workspace', desc: 'Shared by chats using this workspace' },
     { id: 'always', label: 'Always allow', desc: alwaysDesc },
     { id: 'reject', label: 'Reject', desc: '' },
   ].forEach((b) => {
@@ -2523,7 +2565,12 @@ export function renderActorAccounting(wrap, accounting) {
       const item = document.createElement('li');
       item.dataset.actorId = actor.id || '';
       if (actor.parent_id) item.dataset.parentActorId = actor.parent_id;
-      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}`;
+      const requested = actor.requested_model ? `requested ${actor.requested_model}` : '';
+      const effective = actor.effective_model && typeof actor.effective_model === 'object'
+        ? `used ${[actor.effective_model.provider_id, actor.effective_model.model_id].filter(Boolean).join('/')}`
+        : '';
+      const modelInfo = [requested, effective].filter(Boolean).join('; ');
+      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}${modelInfo ? ` · ${modelInfo}` : ''}`;
       if (actor.parent_id) item.title = `Child of ${actor.parent_id}`;
       list.appendChild(item);
     }
@@ -2718,9 +2765,7 @@ export function addMessage(role, content, modelName, metadata) {
         if (metadata) displayMetrics(firstWrap, metadata);
       }
 
-      if (window.hljs) {
-        box.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
-      }
+      if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(box);
       if (markdownModule.renderMermaid) markdownModule.renderMermaid(box);
       if (pendingAskUser) {
         // Session history is rendered oldest-to-newest.  A later user message
@@ -3013,7 +3058,7 @@ export function addMessage(role, content, modelName, metadata) {
         b.innerHTML = _renderVariant(sv);
         wrap.dataset.raw = sv.raw;
         wrap.dataset.variantIndex = String(newIdx);
-        if (window.hljs) wrap.querySelectorAll('pre code').forEach(bl => window.hljs.highlightElement(bl));
+        if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(wrap);
         tagLabel.textContent = _icons[sv.label] || '';
         tagLabel.className = 'variant-tag' + (sv.label === 'shorter' ? ' variant-tag-scissors' : '');
         numLeft.textContent = String(newIdx + 1);

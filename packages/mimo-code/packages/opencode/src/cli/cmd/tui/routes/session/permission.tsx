@@ -306,23 +306,28 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               }
             }
 
-            if (permission === "bash_delete") {
+            if (permission === "bash_destructive" || permission === "bash_delete") {
               const meta = props.request.metadata ?? {}
               const command = typeof meta["command"] === "string" ? meta["command"] : ""
-              const deletes = (props.request.patterns ?? []).filter((p): p is string => typeof p === "string")
+              const workdir = typeof meta["workdir"] === "string" ? meta["workdir"] : ""
+              const actions = (props.request.patterns ?? []).filter((p): p is string => typeof p === "string")
+              const legacyDelete = permission === "bash_delete"
               return {
-                icon: "✗",
-                title: "Confirm irreversible deletion",
+                icon: legacyDelete ? "✗" : "!",
+                title: legacyDelete ? "Confirm irreversible deletion" : "Confirm sensitive shell action",
                 body: (
-                  <box paddingLeft={1} gap={1}>
+                  <box paddingLeft={1} gap={1} flexDirection="column">
                     <Show when={command}>
                       <text fg={theme.text}>{"$ " + command}</text>
                     </Show>
-                    <Show when={deletes.length > 0}>
+                    <Show when={workdir}>
+                      <text fg={theme.textMuted}>{"Directory: " + workdir}</text>
+                    </Show>
+                    <Show when={actions.length > 0}>
                       <box gap={0}>
-                        <text fg={theme.textMuted}>Detected deletions</text>
+                        <text fg={theme.textMuted}>{legacyDelete ? "Detected deletions" : "Detected actions"}</text>
                         <box>
-                          <For each={deletes}>{(cmd) => <text fg={theme.warning}>{"- " + cmd}</text>}</For>
+                          <For each={actions}>{(cmd) => <text fg={theme.warning}>{"- " + cmd}</text>}</For>
                         </box>
                       </box>
                     </Show>
@@ -444,12 +449,12 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
           }
 
           const current = info()
-          // Forced-ask permissions (bash_delete, …) never persist an allow rule
+          // Forced-ask shell permissions never persist an allow rule
           // server-side, so surfacing "Allow always" would be a UX trap: the
           // click looks like durable trust but the next invocation still
           // prompts. Offer only "once" and "reject" for those.
           const options: Record<string, string> =
-            props.request.permission === "bash_delete"
+            props.request.permission === "bash_destructive" || props.request.permission === "bash_delete"
               ? { once: "Allow once", reject: "Reject" }
               : { once: "Allow once", always: "Allow always", reject: "Reject" }
 

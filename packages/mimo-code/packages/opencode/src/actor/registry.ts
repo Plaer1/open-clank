@@ -3,7 +3,7 @@ import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorRegistryTable } from "./actor.sql"
-import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness } from "./schema"
+import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness, ActorModel } from "./schema"
 import { deriveLiveness } from "./schema"
 import * as Events from "./events"
 import { Log } from "@/util"
@@ -24,6 +24,18 @@ const PROCESS_INSTANCE_ID = randomUUID()
 type ActorRow = typeof ActorRegistryTable.$inferSelect
 
 function fromRow(row: ActorRow): Actor {
+  const effectiveModel = row.effective_model
+    ? (() => {
+        try {
+          const parsed = JSON.parse(row.effective_model) as Partial<ActorModel>
+          return parsed.providerID && parsed.modelID
+            ? { providerID: parsed.providerID, modelID: parsed.modelID }
+            : undefined
+        } catch {
+          return undefined
+        }
+      })()
+    : undefined
   return {
     sessionID: row.session_id,
     actorID: row.actor_id,
@@ -38,6 +50,8 @@ function fromRow(row: ActorRow): Actor {
     contextWatermark: row.context_watermark ?? undefined,
     background: Boolean(row.background),
     tools: row.tools ?? undefined,
+    requestedModel: row.requested_model ?? undefined,
+    effectiveModel,
     lastTurnTime: row.last_turn_time,
     turnCount: row.turn_count,
     lastError: row.last_error ?? undefined,
@@ -62,6 +76,8 @@ export interface Interface {
     background: boolean
     lifecycle: Lifecycle
     tools?: ToolWhitelist
+    requestedModel?: string
+    effectiveModel?: ActorModel
   }) => Effect.Effect<Actor>
 
   readonly updateStatus: (
@@ -75,6 +91,7 @@ export interface Interface {
   ) => Effect.Effect<void>
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
   readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
+  readonly updateModel: (sessionID: SessionID, actorID: string, requestedModel?: string, effectiveModel?: ActorModel) => Effect.Effect<void>
   readonly get: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
   // Derived pull-side liveness for a single actor row (progressing/stalled/
   // terminal), computed from honest registry fields. Returns undefined when the
@@ -119,6 +136,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       background: boolean
       lifecycle: Lifecycle
       tools?: ToolWhitelist
+      requestedModel?: string
+      effectiveModel?: ActorModel
     }) {
       const now = Date.now()
       const row = {
@@ -135,6 +154,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         context_watermark: input.contextWatermark ?? null,
         background: input.background,
         tools: input.tools ?? null,
+        requested_model: input.requestedModel ?? null,
+        effective_model: input.effectiveModel ? JSON.stringify(input.effectiveModel) : null,
         last_turn_time: now,
         turn_count: 0,
         last_error: null,
@@ -244,6 +265,27 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             .where(
               and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)),
             )
+            .run(),
+        ),
+      )
+    })
+
+    const updateModel = Effect.fn("ActorRegistry.updateModel")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      requestedModel?: string,
+      effectiveModel?: ActorModel,
+    ) {
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              ...(requestedModel !== undefined ? { requested_model: requestedModel } : {}),
+              ...(effectiveModel !== undefined ? { effective_model: JSON.stringify(effectiveModel) } : {}),
+              time_updated: Date.now(),
+            })
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
             .run(),
         ),
       )
@@ -471,6 +513,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       updateStatus,
       updateTurn,
       updateAgent,
+      updateModel,
       get,
       liveness,
       listBySession,

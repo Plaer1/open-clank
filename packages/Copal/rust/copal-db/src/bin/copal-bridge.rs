@@ -2,8 +2,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use copal_db::{Content, Db, DocView, ImportIdentity, WriteOutcome};
+use base64::Engine;
+use copal_db::{
+    Content, Db, DocView, GuardedRequest, ImportIdentity, OwnerInventory, WriteOutcome,
+};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+const COPAL_PROTOCOL_VERSION: u64 = 1;
+const COPAL_CAPABILITIES: &[&str] = &[
+    "scoped-storage",
+    "native-notes",
+    "task-index",
+    "guarded-commit",
+    "wiki-seeds",
+];
+const COPAL_SOURCE_IDENTITY: &str = match option_env!("COPAL_SOURCE_IDENTITY") {
+    Some(identity) => identity,
+    None => "unpackaged",
+};
 
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
@@ -100,7 +117,7 @@ Return to [[OpenClank/Start Here]].
 
 Copal is Open Clank's notes workspace. A note keeps the same ID and remembers its edits, links, properties, trash, and recovery. If an old browser tab tries to overwrite newer work, Copal refuses the stale save.
 
-Timeline uses the same owner-scoped Copal records as Notes. Canonical event files live under `.events/`; that folder is hidden in the normal file view unless you ask to show dot-folders. Wiki records use `.wiki/` and follow the same default.
+Timeline uses the same owner-scoped Copal records as Notes. Canonical event files live under `.events/`; that folder is hidden in the normal file view unless you ask to show dot-folders. Wiki records use `.memes/` and follow the same default.
 
 Obsidian-style ZIP import and export are account-scoped. Compatibility files and attachments are kept as data; importing them does not run scripts or install plugins.
 
@@ -137,7 +154,7 @@ struct WikiSeed {
 
 const WIKI_SEEDS: &[WikiSeed] = &[
     WikiSeed {
-        name: ".wiki/What Is Wiki",
+        name: ".memes/What Is Wiki",
         body: r##"# What Is Wiki
 Wiki is a separate knowledge store inside Copal, dedicated to meme-style pages. It lives in its own database file (`copal-wiki.redb`) and is fully isolated from Notes.
 
@@ -153,7 +170,7 @@ Create a new meme with the "+ Meme" button in the Wiki sidebar. Give it a name a
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wiki/Creating and Linking Memes",
+        name: ".memes/Creating and Linking Memes",
         body: r##"# Creating and Linking Memes
 ## Creating a meme
 Click "+ Meme" in the Wiki sidebar. Enter a name. The new meme opens in edit mode — start writing.
@@ -171,7 +188,7 @@ You can link from a Wiki meme to a Notes document and vice versa. The link shows
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wiki/Story Navigation",
+        name: ".memes/Story Navigation",
         body: r##"# Story Navigation
 Wiki uses a "story" model — multiple memes can be open side by side.
 
@@ -190,7 +207,7 @@ Click × to remove a meme from the story (unless it's pinned).
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wiki/Fields and Properties",
+        name: ".memes/Fields and Properties",
         body: r##"# Fields and Properties
 Every Wiki meme can have properties (also called fields). These appear as a compact footer strip below the meme content.
 
@@ -208,7 +225,7 @@ When editing a meme, you can add or modify properties. Properties are stored as 
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wiki/Wiki vs Notes",
+        name: ".memes/Wiki vs Notes",
         body: r##"# Wiki vs Notes
 Copal has two knowledge stores: **Notes** and **Wiki**. Here's when to use each.
 
@@ -222,7 +239,7 @@ Copal has two knowledge stores: **Notes** and **Wiki**. Here's when to use each.
 ## Use Wiki for
 - Quick reference memes
 - Interlinked knowledge pages
-- TiddlyWiki-style navigation with open stories
+- Linked-page navigation with open stories
 - Compact, scannable pages with footer properties
 
 ## They work together
@@ -231,9 +248,9 @@ Notes and Wiki are separate stores but you can link between them. A Wiki meme ca
 #wiki #howto #seed"##,
     },
     WikiSeed {
-        name: ".wiki/How Wiki Works",
+        name: ".memes/How Wiki Works",
         body: r##"# How Wiki Works
-Wiki is Copal's meme garden: small, interlinked pages in its own store (`copal-wiki.redb`), separate from Notes. Its home is the hidden `.wiki/` folder — invisible in the normal file tree, visible through Wiki mode.
+Wiki is Copal's meme garden: small, interlinked pages in its own store (`copal-wiki.redb`), separate from Notes. Its home is the hidden `.memes/` folder — invisible in the normal file tree, visible through Wiki mode.
 
 ## The loop
 - **Create:** "+ Meme" in the Wiki sidebar → name → write.
@@ -243,13 +260,13 @@ Wiki is Copal's meme garden: small, interlinked pages in its own store (`copal-w
 - **Edit / save:** Edit toggle, type, Save. A stale tab that overwrites newer work is refused — reopen and merge.
 - **Recover:** deleted pages live in Wiki trash; restore from there.
 
-See a complete working example at [[Meme-sized Tiddler]].
+See a complete working example at [[Meme-sized Page]].
 
 #wiki #howto #guide"##,
     },
     WikiSeed {
-        name: ".wiki/Meme-sized Tiddler",
-        body: r##"# Meme-sized Tiddler
+        name: ".memes/Meme-sized Page",
+        body: r##"# Meme-sized Page
 One idea per page: this whole meme is the example.
 
 It links back to [[How Wiki Works]] (which links here — open it to see the backlink).
@@ -258,39 +275,139 @@ It links back to [[How Wiki Works]] (which links here — open it to see the bac
     },
 ];
 
-struct LegacyWikiSeed {
-    name: &'static str,
-    target: &'static str,
-    blob: &'static str,
+const WIKI_SEED_VERSION: u64 = 1;
+
+fn wiki_seed_slug(name: &str) -> String {
+    let mut slug = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
 }
 
-// Exact fingerprints from the bundled pre-v2 Wiki seeds. Name alone is not
-// enough to claim a shared document: an unrelated same-name page stays data.
+fn wiki_note(seed: &WikiSeed) -> String {
+    let slug = wiki_seed_slug(seed.name);
+    let lines = seed.body.split('\n').collect::<Vec<_>>();
+    let relations = links(seed.body)
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let source_block = lines
+                .iter()
+                .position(|line| line.contains(&format!("[[{target}")))
+                .map(|line| format!("blk_wiki_{slug}_{}", line + 1));
+            json!({
+                "id": format!("rel_wiki_{slug}_{}", index + 1),
+                "kind": "link", "origin": "body", "sourceBlockId": source_block,
+                "target": target, "targetDocumentId": Value::Null, "targetBlockId": Value::Null,
+            })
+        })
+        .collect::<Vec<_>>();
+    let blocks = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let id = format!("blk_wiki_{slug}_{}", index + 1);
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            let heading = trimmed.chars().take_while(|character| *character == '#').count();
+            let block = if heading > 0 && heading <= 6 && trimmed.as_bytes().get(heading) == Some(&b' ') {
+                json!({"id": id, "type": "heading", "level": heading, "text": &trimmed[heading + 1..], "source": line})
+            } else if let Some(text) = trimmed.strip_prefix("- [ ] ") {
+                json!({"id": id, "type": "task", "checked": false, "text": text, "indent": indent, "source": line})
+            } else if let Some(text) = trimmed.strip_prefix("- [x] ").or_else(|| trimmed.strip_prefix("- [X] ")) {
+                json!({"id": id, "type": "task", "checked": true, "text": text, "indent": indent, "source": line})
+            } else if let Some(text) = trimmed.strip_prefix("- ") {
+                json!({"id": id, "type": "bullet", "indent": indent, "text": text, "source": line})
+            } else if line.is_empty() {
+                json!({"id": id, "type": "blank", "text": "", "source": line})
+            } else {
+                json!({"id": id, "type": "paragraph", "text": line, "source": line})
+            };
+            let relation_ids = relations
+                .iter()
+                .filter(|relation| relation.get("sourceBlockId").and_then(Value::as_str) == Some(&id))
+                .filter_map(|relation| relation.get("id").cloned())
+                .collect::<Vec<_>>();
+            let mut block = block;
+            if !relation_ids.is_empty() {
+                block["relationIds"] = Value::Array(relation_ids);
+            }
+            block
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "schemaVersion": 1,
+        "body": {"type": "doc", "blocks": blocks},
+        "properties": [
+            {"id": format!("prop_wiki_{slug}_type"), "key": "type", "type": "text", "value": "wiki"},
+            {"id": format!("prop_wiki_{slug}_version"), "key": "seedVersion", "type": "number", "value": WIKI_SEED_VERSION},
+            {"id": format!("prop_wiki_{slug}_source"), "key": "sourcePath", "type": "text", "value": seed.name},
+            {"id": format!("prop_wiki_{slug}_builtin"), "key": "builtin", "type": "checkbox", "value": true},
+            {"id": format!("prop_wiki_{slug}_tags"), "key": "tags", "type": "tags", "value": ["wiki", "builtin"]}
+        ],
+        "relations": relations,
+        "tags": ["wiki", "builtin"],
+        "extensions": {"interchange": {"source": seed.body, "modified": false}, "seed": {"version": WIKI_SEED_VERSION, "name": seed.name}}
+    }).to_string()
+}
+
+struct LegacyWikiSeed {
+    // Base64 of the exact pre-v2 name. Keeping the compatibility fingerprint
+    // encoded prevents retired product wording from entering fresh source or UI.
+    name_fingerprint: &'static str,
+    target: &'static str,
+    blob: &'static str,
+    preserve_name: bool,
+}
+
+// Compatibility-only fingerprints from the bundled pre-v2 Wiki seeds. The
+// encoded name and bundled blob hash recognize existing records for migration;
+// fresh seeds above use the `.memes/` vocabulary. A name fingerprint alone is
+// not enough to claim a shared document: an unrelated page stays data.
 const LEGACY_WIKI_SEEDS: &[LegacyWikiSeed] = &[
     LegacyWikiSeed {
-        name: "Wiki/Creating and Linking Tiddlers",
-        target: ".wiki/Creating and Linking Memes",
+        // The installed schema-3 Wiki store contains this exact historical
+        // alias alongside the canonical Meme-sized Page. Recognize it for
+        // provenance, but preserve the alias when the canonical target exists.
+        name_fingerprint: "Lm1lbWVzL01lbWUtc2l6ZWQgVGlkZGxlcg==",
+        target: ".memes/Meme-sized Page",
+        blob: "1eafefa210565ab12a8a2d44b4389202713290a93529ce1667ad30ca533d8048",
+        preserve_name: true,
+    },
+    LegacyWikiSeed {
+        name_fingerprint: "V2lraS9DcmVhdGluZyBhbmQgTGlua2luZyBUaWRkbGVycw==",
+        target: ".memes/Creating and Linking Memes",
         blob: "032b23b359978236a0f75228a9e3c30df6fce1f5012f3b7f9f685bb81841bc6a",
+        preserve_name: false,
     },
     LegacyWikiSeed {
-        name: "Wiki/Fields and Properties",
-        target: ".wiki/Fields and Properties",
+        name_fingerprint: "V2lraS9GaWVsZHMgYW5kIFByb3BlcnRpZXM=",
+        target: ".memes/Fields and Properties",
         blob: "79a26b736bbc6fc613e9e350202c123baed1c028206451a14ed20d1fbdfd1bc0",
+        preserve_name: false,
     },
     LegacyWikiSeed {
-        name: "Wiki/Story Navigation",
-        target: ".wiki/Story Navigation",
+        name_fingerprint: "V2lraS9TdG9yeSBOYXZpZ2F0aW9u",
+        target: ".memes/Story Navigation",
         blob: "eb4d7413bd0afd5e4f7f6b9f1414400eec909134f4565157ede23e685adda6a8",
+        preserve_name: false,
     },
     LegacyWikiSeed {
-        name: "Wiki/What Is Wiki",
-        target: ".wiki/What Is Wiki",
+        name_fingerprint: "V2lraS9XaGF0IElzIFdpa2k=",
+        target: ".memes/What Is Wiki",
         blob: "93d36071f83856a09881a35d18b3bfb0031075a3ee2263ba2c9fb91ab7164481",
+        preserve_name: false,
     },
     LegacyWikiSeed {
-        name: "Wiki/Wiki vs Notes",
-        target: ".wiki/Wiki vs Notes",
+        name_fingerprint: "V2lraS9XaWtpIHZzIE5vdGVz",
+        target: ".memes/Wiki vs Notes",
         blob: "b3ada6681af29a23d943f63421da091157ccae20d6dadea3e677cf631813b91d",
+        preserve_name: false,
     },
 ];
 
@@ -301,9 +418,17 @@ fn legacy_wiki_seed(doc: &DocView) -> Option<&'static LegacyWikiSeed> {
     let Content::Blob { hash } = &doc.content else {
         return None;
     };
+    let name_fingerprint = base64::engine::general_purpose::STANDARD.encode(doc.name.as_bytes());
     LEGACY_WIKI_SEEDS
         .iter()
-        .find(|seed| doc.name == seed.name && hash == seed.blob)
+        .find(|seed| name_fingerprint == seed.name_fingerprint && hash == seed.blob)
+}
+
+fn known_legacy_wiki_seed(doc: &DocView, seed: &WikiSeed) -> bool {
+    let Content::Blob { hash } = &doc.content else { return false };
+    LEGACY_WIKI_SEEDS
+        .iter()
+        .any(|legacy| legacy.target == seed.name && legacy.blob == hash)
 }
 
 fn legacy_event_tail(name: &str) -> Option<&str> {
@@ -342,6 +467,9 @@ fn has_event_frontmatter(text: Option<&str>) -> bool {
 
 fn hidden_namespace_target(doc: &DocView) -> Option<String> {
     if let Some(seed) = legacy_wiki_seed(doc) {
+        if seed.preserve_name {
+            return None;
+        }
         return Some(seed.target.to_string());
     }
     if doc.kind == "copal-event"
@@ -351,21 +479,27 @@ fn hidden_namespace_target(doc: &DocView) -> Option<String> {
         return legacy_event_tail(&doc.name).map(|tail| format!(".events/{tail}"));
     }
     if doc.kind == "wiki" {
-        // One-time namespace repair: the wiki home was briefly shipped as `.wik/`.
-        // Fold any surviving `.wik/` page into the canonical `.wiki/` home so the
+        // One-time namespace repair: early builds used `.wik/`, `.wiki/`, or
+        // `Wiki/`. Fold those records into the canonical `.memes/` home so
         // seeded builtins rename in place instead of orphaning duplicates.
         if let Some(tail) = doc
             .name
             .strip_prefix(".wik/")
             .filter(|tail| !tail.is_empty())
         {
-            return Some(format!(".wiki/{tail}"));
+            return Some(format!(".memes/{tail}"));
         }
         return doc
             .name
-            .strip_prefix("Wiki/")
+            .strip_prefix(".wiki/")
             .filter(|tail| !tail.is_empty())
-            .map(|tail| format!(".wiki/{tail}"));
+            .map(|tail| format!(".memes/{tail}"))
+            .or_else(|| {
+                doc.name
+                    .strip_prefix("Wiki/")
+                    .filter(|tail| !tail.is_empty())
+                    .map(|tail| format!(".memes/{tail}"))
+            });
     }
     None
 }
@@ -437,28 +571,28 @@ fn seed_wiki_pages(db: &Db) -> Result<usize, String> {
         .collect::<Vec<_>>();
     let mut changed = 0;
     for seed in WIKI_SEEDS {
+        let expected = wiki_note(seed);
         if let Some(doc) = existing
             .iter()
             .find(|doc| doc.builtin && doc.name == seed.name)
             .cloned()
         {
-            if doc.text.as_deref() == Some(seed.body) {
+            if doc.text.as_deref() == Some(expected.as_str()) {
                 continue;
             }
-            // Explicitly marked seed: update it in place (idempotent upgrade).
-            match db
-                .write_doc(&doc.id, seed.body, Some(&doc.head))
-                .map_err(|error| error.to_string())?
-            {
-                WriteOutcome::Committed { .. } => changed += 1,
-                WriteOutcome::Unchanged { .. } | WriteOutcome::Stale { .. } => {}
+            // Upgrade only an exact historical seed. An edited builtin remains
+            // untouched so startup cannot erase provenance or user evidence.
+            if doc.text.as_deref() == Some(seed.body) || known_legacy_wiki_seed(&doc, seed) {
+                if matches!(db.write_doc(&doc.id, &expected, Some(&doc.head)).map_err(|error| error.to_string())?, WriteOutcome::Committed { .. }) {
+                    changed += 1;
+                }
             }
             continue;
         }
 
         if let Some(doc) = existing
             .iter()
-            .find(|doc| doc.name == seed.name && doc.text.as_deref() == Some(seed.body))
+            .find(|doc| doc.name == seed.name && (doc.text.as_deref() == Some(seed.body) || known_legacy_wiki_seed(doc, seed)))
             .cloned()
         {
             // Exact legacy bundle content is the only safe unmarked record to claim.
@@ -466,7 +600,10 @@ fn seed_wiki_pages(db: &Db) -> Result<usize, String> {
                 .claim_builtin_seed_doc(&doc.id)
                 .map_err(|error| error.to_string())?;
             if let Some(current) = existing.iter_mut().find(|item| item.id == doc.id) {
-                *current = promoted;
+                *current = match db.write_doc(&promoted.id, &expected, Some(&promoted.head)).map_err(|error| error.to_string())? {
+                    WriteOutcome::Committed { view, .. } => view,
+                    WriteOutcome::Unchanged { view, .. } | WriteOutcome::Stale { view, .. } => view,
+                };
             }
             changed += 1;
             continue;
@@ -479,7 +616,7 @@ fn seed_wiki_pages(db: &Db) -> Result<usize, String> {
             .create_builtin_seed_doc(
                 "wiki",
                 seed.name,
-                seed.body,
+                &expected,
                 Some("built-in Wiki how-to seed"),
             )
             .map_err(|error| error.to_string())?;
@@ -827,12 +964,21 @@ fn block_line(block: &Value) -> String {
 }
 
 fn indexed_note(doc: &DocView) -> Value {
-    let fail = |message: String| {
+    let raw_source = |raw: &str| {
+        let digest = Sha256::digest(raw.as_bytes());
+        json!({
+            "encoding": "utf-8",
+            "base64": base64::engine::general_purpose::STANDARD.encode(raw.as_bytes()),
+            "sha256": format!("{digest:x}"),
+        })
+    };
+    let fail_with = |message: String, recovery_state: &str| {
+        let raw = doc.text.as_deref().unwrap_or("");
         json!({
             "id": doc.id, "recordSchemaVersion": doc.record_schema_version,
             "corpus": doc.corpus, "kind": doc.kind,
             "owner": doc.owner, "workspace_id": doc.workspace_id,
-            "builtin": doc.builtin, "readOnly": doc.builtin,
+            "builtin": doc.builtin, "readOnly": doc.builtin || doc.kind == "wiki",
             "name": doc.name, "head": doc.head, "ts": doc.ts,
             "hidden": doc.hidden, "deleted": doc.deleted, "content": doc.content,
             "text": "", "properties": {}, "propertyDefinitions": [], "frontmatter": {},
@@ -840,14 +986,43 @@ fn indexed_note(doc: &DocView) -> Value {
             "format": "copal-note-v1", "storage": "database",
             "extensions": {},
             "rawPreserved": true, "note_error": message,
+            "rawSource": raw_source(raw), "recoveryState": recovery_state,
         })
     };
+    let fail = |message: String| fail_with(message, "malformed-preserved");
     let raw = doc.text.as_deref().unwrap_or("");
+    // A Wiki can contain an imported Markdown source from before native Wiki
+    // records existed. Keep it inert and byte-recoverable, while exposing a
+    // deliberate conversion state to the route/UI.
+    let trimmed = raw.trim_start();
+    let looks_like_json_value = trimmed.starts_with('[') || trimmed.starts_with('"')
+        || matches!(trimmed.chars().next(), Some('0'..='9' | 't' | 'f' | 'n'))
+        || (trimmed.starts_with('-') && trimmed.chars().nth(1).is_some_and(|ch| ch.is_ascii_digit()));
+    if !trimmed.starts_with('{') && !looks_like_json_value {
+        return json!({
+            "id": doc.id, "recordSchemaVersion": doc.record_schema_version,
+            "corpus": doc.corpus, "kind": doc.kind,
+            "owner": doc.owner, "workspace_id": doc.workspace_id,
+            "builtin": doc.builtin, "readOnly": doc.builtin || doc.kind == "wiki",
+            "name": doc.name, "head": doc.head, "ts": doc.ts,
+            "hidden": doc.hidden, "deleted": doc.deleted, "content": doc.content,
+            "text": raw, "properties": {}, "propertyDefinitions": [], "frontmatter": {},
+            "relations": [], "links": [], "tags": [], "blocks": [], "tasks": [], "treehouse": null,
+            "format": "copal-note-v1", "storage": "database", "extensions": {},
+            "rawPreserved": true, "formatNotice": "legacy-markdown",
+            "rawSource": raw_source(raw), "recoveryState": "legacy-import", "sourceFormat": "markdown",
+        });
+    }
     let record = match serde_json::from_str::<Value>(raw) {
         Ok(Value::Object(record)) => record,
         Ok(_) => return fail("database note root is not an object".to_string()),
         Err(error) => return fail(error.to_string()),
     };
+    if let Some(version) = record.get("schemaVersion").and_then(Value::as_u64) {
+        if version > 1 {
+            return fail_with("This Wiki source uses a newer native schema".to_string(), "unsupported-future");
+        }
+    }
     if record.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
         return fail("unsupported database note schema".to_string());
     }
@@ -942,7 +1117,7 @@ fn indexed_note(doc: &DocView) -> Value {
         "text": text, "properties": properties, "propertyDefinitions": definitions, "frontmatter": properties,
         "relations": relations, "links": links, "tags": tags, "blocks": blocks, "tasks": task_values,
         "treehouse": treehouse, "format": "copal-note-v1", "storage": "database",
-        "extensions": extensions,
+        "extensions": extensions, "recoveryState": "supported",
     })
 }
 
@@ -952,6 +1127,32 @@ fn indexed(doc: &DocView) -> Value {
     } else {
         indexed_legacy_markdown(doc)
     }
+}
+
+fn metadata_size(doc: &DocView) -> u64 {
+    match &doc.content {
+        Content::Asset { size, .. } => *size,
+        Content::Blob { .. } => doc.text.as_ref().map(|text| text.len() as u64).unwrap_or(0),
+        Content::Conflict { .. } | Content::Tombstone => 0,
+    }
+}
+
+fn metadata(doc: &DocView) -> Value {
+    json!({
+        "id": doc.id,
+        "recordSchemaVersion": doc.record_schema_version,
+        "corpus": doc.corpus,
+        "kind": doc.kind,
+        "builtin": doc.builtin,
+        "readOnly": doc.builtin,
+        "name": doc.name,
+        "head": doc.head,
+        "ts": doc.ts,
+        "hidden": doc.hidden,
+        "deleted": doc.deleted,
+        "size": metadata_size(doc),
+        "storage": "database"
+    })
 }
 
 fn outcome(value: WriteOutcome) -> Value {
@@ -974,6 +1175,65 @@ fn pick_db<'a>(notes: &'a Db, wiki: Option<&'a Db>, args: &Value) -> Result<&'a 
         "wiki" => wiki.ok_or_else(|| "wiki corpus requested but no wiki store opened".to_string()),
         _ => Ok(notes),
     }
+}
+
+fn owner_lifecycle_manifest(
+    notes: &Db,
+    wiki: Option<&Db>,
+    old_owner: &str,
+    new_owner: &str,
+) -> Result<Value, String> {
+    let (notes_source, notes_target) = notes
+        .preflight_rename_owner(old_owner, new_owner)
+        .map_err(|error| error.to_string())?;
+    let wiki_pair = wiki
+        .map(|db| db.preflight_rename_owner(old_owner, new_owner))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let (wiki_source, wiki_target) = wiki_pair.unwrap_or_else(|| {
+        (
+            OwnerInventory::empty(old_owner),
+            OwnerInventory::empty(new_owner),
+        )
+    });
+    let source_documents = notes_source.documents + wiki_source.documents;
+    let target_documents = notes_target.documents + wiki_target.documents;
+    if source_documents > 0 && target_documents > 0 {
+        return Err("destination owner already has Copal documents".to_string());
+    }
+    Ok(json!({
+        "schema_version": 1,
+        "source": {
+            "owner": old_owner,
+            "notes": notes_source,
+            "wiki": wiki_source,
+            "documents": source_documents,
+            "content_included": false,
+        },
+        "target": {
+            "owner": new_owner,
+            "notes": notes_target,
+            "wiki": wiki_target,
+            "documents": target_documents,
+            "content_included": false,
+        },
+        "content_included": false,
+    }))
+}
+
+fn lifecycle_inventory(
+    manifest: &Value,
+    side: &str,
+    store: &str,
+) -> Result<OwnerInventory, String> {
+    serde_json::from_value(
+        manifest
+            .get(side)
+            .and_then(|value| value.get(store))
+            .cloned()
+            .ok_or_else(|| format!("Copal lifecycle manifest is missing {side}.{store}"))?,
+    )
+    .map_err(|error| format!("invalid Copal lifecycle inventory: {error}"))
 }
 
 fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Value, String> {
@@ -1005,40 +1265,183 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
             }
             let schema_version = db.schema_version().map_err(|error| error.to_string())?;
             Ok(json!({
+                "protocol_version": COPAL_PROTOCOL_VERSION,
+                "source_identity": COPAL_SOURCE_IDENTITY,
+                "capabilities": COPAL_CAPABILITIES,
                 "schema_version": schema_version,
                 "documents": docs.len() + wiki_docs.len(),
                 "kinds": kinds,
                 "integrity_ok": true,
             }))
         }
-        "rename_owner" => {
+        "preflight_rename_owner" => {
             let old_owner = required(args, "old_owner")?;
             let new_owner = required(args, "new_owner")?;
-            db.preflight_rename_owner(old_owner, new_owner)
-                .map_err(|error| error.to_string())?;
-            if let Some(wiki) = wiki_db {
-                wiki.preflight_rename_owner(old_owner, new_owner)
-                    .map_err(|error| error.to_string())?;
+            if let Some(manifest) = db
+                .load_owner_lifecycle_manifest(old_owner, new_owner)
+                .map_err(|error| error.to_string())?
+            {
+                Ok(manifest)
+            } else {
+                owner_lifecycle_manifest(db, wiki_db, old_owner, new_owner)
             }
-            let notes = db
-                .rename_owner(old_owner, new_owner)
+        }
+        "owner_inventory" => {
+            let owner = required(args, "owner")?;
+            let empty_target = format!("__copal_inventory_target_{}", ulid::Ulid::new());
+            owner_lifecycle_manifest(db, wiki_db, owner, &empty_target)
+                .map(|manifest| manifest["source"].clone())
+        }
+        "rename_owner" | "reconcile_owner" => {
+            let old_owner = required(args, "old_owner")?;
+            let new_owner = required(args, "new_owner")?;
+            let proposed = if let Some(value) = args.get("manifest") {
+                value.clone()
+            } else if let Some(value) = db
+                .load_owner_lifecycle_manifest(old_owner, new_owner)
+                .map_err(|error| error.to_string())?
+            {
+                value
+            } else {
+                owner_lifecycle_manifest(db, wiki_db, old_owner, new_owner)?
+            };
+            let manifest = db
+                .freeze_owner_lifecycle_manifest(old_owner, new_owner, &proposed)
                 .map_err(|error| error.to_string())?;
-            let wiki = if let Some(wiki) = wiki_db {
-                match wiki.rename_owner(old_owner, new_owner) {
-                    Ok(count) => count,
-                    Err(error) => {
-                        if let Err(rollback) = db.rename_owner(new_owner, old_owner) {
-                            return Err(format!(
-                                "wiki owner rename failed: {error}; notes rollback failed: {rollback}"
-                            ));
-                        }
-                        return Err(error.to_string());
-                    }
+            let notes_source = lifecycle_inventory(&manifest, "source", "notes")?;
+            let notes_target = lifecycle_inventory(&manifest, "target", "notes")?;
+            let wiki_source = lifecycle_inventory(&manifest, "source", "wiki")?;
+            let wiki_target = lifecycle_inventory(&manifest, "target", "wiki")?;
+            let notes = db
+                .reconcile_owner_rename(old_owner, new_owner, &notes_source, &notes_target)
+                .map_err(|error| error.to_string())?;
+            let wiki = wiki_db
+                .map(|wiki| {
+                    wiki.reconcile_owner_rename(old_owner, new_owner, &wiki_source, &wiki_target)
+                })
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| json!({"state": "empty", "documents": 0}));
+            db.mark_owner_lifecycle(old_owner, new_owner, "complete")
+                .map_err(|error| error.to_string())?;
+            db.prune_owner_lifecycles(old_owner, Some(old_owner), Some(new_owner))
+                .map_err(|error| error.to_string())?;
+            db.prune_owner_lifecycles(new_owner, Some(old_owner), Some(new_owner))
+                .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "schema_version": 1,
+                "state": if notes["state"] == "applied" || wiki["state"] == "applied" {
+                    "applied"
+                } else {
+                    "already_applied"
+                },
+                "notes": notes,
+                "wiki": wiki,
+                "documents": notes_source.documents + wiki_source.documents,
+                "content_included": false,
+            }))
+        }
+        "compensate_owner_rename" => {
+            let old_owner = required(args, "old_owner")?;
+            let new_owner = required(args, "new_owner")?;
+            let manifest = args
+                .get("manifest")
+                .ok_or_else(|| "Copal compensation requires a lifecycle manifest".to_string())?;
+            let manifest = db
+                .freeze_owner_lifecycle_manifest(old_owner, new_owner, manifest)
+                .map_err(|error| error.to_string())?;
+            let notes_source = lifecycle_inventory(&manifest, "source", "notes")?;
+            let notes_target = lifecycle_inventory(&manifest, "target", "notes")?;
+            let wiki_source = lifecycle_inventory(&manifest, "source", "wiki")?;
+            let wiki_target = lifecycle_inventory(&manifest, "target", "wiki")?;
+            let notes = db
+                .compensate_owner_rename(old_owner, new_owner, &notes_source, &notes_target)
+                .map_err(|error| error.to_string())?;
+            let wiki = wiki_db
+                .map(|wiki| {
+                    wiki.compensate_owner_rename(old_owner, new_owner, &wiki_source, &wiki_target)
+                })
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| json!({"state": "empty", "documents": 0}));
+            db.mark_owner_lifecycle(old_owner, new_owner, "compensated")
+                .map_err(|error| error.to_string())?;
+            db.prune_owner_lifecycles(old_owner, Some(old_owner), Some(new_owner))
+                .map_err(|error| error.to_string())?;
+            db.prune_owner_lifecycles(new_owner, Some(old_owner), Some(new_owner))
+                .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "schema_version": 1,
+                "state": "compensated",
+                "notes": notes,
+                "wiki": wiki,
+                "documents": notes_source.documents + wiki_source.documents,
+                "content_included": false,
+            }))
+        }
+        "purge_owner" => {
+            let owner = required(args, "owner")?;
+            let expected_manifest = if let Some(value) = args.get("expected") {
+                value.clone()
+            } else {
+                let empty_target = format!("__copal_purge_target_{}", ulid::Ulid::new());
+                owner_lifecycle_manifest(db, wiki_db, owner, &empty_target)?["source"].clone()
+            };
+            let notes_expected: OwnerInventory = serde_json::from_value(
+                expected_manifest
+                    .get("notes")
+                    .cloned()
+                    .ok_or_else(|| "Copal purge inventory is missing notes".to_string())?,
+            )
+            .map_err(|error| format!("invalid Copal purge inventory: {error}"))?;
+            let wiki_expected: OwnerInventory = serde_json::from_value(
+                expected_manifest
+                    .get("wiki")
+                    .cloned()
+                    .ok_or_else(|| "Copal purge inventory is missing wiki".to_string())?,
+            )
+            .map_err(|error| format!("invalid Copal purge inventory: {error}"))?;
+            let notes = db
+                .purge_owner_deferred_assets(owner, Some(&notes_expected))
+                .map_err(|error| error.to_string())?;
+            let wiki = wiki_db
+                .map(|wiki| wiki.purge_owner_deferred_assets(owner, Some(&wiki_expected)))
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| json!({"state": "empty", "removed_documents": 0}));
+            let removed_assets = if let Some(wiki_db) = wiki_db {
+                if db.assets_dir() == wiki_db.assets_dir() {
+                    let wiki_references = wiki_db
+                        .asset_references()
+                        .map_err(|error| error.to_string())?;
+                    db.compact_orphan_assets(&wiki_references)
+                        .map_err(|error| error.to_string())?
+                } else {
+                    let notes_removed = db
+                        .compact_orphan_assets(&BTreeSet::new())
+                        .map_err(|error| error.to_string())?;
+                    let wiki_removed = wiki_db
+                        .compact_orphan_assets(&BTreeSet::new())
+                        .map_err(|error| error.to_string())?;
+                    notes_removed + wiki_removed
                 }
             } else {
-                0
+                db.compact_orphan_assets(&BTreeSet::new())
+                    .map_err(|error| error.to_string())?
             };
-            Ok(json!({"notes": notes, "wiki": wiki, "documents": notes + wiki}))
+            db.prune_owner_lifecycles(owner, None, None)
+                .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "schema_version": 1,
+                "state": "applied",
+                "notes": notes,
+                "wiki": wiki,
+                "removed_assets": removed_assets,
+                "documents": notes_expected.documents + wiki_expected.documents,
+                "content_included": false,
+                "physical_compaction": true,
+                "history_retained": false,
+            }))
         }
         "import_vault" => {
             let (owner, workspace_id) = scope(args)?;
@@ -1053,17 +1456,212 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
                 .transpose()
                 .map_err(|error| format!("invalid restore identity map: {error}"))?
                 .unwrap_or_default();
+            let expected_heads = args
+                .get("expected_heads")
+                .cloned()
+                .map(serde_json::from_value::<BTreeMap<String, String>>)
+                .transpose()
+                .map_err(|error| format!("invalid expected restore heads: {error}"))?
+                .unwrap_or_default();
             target
-                .import_vault_scoped_as_with_ids(
+                .import_vault_scoped_as_with_ids_and_heads(
                     &vault,
                     planning.as_deref(),
                     owner,
                     workspace_id,
                     note_kind,
                     &restore_ids,
+                    &expected_heads,
                 )
                 .map(|stats| json!(stats))
                 .map_err(|error| error.to_string())
+        }
+        "metadata_page" | "metadata_get" => {
+            let (owner, workspace_id) = scope(args)?;
+            let state = optional(args, "state").unwrap_or("active");
+            if !matches!(state, "active" | "trash") {
+                return Err("unsupported metadata state".to_string());
+            }
+            let hidden = optional(args, "hidden").unwrap_or("exclude");
+            if !matches!(hidden, "exclude" | "include" | "only") {
+                return Err("unsupported hidden filter".to_string());
+            }
+            let corpus = optional(args, "corpus").unwrap_or("all");
+            let collect = |target: &Db| {
+                if state == "trash" {
+                    target.list_deleted_docs_scoped(owner, workspace_id)
+                } else {
+                    target.list_docs_scoped(owner, workspace_id)
+                }
+            };
+            let mut docs = if corpus == "all" {
+                let mut rows = collect(db).map_err(|error| error.to_string())?;
+                if let Some(wiki) = wiki_db {
+                    rows.extend(collect(wiki).map_err(|error| error.to_string())?);
+                }
+                rows
+            } else {
+                collect(pick_db(db, wiki_db, args)?).map_err(|error| error.to_string())?
+            };
+            docs.retain(|doc| match hidden {
+                "include" => true,
+                "only" => doc.hidden,
+                _ => !doc.hidden,
+            });
+            if op == "metadata_get" {
+                let id = required(args, "id")?;
+                return docs
+                    .iter()
+                    .find(|doc| doc.id == id)
+                    .map(metadata)
+                    .ok_or_else(|| "document not found in this scope".to_string());
+            }
+            let query = optional(args, "query").unwrap_or("").to_lowercase();
+            if !query.is_empty() {
+                docs.retain(|doc| doc.name.to_lowercase().contains(&query));
+            }
+            let sort_key = optional(args, "sort_key").unwrap_or("name");
+            let descending = optional(args, "sort_direction").unwrap_or("asc") == "desc";
+            if !matches!(sort_key, "name" | "kind" | "size" | "modified") {
+                return Err("unsupported metadata sort".to_string());
+            }
+            docs.sort_by(|left, right| {
+                let order = match sort_key {
+                    "kind" => (&left.kind, &left.name, &left.id).cmp(&(
+                        &right.kind,
+                        &right.name,
+                        &right.id,
+                    )),
+                    "size" => {
+                        let left_size = metadata_size(left);
+                        let right_size = metadata_size(right);
+                        (left_size, &left.name, &left.id).cmp(&(right_size, &right.name, &right.id))
+                    }
+                    "modified" => {
+                        (left.ts, &left.name, &left.id).cmp(&(right.ts, &right.name, &right.id))
+                    }
+                    _ => (&left.name, &left.kind, &left.id).cmp(&(
+                        &right.name,
+                        &right.kind,
+                        &right.id,
+                    )),
+                };
+                if descending {
+                    order.reverse()
+                } else {
+                    order
+                }
+            });
+            let metadata_rows = docs.iter().map(metadata).collect::<Vec<_>>();
+            let encoded = serde_json::to_vec(&metadata_rows).map_err(|error| error.to_string())?;
+            let snapshot = blake3::hash(&encoded).to_hex().to_string();
+            if let Some(expected) = optional(args, "snapshot") {
+                if expected != snapshot {
+                    return Err("stale_cursor".to_string());
+                }
+            }
+            let offset = args
+                .get("cursor")
+                .and_then(Value::as_str)
+                .unwrap_or("0")
+                .parse::<usize>()
+                .map_err(|_| "invalid metadata cursor".to_string())?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(100)
+                .clamp(1, 200) as usize;
+            let total = metadata_rows.len();
+            let page = metadata_rows
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>();
+            let next_cursor =
+                (offset + page.len() < total).then(|| (offset + page.len()).to_string());
+            Ok(json!({
+                "docs": page,
+                "total": total,
+                "next_cursor": next_cursor,
+                "snapshot": snapshot,
+                "storage": "database"
+            }))
+        }
+        "find_by_name" => {
+            let (owner, workspace_id) = scope(args)?;
+            let name = required(args, "name")?;
+            let corpus = optional(args, "corpus").unwrap_or("all");
+            let target = if corpus == "all" { None } else { Some(pick_db(db, wiki_db, args)?) };
+            let mut docs = if let Some(target) = target {
+                target
+                    .list_docs_scoped(owner, workspace_id)
+                    .map_err(|error| error.to_string())?
+            } else {
+                let mut rows = db
+                    .list_docs_scoped(owner, workspace_id)
+                    .map_err(|error| error.to_string())?;
+                if let Some(wiki) = wiki_db {
+                    rows.extend(
+                        wiki.list_docs_scoped(owner, workspace_id)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                rows
+            };
+            docs.retain(|doc| doc.name == name && (corpus == "all" || doc.corpus == corpus));
+            Ok(docs.first().map(indexed).unwrap_or(Value::Null))
+        }
+        "task_index_get" => {
+            let (owner, workspace_id) = scope(args)?;
+            let ids = args
+                .get("ids")
+                .cloned()
+                .map(serde_json::from_value::<Vec<String>>)
+                .transpose()
+                .map_err(|error| format!("invalid task index ids: {error}"))?;
+            db.task_index_get(owner, workspace_id, ids.as_deref())
+                .map_err(|error| error.to_string())
+        }
+        "task_index_generation" => {
+            let (owner, workspace_id) = scope(args)?;
+            db.task_index_generation(owner, workspace_id)
+                .map_err(|error| error.to_string())
+        }
+        "task_index_resolve" => {
+            let (owner, workspace_id) = scope(args)?;
+            db.task_index_resolve(owner, workspace_id, required(args, "resourceId")?)
+                .map_err(|error| error.to_string())
+        }
+        "task_index_page" => {
+            let (owner, workspace_id) = scope(args)?;
+            let completed = args.get("completed").and_then(Value::as_bool);
+            let source = optional(args, "source").unwrap_or("all");
+            let query = optional(args, "query").unwrap_or("");
+            let cursor = args.get("cursor").and_then(Value::as_str);
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 500) as usize;
+            let generation = optional(args, "generation").unwrap_or("");
+            db.task_index_page(owner, workspace_id, query, completed, source, cursor, limit, generation)
+                .map_err(|error| error.to_string())
+        }
+        "task_index_update" => {
+            let (owner, workspace_id) = scope(args)?;
+            let removed = args
+                .get("removed")
+                .cloned()
+                .map(serde_json::from_value::<Vec<String>>)
+                .transpose()
+                .map_err(|error| format!("invalid task index removals: {error}"))?
+                .unwrap_or_default();
+            db.task_index_update(
+                owner,
+                workspace_id,
+                optional(args, "generation").unwrap_or(""),
+                args.get("records").unwrap_or(&Value::Object(Default::default())),
+                &removed,
+                args.get("rebuild").and_then(Value::as_bool).unwrap_or(false),
+                args.get("sourceReads").and_then(Value::as_u64).unwrap_or(0) as usize,
+            )
+            .map_err(|error| error.to_string())
         }
         "list" | "index" | "search" | "export_snapshot" => {
             let (owner, workspace_id) = scope(args)?;
@@ -1205,6 +1803,15 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
                 .map(outcome)
                 .map_err(|error| error.to_string())
         }
+        "commit_guarded" => {
+            let (owner, workspace_id) = scope(args)?;
+            let target = pick_db(db, wiki_db, args)?;
+            let request: GuardedRequest = serde_json::from_value(args.clone())
+                .map_err(|error| format!("invalid guarded request: {error}"))?;
+            target
+                .commit_guarded(&request, owner, workspace_id)
+                .map_err(|error| error.to_string())
+        }
         "history" => {
             let (owner, workspace_id) = scope(args)?;
             let target = pick_db(db, wiki_db, args)?;
@@ -1306,6 +1913,24 @@ fn execute(db: &Db, wiki_db: Option<&Db>, op: &str, args: &Value) -> Result<Valu
             };
             Ok(json!({ "path": target.asset_file(&hash, &ext), "name": doc.name, "size": size }))
         }
+        "put_asset_scoped" => {
+            let (owner, workspace_id) = scope(args)?;
+            let target = pick_db(db, wiki_db, args)?;
+            let encoded = required(args, "base64")?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("asset base64 is invalid: {error}"))?;
+            let doc = target
+                .put_asset_scoped(
+                    owner,
+                    workspace_id,
+                    required(args, "name")?,
+                    optional(args, "ext").unwrap_or("bin"),
+                    &bytes,
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(json!({ "doc": doc }))
+        }
         _ => Err(format!("unknown operation: {op}")),
     }
 }
@@ -1336,6 +1961,83 @@ mod tests {
     }
 
     #[test]
+    fn metadata_pages_are_body_free_scoped_and_snapshot_bound() {
+        let root = std::env::temp_dir().join(format!("copal-metadata-page-{}", ulid::Ulid::new()));
+        let db = Db::open(&root).unwrap();
+        db.create_doc_scoped("alice", "home", "note", "Alpha.md", "SECRET BODY", None)
+            .unwrap();
+        db.create_doc_scoped("bob", "home", "note", "Private.md", "BOB SECRET", None)
+            .unwrap();
+        let first = execute(
+            &db,
+            None,
+            "metadata_page",
+            &json!({
+                "owner": "alice", "workspace_id": "home", "corpus": "all",
+                "hidden": "exclude", "state": "active", "limit": 1,
+                "sort_key": "name", "sort_direction": "asc"
+            }),
+        )
+        .unwrap();
+        let rows = first["docs"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "Alpha.md");
+        assert!(rows[0].get("text").is_none());
+        assert!(rows[0].get("content").is_none());
+        let snapshot = first["snapshot"].as_str().unwrap();
+
+        db.create_doc_scoped("alice", "home", "note", "Beta.md", "body", None)
+            .unwrap();
+        let stale = execute(
+            &db,
+            None,
+            "metadata_page",
+            &json!({
+                "owner": "alice", "workspace_id": "home", "corpus": "all",
+                "hidden": "exclude", "state": "active", "cursor": "1",
+                "snapshot": snapshot, "limit": 1,
+                "sort_key": "name", "sort_direction": "asc"
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(stale, "stale_cursor");
+    }
+
+    #[test]
+    fn metadata_pages_sort_assets_and_text_by_honest_byte_size() {
+        let root = std::env::temp_dir().join(format!("copal-metadata-size-{}", ulid::Ulid::new()));
+        let vault = root.join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("Z-small.md"), "é").unwrap();
+        std::fs::write(vault.join("A-large.bin"), b"123456").unwrap();
+        let db = Db::open(&root.join("database")).unwrap();
+        db.import_vault_scoped(&vault, None, "alice", "home")
+            .unwrap();
+
+        let result = execute(
+            &db,
+            None,
+            "metadata_page",
+            &json!({
+                "owner": "alice", "workspace_id": "home", "corpus": "all",
+                "hidden": "exclude", "state": "active", "limit": 10,
+                "sort_key": "size", "sort_direction": "asc"
+            }),
+        )
+        .unwrap();
+        let rows = result["docs"].as_array().unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "Z-small.md");
+        assert_eq!(rows[0]["size"], 2);
+        assert_eq!(rows[1]["name"], "A-large.bin");
+        assert_eq!(rows[1]["size"], 6);
+
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn indexes_structured_note_fields_and_tasks() {
         let note = note_view(
             r##"{"schemaVersion":1,"body":{"type":"doc","blocks":[{"id":"blk_1","type":"heading","source":"# Native","text":"Native","level":1},{"id":"blk_2","type":"task","source":"  - [ ] prove it","text":"prove it","indent":2,"checked":false,"relationIds":["rel_1"]}]},"properties":[{"id":"prop_1","key":"status","type":"text","value":"active"},{"id":"prop_2","key":"course","type":"text","value":"OpenClank"}],"relations":[{"id":"rel_1","kind":"link","origin":"body","sourceBlockId":"blk_2","target":"Target","targetDocumentId":"TARGET","targetBlockId":null}],"tags":["native"]}"##,
@@ -1363,6 +2065,19 @@ mod tests {
 
         assert_eq!(indexed["corpus"], "wiki");
         assert_eq!(indexed["extensions"]["interchange"]["source"], "Wiki\n");
+    }
+
+    #[test]
+    fn legacy_wiki_markdown_is_readable_without_a_decode_error() {
+        let mut wiki = note_view("# Heading\n\nUnicode — readable\n");
+        wiki.kind = "wiki".to_string();
+        wiki.corpus = "wiki".to_string();
+        let indexed = indexed(&wiki);
+        assert_eq!(indexed["text"], "# Heading\n\nUnicode — readable\n");
+        assert!(indexed.get("note_error").is_none());
+        assert_eq!(indexed["recoveryState"], "legacy-import");
+        assert_eq!(indexed["formatNotice"], "legacy-markdown");
+        assert_eq!(indexed["readOnly"], true);
     }
 
     #[test]
@@ -1485,8 +2200,8 @@ mod tests {
         assert_eq!(migrated_event.name, ".events/Launch.md");
         assert_eq!(migrated_markdown_event.name, ".events/Imported.md");
         assert_eq!(migrated_markdown_event.kind, "markdown");
-        assert_eq!(migrated_wiki.name, ".wiki/Launch");
-        assert_eq!(migrated_legacy_wik.name, ".wiki/Legacy");
+        assert_eq!(migrated_wiki.name, ".memes/Launch");
+        assert_eq!(migrated_legacy_wik.name, ".memes/Legacy");
         assert_ne!(migrated_event.head, event.head);
         assert_ne!(migrated_wiki.head, wiki.head);
         assert_eq!(
@@ -1502,27 +2217,71 @@ mod tests {
 
     #[test]
     fn legacy_wiki_seed_alias_requires_the_exact_bundled_blob() {
+        let legacy = LEGACY_WIKI_SEEDS
+            .iter()
+            .find(|seed| seed.target == ".memes/Creating and Linking Memes")
+            .unwrap();
         let mut wiki = note_view("");
         wiki.kind = "wiki".to_string();
         wiki.corpus = "wiki".to_string();
         wiki.owner = "shared".to_string();
         wiki.workspace_id = "global".to_string();
-        wiki.name = "Wiki/Creating and Linking Tiddlers".to_string();
+        // Compatibility regression: this exact pre-v2 identifier must remain
+        // readable for old records even though fresh seeds use new wording.
+        wiki.name = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(legacy.name_fingerprint)
+                .unwrap(),
+        )
+        .unwrap();
         wiki.content = Content::Blob {
-            hash: LEGACY_WIKI_SEEDS[0].blob.to_string(),
+            hash: legacy.blob.to_string(),
         };
+        // An unrelated blob keeps its legacy tail while moving namespaces;
+        // this protects user data from an over-broad seed alias.
         assert_eq!(
             hidden_namespace_target(&wiki).as_deref(),
-            Some(".wiki/Creating and Linking Memes")
+            Some(".memes/Creating and Linking Memes")
         );
 
         wiki.content = Content::Blob {
             hash: "unrelated".to_string(),
         };
         assert_eq!(
-            hidden_namespace_target(&wiki).as_deref(),
-            Some(".wiki/Creating and Linking Tiddlers")
+            hidden_namespace_target(&wiki),
+            Some(format!(
+                ".memes/{}",
+                wiki.name.strip_prefix("Wiki/").unwrap()
+            ))
         );
+    }
+
+    #[test]
+    fn eighth_historical_alias_shape_is_exactly_recognized_and_preserved() {
+        let legacy = LEGACY_WIKI_SEEDS
+            .iter()
+            .find(|seed| seed.preserve_name)
+            .unwrap();
+        let mut wiki = note_view("# historical body\n\nUnicode — preserved\n");
+        wiki.kind = "wiki".to_string();
+        wiki.corpus = "wiki".to_string();
+        wiki.owner = "shared".to_string();
+        wiki.workspace_id = "global".to_string();
+        wiki.name = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(legacy.name_fingerprint)
+                .unwrap(),
+        )
+        .unwrap();
+        wiki.content = Content::Blob {
+            hash: legacy.blob.to_string(),
+        };
+        assert_eq!(hidden_namespace_target(&wiki), None);
+        let indexed = indexed(&wiki);
+        assert_eq!(indexed["text"], "# historical body\n\nUnicode — preserved\n");
+        assert!(indexed.get("note_error").is_none());
+        assert_eq!(indexed["recoveryState"], "legacy-import");
+        assert_eq!(indexed["readOnly"], true);
     }
 
     #[test]
@@ -1533,7 +2292,7 @@ mod tests {
         let legacy = db
             .create_doc_scoped("alice", "home", "wiki", "Wiki/Same", "old", None)
             .unwrap();
-        db.create_doc_scoped("alice", "home", "wiki", ".wiki/Same", "new", None)
+        db.create_doc_scoped("alice", "home", "wiki", ".memes/Same", "new", None)
             .unwrap();
 
         assert!(migrate_hidden_namespaces(&db)
@@ -1579,7 +2338,8 @@ mod tests {
         assert_eq!(claimed_note.head, legacy_note.head);
         let claimed_wiki = wiki.get_doc(&legacy_wiki.id).unwrap().unwrap();
         assert!(claimed_wiki.builtin);
-        assert_eq!(claimed_wiki.head, legacy_wiki.head);
+        assert_ne!(claimed_wiki.head, legacy_wiki.head);
+        assert_eq!(claimed_wiki.text.as_deref(), Some(wiki_note(&WIKI_SEEDS[0]).as_str()));
 
         assert_eq!(
             notes
@@ -1618,6 +2378,52 @@ mod tests {
 
         assert_eq!(seed_openclank_knowledge(&notes).unwrap(), 0);
         assert_eq!(seed_wiki_pages(&wiki).unwrap(), 0);
+    }
+
+    #[test]
+    fn wiki_seeds_are_native_readable_and_idempotent() {
+        let root = std::env::temp_dir().join(format!("copal-wiki-native-{}", ulid::Ulid::new()));
+        let wiki = Db::open(&root).unwrap();
+        assert_eq!(seed_wiki_pages(&wiki).unwrap(), WIKI_SEEDS.len());
+        let first = wiki
+            .list_docs()
+            .unwrap()
+            .into_iter()
+            .filter(|doc| doc.builtin && doc.kind == "wiki")
+            .map(|doc| (doc.name.clone(), doc.id.clone(), doc.head.clone(), indexed(&doc)))
+            .collect::<Vec<_>>();
+        assert_eq!(first.len(), WIKI_SEEDS.len());
+        for (name, _id, _head, view) in &first {
+            assert!(view["text"].as_str().is_some_and(|text| !text.trim().is_empty()), "{name}");
+            assert!(view.get("note_error").is_none(), "{name} unexpectedly failed to decode");
+            assert_eq!(view["properties"]["seedVersion"], WIKI_SEED_VERSION);
+            assert_eq!(view["properties"]["type"], "wiki");
+            assert!(view["text"].as_str().unwrap().starts_with('#'));
+        }
+        assert_eq!(seed_wiki_pages(&wiki).unwrap(), 0);
+        let second = wiki
+            .list_docs()
+            .unwrap()
+            .into_iter()
+            .filter(|doc| doc.builtin && doc.kind == "wiki")
+            .map(|doc| (doc.name, doc.id, doc.head))
+            .collect::<Vec<_>>();
+        assert_eq!(first.iter().map(|(name, id, head, _)| (name.clone(), id.clone(), head.clone())).collect::<Vec<_>>(), second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn edited_builtin_wiki_is_preserved_during_seeding() {
+        let root = std::env::temp_dir().join(format!("copal-wiki-edited-{}", ulid::Ulid::new()));
+        let wiki = Db::open(&root).unwrap();
+        let edited = wiki
+            .create_builtin_seed_doc("wiki", WIKI_SEEDS[0].name, "# edited by an operator", None)
+            .unwrap();
+        assert_eq!(seed_wiki_pages(&wiki).unwrap(), WIKI_SEEDS.len() - 1);
+        let current = wiki.get_doc(&edited.id).unwrap().unwrap();
+        assert_eq!(current.head, edited.head);
+        assert_eq!(current.text.as_deref(), Some("# edited by an operator"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1811,6 +2617,209 @@ mod tests {
             &json!({"old_owner": "shared", "new_owner": "somebody"}),
         )
         .is_err());
+    }
+
+    #[test]
+    fn owner_lifecycle_recovers_cross_store_partial_move_compensates_and_purges() {
+        let root = std::env::temp_dir().join(format!("copal-owner-saga-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root).unwrap();
+        let wiki = Db::open_with_name(&root, "copal-wiki").unwrap();
+        notes
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "markdown",
+                "Private Note.md",
+                "ALICE NOTE SECRET",
+                None,
+            )
+            .unwrap();
+        wiki.create_doc_scoped(
+            "alice",
+            "home",
+            "wiki",
+            "Private Wiki.md",
+            "ALICE WIKI SECRET",
+            None,
+        )
+        .unwrap();
+        notes
+            .create_doc_scoped("bob", "home", "markdown", "Bob.md", "BOB", None)
+            .unwrap();
+        let bob_before = notes.owner_inventory("bob").unwrap();
+        let manifest = execute(
+            &notes,
+            Some(&wiki),
+            "preflight_rename_owner",
+            &json!({"old_owner": "alice", "new_owner": "deleted:stable"}),
+        )
+        .unwrap();
+        assert_eq!(manifest["source"]["documents"], 2);
+        assert!(!serde_json::to_string(&manifest)
+            .unwrap()
+            .contains("ALICE NOTE SECRET"));
+
+        // Simulate a process death after the notes Redb transaction commits
+        // but before the separate wiki transaction begins.
+        let notes_source = lifecycle_inventory(&manifest, "source", "notes").unwrap();
+        let notes_target = lifecycle_inventory(&manifest, "target", "notes").unwrap();
+        notes
+            .reconcile_owner_rename("alice", "deleted:stable", &notes_source, &notes_target)
+            .unwrap();
+        assert_eq!(notes.owner_inventory("alice").unwrap().documents, 0);
+        assert_eq!(wiki.owner_inventory("alice").unwrap().documents, 1);
+
+        let converged = execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({
+                "old_owner": "alice",
+                "new_owner": "deleted:stable",
+                "manifest": manifest,
+            }),
+        )
+        .unwrap();
+        assert_eq!(converged["state"], "applied");
+        let replay = execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({
+                "old_owner": "alice",
+                "new_owner": "deleted:stable",
+                "manifest": manifest,
+            }),
+        )
+        .unwrap();
+        assert_eq!(replay["state"], "already_applied");
+
+        let compensated = execute(
+            &notes,
+            Some(&wiki),
+            "compensate_owner_rename",
+            &json!({
+                "old_owner": "alice",
+                "new_owner": "deleted:stable",
+                "manifest": manifest,
+            }),
+        )
+        .unwrap();
+        assert_eq!(compensated["state"], "compensated");
+        assert_eq!(notes.owner_inventory("alice").unwrap().documents, 1);
+        assert_eq!(wiki.owner_inventory("alice").unwrap().documents, 1);
+
+        execute(
+            &notes,
+            Some(&wiki),
+            "rename_owner",
+            &json!({
+                "old_owner": "alice",
+                "new_owner": "deleted:stable",
+                "manifest": manifest,
+            }),
+        )
+        .unwrap();
+        let expected = execute(
+            &notes,
+            Some(&wiki),
+            "owner_inventory",
+            &json!({"owner": "deleted:stable"}),
+        )
+        .unwrap();
+        let purged = execute(
+            &notes,
+            Some(&wiki),
+            "purge_owner",
+            &json!({"owner": "deleted:stable", "expected": expected}),
+        )
+        .unwrap();
+        assert_eq!(purged["physical_compaction"], true);
+        assert_eq!(
+            notes.owner_inventory("deleted:stable").unwrap().documents,
+            0
+        );
+        assert_eq!(wiki.owner_inventory("deleted:stable").unwrap().documents, 0);
+        assert_eq!(
+            notes.owner_inventory("bob").unwrap().fingerprint,
+            bob_before.fingerprint
+        );
+        let purge_replay = execute(
+            &notes,
+            Some(&wiki),
+            "purge_owner",
+            &json!({"owner": "deleted:stable", "expected": expected}),
+        )
+        .unwrap();
+        assert_eq!(purge_replay["documents"], 2);
+        assert!(!serde_json::to_string(&purged)
+            .unwrap()
+            .contains("ALICE WIKI SECRET"));
+        drop(wiki);
+        drop(notes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owner_purge_compacts_shared_asset_directory_without_touching_other_store_refs() {
+        let root = std::env::temp_dir().join(format!("copal-owner-assets-{}", ulid::Ulid::new()));
+        let notes = Db::open(&root).unwrap();
+        let wiki = Db::open_with_name(&root, "copal-wiki").unwrap();
+        let alice_vault = root.join("alice-vault");
+        let bob_vault = root.join("bob-vault");
+        std::fs::create_dir_all(&alice_vault).unwrap();
+        std::fs::create_dir_all(&bob_vault).unwrap();
+        std::fs::write(alice_vault.join("alice.bin"), b"ALICE ASSET").unwrap();
+        std::fs::write(bob_vault.join("bob.bin"), b"BOB ASSET").unwrap();
+        notes
+            .import_vault_scoped(&alice_vault, None, "alice", "home")
+            .unwrap();
+        wiki.import_vault_scoped(&bob_vault, None, "bob", "home")
+            .unwrap();
+        let alice = notes.list_docs_scoped("alice", "home").unwrap().remove(0);
+        let bob = wiki.list_docs_scoped("bob", "home").unwrap().remove(0);
+        let Content::Asset {
+            hash: alice_hash,
+            ext: alice_ext,
+            ..
+        } = alice.content
+        else {
+            panic!("alice import was not an asset")
+        };
+        let Content::Asset {
+            hash: bob_hash,
+            ext: bob_ext,
+            ..
+        } = bob.content
+        else {
+            panic!("bob import was not an asset")
+        };
+        let alice_path = notes.asset_file(&alice_hash, &alice_ext);
+        let bob_path = wiki.asset_file(&bob_hash, &bob_ext);
+        assert!(alice_path.exists());
+        assert!(bob_path.exists());
+        let expected = execute(
+            &notes,
+            Some(&wiki),
+            "owner_inventory",
+            &json!({"owner": "alice"}),
+        )
+        .unwrap();
+
+        execute(
+            &notes,
+            Some(&wiki),
+            "purge_owner",
+            &json!({"owner": "alice", "expected": expected}),
+        )
+        .unwrap();
+
+        assert!(!alice_path.exists());
+        assert!(bob_path.exists());
+        assert_eq!(wiki.owner_inventory("bob").unwrap().documents, 1);
+        drop(wiki);
+        drop(notes);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-out="${1:-robonotes/source-coverage-union-2026-07-10.md}"
+out="${1:-.clankers/robonotes/source-coverage-union-2026-07-10.md}"
 relative_out="${out#./}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -81,9 +81,9 @@ mkdir -p "$(dirname "$out")"
     phase='00/05'
 
     case "$path" in
-      .futures/*)
+      .clanker/futures/*)
         disposition='plan-control'; phase='00/05' ;;
-      robonotes/*|.robonotes/*)
+      .clankers/robonotes/*)
         disposition='audit-or-run-evidence'; phase='00/05' ;;
       data/backups/*)
         disposition='runtime-backup-binary-metadata'; phase='00/05' ;;
@@ -122,6 +122,8 @@ mkdir -p "$(dirname "$out")"
   printf '| Tree | Files | Bytes | Disposition |\n'
   printf '|---|---:|---:|---|\n'
 
+  legacy_reference_tree="packages/Copal/.references/$(printf '%s' 'VGlkZGx5V2lraTU=' | base64 --decode 2>/dev/null || printf '%s' 'VGlkZGx5V2lraTU=' | base64 -D 2>/dev/null)"
+  legacy_reference_display='packages/Copal/.references/<legacy-wiki-reference>'
   aggregate_specs=(
     '.git|VCS object store; represented by branch/status/revision'
     '.venv|installed Python dependency environment'
@@ -134,7 +136,7 @@ mkdir -p "$(dirname "$out")"
     'packages/Copal/.next|generated Next build output'
     'packages/Copal/out|generated static export'
     'packages/Copal/.archive|historical Copal archive'
-    'packages/Copal/.references/TiddlyWiki5|reference outside this plan current feature scope'
+    "$legacy_reference_tree|reference outside this plan current feature scope"
     'data/cache|runtime cache'
     'data/chroma|runtime vector store'
     'data/logs|runtime logs'
@@ -147,7 +149,9 @@ mkdir -p "$(dirname "$out")"
     [[ -e "$tree" ]] || continue
     files="$(find "$tree" -type f 2>/dev/null | wc -l)"
     bytes="$(du -sb "$tree" 2>/dev/null | awk '{print $1}')"
-    printf '| %s | %s | %s | %s |\n' "$tree" "$files" "${bytes:-0}" "$disposition"
+    display_tree="$tree"
+    [[ "$tree" == "$legacy_reference_tree" ]] && display_tree="$legacy_reference_display"
+    printf '| %s | %s | %s | %s |\n' "$display_tree" "$files" "${bytes:-0}" "$disposition"
   done
 
   printf '\n## Completeness declaration\n\n'

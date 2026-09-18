@@ -11,8 +11,6 @@ dedup fallback right below is already owner-scoped; the vector path must be too.
 """
 import asyncio
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -32,20 +30,11 @@ def _load_extractor():
     return mod
 
 
-def _install_llm_stub(monkeypatch, facts_json):
-    mod = types.ModuleType("src.llm_core")
-
-    async def llm_call_async(*a, **k):
+def _install_completion_stub(monkeypatch, memory_extractor, facts_json):
+    async def complete_text(**kwargs):
         return facts_json
 
-    mod.llm_call_async = llm_call_async
-    # Use monkeypatch.setitem so sys.modules is restored at teardown. A raw
-    # assignment here permanently replaced the real src.llm_core with this
-    # stripped stub, leaking "My home is in Lisbon" (and hiding _detect_provider)
-    # into every later-collected test that imports the real module.
-    src_pkg = sys.modules.get("src") or types.ModuleType("src")
-    monkeypatch.setitem(sys.modules, "src", src_pkg)
-    monkeypatch.setitem(sys.modules, "src.llm_core", mod)
+    monkeypatch.setattr(memory_extractor, "_complete_text", complete_text)
 
 
 class FakeSession:
@@ -99,9 +88,8 @@ def test_vector_match_from_other_tenant_does_not_drop_users_fact(monkeypatch):
     ])
     # The vector store reports user B's new fact as a near-duplicate of a1.
     vec = FakeVector(match_id="a1")
-    _install_llm_stub(monkeypatch, '["My home is in Lisbon"]')
-
     memory_extractor = _load_extractor()
+    _install_completion_stub(monkeypatch, memory_extractor, '["My home is in Lisbon"]')
 
     asyncio.run(memory_extractor.extract_and_store(
         FakeSession(owner="userB"), mm, vec,

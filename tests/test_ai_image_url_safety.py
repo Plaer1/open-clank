@@ -1,104 +1,47 @@
+"""Managed image generation returns only host-owned artifact URLs."""
+
 from src import ai_interaction
+from src.openclank import modality_facade
+from src.openclank.operation_router import ManagedOperationResult
 
 
-class _GenerationResponse:
-    status_code = 200
-    text = ""
+async def test_generate_image_never_accepts_or_downloads_provider_urls(monkeypatch):
+    seen = {}
 
-    def __init__(self, image_url):
-        self._image_url = image_url
+    async def generate(**kwargs):
+        seen.update(kwargs)
+        return (
+            b"managed",
+            "image/png",
+            ManagedOperationResult(
+                operation_id="op",
+                root_operation_id="root",
+                operation="image.generate",
+                state="complete",
+                committed=True,
+                replayed=False,
+                model_route_id="pmr_image",
+                connection_id="pcn_image",
+                billing_lane="metered_api",
+                output={},
+                artifacts=(),
+            ),
+        )
 
-    def json(self):
-        return {"data": [{"url": self._image_url}]}
-
-
-class _DownloadResponse:
-    status_code = 503
-    content = b""
-
-
-def _patch_generation(monkeypatch, image_url):
-    async def _post(self, url, json, headers):
-        return _GenerationResponse(image_url)
-
-    class _AsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        post = _post
-
-    import httpx
-    import src.settings as settings
-
-    monkeypatch.setattr(settings, "load_settings", lambda: {})
-    monkeypatch.setattr(httpx, "AsyncClient", _AsyncClient)
+    monkeypatch.setattr(modality_facade, "generate_image", generate)
     monkeypatch.setattr(
         ai_interaction,
-        "_resolve_model",
-        lambda model_spec, owner=None: (
-            "https://api.openai.example/v1/chat/completions",
-            "dall-e-3",
-            {"Authorization": "Bearer test"},
-        ),
+        "_save_managed_gallery_image",
+        lambda **_kwargs: ("/api/generated-image/managed.png", "gallery-1"),
     )
 
-
-async def test_generate_image_validates_provider_url_before_download(monkeypatch):
-    import httpx
-    import src.url_safety as url_safety
-
-    provider_url = "https://images.example.com/generated.png?sig=abc"
-    events = []
-    _patch_generation(monkeypatch, provider_url)
-
-    def _check_outbound_url(url, *, block_private=False):
-        events.append(("check", url, block_private))
-        return True, "ok"
-
-    def _get(url, *, timeout):
-        events.append(("get", url, timeout))
-        return _DownloadResponse()
-
-    monkeypatch.setattr(url_safety, "check_outbound_url", _check_outbound_url)
-    monkeypatch.setattr(httpx, "get", _get)
-
-    result = await ai_interaction.do_generate_image("draw a chair\ndall-e-3")
-
-    assert result["image_url"] == provider_url
-    assert events == [
-        ("check", provider_url, False),
-        ("get", provider_url, 60),
-    ]
-
-
-async def test_generate_image_rejects_unsafe_provider_url_without_download(monkeypatch):
-    import httpx
-    import src.url_safety as url_safety
-
-    unsafe_url = "http://169.254.169.254/latest/meta-data"
-    events = []
-    _patch_generation(monkeypatch, unsafe_url)
-
-    def _check_outbound_url(url, *, block_private=False):
-        events.append(("check", url, block_private))
-        return False, "link-local address blocked (SSRF metadata risk): 169.254.169.254"
-
-    def _get(url, *, timeout):
-        raise AssertionError("unsafe provider image URL must not be downloaded")
-
-    monkeypatch.setattr(url_safety, "check_outbound_url", _check_outbound_url)
-    monkeypatch.setattr(httpx, "get", _get)
-
-    result = await ai_interaction.do_generate_image("draw a chair\ndall-e-3")
-
-    assert result["error"] == (
-        "Image API returned unsafe image URL: "
-        "link-local address blocked (SSRF metadata risk): 169.254.169.254"
+    result = await ai_interaction.do_generate_image(
+        "draw a chair\npmr_image",
+        owner="alice",
     )
-    assert events == [("check", unsafe_url, False)]
+
+    assert result["image_url"] == "/api/generated-image/managed.png"
+    assert result["image_model"] == "pmr_image"
+    assert seen["owner"] == "alice"
+    assert "url" not in seen
+    assert "headers" not in seen

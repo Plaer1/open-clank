@@ -1,0 +1,24 @@
+# Manual-only Copal v2 contract. It is not imported by the default contract.
+contract: open-clank-hexes/v2
+
+imports:
+  - .clankers/hexes/cant_stop_checks.py
+
+settings:
+  ask_me_before_staging: true
+  confirm_before_push: true
+  confirm_before_deleting:
+    over_lines: 5
+
+hexes:
+  - hex: "cant stop dont stop wont stop manual contract exists"
+    in: ./
+    required_files:
+      - .clankers/hexes/manual/cant-stop-dont-stop-wont-stop.md
+      - .clankers/hexes/contracts/cant-stop-dont-stop-wont-stop.yaml
+      - .clankers/hexes/cant_stop_checks.py
+
+  - hex: "engaged recursive plans carry cant stop dont stop wont stop"
+    in: ./.clanker/futures/*
+    allowed_filetypes: .md
+    cant_stop_dont_stop_wont_stop: true

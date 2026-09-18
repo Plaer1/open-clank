@@ -24,15 +24,16 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional
 
 VALID_MODES = frozenset({"off", "automatic", "manual"})
-DEFAULT_MODE = "automatic"
+DEFAULT_MODE = "manual"
 PREF_KEY = "memory_mode"
 
 
 def memory_mode(prefs: Any) -> str:
     """Return the effective memory mode for a user's prefs.
 
-    Malformed / absent values read as ``DEFAULT_MODE`` (``"automatic"``),
-    preserving the pre-gate behaviour.
+    Existing accounts are backfilled to their prior effective mode at startup.
+    Missing or malformed values therefore belong to new/degraded state and
+    fail to the review-first ``manual`` default.
     """
     if not isinstance(prefs, Mapping):
         return DEFAULT_MODE
@@ -60,6 +61,25 @@ def capture_allowed(
     if prefs.get(PREF_KEY) is not None:
         return memory_mode(prefs) != "off"
     return prefs.get("auto_memory", True)
+
+
+def capture_mode(prefs: Any) -> str:
+    """Return the mode automatic turn capture should pass to Frankenmemory.
+
+    Persisted users are backfilled with ``memory_mode``. A compatibility caller
+    can still provide only the legacy ``auto_memory`` flag, though, and that
+    flag must not silently fall through to the review-first default used by
+    direct writes. Keep this conversion beside ``capture_allowed`` so the
+    decision to queue capture and the admission mode sent to the provider
+    cannot disagree.
+    """
+    if not isinstance(prefs, Mapping) or PREF_KEY not in prefs:
+        legacy_enabled = (
+            not isinstance(prefs, Mapping)
+            or prefs.get("auto_memory", True)
+        )
+        return "automatic" if legacy_enabled else "off"
+    return memory_mode(prefs)
 
 
 def write_allowed(prefs: Any) -> tuple[bool, str]:

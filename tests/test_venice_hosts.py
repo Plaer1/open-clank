@@ -1,25 +1,28 @@
-"""Venice host-allowlist behavior (follow-up to provider support).
+"""Venice behavior after managed-provider unification.
 
 Venice (https://api.venice.ai/api/v1) is a paid, OpenAI-compatible cloud API
-with native tool-calling. These tests pin the three host-list integrations:
-  - agent loop sends native tool schemas to Venice (not fenced-block parsing),
-  - teacher escalation treats Venice as SOTA (loop OFF, no added latency).
+with native tool-calling. Agent execution is now selected by the managed engine
+route rather than by matching raw provider hostnames. Teacher escalation still
+classifies Venice as a cloud endpoint (loop OFF, no added latency).
 """
+import inspect
+
 from src import agent_loop, teacher_escalation
 
 
 class TestAgentToolHosts:
-    def test_venice_in_api_hosts(self):
-        assert "api.venice.ai" in agent_loop._API_HOSTS
+    def test_agent_tools_are_not_selected_by_provider_hostnames(self):
+        source = inspect.getsource(agent_loop)
+        assert "_API_HOSTS" not in source
 
-    def test_venice_url_matches_api_host(self):
-        # Mirrors the runtime check: any(h in endpoint_url for h in _API_HOSTS)
-        url = "https://api.venice.ai/api/v1/chat/completions"
-        assert any(h in url for h in agent_loop._API_HOSTS)
+    def test_agent_loop_dispatches_through_managed_route(self):
+        source = inspect.getsource(agent_loop)
+        assert "stream_agent_target(" in source
 
-    def test_unknown_host_not_matched(self):
-        url = "https://example.invalid/v1/chat/completions"
-        assert not any(h in url for h in agent_loop._API_HOSTS)
+    def test_agent_loop_has_no_raw_venice_or_unknown_provider_url_authority(self):
+        source = inspect.getsource(agent_loop)
+        assert "api.venice.ai" not in source
+        assert "example.invalid" not in source
 
 
 class TestTeacherEscalationSota:

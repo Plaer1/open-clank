@@ -1,101 +1,98 @@
+"""Managed vision operations retain owner, root, grant, and route scope."""
+
 from pathlib import Path
 
-from src import ai_interaction
+import pytest
+
 from src import document_processor as dp
+from src import chat_handler
+from src.openclank import modality_facade
+from src.openclank.operation_router import ManagedOperationResult
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_configured_vision_model_resolution_passes_owner(monkeypatch):
-    seen = []
-
-    def fake_resolve_model(spec, owner=None):
-        seen.append((spec, owner))
-        return ("http://example.test/chat/completions", spec, {"Authorization": "Bearer token"})
-
-    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve_model)
-
-    assert dp._resolve_vl_model("gpt-4o", owner="alice") == (
-        "http://example.test/chat/completions",
-        "gpt-4o",
-        {"Authorization": "Bearer token"},
-    )
-    assert seen == [("gpt-4o", "alice")]
-
-
-def test_auto_detected_vision_model_resolution_passes_owner(monkeypatch):
-    seen = []
-
-    def fake_resolve_model(spec, owner=None):
-        seen.append((spec, owner))
-        if spec == "llava":
-            return ("http://example.test/chat/completions", spec, {})
-        raise ValueError("not available")
-
-    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve_model)
-
-    assert dp._resolve_vl_model("", owner="alice") == (
-        "http://example.test/chat/completions",
-        "llava",
-        {},
-    )
-    assert seen
-    assert all(owner == "alice" for _spec, owner in seen)
-
-
-def test_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_vision_analysis_uses_managed_owner_route_and_affinity(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_resolve_vl_model(configured, owner=None):
-        seen["primary"] = (configured, owner)
-        return ("http://primary.test/chat/completions", "vision-primary", {"X-Test": "1"})
+    async def describe(**kwargs):
+        seen.update(kwargs)
+        return ManagedOperationResult(
+            operation_id="op_vision",
+            root_operation_id="turn_root",
+            operation="vision.describe",
+            state="complete",
+            committed=True,
+            replayed=False,
+            model_route_id="pmr_vision",
+            connection_id="pcn_vision",
+            billing_lane="subscription",
+            output={"text": "managed description"},
+            artifacts=(),
+        )
 
-    def fake_fallbacks(owner=None):
-        seen["fallback_owner"] = owner
-        return []
-
-    def fake_llm_call(url, model, messages, headers=None, timeout=None):
-        seen["llm"] = (url, model, headers, timeout, messages)
-        return "description"
-
-    monkeypatch.setattr(dp, "_load_vl_settings", lambda: {"vision_enabled": True, "vision_model": "gpt-4o"})
-    monkeypatch.setattr(dp, "_resolve_vl_model", fake_resolve_vl_model)
-    monkeypatch.setattr(dp, "llm_call", fake_llm_call)
-
-    from src import endpoint_resolver
-
-    monkeypatch.setattr(endpoint_resolver, "resolve_vision_fallback_candidates", fake_fallbacks)
-
+    monkeypatch.setattr(dp, "_load_vl_settings", lambda: {"vision_enabled": True})
+    monkeypatch.setattr(modality_facade, "describe_image_path", describe)
     image = tmp_path / "image.png"
-    image.write_bytes(b"not-a-real-png-but-base64-is-enough")
+    image.write_bytes(b"image")
 
-    assert dp.analyze_image_with_vl_result(str(image), owner="alice") == {
-        "text": "description",
-        "model": "vision-primary",
-    }
-    assert seen["primary"] == ("gpt-4o", "alice")
-    assert seen["fallback_owner"] == "alice"
-    assert seen["llm"][:4] == (
-        "http://primary.test/chat/completions",
-        "vision-primary",
-        {"X-Test": "1"},
-        120,
+    result = await dp.analyze_image_with_vl_result_async(
+        str(image),
+        owner="alice",
+        root_operation_id="turn_root",
+        grant_id="grant-1",
+        model_route_id="pmr_vision",
     )
 
+    assert result == {"text": "managed description", "model": "pmr_vision"}
+    assert seen["owner"] == "alice"
+    assert seen["root_operation_id"] == "turn_root"
+    assert seen["grant_id"] == "grant-1"
+    assert seen["model_route_id"] == "pmr_vision"
 
-def test_request_vision_call_sites_pass_owner():
-    chat_source = (ROOT / "src" / "chat_handler.py").read_text()
+
+def test_request_vision_call_sites_use_managed_facade():
     processor_source = (ROOT / "src" / "document_processor.py").read_text()
     upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
     document_source = (ROOT / "routes" / "document_routes.py").read_text()
-    gallery_source = (ROOT / "routes" / "gallery" / "gallery_routes.py").read_text()
-    memory_source = (ROOT / "routes" / "memory" / "memory_routes.py").read_text()
+    gallery_source = (
+        ROOT / "routes" / "gallery" / "gallery_routes.py"
+    ).read_text()
 
-    assert 'analyze_image_with_vl_result(file_info["path"], owner=owner)' in chat_source
-    assert "analyze_image_with_vl(path, owner=current_user)" in upload_source
-    assert "_process_pdf(path, owner=owner)" in processor_source
-    assert "_process_pdf(pdf_path, owner=user)" in document_source
-    assert "_resolve_vl_model(vl_model, owner=user)" in document_source
-    assert "_resolve_vl_model(configured, owner=user)" in gallery_source
-    assert "_process_pdf(tmp_path, owner=_owner(request))" in memory_source
+    assert "analyze_image_with_vl_result_async" in upload_source
+    assert "describe_image_path" in processor_source
+    assert "root_operation_id=root_operation_id" in processor_source
+    assert "describe_image(" in document_source
+    assert "describe_image(" in gallery_source
+    for source in (processor_source, gallery_source):
+        assert "_resolve_vl_model" not in source
+        assert "llm_call" not in source
+
+
+def test_gallery_caption_sync_requires_a_durable_owner(monkeypatch):
+    from core import database
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+
+    def unexpected_session():
+        raise AssertionError("ownerless caption sync must not query Gallery")
+
+    monkeypatch.setattr(database, "SessionLocal", unexpected_session)
+
+    chat_handler._sync_upload_vision_to_gallery(
+        {"hash": "same-photo"},
+        None,
+        "private caption",
+    )
+
+
+def test_gallery_caption_sync_has_an_unconditional_owner_predicate():
+    chat_source = (ROOT / "src" / "chat_handler.py").read_text()
+    upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
+
+    assert "GalleryImage.owner == owner_key" in chat_source
+    assert "GalleryImage.owner == owner_key" in upload_source
+    assert "if owner:\n                q = q.filter(GalleryImage.owner" not in chat_source
+    assert "if owner:\n                q = q.filter(GalleryImage.owner" not in upload_source

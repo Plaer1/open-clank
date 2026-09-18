@@ -1,5 +1,6 @@
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@mimo-ai/plugin/tui"
-import { createMemo, Show } from "solid-js"
+import { createMemo, For, Show } from "solid-js"
+import * as GoalState from "@/session/goal-state"
 
 const id = "internal:sidebar-goal"
 
@@ -16,7 +17,12 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
   // Show whenever there is an active goal, or a verdict survives from a goal
   // that just cleared (so the ✓/⊘ result lingers briefly).
-  const show = createMemo(() => Boolean(goal()?.condition || latest()))
+  const lines = createMemo(() => {
+    const current = goal()
+    if (!current?.state) return []
+    return GoalState.summaryLines(GoalState.Envelope.parse(current.state), current.analytics ?? {})
+  })
+  const show = createMemo(() => Boolean(lines().length || latest()))
 
   const status = createMemo(() => {
     const v = latest()
@@ -35,18 +41,18 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
             <b>Goal</b>
           </text>
         </box>
-        <Show when={goal()?.condition}>
-          {(condition) => (
+        <For each={lines()}>
+          {(line, index) => (
             <box flexDirection="row" gap={1}>
-              <text flexShrink={0} fg={theme().primary}>
-                •
+              <text flexShrink={0} fg={index() === 1 ? theme().primary : theme().textMuted}>
+                {index() === 1 ? "•" : " "}
               </text>
               <text fg={theme().textMuted} wrapMode="word">
-                {condition()}
+                {line}
               </text>
             </box>
           )}
-        </Show>
+        </For>
         <Show when={status()}>
           {(s) => (
             <box flexDirection="row" gap={1}>

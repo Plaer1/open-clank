@@ -70,6 +70,7 @@ export interface Track {
   color: string;
   icon: string;
   enabled: boolean;
+  parentTrackId?: string | null;
   special?: boolean; // for relax-hammock
   tasks: Task[];
 }

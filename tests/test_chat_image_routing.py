@@ -1,10 +1,5 @@
-import sys
-for mod_name in ["src.endpoint_resolver", "src.database", "core.database"]:
-    _mod = sys.modules.get(mod_name)
-    if _mod is not None and not getattr(_mod, "__file__", None):
-        sys.modules.pop(mod_name, None)
+"""Image routing uses normalized provider routes, never legacy endpoints."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -16,110 +11,85 @@ clear_fake_endpoint_resolver_modules("routes.chat_routes")
 from routes import chat_routes
 
 
-class _FakeQuery:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def filter(self, *conditions):
-        return self
-
-    def all(self):
-        return list(self.rows)
-
-    def first(self):
-        return self.rows[0] if self.rows else None
-
-
-class _FakeDb:
-    def __init__(self, rows):
-        self.rows = rows
-        self.closed = False
-
-    def query(self, model):
-        return _FakeQuery(self.rows)
-
-    def close(self):
-        self.closed = True
-
-
-def _session(model="qwen3.5:latest", endpoint_url="http://localhost:11434/v1/chat/completions", endpoint_id="image-endpoint"):
-    return SimpleNamespace(model=model, endpoint_url=endpoint_url, endpoint_id=endpoint_id)
-
-
-def _endpoint(base_url, model_type="image", models=None):
-    cached_models = None if models is None else json.dumps(models)
+def _session(
+    model="qwen3.5:latest",
+    *,
+    endpoint_id="connection_1",
+    model_route_id="route_1",
+    owner="alice",
+):
     return SimpleNamespace(
-        id="image-endpoint",
-        base_url=base_url,
-        model_type=model_type,
-        is_enabled=True,
-        cached_models=cached_models,
+        model=model,
+        endpoint_id=endpoint_id,
+        provider_model_route_id=model_route_id,
+        owner=owner,
     )
 
 
-def test_image_model_prefix_routes_to_image_generation_without_endpoint_lookup(monkeypatch):
-    def fail_if_called():
-        raise AssertionError("prefixed image models should not need a DB lookup")
+def test_known_image_model_prefix_routes_without_resolving(monkeypatch):
+    def fail_if_called(**_kwargs):
+        raise AssertionError("known image model IDs do not require route lookup")
 
-    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
+    monkeypatch.setattr(chat_routes, "resolve_chat_route", fail_if_called)
 
-    assert chat_routes._is_image_generation_session(_session(model="dall-e-3"))
+    assert chat_routes._is_image_generation_session(
+        _session(model="openai/gpt-5-image")
+    )
 
 
-@pytest.mark.parametrize("endpoint_id", ["mimo:auto", "mimo:xiaomi"])
-def test_available_native_connection_is_not_cleared_as_orphan(
-    monkeypatch,
-    endpoint_id,
-):
-    def fail_if_called():
-        raise AssertionError("available native connections do not query endpoints")
+def test_normalized_image_operation_routes_to_image_generation(monkeypatch):
+    seen = {}
 
+    def resolve(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(operations=("chat.stream", "image.generate"))
+
+    monkeypatch.setattr(chat_routes, "resolve_chat_route", resolve)
+
+    assert chat_routes._is_image_generation_session(_session(), "alice")
+    assert seen == {
+        "owner": "alice",
+        "endpoint_id": "connection_1",
+        "model_id": "qwen3.5:latest",
+        "model_route_id": "route_1",
+    }
+
+
+def test_normalized_text_route_is_not_image_generation(monkeypatch):
     monkeypatch.setattr(
         chat_routes,
-        "_native_connection_is_available",
-        lambda candidate, owner: candidate == endpoint_id,
-    )
-    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
-    session = _session(
-        model="xiaomi/mimo-v2.5-pro",
-        endpoint_url="mimo://acp",
-        endpoint_id=endpoint_id,
+        "resolve_chat_route",
+        lambda **_kwargs: SimpleNamespace(operations=("chat.stream",)),
     )
 
-    assert chat_routes._clear_orphaned_session_endpoint(session, "alice") is False
-    assert chat_routes._is_image_generation_session(session, "alice") is False
-def test_namespaced_gpt_image_model_routes_to_image_generation_without_endpoint_lookup(monkeypatch):
-    def fail_if_called():
-        raise AssertionError("provider-prefixed image models should not need a DB lookup")
-
-    monkeypatch.setattr(chat_routes, "SessionLocal", fail_if_called)
-
-    assert chat_routes._is_image_generation_session(_session(model="openai/gpt-5-image"))
+    assert not chat_routes._is_image_generation_session(_session(), "alice")
 
 
-def test_image_endpoint_does_not_catch_text_model_on_different_path(monkeypatch):
-    db = _FakeDb([
-        _endpoint("http://localhost:11434/v1/images", models=["sdxl-local"]),
-    ])
-    monkeypatch.setattr(chat_routes, "SessionLocal", lambda: db)
+def test_unavailable_normalized_route_is_reported_orphaned(monkeypatch):
+    def unavailable(**_kwargs):
+        raise chat_routes.ChatRouteUnavailable("disabled")
 
-    assert not chat_routes._is_image_generation_session(_session())
-    assert db.closed
+    monkeypatch.setattr(chat_routes, "resolve_chat_route", unavailable)
 
-
-def test_image_endpoint_cache_must_contain_selected_model(monkeypatch):
-    db = _FakeDb([
-        _endpoint("http://localhost:11434/v1", models=["sdxl-local"]),
-    ])
-    monkeypatch.setattr(chat_routes, "SessionLocal", lambda: db)
-
-    assert not chat_routes._is_image_generation_session(_session(model="qwen3.5:latest"))
+    assert chat_routes._clear_orphaned_session_endpoint(_session(), "alice")
 
 
-def test_matching_image_endpoint_routes_selected_image_model(monkeypatch):
-    db = _FakeDb([
-        _endpoint("http://localhost:11434/v1", models=["sdxl-local"]),
-    ])
-    monkeypatch.setattr(chat_routes, "SessionLocal", lambda: db)
+def test_available_normalized_route_preserves_session_provenance(monkeypatch):
+    monkeypatch.setattr(
+        chat_routes,
+        "resolve_chat_route",
+        lambda **_kwargs: SimpleNamespace(operations=("image.generate",)),
+    )
 
-    assert chat_routes._is_image_generation_session(_session(model="sdxl-local"))
+    assert not chat_routes._clear_orphaned_session_endpoint(_session(), "alice")
+
+
+def test_no_normalized_route_never_queries_model_endpoint(monkeypatch):
+    monkeypatch.setattr(
+        chat_routes,
+        "resolve_chat_route",
+        lambda **_kwargs: pytest.fail("legacy rows must not be resolved"),
+    )
+    legacy = SimpleNamespace(model="legacy", endpoint_id="old-endpoint")
+
+    assert chat_routes._clear_orphaned_session_endpoint(legacy, "alice")

@@ -25,6 +25,7 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import GalleryImage
+from src import generated_images
 from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
 
@@ -185,7 +186,7 @@ async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch):
     gallery_dir = tmp_path / "generated_images"
 
     monkeypatch.setattr(up, "SessionLocal", TestingSession)
-    monkeypatch.setattr(up, "GENERATED_IMAGES_DIR", str(gallery_dir))
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", gallery_dir)
 
     h = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
     up.setup_upload_routes(h)
@@ -216,7 +217,11 @@ async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypat
     cdb.Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     monkeypatch.setattr(up, "SessionLocal", TestingSession)
-    monkeypatch.setattr(up, "GENERATED_IMAGES_DIR", str(tmp_path / "generated_images"))
+    monkeypatch.setattr(
+        generated_images,
+        "GENERATED_IMAGE_DIR",
+        tmp_path / "generated_images",
+    )
 
     h = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
     up.setup_upload_routes(h)

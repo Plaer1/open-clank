@@ -26,13 +26,13 @@ import { splitFinalized, describeOpenFence } from './streamingSegmenter.js';
 // (The per-instance try/catch `degraded` fallback below is the runtime safety net.)
 const ENABLED = true;
 
-export function createStreamRenderer(contentEl, { render, hljs } = {}) {
+export function createStreamRenderer(contentEl, { render } = {}) {
   let started = false;
   let tailMarker = null; // finalized nodes precede it; live-tail nodes follow it
   let committedLen = 0; // chars of source already frozen
   let lastText = ''; // most recent full text (for finalize)
   let tailShownLen = 0; // rendered-text length of the live tail (drives token fade)
-  let appendMode = null; // { codeText: Text, appendedLen } while an open fence streams
+  let appendMode = null; // { source, painter } while an open fence streams
   let degraded = !ENABLED; // true once we fall back to full re-render
 
   function start() {
@@ -43,7 +43,9 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   }
 
   function highlight(root) {
-    if (hljs) root.querySelectorAll('pre code').forEach((b) => hljs.highlightElement(b));
+    // Queue-until-ready: blocks rendered before the engine loads are painted
+    // when it finishes, and after ready this is synchronous (pre-insert paint).
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(root);
   }
 
   function clearTail() {
@@ -79,25 +81,37 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
     while (holder.firstChild) contentEl.appendChild(holder.firstChild);
   }
 
-  // Stream the body of an unterminated code fence by appending only the new
-  // characters to a stable <pre><code> text node — no re-parse, no re-highlight.
+  // Stream the body of an unterminated code fence into a stable <pre><code>.
+  // Painting is debounced through the shared highlighter: between paints the
+  // last painted (colored) state stays on screen, so fast scrolling never
+  // reaches a long stretch of unpainted code. Unknown languages stream as
+  // plain text, exactly as before.
   function appendOpenFence(tailText, fence) {
     if (!appendMode) {
       clearTail();
       const pre = document.createElement('pre');
       const code = document.createElement('code');
-      if (fence.lang) code.className = `language-${fence.lang}`;
-      const textNode = document.createTextNode('');
-      code.appendChild(textNode);
+      if (fence.lang) {
+        code.className = `language-${fence.lang}`;
+        code.dataset.lang = fence.lang;
+      }
       pre.appendChild(code);
       contentEl.appendChild(pre);
-      appendMode = { codeText: textNode, appendedLen: 0 };
+      appendMode = {
+        code,
+        source: '',
+        painter:
+          window.odysseusHighlight
+            ? window.odysseusHighlight.createStreamingPainter()
+            : null,
+      };
       tailShownLen = 0; // code is never faded; prose after the fence fades fresh
     }
-    const code = tailText.slice(fence.contentStart);
-    if (code.length > appendMode.appendedLen) {
-      appendMode.codeText.appendData(code.slice(appendMode.appendedLen));
-      appendMode.appendedLen = code.length;
+    appendMode.source = tailText.slice(fence.contentStart);
+    if (appendMode.painter) {
+      appendMode.painter.paint(appendMode.code, appendMode.source);
+    } else {
+      appendMode.code.textContent = appendMode.source;
     }
   }
 

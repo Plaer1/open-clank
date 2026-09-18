@@ -19,6 +19,14 @@ export type SpawnMode = z.infer<typeof SpawnMode>
 export const ToolWhitelist = z.union([z.array(z.string()).readonly(), z.literal("INHERIT")])
 export type ToolWhitelist = z.infer<typeof ToolWhitelist>
 
+// Canonical provider/model identity. Keep this structured all the way through
+// actor accounting so a provider cannot be inferred from a model ID.
+export const ActorModel = z.object({
+  providerID: z.string().min(1),
+  modelID: z.string().min(1),
+})
+export type ActorModel = z.infer<typeof ActorModel>
+
 export const Actor = z
   .object({
     sessionID: SessionID.zod,
@@ -34,6 +42,8 @@ export const Actor = z
     contextWatermark: MessageID.zod.optional(),
     background: z.boolean(),
     tools: ToolWhitelist.optional(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
     lastTurnTime: z.number(),
     turnCount: z.number(),
     lastError: z.string().optional(),

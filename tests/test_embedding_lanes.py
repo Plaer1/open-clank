@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.skip(reason="legacy custom/FastEmbed fallback lanes are retired")
+
 from src.embedding_lanes import (
     LANE_CUSTOM,
     LANE_FASTEMBED,

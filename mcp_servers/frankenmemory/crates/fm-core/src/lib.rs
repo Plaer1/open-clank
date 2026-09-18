@@ -5,10 +5,15 @@ pub mod curate;
 pub mod embed;
 pub mod graph;
 pub mod layer;
+pub mod ontology;
+pub mod privacy;
 pub mod provider;
 pub mod record;
+pub mod repository;
 pub mod retrieval;
 pub mod store;
 
 pub use config::FmConfig;
+pub use ontology::*;
 pub use record::*;
+pub use repository::*;

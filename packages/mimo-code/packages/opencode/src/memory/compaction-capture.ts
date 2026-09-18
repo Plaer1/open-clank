@@ -4,7 +4,7 @@ import { Config } from "../config"
 import { Session } from "../session"
 import { SessionCompaction } from "../session/compaction"
 import { Log } from "../util"
-import { getSharedMcpClient } from "./mcp-client"
+import { callMemoryTool, getSharedMcpClient } from "./mcp-client"
 import { memorySessionScope } from "./session-scope"
 
 const log = Log.create({ service: "memory.compaction-capture" })
@@ -65,11 +65,12 @@ export const layer: Layer.Layer<CompactionCaptureService, never, Bus.Service | S
               return
             }
 
-            const c = yield* Effect.promise(() => getSharedMcpClient())
+            const c = yield* Effect.promise(() => getSharedMcpClient(sessionID))
             yield* Effect.promise(() =>
-              c.callTool({
-                name: "capture",
-                arguments: {
+              callMemoryTool(
+                c,
+                "capture",
+                {
                   user_text: "",
                   assistant_text: text,
                   capture_mode: "raw_only",
@@ -88,7 +89,7 @@ export const layer: Layer.Layer<CompactionCaptureService, never, Bus.Service | S
                     agent_id: summary.info.agentID,
                   },
                 },
-              }),
+              ),
             )
             log.info("captured compaction summary", { sessionID, agentID })
           }),

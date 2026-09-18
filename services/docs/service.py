@@ -2,10 +2,9 @@
 """Docs service — personal document RAG."""
 
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from src.rag_manager import RAGManager
-from src.constants import CHROMA_DIR
+from src.rag_singleton import get_rag_manager
 
 
 @dataclass
@@ -35,10 +34,15 @@ class DocsService:
         results = await service.query("what is async await?")
     """
 
-    def __init__(self, persist_dir: str = CHROMA_DIR):
-        self.rag = RAGManager(persist_directory=persist_dir)
+    def __init__(self, persist_dir: Optional[str] = None):
+        # The app singleton is the canonical Frankenmemory RAG authority.
+        # ``persist_dir`` remains accepted for source compatibility but never
+        # selects the retired Chroma backend.
+        self.rag = get_rag_manager()
+        if self.rag is None:
+            raise RuntimeError("Frankenmemory RAG is unavailable")
 
-    async def query(self, query: str, top_k: int = 5) -> List[DocChunk]:
+    async def query(self, query: str, top_k: int = 5, owner: Optional[str] = None) -> List[DocChunk]:
         """
         Query the document index.
 
@@ -49,19 +53,23 @@ class DocsService:
         Returns:
             List of DocChunk objects
         """
-        results = self.rag.search(query, k=top_k)
+        try:
+            results = self.rag.search(query, k=top_k, owner=owner)
+        except TypeError:
+            # Narrow compatibility for older injected test/extension doubles.
+            results = self.rag.search(query, k=top_k)
         return [
             DocChunk(
-                text=r.get("text", r.get("content", "")),
+                text=r.get("document", r.get("text", r.get("content", ""))),
                 source=r.get("source", r.get("metadata", {}).get("source", "unknown")),
-                score=r.get("score", 0.0),
+                score=r.get("similarity", r.get("score", 0.0)),
                 metadata=r.get("metadata"),
             )
             for r in results
             if isinstance(r, dict)
         ]
 
-    async def index(self, directory: str) -> IndexResult:
+    async def index(self, directory: str, owner: Optional[str] = None) -> IndexResult:
         """
         Index documents from a directory.
 
@@ -71,10 +79,13 @@ class DocsService:
         Returns:
             IndexResult with stats
         """
-        result = self.rag.index_personal_documents(directory)
+        try:
+            result = self.rag.index_personal_documents(directory, owner=owner)
+        except TypeError:
+            result = self.rag.index_personal_documents(directory)
         return IndexResult(
-            indexed=result.get("indexed", 0),
-            failed=result.get("failed", 0),
+            indexed=result.get("indexed_count", result.get("indexed", 0)),
+            failed=result.get("failed_count", result.get("failed", 0)),
             errors=result.get("errors", []),
         )
 

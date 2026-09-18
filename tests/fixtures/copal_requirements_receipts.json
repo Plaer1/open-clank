@@ -1,0 +1,474 @@
+{
+  "schemaVersion": 4,
+  "generatedAt": "2026-09-08T23:01:58.569Z",
+  "receipts": {
+    "P04": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_copal_redb_production_performance.py",
+      "assertions": [
+        "authenticated-redb-index-query"
+      ],
+      "exitCode": 0,
+      "productDigest": "b40edc95428efaf48f8d2c04fa5586e8513b188cdc10f0f10c94b0e1e3be8934",
+      "recordedAt": "2026-09-08T22:30:24.652Z"
+    },
+    "V02": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_copal_routes.py",
+      "assertions": [
+        "memes-round-trip"
+      ],
+      "exitCode": 0,
+      "productDigest": "467d9b103a3aca164605922a884ea19e5c7f04ae54628c95854505f098031603",
+      "recordedAt": "2026-09-08T22:29:11.904Z"
+    },
+    "H02": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_manage_copal.py",
+      "assertions": [
+        "owner-hooks-provenance"
+      ],
+      "exitCode": 0,
+      "productDigest": "7aecf699f7854a845ab412b16656986d37ce792a9fc9979368061d45e7bddbe7",
+      "recordedAt": "2026-09-08T22:29:23.678Z"
+    },
+    "A02": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_agent_actor_accounting.py",
+      "assertions": [
+        "tool-availability-enablement"
+      ],
+      "exitCode": 0,
+      "productDigest": "596f219712b49f283259680852a4506a519550ac6afbf5c059a37912b011e229",
+      "recordedAt": "2026-09-08T22:30:37.763Z"
+    },
+    "A10": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_agent_actor_accounting.py",
+      "assertions": [
+        "requested-effective-subagent-model"
+      ],
+      "exitCode": 0,
+      "productDigest": "596f219712b49f283259680852a4506a519550ac6afbf5c059a37912b011e229",
+      "recordedAt": "2026-09-08T22:30:37.763Z"
+    },
+    "A03": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 venv/bin/python -m pytest -q -p no:cacheprovider tests/test_reminder_endpoints.py",
+      "assertions": [
+        "multiple-endpoint-retention-retry"
+      ],
+      "exitCode": 0,
+      "productDigest": "e206729c668f8be10035fb674f9a5928584e3ac1d26a26af265176dcfc7b5bd5",
+      "recordedAt": "2026-09-08T22:30:51.431Z"
+    },
+    "A04": {
+      "command": "node --test tests/model_labels.mjs tests/model_catalog_identity.mjs",
+      "assertions": [
+        "shared-provider-label"
+      ],
+      "exitCode": 0,
+      "productDigest": "e0c2c6c74aa607a49eae45f36d01aef2fff31485c3b962299101aa6ffffab1d9",
+      "recordedAt": "2026-09-08T22:31:04.747Z"
+    },
+    "A11": {
+      "command": "node --test tests/js/test_copal_notes_buffers.mjs",
+      "assertions": [
+        "template-discovery-insert-variables"
+      ],
+      "exitCode": 0,
+      "productDigest": "0f2e5b67f380014f1ff55461e78459f7f2a8375a1f446bc0bf5eda5c45ebf0ce",
+      "recordedAt": "2026-09-08T22:31:22.336Z"
+    },
+    "H04": {
+      "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test --manifest-path packages/openclank-history/Cargo.toml --locked --offline --features qualification-fixtures --test restore_contract",
+      "assertions": [
+        "restore-cas-recovery"
+      ],
+      "exitCode": 0,
+      "productDigest": "96adfa69544643d308e677eb70947f90e0e767cca271a3a6be2660ca05f45d54",
+      "recordedAt": "2026-09-08T22:29:38.497Z"
+    },
+    "H05": {
+      "command": "CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo test --manifest-path packages/openclank-history/Cargo.toml --locked --offline --features qualification-fixtures --test service_subprocess",
+      "assertions": [
+        "platform-deferred-retention"
+      ],
+      "exitCode": 0,
+      "productDigest": "1103ec56614cbede863caa67980ac68c8d4a6c9081c7eb6ccb645591686e03aa",
+      "recordedAt": "2026-09-08T22:30:03.946Z"
+    },
+    "E01": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "mounted-editor-tabs"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E02": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "explorer-refresh-anchor"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E03": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "input-ownership"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E08": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "quick-open-command-search-navigation"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E09": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "panels-typed-properties"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E10": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "draft-save-cas-external-change"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "V01": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "wiki-round-trip"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "P03": {
+      "command": "node tests/copal_browser_disposable_acceptance.mjs",
+      "assertions": [
+        "responsive-accessible-settings"
+      ],
+      "exitCode": 0,
+      "productDigest": "c8a6cd1a6d273e02096af6cb7067dd2a021722e8e96f703c470d41c6c9aa90d0",
+      "recordedAt": "2026-09-08T22:59:38.943Z"
+    },
+    "E04": {
+      "command": "node tests/copal_markdown_media_acceptance.mjs",
+      "assertions": [
+        "managed-host-media"
+      ],
+      "exitCode": 0,
+      "productDigest": "a37bb766f35e3ff4c14549430c9a5f1a65d82998fa5e8f335dfb2fb0273777a4",
+      "recordedAt": "2026-09-08T22:31:52.338Z"
+    },
+    "E07": {
+      "command": "node tests/copal_markdown_media_acceptance.mjs",
+      "assertions": [
+        "source-preservation"
+      ],
+      "exitCode": 0,
+      "productDigest": "a37bb766f35e3ff4c14549430c9a5f1a65d82998fa5e8f335dfb2fb0273777a4",
+      "recordedAt": "2026-09-08T22:31:52.338Z"
+    },
+    "E05": {
+      "command": "node tests/copal_base_performance_acceptance.mjs",
+      "assertions": [
+        "typed-base-query"
+      ],
+      "exitCode": 0,
+      "productDigest": "69efac7fab7096eb446cebb36707f8bd21d4eedc2c93b3f34c92620e14b9aa30",
+      "recordedAt": "2026-09-08T22:32:13.293Z"
+    },
+    "E06": {
+      "command": "node tests/copal_mounted_editor_memes_acceptance.mjs",
+      "assertions": [
+        "rename-move-resource-ref"
+      ],
+      "exitCode": 0,
+      "productDigest": "7ef47975f6ceb3126c21cce5a606e9a7df8c6ceeb8f1dae7d7355c8a4be9a107",
+      "recordedAt": "2026-09-08T22:32:54.093Z"
+    },
+    "P01": {
+      "command": "node tests/copal_mounted_editor_memes_acceptance.mjs",
+      "assertions": [
+        "files-editor-lifecycle"
+      ],
+      "exitCode": 0,
+      "productDigest": "7ef47975f6ceb3126c21cce5a606e9a7df8c6ceeb8f1dae7d7355c8a4be9a107",
+      "recordedAt": "2026-09-08T22:32:54.093Z"
+    },
+    "P05": {
+      "command": "node tests/copal_mounted_editor_memes_acceptance.mjs",
+      "assertions": [
+        "memes-treehouse-package-round-trip"
+      ],
+      "exitCode": 0,
+      "productDigest": "7ef47975f6ceb3126c21cce5a606e9a7df8c6ceeb8f1dae7d7355c8a4be9a107",
+      "recordedAt": "2026-09-08T22:32:54.093Z"
+    },
+    "T01": {
+      "command": "node tests/copal_timeline_geometry_acceptance.mjs",
+      "assertions": [
+        "nested-track-grid"
+      ],
+      "exitCode": 0,
+      "productDigest": "beea1cf184973254eaea2c87d9929f43607cee30d4e9eb5e48543ddf030c2aaf",
+      "recordedAt": "2026-09-08T22:33:15.132Z"
+    },
+    "T02": {
+      "command": "node tests/copal_timeline_geometry_acceptance.mjs",
+      "assertions": [
+        "single-day-event-bounds"
+      ],
+      "exitCode": 0,
+      "productDigest": "beea1cf184973254eaea2c87d9929f43607cee30d4e9eb5e48543ddf030c2aaf",
+      "recordedAt": "2026-09-08T22:33:15.132Z"
+    },
+    "T03": {
+      "command": "node tests/copal_timeline_geometry_acceptance.mjs",
+      "assertions": [
+        "timeline-geometry"
+      ],
+      "exitCode": 0,
+      "productDigest": "beea1cf184973254eaea2c87d9929f43607cee30d4e9eb5e48543ddf030c2aaf",
+      "recordedAt": "2026-09-08T22:33:15.132Z"
+    },
+    "T04": {
+      "command": "node tests/copal_timeline_geometry_acceptance.mjs",
+      "assertions": [
+        "date-shading"
+      ],
+      "exitCode": 0,
+      "productDigest": "beea1cf184973254eaea2c87d9929f43607cee30d4e9eb5e48543ddf030c2aaf",
+      "recordedAt": "2026-09-08T22:33:15.132Z"
+    },
+    "T05": {
+      "command": "node tests/copal_timeline_geometry_acceptance.mjs",
+      "assertions": [
+        "date-anchor-inclusive-end"
+      ],
+      "exitCode": 0,
+      "productDigest": "beea1cf184973254eaea2c87d9929f43607cee30d4e9eb5e48543ddf030c2aaf",
+      "recordedAt": "2026-09-08T22:33:15.132Z"
+    },
+    "V03": {
+      "command": "node tests/copal_graph_modes_acceptance.mjs",
+      "assertions": [
+        "graph-galaxy-modes"
+      ],
+      "exitCode": 0,
+      "productDigest": "8bd4fcf7678e6ff7d0b75366f29ce0e68ac80b9f397b1d70d506cce8549a6241",
+      "recordedAt": "2026-09-08T22:33:31.853Z"
+    },
+    "V04": {
+      "command": "node tests/copal_tasks_5k_browser_acceptance.mjs",
+      "assertions": [
+        "unopened-note-task-writeback"
+      ],
+      "exitCode": 0,
+      "productDigest": "6096d792021644647ad8bf90b83902f6a3ebd2c449d629e1ab41fbc34eef2760",
+      "recordedAt": "2026-09-08T22:33:48.291Z"
+    },
+    "M01": {
+      "command": "node tests/copal_context_menu_browser_acceptance.mjs",
+      "assertions": [
+        "editing-clipboard-spelling"
+      ],
+      "exitCode": 0,
+      "productDigest": "e4277141ce738bb07b52d3b83fed5f5e0230db9673e413165a99eba1546185a6",
+      "recordedAt": "2026-09-08T22:34:15.250Z"
+    },
+    "M02": {
+      "command": "node tests/copal_context_menu_production_browser_acceptance.mjs",
+      "assertions": [
+        "context-actions"
+      ],
+      "exitCode": 0,
+      "productDigest": "5f866f35a77308b71cf955565633d38231a89ad96636f2c113d13c7ac4523eda",
+      "recordedAt": "2026-09-08T22:34:36.015Z"
+    },
+    "M04": {
+      "command": "node tests/copal_context_menu_codemirror_browser_acceptance.mjs",
+      "assertions": [
+        "keyboard-dismiss-focus-disable"
+      ],
+      "exitCode": 0,
+      "productDigest": "e68cf4ea119e3b6917070f2c12c891c2087f6fdd09cc19445a2c8c0cc2ee4734",
+      "recordedAt": "2026-09-08T22:34:54.996Z"
+    },
+    "H01": {
+      "command": "node tests/history_settings_production_browser_acceptance.mjs",
+      "assertions": [
+        "lore-history-worker"
+      ],
+      "exitCode": 0,
+      "productDigest": "1ac72849176ea223ae47cda9cdc1f08cf41408f94bdf335761903fba90026229",
+      "recordedAt": "2026-09-08T22:53:34.429Z"
+    },
+    "H03": {
+      "command": "node tests/history_settings_production_browser_acceptance.mjs",
+      "assertions": [
+        "budget-pause-unavailable"
+      ],
+      "exitCode": 0,
+      "productDigest": "1ac72849176ea223ae47cda9cdc1f08cf41408f94bdf335761903fba90026229",
+      "recordedAt": "2026-09-08T22:53:34.429Z"
+    },
+    "P02": {
+      "command": "node tests/treehouse_field_guide_browser_acceptance.mjs",
+      "assertions": [
+        "all-17-disposable-lessons"
+      ],
+      "exitCode": 0,
+      "productDigest": "40d82d1a941823c565675b6610eb3cfcc03adec58a7fae3eedcd1b22c1f7a46e",
+      "recordedAt": "2026-09-08T22:53:49.813Z"
+    },
+    "TH04": {
+      "command": "node tests/treehouse_field_guide_browser_acceptance.mjs",
+      "assertions": [
+        "field-guide-mounted-courses"
+      ],
+      "exitCode": 0,
+      "productDigest": "40d82d1a941823c565675b6610eb3cfcc03adec58a7fae3eedcd1b22c1f7a46e",
+      "recordedAt": "2026-09-08T22:53:49.813Z"
+    },
+    "TH01": {
+      "command": "node tests/treehouse_integrated_browser_acceptance.mjs",
+      "assertions": [
+        "learner-admin-separation"
+      ],
+      "exitCode": 0,
+      "productDigest": "4d8e8ffd238bb25e19f062e4350763835c16bf78f54903bd2b225142c8e47038",
+      "recordedAt": "2026-09-08T22:54:01.544Z"
+    },
+    "TH02": {
+      "command": "node tests/treehouse_integrated_browser_acceptance.mjs",
+      "assertions": [
+        "progress-badges-achievements"
+      ],
+      "exitCode": 0,
+      "productDigest": "4d8e8ffd238bb25e19f062e4350763835c16bf78f54903bd2b225142c8e47038",
+      "recordedAt": "2026-09-08T22:54:01.544Z"
+    },
+    "TH03": {
+      "command": "node tests/treehouse_integrated_browser_acceptance.mjs",
+      "assertions": [
+        "scoped-reset"
+      ],
+      "exitCode": 0,
+      "productDigest": "4d8e8ffd238bb25e19f062e4350763835c16bf78f54903bd2b225142c8e47038",
+      "recordedAt": "2026-09-08T22:54:01.544Z"
+    },
+    "TH05": {
+      "command": "node tests/treehouse_integrated_browser_acceptance.mjs",
+      "assertions": [
+        "private-share-revoke-progress"
+      ],
+      "exitCode": 0,
+      "productDigest": "4d8e8ffd238bb25e19f062e4350763835c16bf78f54903bd2b225142c8e47038",
+      "recordedAt": "2026-09-08T22:54:01.544Z"
+    },
+    "A01": {
+      "command": "node tests/theme_browser_acceptance.mjs",
+      "assertions": [
+        "pink-default-custom-preservation"
+      ],
+      "exitCode": 0,
+      "productDigest": "d2e649688160c4b20a244a0485633b839d198ef14cbcaf2d8f9a5e3f1312ba87",
+      "recordedAt": "2026-09-08T22:54:15.002Z"
+    },
+    "A07": {
+      "command": "node tests/theme_browser_acceptance.mjs",
+      "assertions": [
+        "settings-themes-customize"
+      ],
+      "exitCode": 0,
+      "productDigest": "d2e649688160c4b20a244a0485633b839d198ef14cbcaf2d8f9a5e3f1312ba87",
+      "recordedAt": "2026-09-08T22:54:15.002Z"
+    },
+    "A08": {
+      "command": "node tests/theme_browser_acceptance.mjs",
+      "assertions": [
+        "theme-account-bleed-lag"
+      ],
+      "exitCode": 0,
+      "productDigest": "d2e649688160c4b20a244a0485633b839d198ef14cbcaf2d8f9a5e3f1312ba87",
+      "recordedAt": "2026-09-08T22:54:15.002Z"
+    },
+    "A06": {
+      "command": "node tests/kene_browser_acceptance.mjs",
+      "assertions": [
+        "kene-route-speed-lifecycle"
+      ],
+      "exitCode": 0,
+      "productDigest": "93332eac92e3606f79f944de7c4bfd1d57e29eb18edd2017bcf6d3f590eafcc9",
+      "recordedAt": "2026-09-08T22:54:49.764Z"
+    },
+    "A09": {
+      "command": "node tests/i18n_browser_acceptance.mjs",
+      "assertions": [
+        "locale-runtime-current-strings"
+      ],
+      "exitCode": 0,
+      "productDigest": "a659c44d41c13345dd59d0d6a5363b787f8f2d39993555da6167fbbb05031327",
+      "recordedAt": "2026-09-08T22:55:07.339Z"
+    },
+    "A12": {
+      "command": "node tests/copal_multicursor_browser_acceptance.mjs",
+      "assertions": [
+        "parser-rich-comments-source-bytes"
+      ],
+      "exitCode": 0,
+      "productDigest": "2e3def6020d80effeb8c445e547d496e093d3d3fe98e2cced0017176191db323",
+      "recordedAt": "2026-09-08T22:55:19.438Z"
+    },
+    "A13": {
+      "command": "node tests/copal_multicursor_browser_acceptance.mjs",
+      "assertions": [
+        "multi-range-multiline-editing"
+      ],
+      "exitCode": 0,
+      "productDigest": "2e3def6020d80effeb8c445e547d496e093d3d3fe98e2cced0017176191db323",
+      "recordedAt": "2026-09-08T22:55:19.438Z"
+    },
+    "A05": {
+      "command": "node tests/clanker_browser_acceptance.mjs",
+      "assertions": [
+        "compact-hamburger-right"
+      ],
+      "exitCode": 0,
+      "productDigest": "443007d6d56e6a5f463e034413422751a806dc92466ee20280ab43c4515a4eb8",
+      "recordedAt": "2026-09-08T22:57:31.696Z"
+    }
+  },
+  "combinedJourney": {
+    "command": "node tests/copal_combined_50_browser_acceptance.mjs",
+    "assertions": [
+      "theme-pink-default",
+      "hamburger-right",
+      "reminders-retained",
+      "shared-provider-label",
+      "modelled-children",
+      "template-source",
+      "multicursor-multiline",
+      "rich-comments-source",
+      "files-history-treehouse",
+      "locale-account-reload-persistence"
+    ],
+    "exitCode": 0,
+    "productDigest": "b185d47dcd2fa77aca11b18695a18de9d0ce3031ad839e360a8cf6e941d6b65b",
+    "recordedAt": "2026-09-08T23:01:58.569Z"
+  }
+}

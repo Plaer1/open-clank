@@ -30,6 +30,7 @@ const stubActorRegistry = Layer.succeed(
     updateStatus: () => Effect.void,
     updateTurn: () => Effect.void,
     updateAgent: () => Effect.void,
+    updateModel: () => Effect.void,
     get: () => Effect.succeed(undefined),
     liveness: () => Effect.succeed(undefined),
     listBySession: () => Effect.succeed([]),

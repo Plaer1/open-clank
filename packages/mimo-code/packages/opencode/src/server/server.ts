@@ -86,6 +86,25 @@ export async function openapi() {
       openapi: "3.1.1",
     },
   })
+  const schemas = result.components?.schemas
+  if (schemas && !schemas.__schema0) {
+    // hono-openapi emits this recursive JSON value as a local $def while
+    // referring to it through components. Promote the shared target so the
+    // published contract and generated SDK resolve the pointer correctly.
+    schemas.__schema0 = {
+      anyOf: [
+        { type: "string" },
+        { type: "number" },
+        { type: "boolean" },
+        { type: "null" },
+        { type: "array", items: { $ref: "#/components/schemas/__schema0" } },
+        {
+          type: "object",
+          additionalProperties: { $ref: "#/components/schemas/__schema0" },
+        },
+      ],
+    }
+  }
   return result
 }
 

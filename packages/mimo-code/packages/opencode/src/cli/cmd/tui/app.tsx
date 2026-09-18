@@ -10,6 +10,7 @@ import {
   createMemo,
   ErrorBoundary,
   createSignal,
+  onCleanup,
   onMount,
   batch,
   Show,
@@ -82,6 +83,7 @@ import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { DialogModalities } from "./component/dialog-modalities"
 import { DialogContextLimit } from "./component/dialog-context-limit"
+import { resolveShellInvocation } from "@/tool/shell-containment"
 
 function rendererConfig(_config: TuiConfig.Info, plainTerminal: boolean): CliRendererConfig {
   const mouseEnabled = !plainTerminal && !Flag.MIMOCODE_DISABLE_MOUSE && (_config.mouse ?? true)
@@ -1345,18 +1347,41 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
   })
 
+  const interactiveProcesses = new Map<string, AbortController>()
+  onCleanup(() => {
+    for (const controller of interactiveProcesses.values()) controller.abort()
+    interactiveProcesses.clear()
+  })
+
   // Handle interactive bash commands: suspend TUI, let user interact directly in terminal
   event.subscribe((evt) => {
-    if ((evt.type as string) !== "bash.interactive.asked") return
+    const type = evt.type as string
     const props = evt.properties as Record<string, unknown>
+    if (type === "bash.interactive.cancelled") {
+      const id = typeof props.id === "string" ? props.id : undefined
+      if (id) interactiveProcesses.get(id)?.abort()
+      return
+    }
+    if (type !== "bash.interactive.asked") return
     const id = typeof props.id === "string" ? props.id : undefined
+    const sessionID = typeof props.sessionID === "string" ? props.sessionID : undefined
+    const callID = typeof props.callID === "string" ? props.callID : undefined
     const command = typeof props.command === "string" ? props.command : undefined
     const cwd = typeof props.cwd === "string" ? props.cwd : undefined
+    const workspace = typeof props.workspace === "string" ? props.workspace : cwd
+    const writableRoots = Array.isArray(props.writableRoots)
+      ? props.writableRoots.filter((root): root is string => typeof root === "string")
+      : workspace
+        ? [workspace]
+        : []
+    const shell = typeof props.shell === "string" ? props.shell : process.platform === "win32" ? "cmd" : "sh"
+    const network = props.network === "disabled" ? "disabled" : "enabled"
     const description = typeof props.description === "string" ? props.description : "(interactive)"
     const env = props.env && typeof props.env === "object" ? (props.env as Record<string, string>) : undefined
-    if (!id || !command || !cwd) return
+    if (!id || !sessionID || !callID || !command || !cwd || !workspace) return
 
     const abort = new AbortController()
+    interactiveProcesses.set(id, abort)
     void (async () => {
       renderer.suspend()
       renderer.currentRenderBuffer.clear()
@@ -1366,12 +1391,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       let exitCode = 1
       let output = ""
       try {
-        const shell = process.platform === "win32" ? "cmd" : "sh"
-        const args = process.platform === "win32" ? ["/c", command] : ["-c", command]
+        const invocation = resolveShellInvocation({
+          shell,
+          command,
+          cwd,
+          workspace,
+          writableRoots,
+          network,
+        })
         process.stdout.write(`\x1b[2J\x1b[H`) // clear screen
         process.stdout.write(`\x1b[1m[Interactive] ${description}\x1b[0m\n`)
         process.stdout.write(`\x1b[2m$ ${command}\x1b[0m\n\n`)
-        const proc = Process.spawn([shell, ...args], {
+        const proc = Process.spawn([invocation.executable, ...invocation.args], {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
@@ -1384,6 +1415,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       } catch (err: any) {
         output = `(interactive command failed: ${err?.message ?? "unknown error"})`
       } finally {
+        interactiveProcesses.delete(id)
         renderer.currentRenderBuffer.clear()
         renderer.resume()
         renderer.currentRenderBuffer.clear()
@@ -1392,7 +1424,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
 
       // Send result back to the server — if this fails, agent hangs forever, so retry once
       const url = `${sdk.url}/bash-interactive/${id}/reply`
-      const body = JSON.stringify({ output, exitCode })
+      const body = JSON.stringify({ sessionID, callID, output, exitCode })
       const doReply = () =>
         (sdk.fetch ?? fetch)(url, {
           method: "POST",

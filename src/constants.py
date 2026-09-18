@@ -186,13 +186,13 @@ def internal_api_base() -> str:
       1. OPEN_CLANK_INTERNAL_BASE - explicit override.
       2. ODYSSEUS_INTERNAL_BASE  - compatibility override.
       3. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
-      4. Fallback http://127.0.0.1:7000 - legacy default.
+      4. Fallback http://127.0.0.1:7777 - default.
 
     127.0.0.1 (not "localhost") avoids IPv6/DNS ambiguity for a strictly-local
     call. Without this, loopback tools fail with "All connection attempts
-    failed" whenever the server is not on port 7000.
+    failed" whenever the server is not on the default port.
     """
     override = os.environ.get("OPEN_CLANK_INTERNAL_BASE") or os.environ.get("ODYSSEUS_INTERNAL_BASE")
     if override:
         return override.rstrip("/")
-    return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7000')}"
+    return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7777')}"

@@ -22,7 +22,7 @@ import { TuiEvent } from "@/cli/cmd/tui/event"
 // after this bound rather than hanging — preserving the hang-safety the old
 // interactive:false gate guaranteed. Aligned with the actor registry stuck bound.
 const FORWARD_DENY_TIMEOUT_MS = 5 * 60 * 1000
-// In skip-all mode, forced-ask permissions (bash_delete etc.) still require a
+// In skip-all mode, forced-ask permissions (bash_destructive etc.) still require a
 // human — but the human is likely away. Bounded wait, then auto-reject with
 // model-actionable feedback instead of hanging the unattended run.
 // Read lazily so tests (and unusual deployments) can override via env.
@@ -191,8 +191,9 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Rules
 // these — the whole point of a forced-ask permission is that the intent to
 // perform an irreversible action must be recorded in-band, not inherited from
 // a broad blanket rule. Explicit deny still wins; the tool-side env opt-out
-// (e.g. MIMOCODE_AUTO_APPROVE_DELETE for bash_delete) is the only bypass.
-const FORCED_ASK = new Set(["bash_delete"])
+// (e.g. MIMOCODE_AUTO_APPROVE_DESTRUCTIVE for bash_destructive) is the only bypass.
+// bash_delete remains forced-ask for older clients and stored requests.
+const FORCED_ASK = new Set(["bash_destructive", "bash_delete"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
 
@@ -264,7 +265,7 @@ export const layer = Layer.effect(
 
       // Runtime skip-all: auto-allow anything that would block for approval.
       // Ordered AFTER the deny loop (explicit deny still wins) and EXCLUDES
-      // forced-ask permissions (bash_delete etc.) — same containment as a
+      // forced-ask permissions (bash_destructive etc.) — same containment as a
       // wildcard allow rule, which forced-ask is designed to resist.
       if (needsAsk && s.skipAll && !forced) {
         log.info("skip-all active, auto-allowing", { permission: request.permission, patterns: request.patterns })

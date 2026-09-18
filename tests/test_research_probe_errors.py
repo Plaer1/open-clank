@@ -40,13 +40,16 @@ def test_probe_failure_keeps_reachability_guidance_for_plain_errors():
 
 @pytest.mark.asyncio
 async def test_probe_endpoint_surfaces_http_exception_detail(monkeypatch):
+    calls = []
+
     async def _raise(*args, **kwargs):
+        calls.append(kwargs)
         raise HTTPException(
             status_code=400,
             detail="OpenAI returned HTTP 400: max_tokens is not supported",
         )
 
-    monkeypatch.setattr("src.llm_core.llm_call_async", _raise)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", _raise)
 
     with pytest.raises(RuntimeError) as excinfo:
         await ResearchHandler._probe_endpoint(
@@ -59,3 +62,6 @@ async def test_probe_endpoint_surfaces_http_exception_detail(monkeypatch):
     assert "Model 'o3-mini' probe failed" in msg
     assert "max_tokens is not supported" in msg
     assert "Cannot reach model" not in msg
+    assert calls[0]["purpose"] == "research"
+    assert "url" not in calls[0]
+    assert "headers" not in calls[0]

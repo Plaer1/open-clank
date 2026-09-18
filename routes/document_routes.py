@@ -2,10 +2,12 @@
 
 import uuid
 import logging
+from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 
 from sqlalchemy import case, func, or_
 from core.database import SessionLocal, Document, DocumentVersion
@@ -476,6 +478,52 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, user)
             return _doc_to_dict(doc)
+        finally:
+            db.close()
+
+    @router.get("/api/document/{doc_id}/download")
+    async def download_document(request: Request, doc_id: str):
+        """Stream one owner-scoped living document to the viewing device.
+
+        The Files surface uses this as the canonical Library provider action.
+        It deliberately serializes the logical document body rather than
+        exposing database paths or a second storage implementation.
+        """
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            language = _library_language_for_document(doc)
+            extension = {
+                "javascript": ".js", "typescript": ".ts", "python": ".py",
+                "markdown": ".md", "html": ".html", "css": ".css",
+                "json": ".json", "yaml": ".yml", "rust": ".rs",
+                "sql": ".sql", "text": ".txt", "pdf": ".md",
+            }.get(language, ".txt")
+            raw_name = str(doc.title or "document").strip()
+            safe_name = "".join(char for char in raw_name if char not in {"\r", "\n", "/", "\\", '"'})[:200].strip() or "document"
+            if "." not in safe_name.rsplit(" ", 1)[-1]:
+                safe_name += extension
+            content = str(doc.current_content or "").encode("utf-8")
+
+            async def chunks():
+                for offset in range(0, len(content), 1024 * 1024):
+                    yield content[offset:offset + 1024 * 1024]
+
+            encoded = quote(safe_name, safe="")
+            return StreamingResponse(
+                chunks(),
+                media_type="text/markdown; charset=utf-8" if language in {"markdown", "pdf"} else "text/plain; charset=utf-8",
+                headers={
+                    "Content-Length": str(len(content)),
+                    "Content-Disposition": f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "document"}"; filename*=UTF-8\'\'{encoded}',
+                    "X-Content-Type-Options": "nosniff",
+                    "Cache-Control": "private, no-store",
+                },
+            )
         finally:
             db.close()
 
@@ -968,17 +1016,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     async def ai_tidy_documents(request: Request) -> Dict[str, Any]:
         """Use AI to judge if documents are junk/test/accidental, then delete them.
         Caches verdicts so previously-reviewed docs are skipped."""
-        from src.task_endpoint import resolve_task_endpoint
-        from src.endpoint_resolver import resolve_endpoint
-        from src.llm_core import llm_call_async
+        from src.openclank.modality_facade import complete_text
 
         user = get_current_user(request)
-        url, model, headers = resolve_task_endpoint(owner=user or None)
-        if not url or not model:
-            # Fall back to default endpoint
-            url, model, headers = resolve_endpoint("default", owner=user or None)
-        if not url or not model:
-            raise HTTPException(500, "No endpoint configured for AI tidy")
 
         db = SessionLocal()
         try:
@@ -1011,15 +1051,24 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 + "\n".join(doc_list)
             )
 
-            response = await llm_call_async(
-                url, model,
-                [{"role": "system", "content": "You classify documents as junk or keep. Respond only with a JSON array."},
-                 {"role": "user", "content": prompt}],
+            import hashlib
+
+            response = await complete_text(
+                owner=user or "local-installation",
+                purpose="utility",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You classify documents as junk or keep. Respond only with a JSON array.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
                 temperature=0.1,
-                max_tokens=200,
-                headers=headers,
-                timeout=30,
-                owner=user or None,
+                max_output_tokens=200,
+                idempotency_key=(
+                    "document-ai-tidy-"
+                    + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:32]
+                ),
             )
 
             # Parse verdicts
@@ -1245,12 +1294,11 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         are page-percentages (0–100) — same coordinate system as the freeform
         annotations the frontend already renders.
         """
-        import base64
         import json
         import fitz
         from src.pdf_form_doc import find_source_upload_id
-        from src.document_processor import _resolve_vl_model, _load_vl_settings
-        from src.llm_core import llm_call_async
+        from src.document_processor import _load_vl_settings
+        from src.openclank.modality_facade import describe_image
 
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         instruction = (body or {}).get("instruction", "").strip()
@@ -1273,13 +1321,11 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
-        # Resolve VL model (admin-configured or auto-detected vision-capable)
         settings = _load_vl_settings()
-        vl_model = settings.get("vision_model", "")
-        try:
-            url, model_id, headers = _resolve_vl_model(vl_model, owner=user)
-        except Exception as e:
-            raise HTTPException(503, f"No vision model available: {e}")
+        if not settings.get("vision_enabled", True):
+            raise HTTPException(503, "Vision is disabled")
+        model_route_id = str(settings.get("vision_model") or "").strip() or None
+        root_operation_id = f"root_{uuid.uuid4().hex}"
 
         system_prompt = (
             "You analyze rendered PDF page images and propose values to fill in. "
@@ -1301,36 +1347,27 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 mat = fitz.Matrix(_PDF_RENDER_SCALE, _PDF_RENDER_SCALE)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 png_bytes = pix.tobytes("png")
-                b64 = base64.b64encode(png_bytes).decode("ascii")
-
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    f"User instruction:\n{instruction}\n\n"
-                                    f"This is page {page_index + 1} of {pdf_doc.page_count}. "
-                                    "Return JSON array of annotations to add to this page."
-                                ),
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{b64}"},
-                            },
-                        ],
-                    },
-                ]
+                page_prompt = (
+                    f"{system_prompt}\n\nUser instruction:\n{instruction}\n\n"
+                    f"This is page {page_index + 1} of {pdf_doc.page_count}. "
+                    "Return the JSON array of annotations for this page."
+                )
                 try:
-                    raw = await llm_call_async(
-                        url, model_id, messages,
-                        temperature=0.1, max_tokens=2000, headers=headers,
-                        owner=user or None,
+                    vision_result = await describe_image(
+                        owner=user or "",
+                        image=png_bytes,
+                        media_type="image/png",
+                        prompt=page_prompt,
+                        model_route_id=model_route_id,
+                        root_operation_id=root_operation_id,
                     )
-                except Exception as e:
-                    logger.error(f"VL call failed on page {page_index + 1}: {e}")
+                    raw = str(vision_result.output.get("text") or "")
+                except Exception as exc:
+                    logger.warning(
+                        "Managed document vision failed on page %s (%s)",
+                        page_index + 1,
+                        type(exc).__name__,
+                    )
                     continue
 
                 raw = (raw or "").strip()

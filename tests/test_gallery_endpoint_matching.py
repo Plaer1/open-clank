@@ -1,18 +1,14 @@
-def test_gallery_url_normalization_bug():
-    from routes.gallery_routes import _normalize_image_endpoint_base
+"""Gallery execution no longer matches or normalizes provider URLs."""
 
-    def check_match(ep_url: str, base_url: str) -> bool:
-        return (
-            _normalize_image_endpoint_base(ep_url)
-            == _normalize_image_endpoint_base(base_url)
-        )
+import inspect
 
-    # Test cases that SHOULD NOT match under a correct implementation
-    # (Buggy rstrip('/v1') logic incorrectly treats these as equal)
-    assert check_match("http://localhost:8000/v11", "http://localhost:8000") is False
-    assert check_match("http://localhost:8000/dev1", "http://localhost:8000/dev") is False
+import routes.gallery_routes as gallery_routes
 
-    # Test cases that SHOULD match under a correct implementation
-    assert check_match("http://localhost:8000/v1", "http://localhost:8000") is True
-    assert check_match("http://localhost:8000", "http://localhost:8000/v1") is True
-    assert check_match("http://localhost:8000/v1/", "http://localhost:8000/v1") is True
+
+def test_gallery_has_no_provider_url_matching_surface():
+    source = inspect.getsource(gallery_routes)
+
+    assert "_normalize_image_endpoint_base" not in source
+    assert "_visible_image_endpoint_for_base" not in source
+    assert "rstrip('/v1')" not in source
+    assert "model_route_id" in source

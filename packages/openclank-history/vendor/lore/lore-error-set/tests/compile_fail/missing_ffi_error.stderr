@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `NoFfi: FfiError` is not satisfied
+  --> tests/compile_fail/missing_ffi_error.rs:19:1
+   |
+19 | #[error_set]
+   | ^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `FfiError` is not implemented for `NoFfi`
+  --> tests/compile_fail/missing_ffi_error.rs:8:1
+   |
+ 8 | struct NoFfi;
+   | ^^^^^^^^^^^^
+help: the trait `FfiError` is implemented for `BadSet`
+  --> tests/compile_fail/missing_ffi_error.rs:19:1
+   |
+19 | #[error_set]
+   | ^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `error_set` (in Nightly builds, run with -Z macro-backtrace for more info)

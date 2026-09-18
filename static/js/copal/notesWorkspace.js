@@ -1,4 +1,5 @@
-export const NOTES_WORKSPACE_VERSION = 2;
+export const NOTES_WORKSPACE_VERSION = 3;
+export const NOTES_SELECTION_VERSION = 1;
 
 const MODES = new Set(['live', 'source', 'reading']);
 const PREVIEW_LAYOUTS = new Set(['inline', 'side-by-side']);
@@ -46,6 +47,37 @@ function safeNumber(value, fallback, minimum, maximum) {
   return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
 }
 
+function normalizeSelection(value, length) {
+  const max = Math.max(0, Number.isFinite(Number(length)) ? Number(length) : Number.MAX_SAFE_INTEGER);
+  const bounded = (candidate) => {
+    const number = Number(candidate);
+    return Number.isFinite(number) ? Math.min(max, Math.max(0, Math.trunc(number))) : 0;
+  };
+  const source = Array.isArray(value?.ranges) && value.ranges.length
+    ? value.ranges
+    : [{ anchor:value?.anchor, head:value?.head }];
+  const requestedMain = Math.max(0, Math.min(source.length - 1, Math.trunc(Number(value?.mainIndex) || 0)));
+  const indexed = source.map((range, index) => ({
+    index, anchor:bounded(range?.anchor), head:bounded(range?.head),
+  })).sort((a, b) => Math.min(a.anchor, a.head) - Math.min(b.anchor, b.head) || Math.max(a.anchor, a.head) - Math.max(b.anchor, b.head) || a.index - b.index);
+  const ranges = [];
+  let mainIndex = 0;
+  for (const candidate of indexed) {
+    const previous = ranges[ranges.length - 1];
+    if (previous && Math.min(candidate.anchor, candidate.head) < Math.max(previous.anchor, previous.head)) continue;
+    if (candidate.index === requestedMain) mainIndex = ranges.length;
+    ranges.push({ anchor:candidate.anchor, head:candidate.head });
+  }
+  if (!ranges.length) ranges.push({ anchor:0, head:0 });
+  if (mainIndex >= ranges.length) mainIndex = Math.min(ranges.length - 1, requestedMain);
+  const main = ranges[mainIndex];
+  return { version:NOTES_SELECTION_VERSION, ranges, mainIndex, anchor:main.anchor, head:main.head };
+}
+
+export function normalizeNoteSelection(value, length = Number.MAX_SAFE_INTEGER) {
+  return normalizeSelection(value, length);
+}
+
 export function normalizeNotesSettings(raw = {}) {
   const settings = raw && typeof raw === 'object' ? raw : {};
   return {
@@ -54,6 +86,31 @@ export function normalizeNotesSettings(raw = {}) {
     readableLineWidth:settings.readableLineWidth !== false,
     ribbon:settings.ribbon === true,
     completedVisibility:settings.completedVisibility === 'hide' ? 'hide' : 'show',
+    // Template preferences are ordinary workspace state. Keep paths and IDs
+    // opaque strings; Files/host authorization remains provider-owned.
+    templateFolder:typeof settings.templateFolder === 'string' ? settings.templateFolder.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '',
+    // The visible path is only a presentation hint.  A configured template
+    // folder remains bound to this opaque Files-v1 identity and revision.
+    ...(settings.templateFolderRef && typeof settings.templateFolderRef === 'object' ? { templateFolderRef:{
+        resourceRef:String(settings.templateFolderRef.resourceRef || settings.templateFolderRef.ref || '').trim(),
+        resourceKey:String(settings.templateFolderRef.resourceKey || '').trim(),
+        provider:String(settings.templateFolderRef.provider || '').trim(),
+        kind:String(settings.templateFolderRef.kind || 'folder').trim() || 'folder',
+        logicalPath:String(settings.templateFolderRef.logicalPath || settings.templateFolderRef.logical_path || '').trim(),
+        revision:settings.templateFolderRef.revision && typeof settings.templateFolderRef.revision === 'object'
+          ? { kind:String(settings.templateFolderRef.revision.kind || ''), value:String(settings.templateFolderRef.revision.value || '') }
+          : null,
+        capabilities:Array.isArray(settings.templateFolderRef.capabilities)
+          ? [...new Set(settings.templateFolderRef.capabilities.map(String))]
+          : Object.fromEntries(Object.entries(settings.templateFolderRef.capabilities || {}).filter(([, value]) => value === true).map(([key]) => [key, true])),
+        ...(settings.templateFolderRef.accountId || settings.templateFolderRef.account_id || settings.templateFolderRef.accountScope
+          ? { accountId:String(settings.templateFolderRef.accountId || settings.templateFolderRef.account_id || settings.templateFolderRef.accountScope) } : {}),
+        ...(settings.templateFolderRef.workspaceId || settings.templateFolderRef.workspace_id || settings.templateFolderRef.workspaceScope
+          ? { workspaceId:String(settings.templateFolderRef.workspaceId || settings.templateFolderRef.workspace_id || settings.templateFolderRef.workspaceScope) } : {}),
+        ...(settings.templateFolderRef.generation != null ? { generation:Number(settings.templateFolderRef.generation) } : {}),
+        ...(settings.templateFolderRef.policyGeneration != null ? { policyGeneration:Number(settings.templateFolderRef.policyGeneration) } : {}),
+      } } : {}),
+    dailyTemplateId:typeof settings.dailyTemplateId === 'string' ? settings.dailyTemplateId.trim() : '',
   };
 }
 
@@ -77,6 +134,9 @@ export function noteViewType(doc = {}) {
 
 function makeLeaf(doc, source = {}) {
   const view = noteViewType(doc);
+  const selection = source.selection && typeof source.selection === 'object'
+    ? normalizeSelection(source.selection, String(doc.text || '').length)
+    : null;
   return {
     type: 'leaf',
     id: typeof source.id === 'string' && source.id ? source.id : nextId('leaf'),
@@ -85,12 +145,7 @@ function makeLeaf(doc, source = {}) {
     mode:view === 'note' && source.mode === 'source' ? 'live' : MODES.has(source.mode) ? source.mode : 'live',
     pinned: source.pinned === true,
     rawSource: source.rawSource === true,
-    selection: source.selection && typeof source.selection === 'object'
-      ? {
-          anchor: safeNumber(source.selection.anchor, 0, 0, Number.MAX_SAFE_INTEGER),
-          head: safeNumber(source.selection.head, 0, 0, Number.MAX_SAFE_INTEGER),
-        }
-      : null,
+    selection,
     scrollTop: safeNumber(source.scrollTop, 0, 0, Number.MAX_SAFE_INTEGER),
   };
 }
@@ -178,7 +233,7 @@ function migrateLegacy(raw, docsById, fallbackDoc) {
     version: NOTES_WORKSPACE_VERSION,
     root,
     activeLeafId: activeLeaf?.id || null,
-    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[], showDotFolders:raw?.showDotFolders === true },
+    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[], showDotFolders:raw?.showDotFolders === true, resourceRoot:null, resourceRows:[], resourceCursor:null },
     right: {
       open:raw?.sidebarOpen === true,
       width:280,
@@ -197,7 +252,9 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const visibleDocs = docs.filter((doc) => doc && typeof doc.id === 'string');
   const docsById = new Map(visibleDocs.map((doc) => [doc.id, doc]));
   const fallbackDoc = docsById.get(selected) || visibleDocs[0] || null;
-  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return migrateLegacy(raw || {}, docsById, fallbackDoc);
+  // Version 2 already had the split/group tree. Accept it during migration so
+  // upgrading does not collapse open panes or discard saved cursors.
+  if (!raw || ![2, NOTES_WORKSPACE_VERSION].includes(raw.version) || !raw.root) return migrateLegacy(raw || {}, docsById, fallbackDoc);
 
   let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || makeGroup();
   let leaves = flattenLeaves(root);
@@ -229,6 +286,9 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const right = raw.right && typeof raw.right === 'object' ? raw.right : {};
   const settings = normalizeNotesSettings(raw.settings);
   const panels = normalizePanels(raw.panels, left, right);
+  const visibleOn = (side) => Object.entries(panels).filter(([, item]) => item.side === side && !item.hidden).sort(([, a], [, b]) => a.order - b.order).map(([id]) => id);
+  const leftVisible = visibleOn('left');
+  const rightVisible = visibleOn('right');
   return {
     version: NOTES_WORKSPACE_VERSION,
     root,
@@ -236,16 +296,19 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
     left: {
       open:left.open !== false,
       width:safeNumber(left.width, 224, 150, 420),
-      tab:LEFT_TABS.has(left.tab) ? left.tab : 'files',
+      tab:leftVisible.includes(left.tab) ? left.tab : leftVisible[0] || null,
       sort:FILE_SORTS.has(left.sort) ? left.sort : 'name',
       expanded:uniqueStrings(left.expanded),
       selected:uniqueStrings(left.selected).filter((id) => docsById.has(id)),
       showDotFolders:left.showDotFolders === true,
+      resourceRoot:left.resourceRoot && typeof left.resourceRoot === 'object' ? left.resourceRoot : null,
+      resourceRows:Array.isArray(left.resourceRows) ? left.resourceRows.slice(0, 5001) : [],
+      resourceCursor:left.resourceCursor || null,
     },
     right: {
       open:right.open === true,
       width:safeNumber(right.width, 280, 190, 480),
-      tab:RIGHT_TABS.has(right.tab) ? right.tab : 'properties',
+      tab:rightVisible.includes(right.tab) ? right.tab : rightVisible[0] || null,
       pinnedDocId:typeof right.pinnedDocId === 'string' && docsById.has(right.pinnedDocId) ? right.pinnedDocId : null,
     },
     panels,
@@ -433,6 +496,10 @@ function normalizePanels(rawPanels, left, right) {
         hidden: entry.hidden === true,
       };
     }
+  }
+  for (const id of ['files', 'search']) {
+    panels[id].side = 'left';
+    panels[id].hidden = false;
   }
   // Ensure no two panels share the same (side, order) — break ties by
   // stable panel-id sort so the result is deterministic.

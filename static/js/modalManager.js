@@ -82,6 +82,22 @@ function _emitModalOpened(id, modal) {
   } catch (_) {}
 }
 
+function _emitModalClosed(id, modal) {
+  try {
+    window.dispatchEvent(new CustomEvent('odysseus:modal-closed', {
+      detail: { id, modal },
+    }));
+  } catch (_) {}
+}
+
+function _emitModalLifecycle(type, id, modal) {
+  try {
+    window.dispatchEvent(new CustomEvent(`odysseus:modal-${type}`, {
+      detail: { id, modal },
+    }));
+  } catch (_) {}
+}
+
 function _captureRestoreHeight(modal, state) {
   if (!modal || !state) return;
   const content = modal.querySelector('.modal-content');
@@ -1203,6 +1219,7 @@ export function register(id, { restoreFn, closeFn, railBtnId, sidebarBtnId, labe
 
 export function unregister(id) {
   const s = _state.get(id);
+  _emitModalClosed(id, document.getElementById(id));
   if (s) _setBadge(s.btnIds, false);
   _state.delete(id);
   _chipPositions.delete(id);
@@ -1253,6 +1270,7 @@ export function minimize(id) {
     }
   }
   s.isMinimized = true;
+  _emitModalLifecycle('minimized', id, modal);
   _setBadge(s.btnIds, true);
   _ensureDock();
   _renderDock();
@@ -1277,6 +1295,7 @@ export function restore(id) {
     _emitModalOpened(id, modal);
   }
   s.isMinimized = false;
+  _emitModalLifecycle('restored', id, modal);
   _setBadge(s.btnIds, false);
   // Intentionally don't clear _chipPositions here: on mobile a free-
   // positioned chip is meant to act as a persistent toggle that stays
@@ -1303,10 +1322,10 @@ export function toggle(id) {
   return false;
 }
 
-/** Full close — calls closeFn (which should tear down DOM + state) and unregisters. */
+/** Full close — honors a synchronous or asynchronous close veto before cleanup. */
 export function close(id) {
   const s = _state.get(id);
-  if (!s) return;
+  if (!s) return false;
   const modalBeforeClose = document.getElementById(id);
   const contentBeforeClose = modalBeforeClose?.querySelector?.('.modal-content');
   const suspendedDockSide = contentBeforeClose?._dockSuspended
@@ -1314,39 +1333,56 @@ export function close(id) {
         : modalBeforeClose?.classList?.contains('modal-right-docked') ? 'right'
           : null);
   const shouldRememberDock = s.isMinimized && !!suspendedDockSide;
-  if (shouldRememberDock) _rememberDock(id, suspendedDockSide);
-  else _forgetDock(id);
-  try { s.closeFn(); } catch (e) { console.error('closeFn:', e); }
-  // Some tools (cookbook) animate their close over ~250ms before adding
-  // .hidden. If the user re-opens the tool before that finishes, open()
-  // sees the modal as "still visible" and takes its no-op early-return
-  // path — making the tool feel unresponsive. Force the modal into a
-  // fully-closed state synchronously so subsequent open() calls always
-  // hit the real open path.
-  const modal = document.getElementById(id);
-  if (modal) {
-    // Tear down the live dock push/classes before hiding. If this close came
-    // from a minimized dock chip, the side was persisted above and register()
-    // will intentionally re-apply it on the next open.
-    if (modal.classList.contains('modal-right-docked') || modal.classList.contains('modal-left-docked')) {
-      try { clearRightDock(modal); } catch (e) { console.warn('clearRightDock on close failed', e); }
+  const finish = () => {
+    // A close callback is allowed to unregister itself. Do not tear down a
+    // newer registration that appeared while an async decision was pending.
+    if (_state.get(id) !== s) return true;
+    if (shouldRememberDock) _rememberDock(id, suspendedDockSide);
+    else _forgetDock(id);
+    // Some tools animate their close before adding .hidden. Force the modal
+    // into a fully-closed state only after its close gate has allowed it.
+    const modal = document.getElementById(id);
+    _emitModalClosed(id, modal);
+    if (modal) {
+      if (modal.classList.contains('modal-right-docked') || modal.classList.contains('modal-left-docked')) {
+        try { clearRightDock(modal); } catch (e) { console.warn('clearRightDock on close failed', e); }
+      }
+      modal.classList.add('hidden');
+      modal.classList.remove('modal-minimized');
+      const content = modal.querySelector('.modal-content');
+      if (content) {
+        content.classList.remove('modal-closing', 'sheet-ready');
+        content.style.transform = '';
+        content.style.transition = '';
+        content.style.animation = '';
+        content.style.opacity = '';
+      }
     }
-    modal.classList.add('hidden');
-    modal.classList.remove('modal-minimized');
-    const content = modal.querySelector('.modal-content');
-    if (content) {
-      content.classList.remove('modal-closing', 'sheet-ready');
-      content.style.transform = '';
-      content.style.transition = '';
-      content.style.animation = '';
-      content.style.opacity = '';
-    }
+    _setBadge(s.btnIds, false);
+    _state.delete(id);
+    _chipPositions.delete(id);
+    _saveDockState();
+    _renderDock();
+    return true;
+  };
+
+  let decision;
+  try { decision = s.closeFn(); }
+  catch (e) {
+    console.error('closeFn:', e);
+    return false;
   }
-  _setBadge(s.btnIds, false);
-  _state.delete(id);
-  _chipPositions.delete(id);
-  _saveDockState();
-  _renderDock();
+  if (decision && typeof decision.then === 'function') {
+    return Promise.resolve(decision).then((allowed) => {
+      if (allowed === false) return false;
+      return finish();
+    }).catch((e) => {
+      console.error('closeFn:', e);
+      return false;
+    });
+  }
+  if (decision === false) return false;
+  return finish();
 }
 
 /** Inject a minimize (`_`) button next to the close button in a modal.
@@ -1459,11 +1495,12 @@ function _scanAndWire() {
     injectMinimizeButton(modal, id);
   }
 }
-const _scanTimer = setInterval(_scanAndWire, 1000);
-// First scan after DOM ready
-if (document.readyState !== 'loading') {
+const _scanTimer = typeof document !== 'undefined' ? setInterval(_scanAndWire, 1000) : null;
+// First scan after DOM ready. Keep the module importable by non-DOM
+// renderer tests; the timer and observers are browser-only wiring.
+if (typeof document !== 'undefined' && document.readyState !== 'loading') {
   setTimeout(_scanAndWire, 100);
-} else {
+} else if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => setTimeout(_scanAndWire, 100));
 }
 
@@ -1502,7 +1539,7 @@ function _clearEmailSplitAfterMinimize() {
 // Close any open body-mounted popups (kebab dropdowns, split-button menus,
 // etc.) when the cookbook modal is swiped away. Otherwise the dropdowns
 // stay floating in the middle of the page with no anchor.
-window.addEventListener('modal-dismissed', (e) => {
+if (typeof window !== 'undefined') window.addEventListener('modal-dismissed', (e) => {
   const id = e.detail?.id;
   if (id === 'cookbook-modal') {
     document.querySelectorAll(
@@ -1511,7 +1548,7 @@ window.addEventListener('modal-dismissed', (e) => {
   }
 });
 
-window.addEventListener('modal-dismissed', (e) => {
+if (typeof window !== 'undefined') window.addEventListener('modal-dismissed', (e) => {
   const id = e.detail?.id;
   if (!id) return;
   if (!_SWIPE_DOWN_MINIMIZES.has(id) && !_SWIPE_DOWN_MINIMIZES_PREFIX.some(p => id.startsWith(p))) return;
@@ -1542,7 +1579,7 @@ window.addEventListener('modal-dismissed', (e) => {
 // associated modal is currently MINIMIZED, restore it and stop the click
 // before the tool's own toggle handler runs (which would try to re-open or
 // close it).
-document.addEventListener('click', (e) => {
+if (typeof document !== 'undefined') document.addEventListener('click', (e) => {
   const btn = e.target.closest('[id]');
   if (!btn) return;
   const btnId = btn.id;

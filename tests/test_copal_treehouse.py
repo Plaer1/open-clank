@@ -30,6 +30,8 @@ def setup_course():
     state, result, _ = run(state, "skill.create", {"id": "skill:foundation", "title": "Foundation", "masteryThreshold": 60})
     state, result, _ = run(state, "skill.create", {"id": "skill:advanced", "title": "Advanced", "prerequisiteIds": ["skill:foundation"]})
     state, result, _ = run(state, "course.create", {"id": "course:one", "title": "Course One", "description": "A real course"})
+    state, share, _ = run(state, "course.share", {"courseId": "course:one", "recipientId": "learner", "capability": "learn"})
+    state, _, _ = run(state, "course.accept_share", {"shareToken": share["shareToken"]}, actor="learner")
     state, result, _ = run(state, "module.create", {"id": "module:one", "courseId": "course:one", "title": "Module One"})
     state, _, _ = run(state, "activity.create", {"id": "activity:foundation", "moduleId": "module:one", "title": "Foundation lesson", "content": "# Learn", "points": 60, "skillIds": ["skill:foundation"]})
     state, _, _ = run(state, "activity.create", {"id": "activity:advanced", "moduleId": "module:one", "title": "Advanced lesson", "points": 20, "skillIds": ["skill:advanced"]})
@@ -174,6 +176,90 @@ def test_evidence_review_and_role_filtered_snapshot():
     assert corrected["skills"]["skill:a"]["points"] == 0
     assert corrected["badges"] == []
     assert corrected["pointEvidence"] == []
+
+
+def test_progress_reset_is_generation_bound_and_cannot_reset_another_learner():
+    state = setup_course()
+    state, _, _ = run(state, "profile.create", {"id": "other", "displayName": "Other", "roles": ["learner"]})
+    state, shared, _ = run(state, "course.share", {"courseId": "course:one", "recipientId": "other", "capability": "learn"})
+    state, _, _ = run(state, "course.accept_share", {"shareToken": shared["shareToken"]}, actor="other")
+    state, _, _ = run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="learner")
+    state, _, _ = run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="other")
+    state, _, _ = run(state, "activity.complete", {"activityId": "activity:foundation"}, actor="learner")
+    state, _, _ = run(state, "activity.complete", {"activityId": "activity:foundation"}, actor="other")
+    before = compute_treehouse_projections(state)
+    assert before["learners"]["learner"]["points"] == 60
+    assert before["learners"]["other"]["points"] == 60
+
+    with pytest.raises(TreeHouseError) as foreign:
+        run(state, "progress.reset", {"profileId": "other"}, actor="learner")
+    assert foreign.value.code == "forbidden"
+
+    state, reset, _ = run(state, "progress.reset", {}, actor="learner")
+    after = compute_treehouse_projections(state)
+    assert reset["generation"] == 1
+    assert after["learners"]["learner"]["points"] == 0
+    assert after["learners"]["learner"]["completedActivityIds"] == []
+    assert after["learners"]["other"]["points"] == 60
+    assert state["progressResets"]["learner:*"] == 1
+
+    # A stale replay cannot revive the cleared generation or mint another
+    # reset event; command identity remains the idempotency boundary.
+    replay_state, replay, changed = run(state, "progress.reset", {}, actor="learner", command_id="reset-replay", revision=state["revision"])
+    assert changed is True
+    replay_state, replay_again, changed_again = run(replay_state, "progress.reset", {}, actor="learner", command_id="reset-replay", revision=replay_state["revision"])
+    assert changed_again is False
+    assert replay_again["replayed"] is True
+    assert compute_treehouse_projections(replay_state)["learners"]["other"]["points"] == 60
+
+
+def test_completion_from_before_reset_is_rejected_and_awards_recompute():
+    state = setup_course()
+    state, _, _ = run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="learner")
+    state, _, _ = run(state, "activity.complete", {"activityId": "activity:foundation", "resetGeneration": 0}, actor="learner")
+    state, reset, _ = run(state, "progress.reset", {}, actor="learner")
+    assert reset["generation"] == 1
+    with pytest.raises(TreeHouseError) as stale:
+        run(state, "activity.complete", {"activityId": "activity:foundation", "resetGeneration": 0}, actor="learner")
+    assert stale.value.code == "stale_completion"
+    state, completed, _ = run(state, "activity.complete", {"activityId": "activity:foundation", "resetGeneration": 1}, actor="learner")
+    assert compute_treehouse_projections(state)["learners"]["learner"]["points"] == 60
+
+
+def test_course_grants_use_one_access_predicate_and_owner_revoke():
+    state = setup_course()
+    state, _, _ = run(state, "profile.create", {"id": "other", "displayName": "Other", "roles": ["learner"]})
+    learner_view = public_treehouse_snapshot(state, "other")
+    assert "course:one" not in learner_view["state"]["courses"]
+    with pytest.raises(TreeHouseError) as denied:
+        run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="other")
+    assert denied.value.code == "course_forbidden"
+
+    state, shared, _ = run(state, "course.share", {"courseId": "course:one", "recipientId": "other", "capability": "learn"})
+    assert shared["shareToken"]
+    state, accepted, _ = run(state, "course.accept_share", {"shareToken": shared["shareToken"]}, actor="other")
+    assert accepted["grantId"] == shared["grantId"]
+    learner_view = public_treehouse_snapshot(state, "other")
+    assert "course:one" in learner_view["state"]["courses"]
+    state, enrolled, _ = run(state, "enrollment.enroll", {"courseId": "course:one"}, actor="other")
+    assert enrolled["enrollmentId"] == "course:one:other"
+    with pytest.raises(TreeHouseError) as edit_denied:
+        run(state, "course.update", {"courseId": "course:one", "title": "No"}, actor="other")
+    assert edit_denied.value.code == "forbidden"
+
+    state, edit_share, _ = run(state, "course.share", {"courseId": "course:one", "recipientId": "other", "capability": "edit"})
+    state, _, _ = run(state, "course.accept_share", {"shareToken": edit_share["shareToken"]}, actor="other")
+    state, edited, _ = run(state, "course.update", {"courseId": "course:one", "title": "Edited by grant"}, actor="other")
+    assert edited["courseId"] == "course:one"
+    assert state["courses"]["course:one"]["title"] == "Edited by grant"
+
+    state, revoked, _ = run(state, "course.revoke_share", {"grantId": shared["grantId"]})
+    assert revoked["revoked"] is True
+    state, _, _ = run(state, "course.revoke_share", {"grantId": edit_share["grantId"]})
+    assert "course:one" not in public_treehouse_snapshot(state, "other")["state"]["courses"]
+    with pytest.raises(TreeHouseError) as revoked_enroll:
+        run(state, "activity.complete", {"activityId": "activity:foundation"}, actor="other")
+    assert revoked_enroll.value.code == "course_forbidden"
 
 
 def test_legacy_migration_is_dry_run_idempotent_and_preserves_sources():

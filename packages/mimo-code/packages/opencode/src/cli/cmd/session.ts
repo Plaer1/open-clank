@@ -13,6 +13,7 @@ import { EOL } from "os"
 import path from "path"
 import { which } from "../../util/which"
 import { AppRuntime } from "@/effect/app-runtime"
+import * as Truncate from "@/tool/truncate"
 
 function pagerCmd(): string[] {
   const lessOptions = ["-R", "-S"]
@@ -86,6 +87,19 @@ export const SessionDeleteCommand = cmd({
       } catch {
         UI.error(`Session not found: ${args.sessionID}`)
         await Log.exit(1)
+      }
+      const pending = [sessionID]
+      while (pending.length) {
+        const current = pending.pop()!
+        const children = await AppRuntime.runPromise(
+          Session.Service.use((svc) => svc.children(current)),
+        )
+        pending.push(...children.map((child) => child.id))
+        await AppRuntime.runPromise(
+          Truncate.Service.use((svc) =>
+            svc.removeSession(current, process.env.OPEN_CLANK_OWNER ?? ""),
+          ),
+        )
       }
       await AppRuntime.runPromise(Session.Service.use((svc) => svc.remove(sessionID)))
       UI.println(UI.Style.TEXT_SUCCESS_BOLD + `Session ${args.sessionID} deleted` + UI.Style.TEXT_NORMAL)

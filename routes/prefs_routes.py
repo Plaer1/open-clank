@@ -1,12 +1,19 @@
 """User preferences API — per-user key/value store backed by a JSON file."""
 import json
 import os
-from typing import Optional
-from fastapi import APIRouter, Request
+from typing import Iterable, Optional
+from fastapi import APIRouter, HTTPException, Request
 from src.auth_helpers import get_current_user
 from src.constants import USER_PREFS_FILE
 
 PREFS_FILE = USER_PREFS_FILE
+_MEMORY_MODES = frozenset({"off", "automatic", "manual"})
+_PERMISSION_MODES = frozenset({"manual", "yolo", "auto"})
+_TRUST_PREF_MASTER = "memory_trust_auto"
+_TRUST_PREF_KINDS = "memory_trust_auto_kinds"
+_TRUST_KINDS = frozenset({"instruction", "persona", "fact", "episodic", "fabric", "wiki"})
+_MOBILE_CONTROL_SIDE_PREF = "mobile_control_side"
+_MOBILE_CONTROL_SIDES = frozenset({"left", "right", "system"})
 
 
 def _load():
@@ -66,25 +73,121 @@ def _save_for_user(user: Optional[str], prefs: dict):
     _save(all_prefs)
 
 
+def _mobile_control_side(value) -> str:
+    """Normalize the mobile layout preference without mutating stored prefs."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _MOBILE_CONTROL_SIDES:
+            return normalized
+    return "system"
+
+
+def backfill_memory_modes(existing_users: Iterable[str] = ()) -> bool:
+    """Freeze pre-v2 account behavior before the missing default becomes manual."""
+    all_prefs = _load()
+    users = [str(user or "").strip().lower() for user in existing_users]
+    users = list(dict.fromkeys(user for user in users if user))
+    changed = False
+
+    def freeze(prefs: dict) -> None:
+        nonlocal changed
+        raw = str(prefs.get("memory_mode") or "").strip().lower()
+        if raw in _MEMORY_MODES:
+            if prefs.get("memory_mode") != raw:
+                prefs["memory_mode"] = raw
+                changed = True
+            return
+        prefs["memory_mode"] = "off" if prefs.get("auto_memory") is False else "automatic"
+        changed = True
+
+    scoped = all_prefs.get("_users")
+    if isinstance(scoped, dict):
+        targets = users or [str(user) for user in scoped]
+        for user in targets:
+            prefs = scoped.get(user)
+            if not isinstance(prefs, dict):
+                prefs = {}
+                scoped[user] = prefs
+                changed = True
+            freeze(prefs)
+    elif users:
+        # The historical flat store belonged to the sole configured account.
+        # Database startup already performs this conversion; retain the same
+        # deterministic rule here for startup orders that reach prefs first.
+        if len(users) == 1:
+            prefs = dict(all_prefs)
+            freeze(prefs)
+            all_prefs = {"_users": {users[0]: prefs}}
+            changed = True
+        else:
+            all_prefs = {"_users": {}}
+            for user in users:
+                prefs = {}
+                freeze(prefs)
+                all_prefs["_users"][user] = prefs
+            changed = True
+    elif all_prefs:
+        freeze(all_prefs)
+
+    if changed:
+        _save(all_prefs)
+    return changed
+
+
 def setup_prefs_routes():
     router = APIRouter(prefix="/api/prefs", tags=["preferences"])
 
     @router.get("")
     async def get_all_prefs(request: Request):
         user = get_current_user(request)
-        return _load_for_user(user)
+        prefs = _load_for_user(user)
+        if _MOBILE_CONTROL_SIDE_PREF in prefs:
+            prefs[_MOBILE_CONTROL_SIDE_PREF] = _mobile_control_side(
+                prefs[_MOBILE_CONTROL_SIDE_PREF]
+            )
+        return prefs
 
     @router.get("/{key}")
     async def get_pref(request: Request, key: str):
         user = get_current_user(request)
         prefs = _load_for_user(user)
-        return {"key": key, "value": prefs.get(key)}
+        value = prefs.get(key)
+        if key == "permission_mode":
+            value = value if value in _PERMISSION_MODES else "manual"
+        elif key == _MOBILE_CONTROL_SIDE_PREF:
+            value = _mobile_control_side(value)
+        return {"key": key, "value": value}
 
     @router.put("/{key}")
     async def set_pref(request: Request, key: str, body: dict):
         user = get_current_user(request)
         prefs = _load_for_user(user)
-        prefs[key] = body.get("value")
+        value = body.get("value") if isinstance(body, dict) else None
+        if key == "permission_mode":
+            if not isinstance(value, str) or value.strip().lower() not in _PERMISSION_MODES:
+                raise HTTPException(status_code=422, detail="permission_mode must be manual, yolo, or auto")
+            value = value.strip().lower()
+        elif key == _TRUST_PREF_MASTER:
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=422, detail="memory_trust_auto must be a boolean")
+        elif key == _TRUST_PREF_KINDS:
+            if not isinstance(value, dict) or any(
+                kind not in _TRUST_KINDS or not isinstance(enabled, bool)
+                for kind, enabled in value.items()
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="memory_trust_auto_kinds must map known kinds to booleans",
+                )
+            value = {kind: value[kind] for kind in sorted(value)}
+        elif key == _MOBILE_CONTROL_SIDE_PREF:
+            if not isinstance(value, str) or value.strip().lower() not in _MOBILE_CONTROL_SIDES:
+                raise HTTPException(
+                    status_code=422,
+                    detail="mobile_control_side must be left, right, or system",
+                )
+            value = value.strip().lower()
+        prefs[key] = value
         _save_for_user(user, prefs)
         return {"key": key, "value": prefs[key]}
 

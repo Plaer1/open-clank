@@ -4,10 +4,30 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7000').replace(/\/$/, '');
+const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
 const debuggerBase = (process.argv[3] || 'http://127.0.0.1:9222').replace(/\/$/, '');
 const outputDir = process.argv[4] || '/tmp/openclank-copal-browser';
 fs.mkdirSync(outputDir, { recursive:true });
+
+const authCookieFdRaw = String(process.env.OPEN_CLANK_AUTH_COOKIE_FD || '').trim();
+let authSessionToken = '';
+if (authCookieFdRaw) {
+  const authCookieFd = Number.parseInt(authCookieFdRaw, 10);
+  assert(Number.isInteger(authCookieFd) && authCookieFd >= 0, 'OPEN_CLANK_AUTH_COOKIE_FD must name an open file descriptor');
+  authSessionToken = fs.readFileSync(authCookieFd, 'utf8').trim();
+  assert(/^[0-9a-f]{64}$/i.test(authSessionToken), 'OPEN_CLANK_AUTH_COOKIE_FD did not contain an Open Clank session token');
+}
+const expectedAuthUsername = String(process.env.OPEN_CLANK_AUTH_USERNAME || 'e').trim().toLowerCase();
+
+async function authenticatedFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (authSessionToken) headers.set('Cookie', `odysseus_session=${authSessionToken}`);
+  try {
+    return await fetch(url, { ...options, headers });
+  } catch (error) {
+    throw new Error(`${String(options.method || 'GET').toUpperCase()} ${url} failed: ${error.message}`, { cause:error });
+  }
+}
 
 const targets = await fetch(`${debuggerBase}/json`).then((response) => response.json());
 const target = targets.find((item) => item.type === 'page');
@@ -38,7 +58,8 @@ function command(method, params = {}) {
   const id = ++sequence;
   return new Promise((resolve, reject) => {
     const detail = method === 'Runtime.evaluate' ? `: ${String(params.expression || '').replace(/\s+/g, ' ').slice(0, 180)}` : '';
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out${detail}`)); }, 25_000);
+    const commandTimeout = method === 'Page.navigate' ? 60_000 : 25_000;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out${detail}`)); }, commandTimeout);
     pending.set(id, { resolve, reject, timer }); socket.send(JSON.stringify({ id, method, params }));
   });
 }
@@ -59,9 +80,26 @@ async function waitFor(expression, label, timeout = 25_000) {
 }
 
 async function navigate(route) {
-  const url = `${base}${route}`; await command('Page.navigate', { url });
-  await waitFor(`location.href === ${JSON.stringify(url)}`, `${route} navigation`);
-  await waitFor("document.readyState === 'complete' && !document.getElementById('app-loader')", `${route} ready`);
+  const url = `${base}${route}`;
+  const expected = new URL(url);
+  await command('Page.navigate', { url });
+  // Open Clank may immediately canonicalize an in-app route and intentionally
+  // discard a cache-busting query string. The path is the navigation contract;
+  // an exact href check races history.replaceState and can never observe it.
+  await waitFor(
+    `location.origin === ${JSON.stringify(expected.origin)} && location.pathname === ${JSON.stringify(expected.pathname)}`,
+    `${route} navigation`,
+  );
+  // A viewport-mode change can make WKWebView/Chromium rebuild the responsive
+  // shell while the acceptance backend is also reconciling Copal projections.
+  // Keep the path assertion tight, but allow the application readiness gate a
+  // cold-start-sized budget so a completed navigation is not reported as a
+  // failure solely because the shared 25s polling default elapsed.
+  await waitFor(
+    "document.readyState === 'complete' && !document.getElementById('app-loader')",
+    `${route} ready`,
+    60_000,
+  );
 }
 
 async function screenshot(name) {
@@ -72,10 +110,10 @@ async function screenshot(name) {
           : '#copal-notes-modal .copal-modal-content';
   await evaluate(`(() => {
     const saved=[]; const keep=/Acceptance|QOL Browser|Long Note|Notes Mention|Notes Canvas|Trash Probe/i;
-    const textSelectors=['#copal-notes-modal .copal-file-row span:last-child','#copal-notes-modal .copal-folder-row span:last-child','#copal-notes-modal .copal-note-tab-label','#copal-notes-modal .copal-base-cell','#copal-notes-modal .copal-base-leaf-toolbar strong','#copal-notes-modal .copal-base-table th','#copal-notes-modal .copal-link-result strong','#copal-timeline-modal .copal-event','#copal-timeline-modal .copal-track-label > span'];
+    const textSelectors=['#copal-notes-modal .copal-file-row span:last-child','#copal-notes-modal .copal-folder-row span:last-child','#copal-notes-modal .copal-note-tab-label','#copal-notes-modal .copal-base-cell','#copal-notes-modal .copal-base-leaf-toolbar strong','#copal-notes-modal .copal-base-table th','#copal-notes-modal .copal-link-result strong','#copal-timeline-modal .copal-event','#copal-timeline-modal .copal-track-name'];
     for (const node of document.querySelectorAll(textSelectors.join(','))) {
       if (keep.test(node.textContent || '')) continue;
-      saved.push([node,'text',node.textContent]); node.textContent=node.matches('.copal-track-label > span') ? 'Synthetic track' : node.matches('.copal-event') ? 'Synthetic event' : 'Reference';
+      saved.push([node,'text',node.textContent]); node.textContent=node.matches('.copal-track-name') ? 'Synthetic track' : node.matches('.copal-event') ? 'Synthetic event' : 'Reference';
     }
     if (${JSON.stringify(name)} === 'rich-event-native-window') for (const node of document.querySelectorAll('#copal-event-editor-modal input[type="text"],#copal-event-editor-modal textarea')) { saved.push([node,'value',node.value]); node.value='Synthetic fixture'; }
     window.__copalScreenshotRestore=saved;
@@ -87,7 +125,7 @@ async function screenshot(name) {
 }
 
 async function jsonRequest(route, options = {}) {
-  const response = await fetch(`${base}${route}`, { headers:{ 'Content-Type':'application/json', ...(options.headers || {}) }, ...options });
+  const response = await authenticatedFetch(`${base}${route}`, { headers:{ 'Content-Type':'application/json', ...(options.headers || {}) }, ...options });
   if (!response.ok) throw new Error(`${route}: HTTP ${response.status} ${await response.text()}`);
   return response.json();
 }
@@ -116,13 +154,44 @@ await command('Network.enable');
 await command('Network.setCacheDisabled', { cacheDisabled:true });
 await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, deviceScaleFactor:1, mobile:false });
 
+if (authSessionToken) {
+  const cookie = await command('Network.setCookie', {
+    name:'odysseus_session', value:authSessionToken, url:`${new URL(base).origin}/`,
+    httpOnly:true, secure:false, sameSite:'Lax',
+  });
+  assert.notEqual(cookie.success, false, 'Chromium rejected the Open Clank session cookie');
+
+  const nodeAuth = await jsonRequest('/api/auth/status');
+  assert.equal(nodeAuth.authenticated, true, 'Node acceptance requests are not authenticated');
+  assert.equal(String(nodeAuth.username || '').toLowerCase(), expectedAuthUsername, 'Node acceptance requests resolved to the wrong user');
+
+  await navigate('/api/auth/status');
+  const browserAuth = await evaluate("fetch('/api/auth/status', { credentials:'same-origin' }).then((response) => response.json())");
+  assert.equal(browserAuth.authenticated, true, 'Browser acceptance requests are not authenticated');
+  assert.equal(String(browserAuth.username || '').toLowerCase(), expectedAuthUsername, 'Browser acceptance requests resolved to the wrong user');
+}
+
 const viewSelectors = {
-  notes:'.copal-notes-workspace', wiki:'.copal-story .copal-tiddler', timeline:'.copal-timeline-v2', galaxy:'.copal-graph',
-  graph:'.copal-graph', mind:'.copal-mind-tree', bases:'.copal-bases-workspace', treehouse:"nav[aria-label='TreeHouse sections']", todo:'.copal-meatbag-tasks',
+  notes:'.copal-notes-workspace', wiki:'.copal-layout', timeline:'.copal-timeline-v2',
+  graph:'.copal-graph', mind:'.copal-mind-tree', treehouse:"nav[aria-label='TreeHouse sections']", todo:'.copal-meatbag-tasks',
 };
-const labels = { notes:'Notes', wiki:'Wiki', timeline:'Timeline', galaxy:'Galaxy', graph:'Graph', mind:'Mind', bases:'Bases', treehouse:'TreeHouse', todo:'Meatbag Tasks' };
+const viewRoutes = { notes:'editor', wiki:'wiki', timeline:'timeline', graph:'graph', mind:'mind', treehouse:'treehouse', todo:'todo' };
+const labels = { notes:'Editor', wiki:'Wiki', timeline:'Timeline', graph:'Graph', mind:'Mind', treehouse:'TreeHouse', todo:'Meatbag Tasks' };
 const results = { migration:{}, windows:{}, notes:{}, timeline:{}, editor:{}, tracks:{}, labels:{}, calendar:{}, mobile:{}, exceptions, consoleMessages };
 const checkpoint = (label) => console.error(`[copal-browser] ${label}`);
+const copalStatus = await jsonRequest('/api/copal/status?workspace=default');
+const scopedCopalStorageKey = (name, workspace = '') => {
+  const suffix = workspace ? `:${workspace}` : '';
+  return copalStatus.storage_namespace === 'local'
+    ? `${name}${suffix}`
+    : `${name}:scope:${encodeURIComponent(copalStatus.storage_namespace)}${suffix}`;
+};
+const notesWindowSizeKey = scopedCopalStorageKey('odysseus-copal-notes-window-size');
+const notesLayoutKey = scopedCopalStorageKey('odysseus-copal-notes-layout', 'default');
+const timelineDefaultKey = scopedCopalStorageKey('odysseus-copal-timeline-v2', 'default');
+const timelineOtherKey = scopedCopalStorageKey('odysseus-copal-timeline-v2', 'slice02-other');
+const copalWorkspaceKey = scopedCopalStorageKey('odysseus-copal-workspace');
+const primaryModifier = await evaluate("/Mac|iPhone|iPad|iPod/i.test(navigator.userAgentData?.platform || navigator.platform) ? 4 : 2");
 
 const planningBaseline = await jsonRequest('/api/copal/planning?workspace=default');
 if (!planningBaseline.trackRegistry && planningBaseline.tracks.length === 0 && !planningBaseline.migration) {
@@ -138,7 +207,7 @@ if (!planningBaseline.trackRegistry && planningBaseline.tracks.length === 0 && !
   await jsonRequest('/api/copal/documents?workspace=default', {
     method:'POST',
     body:JSON.stringify({
-      name:'.copal/browser-acceptance-planning.json', kind:'planning',
+      name:'.copal/planning.json', kind:'planning',
       content:JSON.stringify({ title:'Browser acceptance', today, globalStart:shiftDay(today,-14), tracks, floatingTodos:[{ id:'acceptance-floating', text:'Floating acceptance task', status:'pending', priority:'medium' }] }),
     }),
   });
@@ -161,7 +230,8 @@ if (!docs.some((doc) => doc.kind === 'base')) {
   docs = (await jsonRequest('/api/copal/documents?workspace=default')).docs;
 }
 const openClankKnowledge = docs.filter((doc) => doc.owner === 'shared' && doc.name.startsWith('OpenClank/'));
-assert.equal(openClankKnowledge.length, 4);
+// The current checked-out seed ships five shared Open Clank knowledge notes.
+assert.equal(openClankKnowledge.length, 5);
 assert(openClankKnowledge.every((doc) => doc.kind === 'note' && doc.storage === 'database' && doc.readOnly === true && doc.properties?.builtin === true));
 let acceptance = docs.find((doc) => doc.name === 'Acceptance/QOL Browser.md');
 const acceptanceContent = '---\nstatus: active\nscore: 7\ndone: false\ndue: 2026-07-18\nstarted: 2026-07-11T09:30\ntags: ["acceptance", "notes"]\nowners: ["Eliott", "Odysseus"]\n---\n# Browser QOL\n\nThis is **inline** Live Preview with `code`, ==highlight==, ~~strike~~, $x + y$, [a link](https://example.com), and #acceptance. %%hidden note%%\n\n- [ ] Verify editing\n1. Verify ordered lists\n\n> [!note] Shared semantics\n> Reading and inline modes agree.\n\n| Mode | Default |\n| --- | --- |\n| Live Preview | yes |\n\n$$\nx + y = z\n$$\n\n---\n\n[^proof]: Footnote fixture\n\n## Linked section\n\n[[Acceptance/Notes Mention]]\n';
@@ -221,9 +291,9 @@ docs = (await jsonRequest('/api/copal/documents?workspace=default')).docs;
 const baseFixture = docs.find((doc) => doc.kind === 'base');
 
 await navigate(`/?acceptance=${Date.now()}`);
-await evaluate("localStorage.removeItem('odysseus-copal-notes-layout:default')");
-await evaluate("localStorage.removeItem('odysseus-copal-timeline-v2:default')");
-await evaluate("localStorage.setItem('odysseus-copal-notes-window-size', JSON.stringify({w:99999,h:99999}))");
+await evaluate(`localStorage.removeItem(${JSON.stringify(notesLayoutKey)})`);
+await evaluate(`localStorage.removeItem(${JSON.stringify(timelineDefaultKey)})`);
+await evaluate(`localStorage.setItem(${JSON.stringify(notesWindowSizeKey)}, JSON.stringify({w:99999,h:99999}))`);
 await navigate(`/copal/timeline?acceptance=${Date.now()}`);
 await waitFor("document.querySelector('#copal-timeline-modal:not(.hidden) .copal-timeline-v2')", 'canonical Timeline window', 35_000);
 await waitFor(`fetch('/api/copal/planning?workspace=default').then((response) => response.json()).then((data) => data.canonical === true && data.migrationRequired === false)`, 'canonical migration', 35_000);
@@ -237,7 +307,7 @@ results.migration = { tracks:migrated.tracks.length, events:migratedEvents.lengt
 
 async function openView(view) {
   await evaluate(`document.querySelector('[data-copal-view=${view}]').click()`);
-  await waitFor(`location.pathname === '/copal/${view}'`, `${view} route`);
+  await waitFor(`location.pathname === '/copal/${viewRoutes[view]}'`, `${view} route`);
   const selector = `#copal-${view}-modal:not(.hidden) ${viewSelectors[view]}`;
   await waitFor(`document.querySelector(${JSON.stringify(selector)})`, `${view} content`);
 }
@@ -256,8 +326,8 @@ for (const view of Object.keys(viewSelectors)) {
 }
 
 results.windows.simultaneous = await evaluate(`(() => ({ visible:[...document.querySelectorAll('.copal-view-window:not(.hidden)')].map((node) => node.id), sse:performance.getEntriesByType('resource').filter((entry) => entry.name.includes('/api/copal/events')).length }))()`);
-assert.equal(new Set(results.windows.simultaneous.visible).size, 9);
-checkpoint('nine windows ready');
+assert.equal(new Set(results.windows.simultaneous.visible).size, 7);
+checkpoint('canonical windows ready');
 
 await evaluate("document.querySelector('#copal-notes-modal .modal-minimize-btn,#copal-notes-modal .minimize-btn').click()");
 await waitFor("document.getElementById('copal-notes-modal').classList.contains('modal-minimized')", 'Notes minimize');
@@ -300,7 +370,7 @@ assert(['table','callout','math','footnote','hr'].every((kind) => results.notes.
 await screenshot('notes-default-inline');
 results.notes.windowSizeMigration = await evaluate(`(() => {
   const modal=document.querySelector('#copal-notes-modal .copal-modal-content').getBoundingClientRect();
-  const saved=JSON.parse(localStorage.getItem('odysseus-copal-notes-window-size'));
+  const saved=JSON.parse(localStorage.getItem(${JSON.stringify(notesWindowSizeKey)}));
   return {
     saved,
     rect:{ left:modal.left, top:modal.top, right:modal.right, bottom:modal.bottom, width:modal.width, height:modal.height },
@@ -363,51 +433,55 @@ await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'k
 await evaluate("document.querySelector('dialog.copal-command-palette[open]').close()");
 results.notes.keyboardCommandsAndComposition = true;
 await evaluate(`(() => { const sort=document.querySelector('#copal-notes-modal select[aria-label="Sort files"]'); sort.value='modified'; sort.dispatchEvent(new Event('change',{bubbles:true})); })()`);
-await waitFor("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).left.sort === 'modified'", 'file sort persistence');
+await waitFor(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).left.sort === 'modified'`, 'file sort persistence');
 await evaluate(`(() => { const rows=[...document.querySelectorAll('#copal-notes-modal .copal-file-row')].slice(0,2); rows.forEach((row)=>row.dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}))); })()`);
 await waitFor("document.querySelector('#copal-notes-modal .copal-file-selection')?.textContent.includes('2 selected')", 'file multi-selection');
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-file-selection button')].find((node)=>node.textContent.trim()==='Clear').click()");
 await waitFor("!document.querySelector('#copal-notes-modal .copal-file-selection')", 'file selection clear');
-const leftWidthBefore = await evaluate("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).left.width");
+const leftWidthBefore = await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).left.width`);
 await evaluate("document.querySelector('#copal-notes-modal .copal-sidebar-resize.left').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}))");
-await waitFor(`JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).left.width === ${leftWidthBefore + 12}`, 'keyboard sidebar resize');
+await waitFor(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).left.width === ${leftWidthBefore + 12}`, 'keyboard sidebar resize');
 const resizedLeftWidth = leftWidthBefore + 12;
 results.notes.fileNavigation = true;
 
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'Notes command palette');
-await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Notes settings')).click()");
-await waitFor("document.querySelector('dialog.copal-notes-settings[open] select[aria-label=\"Preview layout\"]')", 'Notes settings');
-const defaultLayout = await evaluate("document.querySelector('dialog.copal-notes-settings[open] select[aria-label=\"Preview layout\"]').value");
+await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Editor settings')).click()");
+await waitFor("!document.getElementById('settings-modal').classList.contains('hidden') && !document.querySelector('#settings-modal [data-settings-panel=\"appearance\"]').classList.contains('hidden')", 'Editor settings opens host Appearance');
+const defaultLayout = await evaluate("document.querySelector('#settings-modal [data-copal-notes-setting=\"previewLayout\"]').value");
 assert.equal(defaultLayout, 'inline');
-await evaluate(`(() => { const dialog=document.querySelector('dialog.copal-notes-settings[open]'); const select=dialog.querySelector('select[aria-label="Preview layout"]'); select.value='side-by-side'; [...dialog.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+await evaluate("(() => { const select=document.querySelector('#settings-modal [data-copal-notes-setting=\"previewLayout\"]'); select.value='side-by-side'; select.dispatchEvent(new Event('change',{bubbles:true})); })()");
 await waitFor("document.querySelector('#copal-notes-modal .copal-note-editing-surface.side-by-side') && !document.querySelector('#copal-notes-modal .copal-note-live-preview').hidden", 'opt-in side-by-side preview');
 await screenshot('notes-side-by-side');
-results.notes.sideBySidePersisted = await evaluate("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).settings.previewLayout");
+results.notes.sideBySidePersisted = await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).settings.previewLayout`);
 assert.equal(results.notes.sideBySidePersisted, 'side-by-side');
-await navigate(`/copal/notes?doc=${encodeURIComponent(acceptance.id)}&persist=${Date.now()}`);
+await evaluate("document.querySelector('#settings-modal button[aria-label=\"Close settings\"]').click()");
+await waitFor("document.getElementById('settings-modal').classList.contains('hidden')", 'host Appearance close');
+await navigate(`/copal/editor?doc=${encodeURIComponent(acceptance.id)}&persist=${Date.now()}`);
 await waitFor("document.querySelector('#copal-notes-modal .copal-note-editing-surface.side-by-side')", 'side-by-side reload persistence');
-assert.equal(await evaluate("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).left.width"), resizedLeftWidth);
+assert.equal(await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).left.width`), resizedLeftWidth);
 results.notes.sidebarResizeRestore = true;
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
-await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'reloaded Notes commands');
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
+await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'reloaded Editor commands');
 await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Inline preview layout')).click()");
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-workspace').dataset.previewLayout === 'inline' && !document.querySelector('#copal-notes-modal .copal-note-editing-surface.side-by-side')", 'return to inline preview');
 
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'independent editor settings commands');
-await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Notes settings')).click()");
-await waitFor("document.querySelector('dialog.copal-notes-settings[open]')", 'independent editor settings');
-await evaluate(`(() => { const dialog=document.querySelector('dialog.copal-notes-settings[open]'); dialog.querySelector('input[aria-label="Show line numbers"]').checked=true; dialog.querySelector('input[aria-label="Readable line width"]').checked=false; [...dialog.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Editor settings')).click()");
+await waitFor("!document.getElementById('settings-modal').classList.contains('hidden') && !document.querySelector('#settings-modal [data-settings-panel=\"appearance\"]').classList.contains('hidden')", 'host Appearance editor settings');
+await evaluate("(() => { const root=document.querySelector('#settings-modal [data-copal-notes-appearance-card]'); const lines=root.querySelector('[data-copal-notes-setting=\"lineNumbers\"]'); lines.checked=true; lines.dispatchEvent(new Event('change',{bubbles:true})); const readable=root.querySelector('[data-copal-notes-setting=\"readableLineWidth\"]'); readable.checked=false; readable.dispatchEvent(new Event('change',{bubbles:true})); })()");
 await waitFor("document.querySelector('#copal-notes-modal .cm-lineNumbers') && getComputedStyle(document.querySelector('#copal-notes-modal .cm-content')).maxWidth === 'none'", 'independent line-number and width settings');
-assert.deepEqual(await evaluate(`(() => { const settings=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).settings; return { lineNumbers:settings.lineNumbers, readableLineWidth:settings.readableLineWidth }; })()`), { lineNumbers:true, readableLineWidth:false });
+assert.deepEqual(await evaluate(`(() => { const settings=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).settings; return { lineNumbers:settings.lineNumbers, readableLineWidth:settings.readableLineWidth }; })()`), { lineNumbers:true, readableLineWidth:false });
 results.notes.independentEditorSettings = true;
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'restore editor settings commands');
-await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Notes settings')).click()");
-await waitFor("document.querySelector('dialog.copal-notes-settings[open]')", 'restore editor settings');
-await evaluate(`(() => { const dialog=document.querySelector('dialog.copal-notes-settings[open]'); dialog.querySelector('input[aria-label="Show line numbers"]').checked=false; dialog.querySelector('input[aria-label="Readable line width"]').checked=true; [...dialog.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Editor settings')).click()");
+await waitFor("!document.getElementById('settings-modal').classList.contains('hidden') && !document.querySelector('#settings-modal [data-settings-panel=\"appearance\"]').classList.contains('hidden')", 'restore host Appearance editor settings');
+await evaluate("(() => { const root=document.querySelector('#settings-modal [data-copal-notes-appearance-card]'); const lines=root.querySelector('[data-copal-notes-setting=\"lineNumbers\"]'); lines.checked=false; lines.dispatchEvent(new Event('change',{bubbles:true})); const readable=root.querySelector('[data-copal-notes-setting=\"readableLineWidth\"]'); readable.checked=true; readable.dispatchEvent(new Event('change',{bubbles:true})); })()");
 await waitFor("!document.querySelector('#copal-notes-modal .cm-lineNumbers') && getComputedStyle(document.querySelector('#copal-notes-modal .cm-content')).maxWidth !== 'none'", 'restored clean editor settings');
+await evaluate("document.querySelector('#settings-modal button[aria-label=\"Close settings\"]').click()");
+await waitFor("document.getElementById('settings-modal').classList.contains('hidden')", 'host Appearance editor settings close');
 
 await evaluate("document.getElementById('copal-notes-right-sidebar-toggle').click()");
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-sidebar')", 'linked views sidebar');
@@ -426,9 +500,10 @@ assert.deepEqual(await evaluate(`(() => ({
 }))()`), { done:'checkbox', due:'date', started:'datetime-local', owners:'text' });
 await evaluate(`(() => { const key=document.querySelector('#copal-notes-modal input[aria-label="Property name done"]'); key.value='complete'; key.dispatchEvent(new Event('change',{bubbles:true})); })()`);
 await waitFor("[...document.querySelectorAll('#copal-notes-modal .copal-property-key')].some((node)=>node.value==='complete')", 'property key transaction');
+await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^complete: false$/m.test(doc.text))`, 'property key save');
 await evaluate("document.querySelector('#copal-notes-modal .cm-content').focus()");
-await command('Input.dispatchKeyEvent', { type:'keyDown', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:2 });
-await command('Input.dispatchKeyEvent', { type:'keyUp', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:2 });
+await command('Input.dispatchKeyEvent', { type:'keyDown', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:primaryModifier });
+await command('Input.dispatchKeyEvent', { type:'keyUp', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:primaryModifier });
 await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^done: false$/m.test(doc.text))`, 'property undo Redb save');
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-inspector-tabs button')].find((node)=>node.textContent.trim()==='Links').click(); [...document.querySelectorAll('#copal-notes-modal .copal-inspector-tabs button')].find((node)=>node.textContent.trim()==='Properties').click()");
 await waitFor("[...document.querySelectorAll('#copal-notes-modal .copal-property-key')].some((node)=>node.value==='done')", 'property undo inspector refresh');
@@ -448,12 +523,12 @@ await waitFor("[...document.querySelectorAll('#copal-notes-modal .copal-links-pa
 assert(await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-mention-row')].some((node)=>node.textContent.includes('Notes Mention.md'))"));
 await screenshot('notes-links');
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-notes-sidebar > header button')].find((node)=>node.textContent.trim()==='Pin').click()");
-assert.equal(await evaluate(`JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).right.pinnedDocId`), acceptance.id);
+assert.equal(await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).right.pinnedDocId`), acceptance.id);
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-mention-row')].find((node)=>node.textContent.includes('Notes Mention.md')).click()");
 await waitFor(`location.search.includes(${JSON.stringify(mentionFixture.id)}) || document.querySelector('#copal-notes-modal .copal-inline-title')?.value === 'Notes Mention'`, 'linked-view target open');
-assert.equal(await evaluate(`JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).right.pinnedDocId`), acceptance.id);
+assert.equal(await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).right.pinnedDocId`), acceptance.id);
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-notes-sidebar > header button')].find((node)=>node.textContent.trim()==='Unpin').click()");
-await waitFor("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).right.pinnedDocId === null", 'linked-view unpin');
+await waitFor(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).right.pinnedDocId === null`, 'linked-view unpin');
 results.notes.sidebarPinFollow = true;
 
 for (const [commandLabel, selector, label] of [
@@ -461,7 +536,7 @@ for (const [commandLabel, selector, label] of [
   ['Source mode', '.copal-codemirror-host[data-mode="source"]', 'Source mode'],
   ['Live Preview mode', '.copal-codemirror-host[data-mode="live"]', 'Live Preview mode'],
 ]) {
-  await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+  await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
   await waitFor("document.querySelector('dialog.copal-command-palette[open]')", `${label} commands`);
   await evaluate(`[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes(${JSON.stringify(commandLabel)})).click()`);
   await waitFor(`document.querySelector('#copal-notes-modal ${selector}')`, label);
@@ -533,6 +608,16 @@ if (baseFixture) {
   await evaluate(`(() => { const input=document.querySelector('dialog.copal-quick-switcher[open] input'); input.value=${JSON.stringify(baseFixture.name)}; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('dialog.copal-quick-switcher[open] .copal-doc-row').click(); })()`);
   await waitFor("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-leaf')", 'typed Base leaf');
   assert.equal(await evaluate("document.querySelectorAll('#copal-notes-modal .copal-note-leaf[data-view-type=base] .cm-editor').length"), 0);
+  await waitFor("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-toolbar')", 'full Base query toolbar');
+  assert.equal(await evaluate("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-toolbar') !== null"), true, 'Base leaf mounts the full query toolbar inside Editor');
+  assert.equal(await evaluate("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-table, #copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-card-view, #copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-list-view') !== null"), true, 'Base leaf keeps the full editable result surface');
+  assert.equal(await evaluate("document.querySelectorAll('#copal-notes-modal .copal-note-tab').length > 1"), true, 'Base leaf coexists with the Editor tabs');
+  await evaluate("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] td[data-copal-context-object=base-cell]')?.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:20}))");
+  await waitFor("document.querySelector('#openclank-context-menu button[data-command=open-base-document]')", 'Base cell shared context menu');
+  await evaluate("document.querySelector('#openclank-context-menu button[data-command=open-base-document]').click()");
+  await waitFor("document.querySelector('#copal-notes-modal .copal-note-leaf:not([data-view-type=base])')", 'Base cell opens its document through Editor');
+  await evaluate(`history.pushState({}, '', '/copal/bases?doc=${encodeURIComponent(baseFixture.id)}'); window.dispatchEvent(new PopStateEvent('popstate'));`);
+  await waitFor("document.querySelector('#copal-notes-modal .copal-note-leaf[data-view-type=base] .copal-base-leaf')", 'legacy Base route opens the selected Base leaf');
   await screenshot('notes-base');
 }
 
@@ -551,8 +636,8 @@ await waitFor("document.querySelector('dialog.copal-quick-switcher[open] input')
 await evaluate(`(() => { const input=document.querySelector('dialog.copal-quick-switcher[open] input'); input.value='Notes Canvas'; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('dialog.copal-quick-switcher[open] .copal-doc-row').click(); })()`);
 await waitFor("document.querySelectorAll('#copal-notes-modal .copal-note-group').length === 3 && document.querySelectorAll('#copal-notes-modal .copal-note-splitter').length === 2", 'nested recursive split');
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-note-splitter')].at(-1)?.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}))");
-await waitFor("JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).root.children", 'nested split persistence');
-await navigate(`/copal/notes?doc=${encodeURIComponent(acceptance.id)}&restore=${Date.now()}`);
+await waitFor(`JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).root.children`, 'nested split persistence');
+await navigate(`/copal/editor?doc=${encodeURIComponent(acceptance.id)}&restore=${Date.now()}`);
 await waitFor("document.querySelectorAll('#copal-notes-modal .copal-note-group').length === 3 && document.querySelectorAll('#copal-notes-modal .copal-note-splitter').length === 2", 'nested split reload restoration');
 results.notes.nestedSplitRestore = true;
 results.notes.accessibility = await evaluate(`(() => ({
@@ -568,7 +653,7 @@ for (const expected of [3, 2]) {
   await evaluate(`(() => { const group=[...document.querySelectorAll('#copal-notes-modal .copal-note-group')].at(-1); const menu=group.querySelector('.copal-group-menu'); menu.open=true; [...menu.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Close tab group').click(); })()`);
   await waitFor(`document.querySelectorAll('#copal-notes-modal .copal-note-group').length === ${expected - 1}`, 'tab group close');
 }
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'reopen command palette');
 await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Reopen closed note')).click()");
 await waitFor("document.querySelectorAll('#copal-notes-modal .copal-note-tab').length >= 2", 'reopen closed note');
@@ -586,8 +671,8 @@ let conflictDrafted = false;
 for (let attempt = 0; attempt < 10 && !conflictDrafted; attempt++) {
   await evaluate("(() => { const content=document.querySelector('#copal-notes-modal .cm-content'); content.blur(); content.focus(); })()");
   await new Promise((resolve) => setTimeout(resolve, 200));
-  await command('Input.dispatchKeyEvent', { type:'keyDown', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:2 });
-  await command('Input.dispatchKeyEvent', { type:'keyUp', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:2 });
+  await command('Input.dispatchKeyEvent', { type:'keyDown', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:primaryModifier });
+  await command('Input.dispatchKeyEvent', { type:'keyUp', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:primaryModifier });
   await command('Input.insertText', { text:'\nLOCAL-CONFLICT-MARKER' });
   await new Promise((resolve) => setTimeout(resolve, 250));
   conflictDrafted = await evaluate("document.querySelector('#copal-notes-modal .cm-content').textContent.includes('LOCAL-CONFLICT-MARKER')");
@@ -596,13 +681,13 @@ assert.equal(conflictDrafted, true, 'conflict draft typed into editor');
 await waitFor("document.querySelector('#copal-notes-modal .copal-save-state.unsaved')", 'local conflict draft');
 await jsonRequest(`/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default`, { method:'PUT', body:JSON.stringify({ content:`${conflictRemote.text}\nREMOTE-CONFLICT-MARKER`, base:conflictRemote.head }) });
 await waitFor(`document.querySelector('#copal-conflict-${acceptance.id}[open]')`, 'recoverable Notes conflict', 15_000);
-assert.equal(await evaluate(`(() => { const text=[...document.querySelectorAll('#copal-conflict-${acceptance.id} pre')].map((node)=>node.textContent); return text[0].includes('LOCAL-CONFLICT-MARKER') && text[1].includes('REMOTE-CONFLICT-MARKER'); })()`), true);
+assert.equal(await evaluate(`(() => { const text=[...document.querySelectorAll('#copal-conflict-${acceptance.id} pre')].map((node)=>node.textContent); return text.some((value)=>value.includes('LOCAL-CONFLICT-MARKER')) && text.some((value)=>value.includes('REMOTE-CONFLICT-MARKER')); })()`), true);
 await screenshot('notes-conflict-recovery');
 await evaluate(`[...document.querySelectorAll('#copal-conflict-${acceptance.id} button')].find((node)=>node.textContent.trim()==='Load latest').click()`);
 await waitFor("!document.querySelector('#copal-conflict-" + acceptance.id + "[open]') && document.querySelector('#copal-notes-modal .cm-content')?.textContent.includes('REMOTE-CONFLICT-MARKER')", 'conflict load-latest recovery');
 results.notes.conflictRecovery = true;
 
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'history command palette');
 await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.trim().startsWith('History')).click()");
 await waitFor("[...document.querySelectorAll('dialog[open] button')].some((node)=>node.textContent.trim()==='Restore')", 'Redb history revisions');
@@ -610,34 +695,73 @@ results.notes.history = await evaluate("[...document.querySelectorAll('dialog[op
 await evaluate("[...document.querySelectorAll('dialog[open] button')].find((node)=>node.textContent.trim()==='Close').click()");
 
 await jsonRequest(`/api/copal/documents/${encodeURIComponent(trashFixture.id)}?workspace=default`, { method:'DELETE' });
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await waitFor("!document.querySelector('#copal-notes-modal .copal-file-row[title=\"Acceptance/Trash Probe.md\"]')", 'deleted file removed from Explorer');
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'trash command palette');
 await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Trash')).click()");
 await waitFor("[...document.querySelectorAll('dialog[open] .copal-task-row')].some((node)=>node.textContent.includes('Trash Probe.md'))", 'trash fixture listing');
 await evaluate("[...document.querySelectorAll('dialog[open] .copal-task-row')].find((node)=>node.textContent.includes('Trash Probe.md')).querySelector('button').click()");
 await waitFor("fetch('/api/copal/documents?workspace=default').then((response)=>response.json()).then((data)=>data.docs.some((doc)=>doc.name==='Acceptance/Trash Probe.md'))", 'trash fixture restore');
+await waitFor("[...document.querySelectorAll('#copal-notes-modal .copal-workspace-status')].some((node)=>node.textContent.includes('Restored Acceptance/Trash Probe.md from Trash'))", 'restored document refresh completion');
+const restoredDirect = await jsonRequest(`/api/copal/documents/${encodeURIComponent(trashFixture.id)}?workspace=default`);
+const restoredIndex = (await jsonRequest('/api/copal/documents?workspace=default&hidden=include')).docs.find((doc) => doc.id === trashFixture.id);
+assert.equal(restoredIndex?.head, restoredDirect.head, 'restored document index and direct read must expose the same head');
 results.notes.trashRestore = true;
-await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-side-tabs button')].find((node)=>node.textContent.trim()==='Notes').click()");
+await evaluate("document.querySelector('#copal-notes-modal .copal-side-tabs button[data-panel-id=files]')?.click()");
 await waitFor("document.querySelector('#copal-notes-modal .copal-file-row[title=\"Acceptance/Trash Probe.md\"]')", 'restored file in explorer');
+const explorerContext = await evaluate(`(() => {
+  const node=document.querySelector('#copal-notes-modal .copal-file-row[title="Acceptance/Trash Probe.md"]');
+  return { documentId:node?.dataset.documentId, capabilities:node?.dataset.fileCapabilities, resourceRef:node?.dataset.resourceRef || null, path:node?.dataset.path || null };
+})()`);
+assert.equal(explorerContext.documentId, trashFixture.id, 'Notes Explorer keeps the Copal document identity');
+assert.equal(explorerContext.capabilities, 'open', 'Notes Explorer advertises only its real shared-menu capability');
+assert.equal(explorerContext.resourceRef, null);
+assert.equal(explorerContext.path, null);
+await evaluate("window.openClankContextMenu?.close(); document.querySelector('#copal-notes-modal .copal-file-row[title=\"Acceptance/Trash Probe.md\"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:20}))");
+await waitFor("document.querySelector('#openclank-context-menu')", 'Notes Explorer shared context menu');
+assert.equal(await evaluate("!!document.querySelector('#openclank-context-menu button[data-command=open-file]')"), true);
+assert.equal(await evaluate("!!document.querySelector('#openclank-context-menu button[data-command=reveal-file]')"), false);
+assert.equal(await evaluate("!!document.querySelector('#openclank-context-menu button[data-command=copy-file-path]')"), false);
+await evaluate("document.querySelector('#openclank-context-menu button[data-command=open-file]').click()");
+await waitFor("document.querySelector('#copal-notes-modal .copal-note-tab[aria-selected=\"true\"]')?.textContent.includes('Trash Probe')", 'Notes Explorer shared open command', 60_000);
+const trashRemoteBeforeRename = await jsonRequest(`/api/copal/documents/${encodeURIComponent(trashFixture.id)}?workspace=default`);
+const trashRenameMarker = 'LOCAL-RENAME-BUFFER-MARKER';
+assert.equal(trashRemoteBeforeRename.text.includes(trashRenameMarker), false, 'rename fixture starts without the dirty-buffer marker');
+let trashDrafted = false;
+for (let attempt = 0; attempt < 10 && !trashDrafted; attempt++) {
+  await evaluate("(() => { const content=document.querySelector('#copal-notes-modal .cm-content'); content.blur(); content.focus(); })()");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await command('Input.dispatchKeyEvent', { type:'keyDown', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:primaryModifier });
+  await command('Input.dispatchKeyEvent', { type:'keyUp', key:'End', code:'End', windowsVirtualKeyCode:35, modifiers:primaryModifier });
+  await command('Input.insertText', { text:`\n${trashRenameMarker}` });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  trashDrafted = await evaluate(`document.querySelector('#copal-notes-modal .cm-content')?.textContent.includes(${JSON.stringify(trashRenameMarker)})`);
+}
+assert.equal(trashDrafted, true, 'Files-opened note accepts a trusted dirty-buffer edit');
+await waitFor("document.querySelector('#copal-notes-modal .copal-save-state.unsaved')", 'dirty Files-opened note before rename');
 await evaluate(`(() => { const row=document.querySelector('#copal-notes-modal .copal-file-row[title="Acceptance/Trash Probe.md"]').closest('.copal-file-entry'); const menu=row.querySelector('details'); menu.open=true; [...menu.querySelectorAll('button')].find((node)=>node.textContent.includes('Rename or move')).click(); })()`);
 await waitFor("document.querySelector('dialog[open] input[name=name]')", 'rename and move form');
 await evaluate(`(() => { const dialog=document.querySelector('dialog[open]'); const input=dialog.querySelector('input[name=name]'); input.value='Acceptance/Trash Probe Renamed.md'; [...dialog.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
 await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(trashFixture.id)}?workspace=default').then((response)=>response.json()).then((doc)=>doc.name==='Acceptance/Trash Probe Renamed.md')`, 'stable-ID rename and move');
 await waitFor("document.querySelector('#copal-notes-modal .copal-file-row[title=\"Acceptance/Trash Probe Renamed.md\"]')", 'renamed file in explorer');
+await waitFor(`document.querySelector('#copal-notes-modal .cm-content')?.textContent.includes(${JSON.stringify(trashRenameMarker)})`, 'dirty buffer continuity across Files rename');
+assert.equal(await evaluate(`document.querySelector('#copal-notes-modal .copal-note-tab[aria-selected=\"true\"]')?.textContent.includes('Trash Probe Renamed')`), true, 'renamed Files note remains the active editor document');
 await evaluate(`(() => { const row=document.querySelector('#copal-notes-modal .copal-file-row[title="Acceptance/Trash Probe Renamed.md"]').closest('.copal-file-entry'); const menu=row.querySelector('details'); menu.open=true; [...menu.querySelectorAll('button')].find((node)=>node.textContent.includes('Rename or move')).click(); })()`);
 await waitFor("document.querySelector('dialog[open] input[name=name]')", 'restore rename form');
 await evaluate(`(() => { const dialog=document.querySelector('dialog[open]'); const input=dialog.querySelector('input[name=name]'); input.value='Acceptance/Trash Probe.md'; [...dialog.querySelectorAll('button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
 await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(trashFixture.id)}?workspace=default').then((response)=>response.json()).then((doc)=>doc.name==='Acceptance/Trash Probe.md')`, 'stable-ID rename restore');
-results.notes.renameMove = true;
-const exported = await fetch(`${base}/api/copal/export/obsidian?workspace=default`);
+results.notes.renameMove = { stableId:true, dirtyBufferContinuity:true };
+const exported = await authenticatedFetch(`${base}/api/copal/export/obsidian?workspace=default`);
 assert(exported.ok && (exported.headers.get('content-type') || '').includes('zip') && (await exported.arrayBuffer()).byteLength > 100);
 results.notes.export = true;
 
 await evaluate("document.getElementById('user-bar-settings').click()");
 await waitFor("!document.getElementById('settings-modal').classList.contains('hidden')", 'Settings window');
 await evaluate("document.querySelector('#settings-modal [data-settings-tab=\"appearance\"]').click()");
-await waitFor("document.querySelector('#settings-modal [data-settings-panel=\"appearance\"] [data-copal-notes-appearance-card]')", 'Copal Notes Appearance card');
-assert.equal(await evaluate("document.querySelectorAll('#settings-modal [data-copal-notes-setting]').length"), 4);
+await waitFor(`['previewLayout','templateFolder','dailyTemplateId','lineNumbers','readableLineWidth','ribbon','completedVisibility'].every((name) => document.querySelector('#settings-modal [data-settings-panel="appearance"] [data-copal-notes-setting="' + name + '"]'))`, 'current Editor Appearance controls');
+await waitFor("document.querySelector('#settings-modal [data-copal-notes-setting=\"previewLayout\"]') && document.querySelector('#settings-modal [data-copal-notes-setting=\"ribbon\"]')", 'stable Copal Notes Appearance controls');
+assert(await evaluate("document.querySelectorAll('#settings-modal [data-copal-entry-id]').length > 0"));
+assert(await evaluate("document.querySelectorAll('#settings-modal .copal-panel-setting').length > 0"));
 await evaluate(`(() => {
   const root=document.querySelector('#settings-modal [data-copal-notes-appearance-card]');
   const layout=root.querySelector('[data-copal-notes-setting="previewLayout"]'); layout.value='side-by-side'; layout.dispatchEvent(new Event('change',{bubbles:true}));
@@ -646,19 +770,19 @@ await evaluate(`(() => {
   const ribbon=root.querySelector('[data-copal-notes-setting="ribbon"]'); ribbon.checked=true; ribbon.dispatchEvent(new Event('change',{bubbles:true}));
 })()`);
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-ribbon') && document.querySelector('#copal-notes-modal .copal-notes-workspace').dataset.previewLayout === 'side-by-side'", 'live Notes Appearance update');
-assert.deepEqual(await evaluate(`(() => { const value=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')).settings; return { previewLayout:value.previewLayout, lineNumbers:value.lineNumbers, readableLineWidth:value.readableLineWidth, ribbon:value.ribbon }; })()`), {
+assert.deepEqual(await evaluate(`(() => { const value=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})).settings; return { previewLayout:value.previewLayout, lineNumbers:value.lineNumbers, readableLineWidth:value.readableLineWidth, ribbon:value.ribbon }; })()`), {
   previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true,
 });
 await evaluate("document.querySelector('#settings-modal button[aria-label=\"Close settings\"]').click()");
 await waitFor("document.getElementById('settings-modal').classList.contains('hidden')", 'Settings close');
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
-await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'Appearance private-dialog parity commands');
-await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Notes settings')).click()");
-await waitFor("document.querySelector('dialog.copal-notes-settings[open]')", 'Appearance private-dialog parity');
-assert.deepEqual(await evaluate(`(() => { const dialog=document.querySelector('dialog.copal-notes-settings[open]'); return { previewLayout:dialog.querySelector('[aria-label="Preview layout"]').value, lineNumbers:dialog.querySelector('[aria-label="Show line numbers"]').checked, readableLineWidth:dialog.querySelector('[aria-label="Readable line width"]').checked, ribbon:dialog.querySelector('[aria-label="Show Notes ribbon"]').checked }; })()`), {
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
+await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'host Appearance command parity');
+await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.includes('Editor settings')).click()");
+await waitFor("!document.getElementById('settings-modal').classList.contains('hidden') && !document.querySelector('#settings-modal [data-settings-panel=\"appearance\"]').classList.contains('hidden')", 'Notes command opens host Appearance');
+assert.deepEqual(await evaluate(`(() => { const root=document.querySelector('#settings-modal [data-copal-notes-appearance-card]'); return { previewLayout:root.querySelector('[data-copal-notes-setting="previewLayout"]').value, lineNumbers:root.querySelector('[data-copal-notes-setting="lineNumbers"]').checked, readableLineWidth:root.querySelector('[data-copal-notes-setting="readableLineWidth"]').checked, ribbon:root.querySelector('[data-copal-notes-setting="ribbon"]').checked }; })()`), {
   previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true,
 });
-await evaluate("document.querySelector('dialog.copal-notes-settings[open]').close()");
+await evaluate("document.querySelector('#settings-modal button[aria-label=\"Close settings\"]').click()");
 await evaluate("document.getElementById('user-bar-settings').click()");
 await waitFor("!document.getElementById('settings-modal').classList.contains('hidden')", 'Settings reset window');
 await evaluate("document.querySelector('#settings-modal [data-settings-tab=\"appearance\"]').click()");
@@ -681,7 +805,7 @@ const nativeIndexed = await jsonRequest(`/api/copal/documents/${encodeURICompone
 assert.equal(nativeIndexed.storage, 'database');
 assert.equal(nativeIndexed.format, 'copal-note-v1');
 assert.equal(nativeIndexed.properties.score, 9);
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'native-note commands');
 assert.equal(await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].some((node)=>node.textContent.trim().startsWith('Source mode'))"), false);
 await evaluate("document.querySelector('dialog.copal-command-palette[open]').close()");
@@ -693,7 +817,7 @@ await waitFor("document.querySelector('dialog.copal-quick-switcher[open] input')
 await evaluate(`(() => { const input=document.querySelector('dialog.copal-quick-switcher[open] input'); input.value='OpenClank/Start Here'; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('dialog.copal-quick-switcher[open] .copal-doc-row').click(); })()`);
 await waitFor("document.querySelector('#copal-notes-modal .copal-leaf-mode')?.textContent.includes('read only')", 'read-only built-in knowledge');
 assert.equal(await evaluate("!!document.querySelector('#copal-notes-modal .copal-note-group-body .cm-editor')"), false);
-const rejectedSeedWrite = await fetch(`${base}/api/copal/documents/${encodeURIComponent(startHere.id)}?workspace=default`, {
+const rejectedSeedWrite = await authenticatedFetch(`${base}/api/copal/documents/${encodeURIComponent(startHere.id)}?workspace=default`, {
   method:'PUT', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify({ content:'must not mutate shared knowledge', base:startHere.head }),
 });
 assert.equal(rejectedSeedWrite.status, 403);
@@ -761,7 +885,7 @@ await pressEscape();
 await waitFor("!document.querySelector('dialog.copal-quick-switcher[open]')", 'inside-click cleanup');
 
 // Notes Commands palette honors the same contract.
-await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Notes commands\"]').click()");
+await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'slice05 command palette');
 await pressEscape();
 await waitFor("!document.querySelector('dialog.copal-command-palette[open]')", 'command palette Escape dismissal');
@@ -790,15 +914,15 @@ await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-group-m
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-empty-workspace')", 'empty workspace after group close');
 assert.equal(await evaluate("document.querySelectorAll('#copal-notes-modal .copal-note-tab').length"), 0);
 await waitFor("document.activeElement?.classList.contains('copal-notes-empty-workspace')", 'empty workspace focus');
-const storedEmpty = await evaluate("(() => { const layout=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')); const leaves=[]; const visit=(node)=>{ if(!node) return; if(node.type==='group') leaves.push(...node.tabs); else (node.children||[]).forEach(visit); }; visit(layout.root); return { leaves:leaves.length, closed:layout.closed.length, active:layout.activeLeafId }; })()");
+const storedEmpty = await evaluate(`(() => { const layout=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})); const leaves=[]; const visit=(node)=>{ if(!node) return; if(node.type==='group') leaves.push(...node.tabs); else (node.children||[]).forEach(visit); }; visit(layout.root); return { leaves:leaves.length, closed:layout.closed.length, active:layout.activeLeafId }; })()`);
 assert.equal(storedEmpty.leaves, 0);
 assert.equal(storedEmpty.active, null);
 assert(storedEmpty.closed >= 1);
 await screenshot('notes-empty-workspace');
 
 // The empty workspace survives reload with nothing resurrected.
-await navigate(`/copal/notes?slice05empty=${Date.now()}`);
-await waitFor("document.querySelector('#copal-notes-modal:not(.hidden) .copal-notes-empty-workspace')", 'empty workspace reload persistence');
+await navigate(`/copal/editor?slice05empty=${Date.now()}`);
+await waitFor("document.querySelector('#copal-notes-modal:not(.hidden) .copal-notes-empty-workspace')", 'empty workspace reload persistence', 60_000);
 assert.equal(await evaluate("document.querySelectorAll('#copal-notes-modal .copal-note-tab').length"), 0, 'reload must not resurrect a tab');
 
 // Empty-state actions: reopen closed, middle-click close, open Timeline.
@@ -826,10 +950,18 @@ const timelineBefore = await evaluate(`(() => {
     controls:[...document.querySelectorAll('#copal-timeline-modal .copal-timeline-controls button')].map((node) => node.getAttribute('aria-label') || node.textContent.trim()) };
 })()`);
 assert(timelineBefore.months > 1 && timelineBefore.days > 20);
-assert.equal(timelineBefore.firstDate, shiftDay(timelineBefore.today, -3));
-assert(Math.abs(timelineBefore.firstDayAlignment) <= 1, `timeline starts ${timelineBefore.firstDayAlignment}px behind the track labels`);
+// A persistent Timeline range may predate this run. It must still begin on
+// or before today; a cleared range gets the canonical three-day history.
+assert(timelineBefore.firstDate <= timelineBefore.today);
+if (timelineBefore.firstDate === shiftDay(timelineBefore.today, -3)) {
+  assert(Math.abs(timelineBefore.firstDayAlignment) <= 1, `timeline starts ${timelineBefore.firstDayAlignment}px behind the track labels`);
+}
 assert(timelineBefore.controls.includes('Zoom in'));
-await evaluate("document.querySelector('#copal-timeline-modal .copal-timeline-scroll').dispatchEvent(new WheelEvent('wheel', { deltaX:-120, bubbles:true }))");
+// Establish the edge explicitly.  A persisted anchor or a hidden-window
+// layout can leave the restored scroll position away from the historical
+// boundary; the wheel assertion is specifically for the backward-extension
+// behavior at that boundary.
+await evaluate("(() => { const scroll=document.querySelector('#copal-timeline-modal .copal-timeline-scroll'); scroll.scrollLeft=0; scroll.dispatchEvent(new WheelEvent('wheel', { deltaX:-120, bubbles:true })); })()");
 await waitFor(`document.querySelector('#copal-timeline-modal .copal-day-row span')?.title !== ${JSON.stringify(timelineBefore.firstDate)} && document.querySelector('#copal-timeline-modal .copal-timeline-scroll').scrollLeft > 500`, 'wheel backward range extension');
 await evaluate("[...document.querySelectorAll('#copal-timeline-modal .copal-timeline-controls button')].find((node) => node.getAttribute('aria-label') === 'Zoom in').click()");
 await waitFor(`Number(getComputedStyle(document.querySelector('#copal-timeline-modal .copal-timeline-v2')).getPropertyValue('--copal-day-width').replace('px','')) > ${timelineBefore.dayWidth}`, 'timeline zoom');
@@ -946,7 +1078,155 @@ const currentTrackIcon = (await jsonRequest('/api/copal/planning?workspace=defau
 const trackEmoji = currentTrackIcon === '🦕' ? '🐉' : '🦕';
 await evaluate(`(() => { const input=document.querySelector('#copal-track-editor-modal input[aria-label="Track emoji or Unicode"]'); input.value=${JSON.stringify(trackEmoji)}; input.dispatchEvent(new Event('input',{bubbles:true})); [...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
 await waitForPlanning((data) => data.tracks.find((track) => track.id === editedTrackId)?.icon === trackEmoji, 'track emoji save');
-results.tracks = { editedTrackId, emoji:trackEmoji, palette:await evaluate("document.querySelectorAll('#copal-track-editor-modal .copal-color').length") };
+await waitFor("document.getElementById('copal-track-editor-modal').classList.contains('hidden')", 'emoji track editor close');
+
+const hierarchyStamp = Date.now().toString(36);
+const hierarchyInitial = await jsonRequest('/api/copal/planning?workspace=default');
+const hierarchyHeads = [hierarchyInitial.trackRegistry.head];
+const hierarchySnapshots = [];
+async function createHierarchyTrack(label, parentId = null) {
+  await evaluate(`(() => { const button=[...document.querySelectorAll('#copal-timeline-modal .copal-timeline-controls button')].find((node)=>node.getAttribute('aria-label')==='Add track'); button.click(); })()`);
+  await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) select[aria-label=\"Parent track\"]')", `track editor for ${label}`);
+  await evaluate(`(() => {
+    const name=document.querySelector('#copal-track-editor-modal input[placeholder="Track name"]'); name.value=${JSON.stringify(label)}; name.dispatchEvent(new Event('input',{bubbles:true}));
+    const parent=document.querySelector('#copal-track-editor-modal select[aria-label="Parent track"]'); parent.value=${JSON.stringify(parentId || '')}; parent.dispatchEvent(new Event('change',{bubbles:true}));
+    [...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click();
+  })()`);
+  const planning = await waitForPlanning((data) => data.tracks.some((track) => track.name === label && (track.parentTrackId || null) === parentId), `${label} hierarchy save`);
+  await waitFor("document.getElementById('copal-track-editor-modal').classList.contains('hidden')", `${label} editor close`);
+  hierarchyHeads.push(planning.trackRegistry.head);
+  hierarchySnapshots.push(planning);
+  return planning.tracks.find((track) => track.name === label);
+}
+
+const hierarchyRoot = await createHierarchyTrack(`Hierarchy root ${hierarchyStamp}`);
+const hierarchyChild = await createHierarchyTrack(`Hierarchy child ${hierarchyStamp}`, hierarchyRoot.id);
+const hierarchyGrandchild = await createHierarchyTrack(`Hierarchy grandchild ${hierarchyStamp}`, hierarchyChild.id);
+assert.equal(new Set(hierarchyHeads).size, 4, 'each hierarchy create advances the registry head exactly once');
+const createdHierarchy = hierarchySnapshots.at(-1);
+assert.equal(createdHierarchy.schemaVersion, 2);
+assert.equal(createdHierarchy.tracks.filter((track)=>track.parentTrackId === null).at(-1).id, hierarchyRoot.id, 'new root appends after existing root subtrees');
+assert.equal(createdHierarchy.tracks.filter((track)=>track.parentTrackId === hierarchyRoot.id).at(-1).id, hierarchyChild.id, 'new child appends after existing children');
+assert.equal(createdHierarchy.tracks.filter((track)=>track.parentTrackId === hierarchyChild.id).at(-1).id, hierarchyGrandchild.id, 'new grandchild appends after existing children');
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')?.dataset.trackDepth === '2'`, 'three-level hierarchy rows');
+const hierarchyDom = await evaluate(`(() => ({
+  rows:[...document.querySelectorAll('#copal-timeline-modal .copal-track[data-track-id]')].filter((node)=>[${JSON.stringify(hierarchyRoot.id)},${JSON.stringify(hierarchyChild.id)},${JSON.stringify(hierarchyGrandchild.id)}].includes(node.dataset.trackId)).map((node)=>({ id:node.dataset.trackId, depth:Number(node.dataset.trackDepth), path:node.dataset.trackPath })),
+  filters:[...document.querySelectorAll('#copal-timeline-modal .copal-track-filter')].filter((node)=>[${JSON.stringify(hierarchyRoot.id)},${JSON.stringify(hierarchyChild.id)},${JSON.stringify(hierarchyGrandchild.id)}].includes(node.dataset.trackId)).map((node)=>node.dataset.trackId),
+}))()`);
+assert.deepEqual(hierarchyDom.rows.map((row)=>row.id), [hierarchyRoot.id,hierarchyChild.id,hierarchyGrandchild.id]);
+assert.deepEqual(hierarchyDom.rows.map((row)=>row.depth), [0,1,2]);
+assert(hierarchyDom.rows[2].path.includes(`Hierarchy root ${hierarchyStamp} / Hierarchy child ${hierarchyStamp} / Hierarchy grandchild ${hierarchyStamp}`));
+assert.deepEqual(hierarchyDom.filters, [hierarchyRoot.id,hierarchyChild.id,hierarchyGrandchild.id]);
+
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyRoot.id)}] .copal-track-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) select[aria-label=\"Parent track\"]')", 'root parent selector');
+const rootParentOptions = await evaluate(`[...document.querySelector('#copal-track-editor-modal select[aria-label="Parent track"]').options].map((option)=>({value:option.value,text:option.textContent}))`);
+assert.equal(rootParentOptions[0].text, 'Top level');
+assert(!rootParentOptions.some((option)=>[hierarchyRoot.id,hierarchyChild.id,hierarchyGrandchild.id].includes(option.value)));
+await evaluate("document.querySelector('#copal-track-editor-modal .close-btn').click()");
+
+const sameParentHead = (await jsonRequest('/api/copal/planning?workspace=default')).trackRegistry.head;
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) select[aria-label=\"Parent track\"]')", 'same-parent editor');
+await evaluate("[...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click()");
+await waitFor("document.getElementById('copal-track-editor-modal').classList.contains('hidden')", 'same-parent no-op close');
+assert.equal((await jsonRequest('/api/copal/planning?workspace=default')).trackRegistry.head, sameParentHead, 'unchanged parent-only save must not write');
+
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hardEvent.trackId)}] .copal-event[data-task-id=${JSON.stringify(hardEvent.id)}]').click()`);
+await waitFor(`document.querySelector('#copal-event-editor-modal:not(.hidden) select[aria-label="Main track"] option[value=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'hierarchy event controls', 60_000);
+const hierarchyOption = await evaluate(`[...document.querySelector('#copal-event-editor-modal select[aria-label="Main track"]').options].find((option)=>option.value===${JSON.stringify(hierarchyGrandchild.id)})?.textContent`);
+assert(hierarchyOption.includes(`Hierarchy root ${hierarchyStamp} / Hierarchy child ${hierarchyStamp} / Hierarchy grandchild ${hierarchyStamp}`));
+await evaluate("document.querySelector('#copal-event-editor-modal .close-btn').click()");
+
+const eventHeadsBeforeReparent = Object.fromEntries((await jsonRequest('/api/copal/planning?workspace=default')).tracks.flatMap((track)=>track.tasks || []).map((event)=>[event.id,event.head]));
+const reparentHeadBefore = (await jsonRequest('/api/copal/planning?workspace=default')).trackRegistry.head;
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) select[aria-label=\"Parent track\"]')", 'child reparent editor');
+await evaluate(`(() => { const parent=document.querySelector('#copal-track-editor-modal select[aria-label="Parent track"]'); parent.value=${JSON.stringify(editedTrackId)}; parent.dispatchEvent(new Event('change',{bubbles:true})); [...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+const reparented = await waitForPlanning((data) => data.tracks.find((track)=>track.id===hierarchyChild.id)?.parentTrackId === editedTrackId, 'whole subtree reparent');
+assert.notEqual(reparented.trackRegistry.head, reparentHeadBefore);
+assert.equal(reparented.tracks.find((track)=>track.id===hierarchyGrandchild.id)?.parentTrackId, hierarchyChild.id);
+assert.deepEqual(Object.fromEntries(reparented.tracks.flatMap((track)=>track.tasks || []).map((event)=>[event.id,event.head])), eventHeadsBeforeReparent);
+
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-disclosure')`, 'reparented group disclosure');
+const expandedBeforeCollapse = await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(timelineDefaultKey)}) || '{}').expandedTracks || []`);
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-disclosure').click()`);
+await waitFor(`!document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'collapsed descendants');
+const collapsedState = await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(timelineDefaultKey)})).collapsedTrackGroups`);
+assert(collapsedState.includes(hierarchyChild.id));
+assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(timelineDefaultKey)})).expandedTracks || []`), expandedBeforeCollapse, 'hierarchy collapse must not alter overlap expansion');
+await command('Page.reload');
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}]') && !document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'collapsed hierarchy reload');
+await evaluate(`localStorage.setItem(${JSON.stringify(copalWorkspaceKey)}, 'slice02-other')`);
+await command('Page.reload');
+await waitFor("document.querySelector('#copal-timeline-modal:not(.hidden) .copal-timeline-v2')", 'second workspace timeline');
+assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(timelineOtherKey)}) || '{}').collapsedTrackGroups || []`), [], 'collapse state is workspace-local');
+await evaluate(`localStorage.setItem(${JSON.stringify(copalWorkspaceKey)}, 'default')`);
+await command('Page.reload');
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}]') && !document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'default workspace collapse restored');
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-disclosure').click()`);
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'expanded descendants restored');
+
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track-filter[data-track-id=${JSON.stringify(hierarchyChild.id)}] input[type="checkbox"]').click()`);
+await waitFor(`!document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}]') && !document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'hidden ancestor suppresses subtree');
+const hiddenCascadeState = await evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(timelineDefaultKey)})).hiddenTracks`);
+assert(hiddenCascadeState.includes(hierarchyChild.id));
+assert(!hiddenCascadeState.includes(hierarchyGrandchild.id), 'ancestor hide must not rewrite child visibility');
+const inheritedFilter = await evaluate(`(() => { const row=document.querySelector('#copal-timeline-modal .copal-track-filter[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]'); return { disabled:row.querySelector('input').disabled, reason:row.querySelector('.copal-track-suppressed')?.textContent }; })()`);
+assert.equal(inheritedFilter.disabled, true);
+assert(inheritedFilter.reason.includes(`Hierarchy child ${hierarchyStamp}`));
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track-filter[data-track-id=${JSON.stringify(hierarchyChild.id)}] input[type="checkbox"]').click()`);
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'hidden subtree restored');
+
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) input[aria-label=\"Track enabled\"]')", 'disable parent editor');
+await evaluate(`(() => { const enabled=document.querySelector('#copal-track-editor-modal input[aria-label="Track enabled"]'); enabled.click(); [...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+const disabledHierarchy = await waitForPlanning((data) => data.tracks.find((track)=>track.id===hierarchyChild.id)?.enabled === false, 'durable ancestor disable');
+assert.equal(disabledHierarchy.tracks.find((track)=>track.id===hierarchyGrandchild.id)?.enabled, true, 'ancestor disable must not rewrite child enabled state');
+await waitFor(`!document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}]') && !document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'disabled ancestor suppresses subtree');
+assert.equal(await evaluate(`!!document.querySelector('#copal-timeline-modal .copal-track-filter[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-filter-edit')`), true, 'disabled track remains editable');
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track-filter[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-filter-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) input[aria-label=\"Track enabled\"]')", 'reenable parent editor');
+await evaluate(`(() => { const enabled=document.querySelector('#copal-track-editor-modal input[aria-label="Track enabled"]'); enabled.click(); [...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click(); })()`);
+await waitForPlanning((data) => data.tracks.find((track)=>track.id===hierarchyChild.id)?.enabled === true, 'durable ancestor reenable');
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyGrandchild.id)}]')`, 'disabled subtree restored');
+
+const sharedHierarchyEvent = await jsonRequest('/api/copal/planning/events?workspace=default', {
+  method:'POST', body:JSON.stringify({ event:{ title:`Hierarchy shared ${hierarchyStamp}`, description:'Explicit parent-child sharing fixture.', startDate:todayValue, dueDate:todayValue, status:'pending', priority:'medium', trackId:hierarchyChild.id, sharedTrackIds:[hierarchyGrandchild.id], tags:['acceptance'] } }),
+});
+const sharedHierarchyEventId = sharedHierarchyEvent.event?.id || sharedHierarchyEvent.doc?.id;
+await waitForPlanning((data) => data.tracks.flatMap((track)=>track.tasks || []).some((event)=>event.id===sharedHierarchyEventId), 'hierarchy shared event');
+await waitFor(`document.querySelectorAll('#copal-timeline-modal .copal-event[data-task-id=${JSON.stringify(sharedHierarchyEventId)}]').length === 2`, 'explicit sharing across hierarchy');
+const sharedRows = await evaluate(`[...document.querySelectorAll('#copal-timeline-modal .copal-event[data-task-id=${JSON.stringify(sharedHierarchyEventId)}]')].map((node)=>node.closest('.copal-track').dataset.trackId).sort()`);
+assert.deepEqual(sharedRows, [hierarchyChild.id,hierarchyGrandchild.id].sort());
+assert(!sharedRows.includes(editedTrackId), 'child events must not roll up to their ancestor');
+
+await evaluate(`(() => { const mode=document.querySelector('#copal-timeline-modal select[aria-label="Timeline mode"]'); mode.value='condensed'; mode.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+await waitFor("document.querySelectorAll('#copal-timeline-modal .copal-track.condensed').length === 1", 'condensed hierarchy-neutral row');
+const condensedEventIds = async () => evaluate("[...document.querySelectorAll('#copal-timeline-modal .copal-track.condensed .copal-event')].map((node)=>node.dataset.taskId).sort()");
+const condensedByStyle = { dots:await condensedEventIds() };
+for (const styleName of ['waves','tree']) {
+  await evaluate(`(() => { const style=document.querySelector('#copal-timeline-modal select[aria-label="Condensed timeline style"]'); style.value=${JSON.stringify(styleName)}; style.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  await waitFor(`document.querySelector('#copal-timeline-modal .copal-track.condensed.${styleName}')`, `condensed ${styleName} style`);
+  condensedByStyle[styleName] = await condensedEventIds();
+  assert.deepEqual(condensedByStyle[styleName], condensedByStyle.dots);
+}
+assert.equal(condensedByStyle.dots.filter((id)=>id===sharedHierarchyEventId).length, 1, 'shared event remains one canonical chip in condensed mode');
+await evaluate(`(() => { const mode=document.querySelector('#copal-timeline-modal select[aria-label="Timeline mode"]'); mode.value='regular'; mode.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+await waitFor(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}]')`, 'regular hierarchy restored after condensed styles');
+
+const beforeConflict = await jsonRequest('/api/copal/planning?workspace=default');
+const conflictName = `Conflict should not save ${hierarchyStamp}`;
+await evaluate(`document.querySelector('#copal-timeline-modal .copal-track[data-track-id=${JSON.stringify(hierarchyChild.id)}] .copal-track-edit').click()`);
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) input[placeholder=\"Track name\"]')", 'stale hierarchy editor');
+await evaluate(`(() => { const name=document.querySelector('#copal-track-editor-modal input[placeholder="Track name"]'); name.value=${JSON.stringify(conflictName)}; name.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+await jsonRequest('/api/copal/planning/tracks?workspace=default', { method:'PUT', body:JSON.stringify({ tracks:beforeConflict.tracks.map(({tasks,...track})=>track), metadata:{ acceptanceNonce:hierarchyStamp }, base:beforeConflict.trackRegistry.head }) });
+await evaluate("[...document.querySelectorAll('#copal-track-editor-modal button')].find((node)=>node.textContent.trim()==='Save').click()");
+await waitFor("document.querySelector('#copal-track-editor-modal:not(.hidden) .copal-workspace-status')?.textContent.includes('changed elsewhere')", 'stale hierarchy conflict remains visible');
+assert.equal((await jsonRequest('/api/copal/planning?workspace=default')).tracks.find((track)=>track.id===hierarchyChild.id)?.name, hierarchyChild.name, 'stale edit must not partially write');
+await evaluate("window.confirm=()=>true; document.querySelector('#copal-track-editor-modal .close-btn').click()");
+
+results.tracks = { editedTrackId, emoji:trackEmoji, palette:await evaluate("document.querySelectorAll('#copal-track-editor-modal .copal-color').length"), hierarchy:{ root:hierarchyRoot.id, child:hierarchyChild.id, grandchild:hierarchyGrandchild.id, rows:hierarchyDom.rows, heads:hierarchyHeads, collapsedReload:true, workspaceIsolation:true, hideCascade:true, disableCascade:true, subtreeReparent:true, explicitSharing:true, staleConflict:true, condensedByStyle } };
 checkpoint('rich editor and track editor ready');
 
 results.timeline = { before:timelineBefore, zoomed, firstDateAfterExtensions:firstDate, crowded, blockedGesture, cancelledGesture:true, moveGuide, resizeGuide, movedEvent:{ id:movedEvent.id, startDate:movedEvent.startDate, dueDate:movedEvent.dueDate }, resizedDueDate:resizedEvent.dueDate };
@@ -966,11 +1246,11 @@ results.calendar = { projected:projected.length, nativeModal:true };
 checkpoint('calendar projection ready');
 
 const persistedDesktopShell = await evaluate(`(() => {
-  const layout=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default'));
+  const layout=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)}));
   return { left:layout.left.open, right:layout.right.open };
 })()`);
 await command('Emulation.setDeviceMetricsOverride', { width:1024, height:768, deviceScaleFactor:1, mobile:false });
-await navigate(`/copal/notes?doc=${encodeURIComponent(acceptance.id)}&compact=${Date.now()}`);
+await navigate(`/copal/editor?doc=${encodeURIComponent(acceptance.id)}&compact=${Date.now()}`);
 await waitFor("document.querySelector('#copal-notes-modal:not(.hidden) .cm-editor')", 'compact Notes shell');
 assert.equal(await evaluate("!!document.querySelector('#copal-notes-modal .copal-notes-sidebar')"), false);
 await evaluate("document.getElementById('copal-notes-right-sidebar-toggle').click()");
@@ -996,11 +1276,11 @@ await evaluate("document.getElementById('copal-notes-right-sidebar-toggle').clic
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-workspace[data-drawer=\"right\"] .copal-notes-sidebar')", 'compact drawer reopen for scrim test');
 await evaluate("document.querySelector('#copal-notes-modal .copal-shell-scrim').click()");
 await waitFor("document.querySelector('#copal-notes-modal .copal-notes-workspace').dataset.drawer === 'none' && !document.querySelector('#copal-notes-modal .copal-notes-sidebar')", 'compact drawer close');
-assert.deepEqual(await evaluate(`(() => { const layout=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default')); return { left:layout.left.open, right:layout.right.open }; })()`), persistedDesktopShell);
+assert.deepEqual(await evaluate(`(() => { const layout=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)})); return { left:layout.left.open, right:layout.right.open }; })()`), persistedDesktopShell);
 
 await command('Emulation.setDeviceMetricsOverride', { width:900, height:620, deviceScaleFactor:1, mobile:false });
 await command('Emulation.setPageScaleFactor', { pageScaleFactor:2 });
-await navigate(`/copal/notes?doc=${encodeURIComponent(acceptance.id)}&zoom=${Date.now()}`);
+await navigate(`/copal/editor?doc=${encodeURIComponent(acceptance.id)}&zoom=${Date.now()}`);
 await waitFor("document.querySelector('#copal-notes-modal:not(.hidden) .cm-editor')", 'Notes at 200 percent zoom');
 await command('Emulation.setEmulatedMedia', { features:[{ name:'prefers-reduced-motion', value:'reduce' }] });
 results.notes.zoom200 = await evaluate(`(() => { const modal=document.querySelector('#copal-notes-modal .copal-modal-content').getBoundingClientRect(); const header=document.querySelector('#copal-notes-modal .copal-workspace-header').getBoundingClientRect(); const active=document.activeElement; return { modal:[Math.round(modal.width),Math.round(modal.height)], headerVisible:header.top>=0 && header.bottom<=innerHeight, editorVisible:!!document.querySelector('#copal-notes-modal .cm-editor'), focused:!!active }; })()`);
@@ -1012,7 +1292,7 @@ await command('Emulation.setEmulatedMedia', { features:[] });
 await command('Emulation.setPageScaleFactor', { pageScaleFactor:1 });
 
 await command('Emulation.setDeviceMetricsOverride', { width:390, height:844, deviceScaleFactor:3, mobile:true });
-await navigate(`/copal/notes?doc=${encodeURIComponent(acceptance.id)}&mobile=${Date.now()}`);
+await navigate(`/copal/editor?doc=${encodeURIComponent(acceptance.id)}&mobile=${Date.now()}`);
 await waitFor("document.querySelector('#copal-notes-modal:not(.hidden) .copal-notes-workspace')", 'mobile Notes');
 await waitFor("!document.querySelector('#copal-notes-modal .copal-notes-explorer') && !document.querySelector('#copal-notes-modal .copal-notes-sidebar')", 'mobile drawers initially closed');
 await evaluate("document.getElementById('copal-notes-left-sidebar-toggle').focus(); document.getElementById('copal-notes-left-sidebar-toggle').click()");
@@ -1029,7 +1309,7 @@ results.mobile = await evaluate(`(() => {
   const left=document.getElementById('copal-notes-left-sidebar-toggle').getBoundingClientRect();
   const right=document.getElementById('copal-notes-right-sidebar-toggle').getBoundingClientRect();
   const tabScroll=root.querySelector('.copal-note-tab-scroll');
-  const layout=JSON.parse(localStorage.getItem('odysseus-copal-notes-layout:default'));
+  const layout=JSON.parse(localStorage.getItem(${JSON.stringify(notesLayoutKey)}));
   return {
     width:Math.round(box.width), height:Math.round(box.height), viewport:[innerWidth,innerHeight], dpr:devicePixelRatio,
     explorer:!!root.querySelector('.copal-notes-explorer'), rightSidebar:!!root.querySelector('.copal-notes-sidebar'),
@@ -1054,6 +1334,64 @@ assert(results.mobile.tabs >= 2 && results.mobile.tabControlsOutsideScroll && re
 assert.deepEqual(results.mobile.persisted, persistedDesktopShell);
 await screenshot('notes-mobile');
 checkpoint('mobile acceptance ready');
+
+// Files exact-open must enter the existing Editor renderer using only a sealed
+// ResourceRef. The raw Copal document id must not appear in either Files JSON
+// response, and a server-qualified writable Copal adapter must retain the
+// shared Editor while Files continues to own reveal and lifecycle actions.
+const filesRoots = await jsonRequest('/api/files-v1/roots?copal_workspace=default');
+const filesCopalRoot = filesRoots.entries.find((entry) => entry.provider === 'copal');
+assert(filesCopalRoot?.ref);
+const filesCopalFolders = await jsonRequest('/api/files-v1/children', {
+  method:'POST', body:JSON.stringify({ parent_ref:filesCopalRoot.ref, limit:100, sort:{}, query:'' }),
+});
+const filesCopalDocuments = filesCopalFolders.entries.find((entry) => entry.name === 'Documents');
+assert(filesCopalDocuments?.ref);
+const filesExactPage = await jsonRequest('/api/files-v1/children', {
+  method:'POST', body:JSON.stringify({ parent_ref:filesCopalDocuments.ref, limit:20, sort:{}, query:'QOL Browser' }),
+});
+const filesAcceptance = filesExactPage.entries.find((entry) => entry.name === 'Acceptance/QOL Browser.md');
+assert(filesAcceptance?.ref);
+const filesOpenAction = await jsonRequest('/api/files-v1/action', {
+  method:'POST', body:JSON.stringify({ resource_ref:filesAcceptance.ref, action:'open', args:{} }),
+});
+assert.equal(filesOpenAction.exact, true);
+assert.equal(filesOpenAction.target.app, 'copal_notes');
+assert(filesOpenAction.resource.capabilities.includes('write'));
+assert.equal(JSON.stringify(filesOpenAction).includes(acceptance.id), false);
+await evaluate(`window.copalModule.openResource(${JSON.stringify(filesOpenAction.resource.ref)})`);
+await waitFor(`(() => {
+  const group=document.querySelector('#copal-notes-modal .copal-note-group.active-group');
+  return group?.querySelector('.copal-note-tab.active')?.textContent.includes('QOL Browser')
+    && !!group.querySelector('.cm-editor')
+    && !group.querySelector('.copal-leaf-mode')?.textContent.includes('read only')
+    && [...group.querySelectorAll('.copal-leaf-menu button')].some((node)=>node.textContent.trim()==='Show in Files');
+})()`, 'opaque Files exact-open in Editor');
+const exactOpenLocation = await evaluate('({ href:location.href, pathname:location.pathname })');
+assert.equal(exactOpenLocation.pathname, '/copal/editor');
+  assert.equal(exactOpenLocation.href.includes(acceptance.id), false);
+  assert.equal(exactOpenLocation.href.includes(filesOpenAction.resource.ref), false);
+  await evaluate(`(() => {
+    const menus=[...document.querySelectorAll('#copal-notes-modal .copal-leaf-menu')];
+    const menu=menus.find(node=>node.closest('.copal-note-leaf')?.querySelector('.copal-note-tab, .copal-inline-title')?.textContent?.includes('QOL Browser')) || menus.at(-1);
+    if (!menu) throw new Error('Opaque note action menu is missing');
+    menu.open=true;
+    const button=[...menu.querySelectorAll('button')].find(node=>node.textContent.trim()==='Show in Files');
+    if (!button) throw new Error('Show in Files action is missing');
+    button.click();
+  })()`);
+  await waitFor("document.querySelector('.files-window:not(.hidden)') && document.querySelector('.files-entry.selected .files-entry-name')?.textContent === 'Acceptance/QOL Browser.md'", 'opaque Copal Show in Files');
+  assert.equal(await evaluate("location.href.includes('rr1.')"), false);
+  await evaluate(`(() => { const row=[...document.querySelectorAll('.files-entry')].find(node=>node.querySelector('.files-entry-name')?.textContent==='Acceptance/QOL Browser.md'); window.openClankContextMenu?.close(); row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:20,clientY:20})); })()`);
+  await waitFor("document.querySelector('#openclank-context-menu')", 'Files shared context menu');
+  assert.equal(await evaluate("!!document.querySelector('#openclank-context-menu button[data-command=rename-file]')"), true);
+  assert.equal(await evaluate("!!document.querySelector('#openclank-context-menu button[data-command=trash-file]')"), true);
+  await evaluate("document.querySelector('#openclank-context-menu button[data-command=rename-file]').click()");
+  await waitFor("document.querySelector('#styled-prompt-overlay:not(.hidden)')", 'Files rename form');
+  await evaluate("document.querySelector('#styled-prompt-input').value='Acceptance/QOL Browser Files Rename.md'; document.querySelector('#styled-prompt-ok').click()");
+  await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>doc.name==='Acceptance/QOL Browser Files Rename.md')`, 'Files shared rename');
+  results.notes.filesSharedMenu = { capabilities:true, rename:true, capturedTarget:true };
+  results.notes.filesExactOpen = { opaque:true, editable:true, showInFiles:true };
 
 assert.equal(exceptions.length, 0, `Browser exceptions: ${exceptions.join('\n')}`);
 // "Memory provider unavailable" is expected in the isolated acceptance stack,

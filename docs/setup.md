@@ -27,9 +27,9 @@ docker compose up -d --build
 ```
 To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
 
-Open `http://localhost:7000` when the containers are healthy. Docker Compose
+Open `http://localhost:7777` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set
-`APP_PORT=7001` in `.env` and recreate the container. Set `APP_BIND=0.0.0.0`
+`APP_PORT=7778` in `.env` and recreate the container. Set `APP_BIND=0.0.0.0`
 only when you intentionally want LAN/reverse-proxy access.
 
 > **On Apple Silicon (M-series) Macs:** Docker can't reach the Metal GPU, so
@@ -44,9 +44,15 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python setup.py
-python -m uvicorn app:app --host 127.0.0.1 --port 7000
+openclank
 ```
-Requirements: Python 3.11+. Cookbook also needs `tmux` for background model
+`openclank` opens the terminal interface and auto-starts the complete local
+service only after a genuine loopback connection refusal. Use `openclank
+server start|stop|status` for explicit lifecycle control. Setup installs no
+public engine or legacy-brand command.
+
+Requirements: Python 3.11+. Source setup fetches the pinned Bun toolchain when
+the exact custom engine must be rebuilt. Cookbook also needs `tmux` for background model
 downloads and serves. The app itself is lightweight; local model serving is the
 heavy part and depends on the model, runtime, GPU, and VRAM, so small hosts can
 connect to API or remote model servers instead. Use `--host 0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
@@ -61,11 +67,11 @@ cd open-clank
 ./start-macos.sh
 ```
 
-It launches at `http://127.0.0.1:7860`. To expose it to your phone over a trusted LAN/VPN such as Tailscale, bind all interfaces:
+It launches at `http://127.0.0.1:7777`. To expose it to your phone over a trusted LAN/VPN such as Tailscale, bind all interfaces:
 
 ```bash
 ODYSSEUS_HOST=0.0.0.0 ./start-macos.sh
-# then open http://<tailscale-ip>:7860
+# then open http://<tailscale-ip>:7777
 ```
 
 The script also reads `.env` at startup, so `APP_BIND=0.0.0.0` and `APP_PORT`
@@ -81,8 +87,10 @@ expose this port directly to the public internet. To build a clickable app wrapp
 <details>
 <summary>Cookbook, GPU, Ollama, and troubleshooting notes</summary>
 
-**Docker bundled services.** Compose starts Odysseus, ChromaDB, SearXNG, and
-ntfy. Odysseus and the bundled service ports bind to `127.0.0.1` by default, so
+**Docker bundled services.** Compose starts Open Clank, SearXNG, and ntfy.
+Frankenmemory stores memory/RAG locally in the mounted SQLite data directory;
+it does not need a second vector service. The bundled service ports bind to
+`127.0.0.1` by default, so
 they are reachable from the host but not exposed to your LAN/public internet
 unless you opt in.
 
@@ -314,12 +322,12 @@ install usually only need to add the endpoint in Settings.
 ```bash
 docker compose ps
 docker compose logs --tail=120 odysseus
-docker compose logs odysseus | grep -E 'ChromaDB|MemoryVectorStore|DEGRADED'
+  docker compose logs odysseus | grep -E 'Frankenmemory|DEGRADED|ERROR'
 ```
 
 **macOS details.** `start-macos.sh` installs Homebrew deps, creates the venv,
-runs setup, and starts uvicorn on port `7860` because AirPlay often holds
-`7000`. It uses llama.cpp/Ollama for Metal. vLLM/SGLang are CUDA/ROCm-only and
+runs setup, and starts uvicorn on port `7777`. It uses llama.cpp/Ollama for
+Metal. vLLM/SGLang are CUDA/ROCm-only and
 do not run on macOS. MLX-only models are not served by Odysseus.
 
 </details>
@@ -344,7 +352,7 @@ py -3.11 -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python setup.py
-python -m uvicorn app:app --host 127.0.0.1 --port 7000
+python -m uvicorn app:app --host 127.0.0.1 --port 7777
 ```
 
 If `python` points at an older interpreter, use `py -3.12` (or another installed
@@ -371,19 +379,15 @@ Local GPU *serving* of vLLM/SGLang needs Linux/WSL2; for a local model on Window
 [Ollama](https://ollama.com/download) is the easiest path — point Odysseus at
 `http://localhost:11434/v1` in Settings.
 
-Open `http://localhost:7000`, log in with the generated admin password,
+Open `http://localhost:7777`, log in with the generated admin password,
 and configure everything else inside **Settings**.
 
 ## Troubleshooting & Advanced Setup
 
-### `chromadb-client` conflicts with embedded ChromaDB
-If `chromadb-client` (the lightweight HTTP-only package) is installed alongside the full `chromadb` package, Odysseus starts but ChromaDB silently falls back to HTTP-only mode and fails.
-
-**Fix:** uninstall `chromadb-client` and force-reinstall the full package:
-```bash
-./venv/bin/pip uninstall chromadb-client -y
-./venv/bin/pip install --force-reinstall chromadb
-```
+### Legacy Chroma data
+Historical migration scripts remain available for inspecting or importing an
+old dataset. They do not configure an application backend; Frankenmemory is the
+only live memory, document, and tool-index authority.
 
 ### HTTPS + LAN/Tailscale exposure
 To expose Odysseus on a local network or Tailscale with HTTPS:
@@ -395,7 +399,7 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
    ```
 3. Run `uvicorn` with the generated certs:
    ```bash
-   python -m uvicorn app:app --host 0.0.0.0 --port 7000 --ssl-certfile=cert.pem --ssl-keyfile=key.pem
+   python -m uvicorn app:app --host 0.0.0.0 --port 7777 --ssl-certfile=cert.pem --ssl-keyfile=key.pem
    ```
 4. Install the `mkcert` CA on any other device you want to access Odysseus from (e.g., for iOS, email the `rootCA.pem` to yourself, install the profile, and trust it in Certificate Trust Settings).
 
@@ -403,8 +407,7 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
 A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 
 - **`AUTH_ENABLED=false` is ignored / you're still forced to log in (Windows).** If you edited `.env` in Notepad it may have saved a UTF-8 **BOM**, turning the first key into `﻿AUTH_ENABLED` so it is never matched. Odysseus loads `.env` with `encoding="utf-8-sig"` to tolerate a leading BOM, but the safe fix is to re-save `.env` as **UTF-8 without BOM** (VS Code: *Save with Encoding → UTF-8*).
-- **macOS: the app isn't at `http://localhost:7000`.** macOS AirPlay Receiver usually holds port `7000`, so the macOS start script serves on **`7860`** instead — open `http://localhost:7860`. To use `7000`, free it (System Settings → General → AirDrop & Handoff → turn off *AirPlay Receiver*) and set `APP_PORT=7000`.
-- **Copy buttons do nothing over a plain-HTTP Tailscale/LAN URL.** Browsers only expose the clipboard API (`navigator.clipboard`) on **secure origins** — HTTPS, or `localhost`. Over `http://100.x.y.z:7860` it is blocked. Serve over HTTPS (see *HTTPS + LAN/Tailscale exposure* above); `localhost` is exempt, so copy still works on the host itself.
+- **Copy buttons do nothing over a plain-HTTP Tailscale/LAN URL.** Browsers only expose the clipboard API (`navigator.clipboard`) on **secure origins** — HTTPS, or `localhost`. Over `http://100.x.y.z:7777` it is blocked. Serve over HTTPS (see *HTTPS + LAN/Tailscale exposure* above); `localhost` is exempt, so copy still works on the host itself.
 - **Self-hosted ntfy reminders don't reach your phone.** Two things: (1) the bundled ntfy binds to loopback by default — to reach it from your phone set `NTFY_BIND` to your host/Tailscale IP and `NTFY_BASE_URL` to the same server URL in `.env`, then recreate the ntfy container (see the `NTFY_*` block in `.env.example`); (2) in the ntfy **Android** app, subscribe to the topic with **Instant delivery** enabled — non-`ntfy.sh` servers don't get instant push otherwise.
 - **Local mail (Dovecot) login fails: "Plaintext authentication disallowed on non-encrypted connections."** Your IMAP/SMTP server is refusing cleartext auth over an unencrypted link. Prefer enabling TLS on the mail server; on a trusted LAN only, you can allow cleartext (Dovecot: `disable_plaintext_auth = no`).
 - **Calendar/contacts (Radicale) won't sync.** Point Odysseus at the **full collection URL** with its trailing slash — e.g. `http://host:5232/<user>/<collection-id>/` — not just the server root. Radicale shows this address for each calendar/address book in its web UI.
@@ -457,45 +460,44 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 - Rotate any API keys or tokens that were ever pasted into a shared chat, demo, screenshot, or log.
 - If you enable API tokens or webhooks, create separate tokens per integration and delete unused ones.
 - Prefer binding manual development runs to `127.0.0.1`; bind to `0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
-- Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Odysseus web/API entrypoint through your trusted proxy or private access layer.
+- Keep SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Odysseus web/API entrypoint through your trusted proxy or private access layer.
 - Before publishing a fork, run `git status --short` and confirm no private files from `.env`, `data/`, `logs/`, uploads, backups, or local databases are staged.
 
 ### Private or proxied deployments
 Odysseus serves plain HTTP on its app port. Docker Compose binds Odysseus and the bundled services to `127.0.0.1` by default, so a typical production/private setup is:
 
-1. Keep Odysseus on localhost, for example `127.0.0.1:7000`.
+1. Keep Open Clank on localhost, for example `127.0.0.1:7777`.
 2. Terminate HTTPS at a trusted reverse proxy or private access gateway.
 3. Put the authenticated Odysseus web/API entrypoint behind that layer.
 4. Keep raw service and model ports internal-only.
 
-Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Odysseus. If your access layer reaches Odysseus on the same host, proxy to `http://127.0.0.1:7000` and keep `AUTH_ENABLED=true`, `LOCALHOST_BYPASS=false`, and `SECURE_COOKIES=true`.
+Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Open Clank. If your access layer reaches Open Clank on the same host, proxy to `http://127.0.0.1:7777` and keep `AUTH_ENABLED=true`, `LOCALHOST_BYPASS=false`, and `SECURE_COOKIES=true`.
 `ALLOWED_ORIGINS` lists exact permitted origins for cross-origin browser/API clients; ordinary same-origin reverse-proxy access usually does not need a special CORS entry.
 
 Common internal-only ports from the default docs/compose setup:
 
 | Port | Service |
 |---|---|
-| `7000` | Odysseus raw app port |
+| `7777` | Open Clank raw app port |
 | `8080` | SearXNG |
 | `8091` | ntfy |
-| `8100` | ChromaDB host port for manual/compose access |
 | `11434` | Ollama |
 | `8000-8020` | Common local model/provider APIs |
 
 ## Configuration
-Most setup is done inside the app with `/setup` or **Settings**. Use `.env`
-for deployment-level defaults and secrets you want present before first boot.
+Most setup is done inside the app with `/setup` or **Settings**. Provider
+connections, credentials, model visibility, and modality defaults belong only
+in **Providers**; retired provider environment variables fail startup. Use
+`.env` for application and non-model integration settings you want present
+before first boot.
 Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_HOST` | `localhost` | Your LLM server (e.g. `llm-host.local:8000`) |
-| `LLM_HOSTS` | -- | Comma-separated list for model discovery |
-| `OPENAI_API_KEY` | -- | Optional OpenAI key. Prefer adding providers in the app unless pre-seeding. |
 | `SEARXNG_INSTANCE` | `http://localhost:8080` | SearXNG URL. Docker overrides this to `http://searxng:8080`. |
 | `SEARXNG_SECRET` | generated on first Docker boot | Optional SearXNG cookie/CSRF secret. Leave blank unless you need to pin it. |
 | `APP_BIND` | `127.0.0.1` | Docker Compose host bind address for the web UI. Use `0.0.0.0` only for intentional LAN/reverse-proxy access. |
-| `APP_PORT` | `7000` | Docker Compose host port for the web UI. |
+| `APP_PORT` | `7777` | Docker Compose host port for the web UI. |
 | `APP_DATA_DIR` | `./data` | Docker Compose host directory for application data volumes. |
 | `APP_LOGS_DIR` | `./logs` | Docker Compose host directory for application logs. |
 | `AUTH_ENABLED` | `true` | Enable/disable login |
@@ -503,9 +505,8 @@ Key settings:
 | `ALLOWED_ORIGINS` | `http://localhost,http://127.0.0.1` | Comma-separated exact permitted origins for cross-origin browser/API clients. |
 | `SECURE_COOKIES` | `false` | Set true when serving Odysseus through HTTPS at a trusted proxy or private access gateway. |
 | `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
-| `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
-| `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
-| `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint |
+| `FM_DB_PATH` | `./data/frankenmemory.db` | Frankenmemory memory/RAG database path. |
+| `FM_CODE_INDEX_LEASE_SECONDS` | `99999` | Code-index stale-run recovery lease in seconds (60–99999). This is not an indexing timeout; lower it only when faster abandoned-run recovery is preferred. |
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
 | `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Gallery transform input cap in bytes (25 MB). |
@@ -541,8 +542,11 @@ docs/      landing page (index.html) + preview clips
 ```
 
 ## Data
-All user data lives in `data/` (gitignored): `app.db` (sessions, messages, documents),
-`memory.json`, `presets.json`, `uploads/`, `personal_docs/`, `chroma/`, `settings.json`.
+All user data lives in `data/` (gitignored): `app.db` (sessions, messages,
+documents), `frankenmemory.db` (memory, typed knowledge, sources, RAG chunks,
+and derived indexes), `memory.json`, `presets.json`, `uploads/`,
+`personal_docs/`, and `settings.json`. A `chroma/` directory is legacy
+compatibility data only and is not required by the default install.
 
 To back up or restore everything in `data/`, see the
 [Backup & Restore guide](backup-restore.md).

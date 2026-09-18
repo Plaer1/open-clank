@@ -10,13 +10,15 @@ import { providerLogo } from './providers.js';
 import { catalogEntries } from './modelCatalog.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
-import mimoProviders from './mimoProviders.js';
-import modelSharing from './modelSharing.js';
+import providerControl from './providerControl.js';
+import { getWorkspaceId } from './workspace.js';
 
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
 let _copalModule = null;
+let _copalAppearanceRefresh = null;
+let _closeTimer = null;
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return uiModule.esc(s); }
@@ -35,8 +37,8 @@ function safeRasterDataUrl(raw) {
 
 /* ── Tab switching ── */
 const SETTINGS_OWNERSHIP = Object.freeze({
-  services: { scope: 'per-user', api: '/api/model-endpoints', consumer: 'your Open Clank model catalogue' },
-  'added-models': { scope: 'per-user', api: '/api/model-endpoints', consumer: 'your Open Clank model catalogue' },
+  services: { scope: 'per-user', api: '/api/v1/providers', consumer: 'adding API and local models' },
+  'added-models': { scope: 'per-user', api: '/api/v1/providers', consumer: 'your connected models and advanced provider settings' },
   // The Persona card inside this panel is per-user too, served by
   // /api/presets/default-persona (chat default, assistant, reminder voice,
   // background work — one synced record, ruling R13).
@@ -45,10 +47,12 @@ const SETTINGS_OWNERSHIP = Object.freeze({
   integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
   reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
+  history: { scope: 'shared-policy', api: '/api/history/settings', consumer: 'Lore history usage and retention budgets' },
   appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   account: { scope: 'per-user', api: '/api/auth', consumer: 'current account lifecycle' },
   tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Open Clank effective tool policy' },
+  'file-access': { scope: 'shared-policy', api: '/api/file-policy/state + /api/file-policy/locations + /api/file-policy/people', consumer: 'Locations, People access, and separate agent approvals' },
   users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
   system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
 });
@@ -111,14 +115,12 @@ function initTabs() {
       // they flip toggles instead of having to close + reopen the modal.
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
-      if (MODEL_MANAGEMENT_TABS.has(tab)) window.adminModule?._initModelData?.();
       if (tab === 'appearance') syncCopalNotesSettings();
-      if (tab === 'ai') { refreshAiModelEndpoints(); loadDefaultPersonaPanel(); }
+      if (tab === 'ai') activateAiSettings();
+      if (tab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
       if (MODEL_MANAGEMENT_TABS.has(tab)) {
-        mimoProviders.load();
-        modelSharing.load();
+        providerControl.load({ view: tab });
       }
-      if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
     });
   });
 }
@@ -283,11 +285,86 @@ function initOpacityToggle() {
 
 const _aiEndpointRefreshers = new Set();
 let _aiEndpointRefreshInFlight = null;
+let _modelEndpointSnapshot = null;
+let _modelEndpointSnapshotAt = 0;
+let _modelEndpointFetchInFlight = null;
+let _ownerModelCatalogSnapshot = null;
+let _ownerModelCatalogSnapshotAt = 0;
+let _ownerModelCatalogFetchInFlight = null;
+let _aiSettingsInitialized = false;
 
-async function _fetchModelEndpoints() {
-  const epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin', cache: 'no-store' });
-  const endpoints = await epRes.json();
-  return Array.isArray(endpoints) ? endpoints : [];
+async function _fetchOwnerModelCatalog(options = {}) {
+  const force = options.force === true;
+  const fresh = _ownerModelCatalogSnapshot
+    && (Date.now() - _ownerModelCatalogSnapshotAt) < 5000;
+  if (!force && fresh) return _ownerModelCatalogSnapshot;
+  if (_ownerModelCatalogFetchInFlight) return _ownerModelCatalogFetchInFlight;
+  _ownerModelCatalogFetchInFlight = (async function() {
+    const response = await checkedFetch('/api/models', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    const data = await response.json();
+    _ownerModelCatalogSnapshot = data;
+    _ownerModelCatalogSnapshotAt = Date.now();
+    return data;
+  })();
+  try {
+    return await _ownerModelCatalogFetchInFlight;
+  } finally {
+    _ownerModelCatalogFetchInFlight = null;
+  }
+}
+
+async function _fetchModelEndpoints(options = {}) {
+  const force = options.force === true;
+  const fresh = _modelEndpointSnapshot && (Date.now() - _modelEndpointSnapshotAt) < 5000;
+  if (!force && fresh) return _modelEndpointSnapshot;
+  if (_modelEndpointFetchInFlight) return _modelEndpointFetchInFlight;
+  _modelEndpointFetchInFlight = (async () => {
+    // One DB-only projection includes both personal and received shared models.
+    // This also avoids serializing every AI Defaults picker behind separate
+    // connection and model requests.
+    const items = (await _fetchOwnerModelCatalog({ force })).items || [];
+    const snapshot = items.map(function(item) {
+      const connectionRoutes = (item.catalog || []).filter(function(route) {
+        return route.hidden !== true && route.entitled !== false && route.compatible !== false;
+      }).map(function(route) {
+        const selector = item.shared
+          ? route.model_id
+          : (route.provider_model_route_id || route.model_id);
+        return {
+          model_id: selector,
+          provider_model_id: route.provider_model_id || route.model_id,
+          display_name: route.display_name || route.model_id,
+          capabilities: route.capabilities || {},
+          operations: route.operations || [],
+          hidden: false,
+        };
+      });
+      return {
+        id: item.endpoint_id,
+        endpoint_id: item.endpoint_id,
+        name: item.endpoint_name || item.endpoint_id,
+        online: item.offline !== true,
+        is_enabled: item.offline !== true,
+        endpoint_kind: item.endpoint_kind,
+        billing_lane: item.billing_lane,
+        shared: item.shared === true,
+        shared_by: item.shared_by || null,
+        catalog: connectionRoutes,
+        models: connectionRoutes.map(function(route) { return route.model_id; }),
+      };
+    }).filter(function(item) { return item.id && item.catalog.length; });
+    _modelEndpointSnapshot = snapshot;
+    _modelEndpointSnapshotAt = Date.now();
+    return snapshot;
+  })();
+  try {
+    return await _modelEndpointFetchInFlight;
+  } finally {
+    _modelEndpointFetchInFlight = null;
+  }
 }
 
 function _endpointLabel(ep) {
@@ -400,7 +477,7 @@ export async function refreshAiModelEndpoints() {
   if (_aiEndpointRefreshInFlight) return _aiEndpointRefreshInFlight;
   _aiEndpointRefreshInFlight = (async function() {
     try {
-      const endpoints = await _fetchModelEndpoints();
+      const endpoints = await _fetchModelEndpoints({ force: true });
       _aiEndpointRefreshers.forEach(function(fn) {
         try { fn(endpoints); } catch (e) { console.warn('[settings] endpoint refresh handler failed', e); }
       });
@@ -411,121 +488,6 @@ export async function refreshAiModelEndpoints() {
     }
   })();
   return _aiEndpointRefreshInFlight;
-}
-
-/* Shared fallback-chain widget — mirrors the Default Chat Model fallback UI
- * for other model cards (Utility, Vision, …). Pass in the container/button
- * IDs, the endpoints list, the settings key to persist under, and the
- * model-filter (for Vision we exclude non-chat-capable models).
- */
-function _bindFallbackWidget(opts) {
-  var fbContainer = el(opts.containerId);
-  var addBtn = el(opts.addBtnId);
-  var endpointsRef = opts.endpoints;       // mutable list reference
-  var modelsFilter = opts.modelsFilter || function() { return true; };
-  var settingKey = opts.settingKey;
-  var current = opts.initial || [];        // [{endpoint_id, model}]
-
-  if (!fbContainer || !addBtn) return { setEndpoints: function() {}, setInitial: function() {} };
-
-  function enabledEps() { return (endpointsRef() || []).filter(function(e) { return e.is_enabled; }); }
-
-  function fillModels(selectEl, epId, selected) {
-    while (selectEl.options.length) selectEl.remove(0);
-    var ep = (endpointsRef() || []).find(function(e) { return e.id === epId; });
-    if (ep) {
-      _endpointCatalog(ep).forEach(function(entry) {
-        var m = entry.mid;
-        if (!modelsFilter(m, ep, entry)) return;
-        var o = document.createElement('option');
-        o.value = m;
-        o.textContent = m.split('/').pop();
-        selectEl.appendChild(o);
-      });
-    }
-    if (selected) selectEl.value = selected;
-  }
-
-  async function save() {
-    var clean = current.filter(function(f) { return f.endpoint_id && f.model; });
-    var body = {};
-    body[settingKey] = clean;
-    try {
-      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    } catch (e) { console.warn('[fallback] save failed for ' + settingKey, e); }
-  }
-
-  function render() {
-    fbContainer.innerHTML = '';
-    current.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEps().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEps()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        save();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; save(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-      rm.addEventListener('click', function() {
-        current.splice(idx, 1);
-        render();
-        save();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
-  }
-
-  addBtn.addEventListener('click', function() {
-    var first = enabledEps()[0];
-    current.push({ endpoint_id: first ? first.id : '', model: '' });
-    render();
-    save();
-  });
-
-  render();
-
-  return {
-    setInitial: function(list) { current = (list || []).slice(); render(); },
-    refresh: render,
-  };
 }
 
 /* ── Persona manager (identity rulings R10/R11/R13) ──
@@ -742,14 +704,7 @@ async function initDefaultChat() {
   var epSel = el('set-defaultEpSelect');
   var modelSel = el('set-defaultModelSelect');
   var msg = el('set-defaultChatMsg');
-  var fbContainer = el('set-defaultFallbacks');
-  var addFbBtn = el('set-defaultAddFallback');
   var _endpoints = [];
-  var _fallbacks = []; // [{endpoint_id, model}] — tried in order if primary fails
-
-  function enabledEndpoints() {
-    return _endpoints.filter(function(e) { return e.is_enabled; });
-  }
 
   // Fill any <select> with the models for a given endpoint id.
   function fillModels(selectEl, epId, selected) {
@@ -766,64 +721,6 @@ async function initDefaultChat() {
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
     _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
-    renderFallbacks();
-  }
-
-  // Render the fallback chain. Each row is endpoint + model + remove.
-  function renderFallbacks() {
-    fbContainer.innerHTML = '';
-    _fallbacks.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEndpoints().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEndpoints()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      // Keep the model in sync with the values actually shown.
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        saveDefault();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; saveDefault(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-      rm.addEventListener('click', function() {
-        _fallbacks.splice(idx, 1);
-        renderFallbacks();
-        saveDefault();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
   }
 
   try {
@@ -831,12 +728,6 @@ async function initDefaultChat() {
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
-    _fallbacks = Array.isArray(settings.default_model_fallbacks)
-      ? settings.default_model_fallbacks.map(function(f) {
-          return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' };
-        })
-      : [];
-    renderFallbacks();
   } catch (e) { console.warn('Failed to load default chat settings', e); }
 
   epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
@@ -844,26 +735,22 @@ async function initDefaultChat() {
 
   async function saveDefault() {
     try {
-      var clean = _fallbacks.filter(function(f) { return f.endpoint_id && f.model; });
       await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           default_endpoint_id: epSel.value,
-          default_model: modelSel.value,
-          default_model_fallbacks: clean
+          default_model: modelSel.value
         })
       });
+      try {
+        window.dispatchEvent(new CustomEvent('openclank:default-chat-changed', {
+          detail: { endpointId: epSel.value, modelId: modelSel.value }
+        }));
+      } catch (_) {}
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
-
-  if (addFbBtn) addFbBtn.addEventListener('click', function() {
-    var first = enabledEndpoints()[0];
-    _fallbacks.push({ endpoint_id: first ? first.id : '', model: '' });
-    renderFallbacks();
-    saveDefault();
-  });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
@@ -877,7 +764,6 @@ async function initUtilityModel() {
   var modelSel = el('set-utilityModelSelect');
   var msg = el('set-utilityChatMsg');
   var _endpoints = [];
-  var fallbackWidget = null;
   if (epSel && epSel.options[0]) epSel.options[0].textContent = 'Same as chat';
   if (modelSel && modelSel.options[0]) modelSel.options[0].textContent = 'Same as chat';
 
@@ -897,15 +783,6 @@ async function initUtilityModel() {
     var settings = await res.json();
     if (settings.utility_endpoint_id) epSel.value = settings.utility_endpoint_id;
     refreshModels(settings.utility_model || '');
-    fallbackWidget = _bindFallbackWidget({
-      containerId: 'set-utilityFallbacks',
-      addBtnId: 'set-utilityAddFallback',
-      endpoints: function() { return _endpoints; },
-      settingKey: 'utility_model_fallbacks',
-      initial: Array.isArray(settings.utility_model_fallbacks)
-        ? settings.utility_model_fallbacks.map(function(f) { return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' }; })
-        : [],
-    });
   } catch (e) { console.warn('Failed to load utility model settings', e); }
 
   // Persist whatever's currently selected. Empty endpoint or model → backend
@@ -932,7 +809,63 @@ async function initUtilityModel() {
     _endpoints = endpoints;
     _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
     refreshModels(modelSel.value);
-    if (fallbackWidget && fallbackWidget.refresh) fallbackWidget.refresh();
+  });
+}
+
+/* ── Memory Model ── */
+async function initMemoryModel() {
+  var epSel = el('set-memoryEpSelect');
+  var modelSel = el('set-memoryModelSelect');
+  var msg = el('set-memoryChatMsg');
+  var _endpoints = [];
+  if (!epSel || !modelSel) return;
+  if (epSel.options[0]) epSel.options[0].textContent = 'Same as Utility';
+  if (modelSel.options[0]) modelSel.options[0].textContent = 'Same as Utility';
+
+  try {
+    _endpoints = await _fetchModelEndpoints();
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+  } catch (e) { console.warn('Failed to load endpoints for memory model', e); }
+
+  function refreshModels(selectedModel) {
+    var ep = _endpoints.find(function(e) { return e.id === epSel.value; });
+    _fillModelSelect(modelSel, _endpointCatalog(ep), selectedModel, true);
+  }
+
+  try {
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.memory_endpoint_id) epSel.value = settings.memory_endpoint_id;
+    refreshModels(settings.memory_model || '');
+  } catch (e) { console.warn('Failed to load memory model settings', e); }
+
+  async function saveMemory() {
+    try {
+      await checkedFetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memory_endpoint_id: epSel.value || '',
+          memory_model: modelSel.value || '',
+        }),
+      });
+      msg.textContent = epSel.value && modelSel.value ? 'Saved' : 'Using Utility';
+      msg.style.color = 'var(--fg)';
+      setTimeout(function() { msg.textContent = ''; }, 1800);
+    } catch (e) {
+      msg.textContent = 'Failed to save';
+      msg.style.color = 'var(--red)';
+    }
+  }
+
+  epSel.addEventListener('change', function() { refreshModels(''); saveMemory(); });
+  modelSel.addEventListener('change', saveMemory);
+
+  _registerAiEndpointRefresh(function(endpoints) {
+    _endpoints = endpoints;
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+    refreshModels(modelSel.value);
   });
 }
 
@@ -1045,8 +978,7 @@ async function initImageSettings() {
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
   try {
-    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
+    const modelsData = await _fetchOwnerModelCatalog();
     // Inpaint-compat allowlist — image gen here is scoped to inpainting only,
     // so DALL-E / GPT-Image-1 (no inpaint API) are excluded. Currently:
     //   - any model with 'inpaint' in the id
@@ -1107,16 +1039,13 @@ async function initVisionSettings() {
   const msg = el('set-visionSettingsMsg');
   const enabledToggle = el('set-visionEnabledToggle');
   const configWrap = vlSel ? vlSel.closest('div[style*="flex-direction"]') : null;
-  var _visionEndpoints = [];
-  var visionFallbackWidget = null;
   var _vlExclude = ['audio', 'realtime', 'tts', 'dall-e', 'embedding', 'search', 'whisper'];
   function _isVisionModel(mid) {
     var lower = String(mid || '').toLowerCase();
     return !_vlExclude.some(function(kw) { return lower.includes(kw); });
   }
   try {
-    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
+    const modelsData = await _fetchOwnerModelCatalog();
     const visionModels = [];
     (modelsData.items || []).forEach(item => {
       if (item.offline) return;
@@ -1132,33 +1061,12 @@ async function initVisionSettings() {
       var opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; vlSel.appendChild(opt);
     });
   } catch (e) { console.warn('Failed to load models for vision settings', e); }
-  // Also pull the raw endpoint list so the fallback widget can resolve
-  // endpoint-id → models the same way the other cards do.
-  try {
-    _visionEndpoints = (await _fetchModelEndpoints()).filter(function(ep) {
-      return !ep.virtual || _endpointCatalog(ep).some(function(entry) {
-        return entry.capabilities?.vision === true;
-      });
-    });
-  } catch (e) { console.warn('Failed to load endpoints for vision fallback', e); }
   try {
     const settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
     if (settings.vision_model) vlSel.value = settings.vision_model;
     _syncModelLogo(vlSel);
     if (enabledToggle) enabledToggle.checked = settings.vision_enabled !== false;
-    visionFallbackWidget = _bindFallbackWidget({
-      containerId: 'set-visionFallbacks',
-      addBtnId: 'set-visionAddFallback',
-      endpoints: function() { return _visionEndpoints; },
-      // Vision fallback list filters to vision-capable models (same heuristic
-      // as the primary select above — exclude audio/tts/embedding/etc.).
-      modelsFilter: function(mid) { return _isVisionModel(mid); },
-      settingKey: 'vision_model_fallbacks',
-      initial: Array.isArray(settings.vision_model_fallbacks)
-        ? settings.vision_model_fallbacks.map(function(f) { return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' }; })
-        : [],
-    });
   } catch (e) { console.warn('Failed to load vision settings', e); }
 
   function syncVisionDisabled() {
@@ -1179,10 +1087,6 @@ async function initVisionSettings() {
   vlSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncVisionDisabled(); saveSettings(); });
 
-  _registerAiEndpointRefresh(function(endpoints) {
-    _visionEndpoints = endpoints;
-    if (visionFallbackWidget && visionFallbackWidget.refresh) visionFallbackWidget.refresh();
-  });
 }
 
 /* ── Face Recognition ── */
@@ -1222,11 +1126,13 @@ async function initTtsSettings() {
 
   var ttsKeywords = ['tts', 'audio'];
   try {
-    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = await _fetchModelEndpoints();
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled || ep.virtual) return;
-      var hasTTS = _endpointCatalog(ep).some(entry => ttsKeywords.some(kw => entry.mid.toLowerCase().includes(kw)));
+      var hasTTS = _endpointCatalog(ep).some(entry => (
+        (entry.operations || []).includes('audio.synthesize')
+        || ttsKeywords.some(kw => String(entry.providerModelId || entry.mid).toLowerCase().includes(kw))
+      ));
       if (!hasTTS) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
     });
@@ -1391,8 +1297,11 @@ async function initSttSettings() {
 
   // Add API endpoints that might support STT
   try {
-    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = (await _fetchModelEndpoints()).filter(function(ep) {
+      return _endpointCatalog(ep).some(function(entry) {
+        return (entry.operations || []).includes('audio.transcribe');
+      });
+    });
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled || ep.virtual) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
@@ -2037,6 +1946,14 @@ function initAppearance() {
   syncAppearanceCheckboxes();
   syncPrivacyCheckboxes();
   syncCopalNotesSettings();
+  const contextMenuToggle = modalEl.querySelector('#set-custom-context-menu');
+  if (contextMenuToggle) {
+    contextMenuToggle.checked = localStorage.getItem('odysseus-custom-context-menu') !== 'off';
+    contextMenuToggle.addEventListener('change', () => {
+      localStorage.setItem('odysseus-custom-context-menu', contextMenuToggle.checked ? 'on' : 'off');
+      window.dispatchEvent(new CustomEvent('odysseus-context-menu-changed'));
+    });
+  }
 
   modalEl.querySelectorAll('[data-ui-key]').forEach(function(chk) {
     chk.addEventListener('change', async function() {
@@ -2093,11 +2010,14 @@ function initAppearance() {
     control.addEventListener('change', function() {
       if (!_copalModule?.updateNotesSettings) return;
       const key = control.dataset.copalNotesSetting;
-      const value = control.type === 'checkbox' ? control.checked : control.value;
+      const value = control.type === 'checkbox'
+        ? (key === 'completedVisibility' ? (control.checked ? 'hide' : 'show') : control.checked)
+        : control.value;
       _copalModule.updateNotesSettings({ [key]:value });
       syncCopalNotesSettings();
     });
   });
+  initCopalAppearanceControls();
 
   // Per-section reset buttons (arrow-circle-back icon in each card's h2).
   // Removes only the keys belonging to this section from the persisted
@@ -2122,12 +2042,81 @@ function initAppearance() {
 
 function syncCopalNotesSettings() {
   if (!modalEl || !_copalModule?.getNotesSettings) return;
-  const settings = _copalModule.getNotesSettings();
+  let settings;
+  try { settings = _copalModule.getNotesSettings(); } catch (_) { return; }
   modalEl.querySelectorAll('[data-copal-notes-setting]').forEach(function(control) {
     const value = settings[control.dataset.copalNotesSetting];
-    if (control.type === 'checkbox') control.checked = value === true;
+    if (control.type === 'checkbox') control.checked = control.dataset.copalNotesSetting === 'completedVisibility' ? value === 'hide' : value === true;
     else if (value != null) control.value = String(value);
   });
+}
+
+function initCopalAppearanceControls() {
+  const entries = modalEl?.querySelector('#set-copal-navigation-entries');
+  const panels = modalEl?.querySelector('#set-copal-notes-panels');
+  const render = () => {
+    if (!entries || !_copalModule?.getAppearanceEntries || !_copalModule?.getEntryVisibility) return;
+    let visibility;
+    try { visibility = _copalModule.getEntryVisibility(); } catch (_) { visibility = null; }
+    entries.replaceChildren();
+    if (!visibility) {
+      const message = document.createElement('p'); message.textContent = 'Copal is still loading; retry Appearance.'; entries.append(message);
+      // Copal initializes its scoped appearance preference asynchronously.
+      // Keep the normal Appearance tab live when it is opened during that
+      // short window instead of requiring the user to close and reopen it.
+      if (_copalModule.whenReady && entries.dataset.copalReadyPending !== '1') {
+        entries.dataset.copalReadyPending = '1';
+        _copalModule.whenReady().then(() => {
+          delete entries.dataset.copalReadyPending;
+          _copalAppearanceRefresh?.();
+        }).catch(() => { delete entries.dataset.copalReadyPending; });
+      }
+      return;
+    }
+    for (const entry of _copalModule.getAppearanceEntries()) {
+      const input = document.createElement('input'); input.type = 'checkbox'; input.checked = visibility[entry.id] !== false; input.dataset.copalEntryId = entry.id;
+      input.addEventListener('change', async () => { try { await _copalModule.updateEntryVisibility(entry.id, input.checked); } catch (error) { input.checked = !input.checked; window.uiModule?.showToast?.(error.message); } });
+      const row = document.createElement('label'); row.className = 'vis-row'; row.append(document.createElement('span'), Object.assign(document.createElement('span'), { textContent: entry.label }), input, Object.assign(document.createElement('span'), { className: 'vis-switch' }));
+      entries.append(row);
+    }
+  };
+  modalEl?.querySelectorAll('[data-copal-entry-action]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      if (button.dataset.copalEntryAction === 'show') await _copalModule.setAllEntryVisibility(true);
+      else if (button.dataset.copalEntryAction === 'hide') await _copalModule.setAllEntryVisibility(false);
+      else await _copalModule.resetEntryVisibility();
+      render();
+    } catch (error) { window.uiModule?.showToast?.(error.message); }
+  }));
+  const renderPanels = () => {
+    if (!panels || !_copalModule?.getNotesPanels) return;
+    panels.replaceChildren();
+    let panelItems;
+    try { panelItems = _copalModule.getNotesPanels(); } catch (_) {
+      const message = document.createElement('p');
+      message.className = 'admin-toggle-sub';
+      message.textContent = 'Copal is still loading; retry Appearance.';
+      panels.append(message);
+      return;
+    }
+    for (const item of panelItems) {
+      if (['files', 'search'].includes(item.id)) continue;
+      const row = document.createElement('div'); row.className = 'settings-row copal-panel-setting';
+      const label = document.createElement('span'); label.className = 'settings-label'; label.textContent = item.label;
+      const side = document.createElement('select'); side.className = 'settings-select'; side.innerHTML = '<option value="left">Left</option><option value="right">Right</option>'; side.value = item.side;
+      side.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { side: side.value }); renderPanels(); });
+      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = !item.hidden; visible.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { hidden: !visible.checked }); renderPanels(); });
+      const up = document.createElement('button'); up.type = 'button'; up.className = 'copal-btn'; up.textContent = '↑'; up.disabled = item.hidden; up.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'up' }); renderPanels(); });
+      const down = document.createElement('button'); down.type = 'button'; down.className = 'copal-btn'; down.textContent = '↓'; down.disabled = item.hidden; down.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'down' }); renderPanels(); });
+      row.append(label, side, visible, up, down); panels.append(row);
+    }
+  };
+  if (_copalAppearanceRefresh) {
+    _copalAppearanceRefresh();
+    return;
+  }
+  _copalAppearanceRefresh = () => { render(); renderPanels(); };
+  _copalAppearanceRefresh();
 }
 
 function syncAppearanceCheckboxes() {
@@ -2215,7 +2204,7 @@ const SHORTCUT_LABELS = {
   open_gallery:   'Open Gallery',
   open_library:   'Open Library',
   open_memory:    'Open Memory',
-  open_notes:     'Open Notes',
+  open_notes:     'Open Editor',
   open_tasks:     'Open Clanker Tasks',
   open_theme:     'Open Theme',
 };
@@ -2456,6 +2445,24 @@ async function initShortcuts() {
    INIT & REFRESH
    ═══════════════════════════════════════════ */
 function initAccount() {
+  const emptyPasswordRow = el('settings-pw-empty-row');
+  const emptyPasswordToggle = el('settings-pw-empty');
+  const passwordNew = el('settings-pw-new');
+  const passwordConfirm = el('settings-pw-confirm');
+
+  const syncEmptyPasswordChoice = () => {
+    const useEmpty = !!emptyPasswordToggle?.checked;
+    if (passwordNew) {
+      passwordNew.disabled = useEmpty;
+      if (useEmpty) passwordNew.value = '';
+    }
+    if (passwordConfirm) {
+      passwordConfirm.disabled = useEmpty;
+      if (useEmpty) passwordConfirm.value = '';
+    }
+  };
+  emptyPasswordToggle?.addEventListener('change', syncEmptyPasswordChoice);
+
   // Populate user info
   fetch('/api/auth/status', { credentials: 'same-origin' })
     .then(r => r.json())
@@ -2465,6 +2472,11 @@ function initAccount() {
       const avatarEl = el('settings-account-avatar');
       if (nameEl) nameEl.textContent = d.username || 'Unknown';
       if (roleEl) roleEl.textContent = d.is_admin ? 'Admin' : 'User';
+      if (emptyPasswordRow) emptyPasswordRow.style.display = d.is_admin ? 'flex' : 'none';
+      if (!d.is_admin && emptyPasswordToggle) {
+        emptyPasswordToggle.checked = false;
+        syncEmptyPasswordChoice();
+      }
       if (avatarEl) {
         const initial = (d.username || '?')[0].toUpperCase();
         avatarEl.textContent = initial;
@@ -2487,12 +2499,14 @@ function initAccount() {
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
       const cur = el('settings-pw-current').value;
-      const nw = el('settings-pw-new').value;
-      const conf = el('settings-pw-confirm').value;
+      const useEmpty = !!emptyPasswordToggle?.checked
+        && emptyPasswordRow?.style.display !== 'none';
+      const nw = useEmpty ? '' : el('settings-pw-new').value;
+      const conf = useEmpty ? '' : el('settings-pw-confirm').value;
       msgEl.style.color = '';
-      if (!cur || !nw) { msgEl.textContent = 'Fill in all fields'; msgEl.style.color = 'var(--red)'; return; }
-      if (nw.length < _authPolicy.password_min_length) { msgEl.textContent = `Min ${_authPolicy.password_min_length} characters`; msgEl.style.color = 'var(--red)'; return; }
-      if (nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && !nw) { msgEl.textContent = 'Enter a new password'; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && nw.length < _authPolicy.password_min_length) { msgEl.textContent = `Min ${_authPolicy.password_min_length} characters`; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
       saveBtn.disabled = true;
       try {
         const res = await checkedFetch('/api/auth/change-password', {
@@ -2502,10 +2516,12 @@ function initAccount() {
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'Failed'); }
         msgEl.style.color = 'var(--green)';
-        msgEl.textContent = 'Password updated';
+        msgEl.textContent = useEmpty ? 'Password set to empty' : 'Password updated';
         el('settings-pw-current').value = '';
         el('settings-pw-new').value = '';
         el('settings-pw-confirm').value = '';
+        if (emptyPasswordToggle) emptyPasswordToggle.checked = false;
+        syncEmptyPasswordChoice();
       } catch (e) {
         msgEl.style.color = 'var(--red)';
         msgEl.textContent = e.message;
@@ -2537,7 +2553,6 @@ function initAccount() {
           el('tfa-disable-btn').addEventListener('click', async () => {
             const pw = el('tfa-disable-pw').value;
             const msg = el('tfa-msg');
-            if (!pw) { msg.textContent = 'Enter your password'; msg.style.color = 'var(--red)'; return; }
             try {
               const r = await checkedFetch('/api/auth/2fa/disable', {
                 method: 'POST', credentials: 'same-origin',
@@ -2654,16 +2669,13 @@ function initAll() {
     }
   }).observe(modalEl, { childList: true, subtree: true });
   initTabs();
-  mimoProviders.init({
+  providerControl.init({
     onCatalogChanged: async () => {
       if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
-      await refreshAiModelEndpoints();
-    },
-  });
-  modelSharing.init({
-    onCatalogChanged: async () => {
-      if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
-      await refreshAiModelEndpoints();
+      // The AI model cards are lazy. Until somebody opens that tab there are
+      // no controls to refresh, and fetching their endpoint projection here
+      // would duplicate providerControl's own connection/model reload.
+      if (_aiSettingsInitialized) await refreshAiModelEndpoints();
       window.sessionModule?.updateModelPicker?.();
     },
   });
@@ -2672,16 +2684,8 @@ function initAll() {
   initOpenPromptModalLink();
   initOpacityToggle();
   initialized = true;
-  initDefaultChat();
-  initTeacherModel();
-  initUtilityModel();
-  initImageSettings();
-  initVisionSettings();
-  initTtsSettings();
-  initSttSettings();
   if (window._isAdmin) {
     initSearchSettings();
-    initResearchSettings();
     initResearchSearchSettings();
     initAgentSettings();
   }
@@ -2693,6 +2697,33 @@ function initAll() {
   initEmailAccountsSettings();
   initReminderSettings();
   initUnifiedIntegrations();
+}
+
+function initAiSettingsOnce() {
+  if (_aiSettingsInitialized) return false;
+  _aiSettingsInitialized = true;
+  // These initializers share _fetchModelEndpoints' in-flight request. Keeping
+  // them behind the AI tab means opening Add Models performs only the two
+  // providerControl core reads it actually needs.
+  initDefaultChat();
+  initTeacherModel();
+  initUtilityModel();
+  initMemoryModel();
+  initImageSettings();
+  initVisionSettings();
+  initTtsSettings();
+  initSttSettings();
+  if (window._isAdmin) initResearchSettings();
+  return true;
+}
+
+function activateAiSettings() {
+  const initializedNow = initAiSettingsOnce();
+  // Each initializer populates itself from the shared first snapshot. On a
+  // later visit retain the previous behavior of refreshing every registered
+  // AI model picker from the provider API.
+  if (!initializedNow) refreshAiModelEndpoints();
+  loadDefaultPersonaPanel();
 }
 
 function notifyIntegrationsChanged() {
@@ -2835,6 +2866,184 @@ async function initReminderSettings() {
   const webhookIntgSel = el('set-reminder-webhook-intg');
   const webhookTemplateRow = el('set-reminder-webhook-template-row');
   const webhookTemplateIn = el('set-reminder-webhook-template');
+  const endpointsIn = el('set-reminder-endpoints');
+  const endpointsMsg = el('set-reminder-endpoints-msg');
+  const endpointsList = el('set-reminder-endpoints-list');
+  const addEndpointBtn = el('set-reminder-add-endpoint');
+  let endpointDraft = [];
+
+  function endpointValue(row) {
+    const channel = String(row.channel || 'browser');
+    if (channel === 'email') return row.email_to || '';
+    if (channel === 'ntfy') return row.ntfy_topic || '';
+    if (channel === 'webhook') return row.webhook_integration_id || '';
+    return '';
+  }
+  const ntfyIntegrations = () => allIntegrations.filter(i =>
+    String(i.preset || i.name || '').toLowerCase() === 'ntfy'
+  );
+  function renderReminderEndpoints() {
+    if (!endpointsList) return;
+    endpointsList.innerHTML = '';
+    endpointDraft.forEach((row, index) => {
+      const item = document.createElement('div');
+      item.className = 'reminder-endpoint-row';
+      item.dataset.index = String(index);
+      const channel = document.createElement('select');
+      channel.className = 'settings-select reminder-endpoint-channel';
+      channel.innerHTML = '<option value="browser">Browser</option><option value="email">Email</option><option value="ntfy">ntfy</option><option value="webhook">Webhook</option>';
+      channel.value = row.channel || 'browser';
+      const value = document.createElement('input');
+      value.className = 'settings-select reminder-endpoint-value';
+      value.type = channel.value === 'email' ? 'email' : 'text';
+      value.placeholder = channel.value === 'email' ? 'you@example.com' : channel.value === 'ntfy' ? 'topic' : channel.value === 'webhook' ? 'Integration' : 'In-app browser notification';
+      value.value = endpointValue(row);
+      value.disabled = channel.value === 'browser';
+      value.style.display = channel.value === 'email' || channel.value === 'ntfy' ? '' : 'none';
+      const account = document.createElement('select');
+      account.className = 'settings-select reminder-endpoint-account';
+      account.innerHTML = '<option value="">Default account</option>' + emailAccounts.map(a => `<option value="${esc(a.id)}">${esc(a.name || a.from_address || a.imap_user || 'Email account')}</option>`).join('');
+      account.value = row.email_account_id || '';
+      account.style.display = channel.value === 'email' ? '' : 'none';
+      const ntfySelect = document.createElement('select');
+      ntfySelect.className = 'settings-select reminder-endpoint-ntfy-integration';
+      const ntfyOptions = ntfyIntegrations();
+      ntfySelect.innerHTML = '<option value="">Default ntfy server</option>' + ntfyOptions.map(i => `<option value="${esc(i.id)}">${esc(i.name || i.id)}</option>`).join('');
+      if (row.ntfy_integration_id && !ntfyOptions.some(i => i.id === row.ntfy_integration_id)) {
+        ntfySelect.insertAdjacentHTML('beforeend', `<option value="${esc(row.ntfy_integration_id)}">Unavailable integration</option>`);
+      }
+      ntfySelect.value = row.ntfy_integration_id || '';
+      ntfySelect.style.display = channel.value === 'ntfy' ? '' : 'none';
+      const webhookSelect = document.createElement('select');
+      webhookSelect.className = 'settings-select reminder-endpoint-webhook-integration';
+      webhookSelect.innerHTML = allIntegrations.length
+        ? '<option value="">Select integration</option>' + allIntegrations.map(i => `<option value="${esc(i.id)}">${esc(i.name || i.id)}</option>`).join('')
+        : '<option value="">No integrations configured</option>';
+      if (row.webhook_integration_id && !allIntegrations.some(i => i.id === row.webhook_integration_id)) {
+        webhookSelect.insertAdjacentHTML('beforeend', `<option value="${esc(row.webhook_integration_id)}">Unavailable integration</option>`);
+      }
+      webhookSelect.value = row.webhook_integration_id || '';
+      webhookSelect.style.display = channel.value === 'webhook' ? '' : 'none';
+      const advanced = document.createElement('details');
+      advanced.className = 'reminder-endpoint-advanced';
+      advanced.style.display = channel.value === 'webhook' ? '' : 'none';
+      const advancedSummary = document.createElement('summary');
+      advancedSummary.textContent = 'Advanced payload template (optional)';
+      const payload = document.createElement('textarea');
+      payload.className = 'settings-select reminder-endpoint-payload';
+      payload.rows = 2;
+      payload.placeholder = '{"content":"{{title}}: {{message}}"}';
+      payload.value = row.webhook_payload_template || '';
+      payload.setAttribute('aria-label', 'Optional webhook payload template');
+      advanced.append(advancedSummary, payload);
+      const enabledLabel = document.createElement('label');
+      enabledLabel.className = 'reminder-endpoint-enabled';
+      enabledLabel.innerHTML = '<input type="checkbox"> Enabled';
+      enabledLabel.querySelector('input').checked = row.enabled !== false;
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'admin-btn-sm reminder-endpoint-remove';
+      remove.textContent = 'Remove';
+      const moveUp = document.createElement('button');
+      moveUp.type = 'button'; moveUp.className = 'admin-btn-sm reminder-endpoint-up';
+      moveUp.textContent = '↑'; moveUp.title = 'Move endpoint up'; moveUp.disabled = index === 0;
+      const moveDown = document.createElement('button');
+      moveDown.type = 'button'; moveDown.className = 'admin-btn-sm reminder-endpoint-down';
+      moveDown.textContent = '↓'; moveDown.title = 'Move endpoint down'; moveDown.disabled = index === endpointDraft.length - 1;
+      const test = document.createElement('button');
+      test.type = 'button'; test.className = 'admin-btn-sm reminder-endpoint-test';
+      test.textContent = 'Test';
+      const status = document.createElement('span');
+      status.className = 'reminder-endpoint-status';
+      status.setAttribute('role', 'status');
+      item.append(channel, value, account, ntfySelect, webhookSelect, advanced, enabledLabel, moveUp, moveDown, test, remove, status);
+      const sync = () => {
+        const next = { ...endpointDraft[index], channel: channel.value, enabled: enabledLabel.querySelector('input').checked };
+        if (channel.value === 'email') next.email_to = value.value.trim();
+        if (channel.value === 'email') next.email_account_id = account.value || '';
+        if (channel.value === 'ntfy') next.ntfy_topic = value.value.trim();
+        if (channel.value === 'ntfy') next.ntfy_integration_id = ntfySelect.value || '';
+        if (channel.value === 'webhook') next.webhook_integration_id = webhookSelect.value || '';
+        if (channel.value === 'webhook') next.webhook_payload_template = payload.value.trim();
+        endpointDraft[index] = next;
+        value.type = channel.value === 'email' ? 'email' : 'text';
+        value.disabled = channel.value === 'browser';
+        value.style.display = channel.value === 'email' || channel.value === 'ntfy' ? '' : 'none';
+        account.style.display = channel.value === 'email' ? '' : 'none';
+        ntfySelect.style.display = channel.value === 'ntfy' ? '' : 'none';
+        webhookSelect.style.display = channel.value === 'webhook' ? '' : 'none';
+        advanced.style.display = channel.value === 'webhook' ? '' : 'none';
+        value.placeholder = channel.value === 'email' ? 'you@example.com' : channel.value === 'ntfy' ? 'topic' : channel.value === 'webhook' ? 'Integration' : 'In-app browser notification';
+        scheduleEndpointSave(status);
+      };
+      channel.addEventListener('change', sync);
+      value.addEventListener('input', sync);
+      account.addEventListener('change', sync);
+      ntfySelect.addEventListener('change', sync);
+      webhookSelect.addEventListener('change', sync);
+      payload.addEventListener('input', sync);
+      enabledLabel.querySelector('input').addEventListener('change', sync);
+      moveUp.addEventListener('click', () => { if (index > 0) { [endpointDraft[index - 1], endpointDraft[index]] = [endpointDraft[index], endpointDraft[index - 1]]; renderReminderEndpoints(); scheduleEndpointSave(); } });
+      moveDown.addEventListener('click', () => { if (index < endpointDraft.length - 1) { [endpointDraft[index + 1], endpointDraft[index]] = [endpointDraft[index], endpointDraft[index + 1]]; renderReminderEndpoints(); scheduleEndpointSave(); } });
+      remove.addEventListener('click', () => { endpointDraft.splice(index, 1); renderReminderEndpoints(); scheduleEndpointSave(); });
+      test.addEventListener('click', async () => {
+        test.disabled = true;
+        status.textContent = 'Testing…';
+        try {
+          const personaSel = el('set-reminder-llm-persona');
+          const draft = { ...endpointDraft[index], channel: channel.value };
+          const testBody = {
+            note_id: 'test-' + Date.now(), title: 'Test Reminder',
+            body: 'This is a test reminder to verify this endpoint.',
+            channel: draft.channel, llm_synthesis: !!llmToggle.checked,
+            llm_persona: personaSel?.value || '',
+            ...(draft.channel === 'email' ? { email_to: value.value.trim(), email_account_id: account.value || '' } : {}),
+            ...(draft.channel === 'ntfy' ? { ntfy_topic: value.value.trim(), ntfy_integration_id: ntfySelect.value || '' } : {}),
+            ...(draft.channel === 'webhook' ? { webhook_integration_id: webhookSelect.value || '', webhook_payload_template: payload.value.trim() } : {}),
+          };
+          const response = await checkedFetch('/api/notes/fire-reminder', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(testBody) });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Test failed');
+          const sent = draft.channel === 'email' ? data.email_sent : draft.channel === 'ntfy' ? data.ntfy_sent : draft.channel === 'webhook' ? data.webhook_sent : true;
+          if (!sent) throw new Error(data.email_error || data.ntfy_error || data.webhook_error || 'Endpoint did not report delivery');
+          status.textContent = 'Test sent'; status.style.color = 'var(--green,#50fa7b)';
+        } catch (error) {
+          status.textContent = error?.message || 'Test failed'; status.style.color = 'var(--red)';
+        } finally { test.disabled = false; }
+      });
+      endpointsList.append(item);
+    });
+    if (endpointsIn) endpointsIn.value = JSON.stringify(endpointDraft);
+  }
+  let endpointSaveTimer;
+  function scheduleEndpointSave(statusEl) {
+    clearTimeout(endpointSaveTimer);
+    if (endpointsMsg) { endpointsMsg.textContent = 'Saving…'; endpointsMsg.style.color = 'var(--fg)'; }
+    endpointSaveTimer = setTimeout(async () => {
+      const submitted = JSON.stringify(endpointDraft);
+      try {
+        const response = await save({ reminder_endpoints: { version: 1, endpoints: endpointDraft } });
+        // The server assigns deterministic IDs during migration. Adopt them
+        // only when no newer edit landed while this save was in flight.
+        if (JSON.stringify(endpointDraft) === submitted) {
+          const saved = await response.clone().json().catch(() => null);
+          const rows = saved?.reminder_endpoints?.endpoints;
+          if (Array.isArray(rows)) {
+            endpointDraft = rows.map(row => ({ ...row }));
+            renderReminderEndpoints();
+          }
+        }
+        if (endpointsMsg) { endpointsMsg.textContent = 'Saved'; endpointsMsg.style.color = 'var(--green,#50fa7b)'; }
+        if (statusEl) statusEl.textContent = '';
+      } catch (error) {
+        if (statusEl) statusEl.textContent = 'Save failed';
+      }
+    }, 450);
+  }
+  addEndpointBtn?.addEventListener('click', () => {
+    endpointDraft.push({ channel: 'browser', enabled: true });
+    renderReminderEndpoints();
+    scheduleEndpointSave();
+  });
 
   function populateReminderEmailAccounts(selectedId = '') {
     if (!emailAcctSel) return;
@@ -3006,6 +3215,18 @@ async function initReminderSettings() {
         if (tpl) { webhookTemplateIn.value = tpl; save({ reminder_webhook_payload_template: tpl }); }
       }
     }
+    if (endpointsIn) {
+      const saved = s.reminder_endpoints;
+      endpointDraft = Array.isArray(saved)
+        ? saved.map(row => ({ ...row }))
+        : (saved && Array.isArray(saved.endpoints) ? saved.endpoints.map(row => ({ ...row })) : []);
+      renderReminderEndpoints();
+      const invalid = saved && Array.isArray(saved.errors) ? saved.errors : [];
+      if (invalid.length && endpointsMsg) {
+        endpointsMsg.textContent = invalid.join('; ');
+        endpointsMsg.style.color = 'var(--red)';
+      }
+    }
     // Restore the previously-picked email account (if any), otherwise
     // default to the account flagged is_default in the integrations
     // list. Falls through to the first option if neither exists.
@@ -3022,13 +3243,19 @@ async function initReminderSettings() {
 
   async function save(patch) {
     try {
-      await checkedFetch('/api/auth/settings', {
+      const response = await checkedFetch('/api/auth/settings', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-    } catch (e) { console.warn('Failed to save reminder settings', e); }
+      if (!response.ok) {
+        let detail = 'Settings save failed';
+        try { const payload = await response.json(); detail = payload.detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      return response;
+    } catch (e) { console.warn('Failed to save reminder settings', e); throw e; }
   }
 
   channelSel.addEventListener('change', () => {
@@ -3128,6 +3355,13 @@ async function initReminderSettings() {
             ...(channelSel.value === 'webhook' ? {
               webhook_integration_id: webhookIntgSel?.value || '',
               webhook_payload_template: webhookTemplateIn?.value.trim() || '',
+            } : {}),
+            ...(channelSel.value === 'email' ? {
+              email_to: emailToIn?.value.trim() || '',
+              email_account_id: emailAcctSel?.value || '',
+            } : {}),
+            ...(channelSel.value === 'ntfy' ? {
+              ntfy_topic: ntfyTopicIn?.value.trim() || '',
             } : {}),
           }),
         });
@@ -5383,7 +5617,7 @@ async function initUnifiedIntegrations() {
       if (el('uf-mcp-pasteback')) return;  // already shown
       msg.innerHTML =
         'Authorize in the opened tab. If the redirect fails (remote access), paste the resulting URL here: ' +
-        '<input id="uf-mcp-pasteback" class="settings-input" placeholder="http://localhost:7000/api/mcp/oauth/callback?code=..." style="margin-top:4px">' +
+        '<input id="uf-mcp-pasteback" class="settings-input" placeholder="http://localhost:7777/api/mcp/oauth/callback?code=..." style="margin-top:4px">' +
         '<button class="admin-btn-sm" id="uf-mcp-paste-go" style="margin-top:4px">Submit</button>';
       const pasteGo = el('uf-mcp-paste-go');
       if (pasteGo) pasteGo.addEventListener('click', async () => {
@@ -6084,19 +6318,102 @@ function syncAdminVisibility() {
   });
 }
 
+async function loadCanonicalPolicyState({ includeInactive = false } = {}) {
+  const suffix = includeInactive ? '?include_inactive=true' : '';
+  const response = await window.fetch(`/api/file-policy/state${suffix}`, {
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  if (response.status === 404) return null; // measured compatibility fallback
+  if (!response.ok) {
+    let detail = {};
+    try { detail = await response.json(); } catch (_) {}
+    throw new Error(String(detail.detail?.message || detail.detail || `Policy request failed (${response.status})`));
+  }
+  return response.json();
+}
+
+function announceFilePolicyChanged(detail = {}) {
+  document.dispatchEvent(new CustomEvent('openclank:file-policy-changed', {
+    detail: { source: 'settings', ...detail },
+  }));
+}
+
 async function loadPermissionGrants() {
-  const list = el('mimo-permission-grants');
-  const status = el('mimo-permission-grants-status');
-  if (!list || !window._isAdmin) return;
+  const list = el('odysseus-agent-grants') || el('mimo-permission-grants');
+  const status = el('odysseus-permissions-reset-status') || el('mimo-permission-grants-status');
+  if (!list) return;
+  list.replaceChildren();
+  let canonical = null;
+  let grants = [];
+  const errors = [];
+  try { canonical = await loadCanonicalPolicyState(); } catch (error) { errors.push(error.message); }
   try {
     const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin' });
     const data = await response.json();
-    const grants = Array.isArray(data.grants) ? data.grants : [];
-    list.replaceChildren(...grants.map((grant) => {
+    grants = Array.isArray(data.grants) ? data.grants : [];
+  } catch (error) { errors.push(error.message); }
+
+  const canonicalRows = (canonical?.bindings || []).filter(binding => ['agent', 'operation'].includes(binding.binding_class));
+  if (canonicalRows.length) {
+    const heading = document.createElement('div');
+    heading.className = 'admin-toggle-sub';
+    heading.textContent = 'Canonical agent policy';
+    list.append(heading);
+    for (const binding of canonicalRows) {
       const row = document.createElement('div');
-      row.className = 'admin-user-row';
+      row.className = 'admin-user-row permission-workspace-grant';
       const text = document.createElement('span');
-      text.textContent = `${grant.permission_type} · ${grant.pattern} · ${grant.workspace || 'any workspace'}`;
+      const caps = (binding.capabilities || []).join(' + ') || 'no capabilities';
+      const scope = binding.lifetime === 'chat' ? 'this chat'
+        : binding.lifetime === 'workspace' ? 'this workspace'
+          : binding.lifetime === 'once' ? 'once' : 'always';
+      text.textContent = `${binding.binding_class} · ${caps} · ${scope}${binding.operation ? ` · ${binding.operation}` : ''}`;
+      row.append(text);
+      list.append(row);
+    }
+  }
+
+  const workspaceNames = new Map(
+    (canonical?.workspaces || []).map(workspace => [workspace.id, workspace.name]),
+  );
+  const byWorkspace = new Map();
+  grants.forEach((grant) => {
+    const workspaceId = String(grant.workspace_id || '');
+    const legacyWorkspace = String(grant.workspace || '');
+    const scopeKey = workspaceId ? `workspace:${workspaceId}`
+      : legacyWorkspace ? `legacy:${legacyWorkspace}` : 'account';
+    if (!byWorkspace.has(scopeKey)) byWorkspace.set(scopeKey, []);
+    byWorkspace.get(scopeKey).push(grant);
+  });
+  for (const [scopeKey, workspaceGrants] of byWorkspace) {
+    const group = document.createElement('details');
+    group.className = 'permission-workspace-group';
+    group.open = true;
+    const summary = document.createElement('summary');
+    summary.className = 'permission-workspace-summary';
+    const path = document.createElement('span');
+    path.className = 'permission-workspace-path';
+    const sample = workspaceGrants[0] || {};
+    path.textContent = sample.workspace_id
+      ? workspaceNames.get(sample.workspace_id) || 'This workspace'
+      : sample.workspace
+        ? 'Imported legacy path approval'
+        : 'Account-wide approvals';
+    const count = document.createElement('span');
+    count.className = 'permission-workspace-count';
+    count.textContent = `${workspaceGrants.length} grant${workspaceGrants.length === 1 ? '' : 's'}`;
+    summary.append(path, count);
+    const rows = document.createElement('div');
+    rows.className = 'permission-workspace-grants';
+    workspaceGrants.forEach((grant) => {
+      const row = document.createElement('div');
+      row.className = 'admin-user-row permission-workspace-grant';
+      const text = document.createElement('span');
+      const lifetime = grant.session_id ? 'this chat'
+        : grant.workspace_id ? 'this workspace'
+          : grant.workspace ? 'imported legacy scope' : 'always';
+      text.textContent = `${grant.permission_type} · ${grant.pattern} · ${lifetime}`;
       const revoke = document.createElement('button');
       revoke.type = 'button';
       revoke.className = 'admin-btn-sm';
@@ -6104,17 +6421,642 @@ async function loadPermissionGrants() {
       revoke.addEventListener('click', async () => {
         try {
           await checkedFetch(`/api/mimo/permission-grants/${grant.id}`, { method: 'DELETE', credentials: 'same-origin' });
+          announceFilePolicyChanged({ mutation: 'permission-revoke' });
           await loadPermissionGrants();
-        } catch (error) { status.textContent = error.message; }
+        } catch (error) { if (status) status.textContent = error.message; }
       });
       row.append(text, revoke);
-      return row;
+      rows.append(row);
+    });
+    group.append(summary, rows);
+    list.append(group);
+  }
+  if (!canonicalRows.length && !grants.length) list.textContent = 'No persistent agent permissions.';
+
+  const locationSelect = el('odysseus-permissions-reset-location');
+  if (locationSelect && canonical) {
+    const selected = locationSelect.value;
+    locationSelect.replaceChildren(new Option('Choose a location', ''));
+    for (const location of canonical.locations || []) {
+      locationSelect.append(new Option(location.display_path || location.canonical_path || location.id, location.id));
+    }
+    if ([...locationSelect.options].some(option => option.value === selected)) locationSelect.value = selected;
+  }
+  if (status) {
+    const total = canonicalRows.length + grants.length;
+    status.textContent = errors.length
+      ? errors.join(' · ')
+      : `${total} durable agent permission${total === 1 ? '' : 's'}; human sharing is separate.`;
+  }
+  return canonical;
+}
+
+let _fileRootsInitialized = false;
+let _fileVisibilityInitialized = false;
+let _fileVisibilityBackend = null;
+
+function filesystemAccessRow(titleText, metaText) {
+  const row = document.createElement('div');
+  row.className = 'admin-user-row';
+  const title = document.createElement('div');
+  title.style.fontWeight = '600';
+  title.textContent = titleText;
+  const meta = document.createElement('div');
+  meta.className = 'admin-toggle-sub';
+  meta.textContent = metaText;
+  row.append(title, meta);
+  return row;
+}
+
+let _permissionResetInitialized = false;
+async function initPermissionResetControls() {
+  const button = el('odysseus-permissions-reset-all');
+  const status = el('odysseus-permissions-reset-status');
+  if (!button || _permissionResetInitialized) return;
+  _permissionResetInitialized = true;
+  const canonicalReset = async (scope, payload, preview = false) => {
+    const response = await window.fetch(`/api/file-policy/resets${preview ? '/preview' : ''}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, ...payload }),
+    });
+    if (response.status === 404) return null;
+    let data = {};
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(String(data.detail?.message || data.detail || `Reset failed (${response.status})`));
+    return data;
+  };
+  const confirmReset = async (label, preview) => uiModule.styledConfirm(
+    `${label} will revoke ${preview?.total_matched ?? preview?.matched ?? 0} agent permission${(preview?.total_matched ?? preview?.matched) === 1 ? '' : 's'}. Shared locations and human access remain unchanged.`,
+    { title: `Reset ${label.toLowerCase()}?`, confirmText: 'Reset permissions', cancelText: 'Keep permissions', danger: true },
+  );
+  const resetScoped = async (scope, canonicalPayload, legacyPayload, label) => {
+    try {
+      const preview = canonicalPayload ? await canonicalReset(scope, canonicalPayload, true) : null;
+      if (!await confirmReset(label, preview)) return;
+      const canonical = canonicalPayload ? await canonicalReset(scope, canonicalPayload, false) : null;
+      let legacy = { revoked: 0, pending_rejected: 0 };
+      // Current canonical resets orchestrate compatibility cleanup on the
+      // server. Only an older server (404) needs the measured legacy call.
+      if (!canonical && legacyPayload) {
+        const response = await checkedFetch('/api/mimo/permission-grants/reset', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope, ...legacyPayload }),
+        });
+        legacy = await response.json();
+      }
+      const count = Number(canonical?.total_revoked ?? canonical?.matched ?? 0) + Number(legacy?.revoked || 0);
+      const pendingRejected = Number(canonical?.pending_rejected || 0) + Number(legacy?.pending_rejected || 0);
+      if (status) status.textContent = `${label}: reset ${count} durable agent permission${count === 1 ? '' : 's'}${pendingRejected ? ` and rejected ${pendingRejected} pending request${pendingRejected === 1 ? '' : 's'}` : ''}.`;
+      announceFilePolicyChanged({ mutation: 'permission-reset', scope });
+      await loadPermissionGrants();
+    } catch (error) { if (status) status.textContent = error.message || `Could not reset ${label.toLowerCase()} approvals.`; }
+  };
+  el('odysseus-permissions-reset-chat')?.addEventListener('click', async () => {
+    const sessionId = window.sessionModule?.getCurrentSessionId?.() || '';
+    if (!sessionId) { if (status) status.textContent = 'There is no active chat to reset.'; return; }
+    await resetScoped('chat', { chat_id: sessionId }, { session_id: sessionId }, 'This chat');
+  });
+  el('odysseus-permissions-reset-workspace')?.addEventListener('click', async () => {
+    const workspaceId = getWorkspaceId();
+    if (!workspaceId) { if (status) status.textContent = 'There is no active workspace to reset.'; return; }
+    await resetScoped(
+      'workspace',
+      { workspace_id: workspaceId },
+      { workspace_id: workspaceId },
+      'This workspace',
+    );
+  });
+  el('odysseus-permissions-reset-location-button')?.addEventListener('click', async () => {
+    const locationId = el('odysseus-permissions-reset-location')?.value || '';
+    if (!locationId) { if (status) status.textContent = 'Choose a location first.'; return; }
+    await resetScoped('location', { location_id: locationId }, null, 'This location');
+  });
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const preview = await canonicalReset('all_agent', {}, true);
+      if (!await confirmReset('All agent permissions', preview)) return;
+      const canonical = await canonicalReset('all_agent', {}, false);
+      let revoked = 0;
+      // Current canonical servers revoke canonical + compatibility approvals
+      // as one monotonic operation. Retain the older per-record fallback only
+      // when that endpoint is absent.
+      if (canonical) {
+        revoked = Number(canonical.total_revoked ?? canonical.matched ?? 0);
+      } else {
+        const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin', cache: 'no-store' });
+        const data = await response.json();
+        const grants = Array.isArray(data.grants) ? data.grants : [];
+        for (const grant of grants) {
+          if (!grant?.id) continue;
+          const result = await checkedFetch(`/api/mimo/permission-grants/${encodeURIComponent(grant.id)}`, { method: 'DELETE', credentials: 'same-origin' });
+          if (result.ok) revoked += 1;
+        }
+      }
+      if (status) status.textContent = revoked ? `Reset ${revoked} agent permission${revoked === 1 ? '' : 's'}. Human access was preserved.` : 'No durable agent permissions were present.';
+      announceFilePolicyChanged({ mutation: 'permission-reset', scope: 'all_agent' });
+      await loadPermissionGrants();
+    } catch (error) {
+      if (status) status.textContent = error.message || 'Could not reset approvals.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function locationKindLabel(location) {
+  if (location?.kind === 'exact_file') return 'Exact file';
+  if (location?.kind === 'whole_root') return 'Whole disk / volume';
+  return 'Recursive folder';
+}
+
+function fileCapabilitySummary(capabilities) {
+  const values = new Set(Array.isArray(capabilities) ? capabilities : []);
+  const labels = [];
+  if (values.has('read')) labels.push('Browse / download');
+  if (values.has('write')) labels.push('Modify');
+  return labels.join(' + ') || 'No access';
+}
+
+async function loadCurrentAppFilesystemAccess(policyState = undefined) {
+  const list = el('odysseus-file-visible-to-me-list');
+  if (!list) return;
+  try {
+    const canonical = policyState === undefined ? await loadCanonicalPolicyState() : policyState;
+    if (canonical) {
+      if (window._isAdmin) {
+        list.replaceChildren(filesystemAccessRow(
+          'Full OS-visible filesystem',
+          'Owner/admin app access · Editor opens at home by default · agent approvals remain separate.',
+        ));
+        return;
+      }
+      const locationsById = new Map((canonical.locations || []).map((location) => [String(location.id), location]));
+      const assignments = (canonical.bindings || []).filter((binding) => (
+        binding?.binding_class === 'people'
+        && binding.status === 'active'
+        && binding.location_id
+      ));
+      list.replaceChildren(...assignments.map((assignment) => {
+        const location = locationsById.get(String(assignment.location_id)) || {};
+        return filesystemAccessRow(
+          location.display_path || location.canonical_path || assignment.location_id || 'Assigned Location',
+          `${locationKindLabel(location)} · ${(assignment.capabilities || []).join(', ')} · ${location.availability || 'unknown'}`,
+        );
+      }));
+      if (!assignments.length) list.textContent = 'No files or folders have been shared with this account.';
+      return;
+    }
+
+    // Compatibility fallback is used only when the canonical state route is
+    // not installed (404), never when canonical policy reports an error.
+    const scopeResponse = await checkedFetch('/api/odysseus-files/app-scope', { credentials: 'same-origin' });
+    const scope = (await scopeResponse.json()).scope || {};
+    if (scope.host) {
+      list.replaceChildren(filesystemAccessRow(
+        'Full OS-visible filesystem',
+        'Owner/admin app access · Editor opens at home by default · agent approvals remain separate.',
+      ));
+      return;
+    }
+    const visibilityResponse = await checkedFetch('/api/odysseus-files/visibility', { credentials: 'same-origin' });
+    const visibility = await visibilityResponse.json();
+    const assignments = Array.isArray(visibility.assignments) ? visibility.assignments : [];
+    list.replaceChildren(...assignments.map((assignment) => {
+      const root = assignment.root || {};
+      return filesystemAccessRow(
+        root.display_path || root.canonical_path || assignment.root_id || 'Assigned root',
+        `${root.kind === 'exact_file' ? 'Exact file' : 'Recursive folder'} · ${(assignment.capabilities || []).join(', ')} · ${assignment.enabled ? 'enabled' : 'disabled'}`,
+      );
     }));
-    if (!grants.length) list.textContent = 'No persistent grants.';
-    status.textContent = `${grants.length} owner-scoped persistent grant${grants.length === 1 ? '' : 's'}`;
+    if (!assignments.length) list.textContent = 'No files or folders have been shared with this account.';
+  } catch (error) {
+    list.textContent = error.message;
+  }
+}
+
+function populateVisibilitySelectors(users, locations, { canonical = true } = {}) {
+  const subject = el('odysseus-file-visibility-subject');
+  const root = el('odysseus-file-visibility-root');
+  if (!subject || !root) return;
+  const previousSubject = subject.value;
+  const previousRoot = root.value;
+  subject.replaceChildren(new Option('Choose a non-admin user', ''));
+  (Array.isArray(users) ? users : [])
+    .filter((user) => user && !user.is_admin && user.username)
+    .sort((a, b) => String(a.username).localeCompare(String(b.username)))
+    .forEach((user) => {
+      const accountId = String(user.account_id || '').trim();
+      const option = new Option(String(user.username), canonical && accountId ? accountId : String(user.username));
+      option.dataset.username = String(user.username);
+      if (accountId) option.dataset.accountId = accountId;
+      subject.append(option);
+    });
+  if ([...subject.options].some((option) => option.value === previousSubject)) subject.value = previousSubject;
+  root.replaceChildren(new Option('Choose a Location', ''));
+  (Array.isArray(locations) ? locations : [])
+    .filter((item) => item && item.id && item.enabled && item.availability === 'available')
+    .forEach((item) => {
+      const label = `${locationKindLabel(item)} · ${item.display_path || item.canonical_path || item.id}`;
+      root.append(new Option(label, String(item.id)));
+    });
+  if ([...root.options].some((option) => option.value === previousRoot)) root.value = previousRoot;
+}
+
+async function loadVisibilityAssignments(policyState = undefined, compatibilityRoots = [], usersPayload = null) {
+  const list = el('odysseus-file-visibility-assignments');
+  const status = el('odysseus-file-visibility-status');
+  let canonical = policyState;
+  if (canonical === undefined) {
+    try {
+      canonical = await loadCanonicalPolicyState();
+    } catch (error) {
+      if (list) list.textContent = '';
+      if (status) status.textContent = error.message;
+      await loadCurrentAppFilesystemAccess(undefined);
+      return;
+    }
+  }
+  await loadCurrentAppFilesystemAccess(canonical);
+  if (!window._isAdmin) {
+    return;
+  }
+  if (!list) return;
+  try {
+    let users = usersPayload;
+    if (!users) {
+      const usersResponse = await checkedFetch('/api/auth/users', { credentials: 'same-origin' });
+      users = await usersResponse.json();
+    }
+    if (canonical) {
+      _fileVisibilityBackend = 'canonical';
+      const locations = Array.isArray(canonical.locations) ? canonical.locations : [];
+      const assignments = (canonical.bindings || []).filter((binding) => binding?.binding_class === 'people');
+      const locationsById = new Map(locations.map((location) => [String(location.id), location]));
+      const usersByAccountId = new Map((users.users || [])
+        .filter((user) => user?.account_id)
+        .map((user) => [String(user.account_id), user]));
+      populateVisibilitySelectors(users.users, locations, { canonical: true });
+      list.replaceChildren(...assignments.map((assignment) => {
+        const row = document.createElement('div');
+        row.className = 'admin-user-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:240px;';
+        const location = locationsById.get(String(assignment.location_id));
+        const subject = usersByAccountId.get(String(assignment.subject_id));
+        const active = assignment.status === 'active';
+        const path = document.createElement('div');
+        path.style.fontWeight = '600';
+        path.textContent = `${subject?.username || assignment.subject_id} · ${location?.display_path || location?.canonical_path || assignment.location_id}`;
+        const meta = document.createElement('div');
+        meta.className = 'admin-toggle-sub';
+        meta.textContent = `People · ${fileCapabilitySummary(assignment.capabilities)} · ${active ? 'enabled' : assignment.status || 'disabled'} · policy ${assignment.generation ?? canonical.generation ?? 'unknown'}`;
+        info.append(path, meta);
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'admin-btn-sm';
+        toggle.textContent = active ? 'Disable' : 'Enable';
+        toggle.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !active }), credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'people-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        const locationCaps = new Set(location?.capabilities || []);
+        const hasWrite = (assignment.capabilities || []).includes('write');
+        const modify = document.createElement('button');
+        modify.type = 'button';
+        modify.className = 'admin-btn-sm';
+        modify.textContent = hasWrite ? 'Browse only' : 'Allow modify';
+        modify.disabled = !active || !locationCaps.has('write');
+        modify.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, {
+              method: 'PATCH', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ capabilities: hasWrite ? ['read'] : ['read', 'write'] }),
+            });
+            announceFilePolicyChanged({ mutation: 'people-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'admin-btn-sm';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, { method: 'DELETE', credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'people-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        row.append(info, toggle, modify, remove);
+        return row;
+      }));
+      if (!assignments.length) list.textContent = 'No People access has been shared yet.';
+      status.textContent = `${assignments.length} People assignment${assignments.length === 1 ? '' : 's'} · policy generation ${canonical.generation ?? 'unknown'}`;
+    } else {
+      _fileVisibilityBackend = 'legacy';
+      const visibilityResponse = await checkedFetch('/api/odysseus-files/visibility', { credentials: 'same-origin' });
+      const visibility = await visibilityResponse.json();
+      const assignments = Array.isArray(visibility.assignments) ? visibility.assignments : [];
+      const roots = Array.isArray(compatibilityRoots) ? compatibilityRoots : [];
+      populateVisibilitySelectors(users.users, roots, { canonical: false });
+      const rootsById = new Map(roots.map((item) => [String(item.id), item]));
+      list.replaceChildren(...assignments.map((assignment) => {
+        const row = document.createElement('div');
+        row.className = 'admin-user-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:240px;';
+        const rootRecord = rootsById.get(String(assignment.root_id));
+        const path = document.createElement('div');
+        path.style.fontWeight = '600';
+        path.textContent = `${assignment.subject_id} · ${rootRecord?.display_path || rootRecord?.canonical_path || assignment.root_id}`;
+        const meta = document.createElement('div');
+        meta.className = 'admin-toggle-sub';
+        meta.textContent = `${assignment.subject_kind || 'user'} · ${(assignment.capabilities || []).join(', ')} · ${assignment.enabled ? 'enabled' : 'disabled'} · compatibility policy ${assignment.generation ?? visibility.generation ?? 'unknown'}`;
+        info.append(path, meta);
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'admin-btn-sm';
+        toggle.textContent = assignment.enabled ? 'Disable' : 'Enable';
+        toggle.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/odysseus-files/visibility/${encodeURIComponent(assignment.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !assignment.enabled }), credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'people-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'admin-btn-sm';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/odysseus-files/visibility/${encodeURIComponent(assignment.id)}`, { method: 'DELETE', credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'people-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        row.append(info, toggle, remove);
+        return row;
+      }));
+      if (!assignments.length) list.textContent = 'No user-visible compatibility roots assigned yet.';
+      status.textContent = `${assignments.length} compatibility assignment${assignments.length === 1 ? '' : 's'} · policy generation ${visibility.generation ?? 'unknown'}`;
+    }
   } catch (error) {
     list.textContent = '';
     status.textContent = error.message;
+  }
+  if (!_fileVisibilityInitialized) {
+    _fileVisibilityInitialized = true;
+    const add = el('odysseus-file-visibility-add');
+    add?.addEventListener('click', async () => {
+      const subjectSelect = el('odysseus-file-visibility-subject');
+      const subjectOption = subjectSelect?.selectedOptions?.[0];
+      const subjectId = subjectSelect?.value?.trim();
+      const subjectUsername = subjectOption?.dataset.username || subjectId;
+      const locationId = el('odysseus-file-visibility-root')?.value?.trim();
+      const capabilities = ['read', 'write'].filter((name) => el(`odysseus-file-visibility-${name}`)?.checked);
+      if (!subjectId || !subjectUsername || !locationId || !capabilities.length) {
+        if (status) status.textContent = 'Choose a user, a Location, and at least one capability.';
+        return;
+      }
+      try {
+        if (_fileVisibilityBackend === 'canonical') {
+          await checkedFetch('/api/file-policy/people', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject_username: subjectUsername, location_id: locationId, capabilities }), credentials: 'same-origin' });
+        } else if (_fileVisibilityBackend === 'legacy') {
+          await checkedFetch('/api/odysseus-files/visibility', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject_id: subjectUsername, root_id: locationId, capabilities }), credentials: 'same-origin' });
+        } else {
+          throw new Error('File policy is still loading.');
+        }
+        announceFilePolicyChanged({ mutation: 'people-access' });
+        await loadFilesystemRoots();
+      } catch (error) { status.textContent = error.message; }
+    });
+  }
+}
+
+async function loadFilesystemRoots() {
+  const list = el('odysseus-file-roots');
+  const status = el('odysseus-file-root-status');
+  if (!list) return;
+  try {
+    const canonical = await loadCanonicalPolicyState();
+    if (canonical) {
+      const allLocations = Array.isArray(canonical.locations) ? canonical.locations : [];
+      let usersPayload = null;
+      if (window._isAdmin) {
+        try {
+          const usersResponse = await checkedFetch('/api/auth/users', { credentials: 'same-origin' });
+          usersPayload = await usersResponse.json();
+        } catch (_) {
+          // Locations and authority controls remain usable if account labels
+          // are temporarily unavailable; immutable subject IDs are shown.
+        }
+      }
+      const usersByAccountId = new Map((usersPayload?.users || [])
+        .filter((user) => user?.account_id)
+        .map((user) => [String(user.account_id), user]));
+      const peopleLocationIds = new Set((canonical.bindings || [])
+        .filter((binding) => binding?.binding_class === 'people' && binding.status === 'active' && binding.location_id)
+        .map((binding) => String(binding.location_id)));
+      const locations = window._isAdmin
+        ? allLocations
+        : allLocations.filter((location) => peopleLocationIds.has(String(location.id)));
+      const agentBindingsByLocation = new Map();
+      for (const binding of canonical.bindings || []) {
+        if (
+          binding?.binding_class !== 'agent'
+          || binding.status !== 'active'
+          || !binding.location_id
+          || String(binding.subject_id) !== String(canonical.subject_id)
+        ) continue;
+        const key = String(binding.location_id);
+        if (!agentBindingsByLocation.has(key)) agentBindingsByLocation.set(key, []);
+        agentBindingsByLocation.get(key).push(binding);
+      }
+      const peopleBindingsByLocation = new Map();
+      for (const binding of canonical.bindings || []) {
+        if (binding?.binding_class !== 'people' || binding.status !== 'active' || !binding.location_id) continue;
+        const key = String(binding.location_id);
+        if (!peopleBindingsByLocation.has(key)) peopleBindingsByLocation.set(key, []);
+        peopleBindingsByLocation.get(key).push(binding);
+      }
+      list.replaceChildren(...locations.map((location) => {
+        const row = document.createElement('div');
+        row.className = 'admin-user-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:240px;';
+        const path = document.createElement('div');
+        path.style.fontWeight = '600';
+        path.textContent = location.display_path || location.canonical_path || location.id;
+        const meta = document.createElement('div');
+        meta.className = 'admin-toggle-sub';
+        const agentBindings = agentBindingsByLocation.get(String(location.id)) || [];
+        const activeAgent = agentBindings.find((binding) => binding.status === 'active') || null;
+        const agentCaps = [...new Set(agentBindings.flatMap((binding) => binding.capabilities || []))];
+        const agentSummary = activeAgent
+          ? `Agent access: ${fileCapabilitySummary(agentCaps)}`
+          : 'Agent access: off';
+        const peopleBindings = peopleBindingsByLocation.get(String(location.id)) || [];
+        const peopleNames = peopleBindings.map((binding) => (
+          usersByAccountId.get(String(binding.subject_id))?.username || binding.subject_id
+        ));
+        const peopleSummary = peopleNames.length
+          ? `People: ${peopleNames.join(', ')} (${fileCapabilitySummary(peopleBindings.flatMap((binding) => binding.capabilities || []))})`
+          : 'People: nobody';
+        meta.textContent = `${locationKindLabel(location)} · Location ceiling: ${fileCapabilitySummary(location.capabilities)} · ${location.availability || 'unknown'} · ${location.enabled ? 'enabled' : 'disabled'} · ${peopleSummary} · ${agentSummary}`;
+        info.append(path, meta);
+        row.append(info);
+
+        const locationCaps = new Set(location.capabilities || []);
+        const peopleCaps = new Set((peopleBindingsByLocation.get(String(location.id)) || [])
+          .flatMap((binding) => binding.capabilities || []));
+        const ceiling = canonical.is_admin
+          ? locationCaps
+          : new Set([...locationCaps].filter((capability) => peopleCaps.has(capability)));
+        if (ceiling.has('read')) {
+          const toggleAgent = document.createElement('button');
+          toggleAgent.type = 'button';
+          toggleAgent.className = 'admin-btn-sm';
+          toggleAgent.textContent = activeAgent ? 'Disable agent' : 'Enable agent';
+          toggleAgent.addEventListener('click', async () => {
+            try {
+              if (activeAgent) {
+                await checkedFetch(`/api/file-policy/agent-access/${encodeURIComponent(activeAgent.id)}`, {
+                  method: 'PATCH', credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ enabled: false }),
+                });
+              } else {
+                await checkedFetch('/api/file-policy/agent-access', {
+                  method: 'POST', credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ location_id: location.id, capabilities: ['read'] }),
+                });
+              }
+              announceFilePolicyChanged({ mutation: 'agent-access' });
+              await loadFilesystemRoots();
+            } catch (error) { status.textContent = error.message; }
+          });
+          row.append(toggleAgent);
+          if (activeAgent && ceiling.has('write')) {
+            const hasWrite = (activeAgent.capabilities || []).includes('write');
+            const modify = document.createElement('button');
+            modify.type = 'button';
+            modify.className = 'admin-btn-sm';
+            modify.textContent = hasWrite ? 'Agent browse only' : 'Allow agent modify';
+            modify.addEventListener('click', async () => {
+              try {
+                await checkedFetch(`/api/file-policy/agent-access/${encodeURIComponent(activeAgent.id)}`, {
+                  method: 'PATCH', credentials: 'same-origin',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ capabilities: hasWrite ? ['read'] : ['read', 'write'] }),
+                });
+                announceFilePolicyChanged({ mutation: 'agent-access' });
+                await loadFilesystemRoots();
+              } catch (error) { status.textContent = error.message; }
+            });
+            row.append(modify);
+          }
+        }
+        if (canonical.is_admin) {
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'admin-btn-sm';
+          remove.textContent = 'Remove Location';
+          remove.addEventListener('click', async () => {
+            const confirmed = await uiModule.styledConfirm(
+              `Remove “${location.display_path || location.canonical_path || location.id}”? This revokes its People access, Agent access, and operation approvals, and archives its Workspaces. Files on disk are not deleted.`,
+              { title: 'Remove Location?', confirmText: 'Remove Location', cancelText: 'Keep Location', danger: true },
+            );
+            if (!confirmed) return;
+            try {
+              const response = await checkedFetch(`/api/file-policy/locations/${encodeURIComponent(location.id)}`, {
+                method: 'DELETE', credentials: 'same-origin',
+              });
+              const result = await response.json();
+              announceFilePolicyChanged({ mutation: 'location-remove' });
+              await loadFilesystemRoots();
+              await loadPermissionGrants();
+              status.textContent = `Removed Location; revoked ${Number(result.bindings_revoked || 0)} access record${Number(result.bindings_revoked || 0) === 1 ? '' : 's'} and archived ${Number(result.workspaces_archived || 0)} Workspace${Number(result.workspaces_archived || 0) === 1 ? '' : 's'}. Files were not deleted.`;
+            } catch (error) { status.textContent = error.message; }
+          });
+          row.append(remove);
+        }
+        return row;
+      }));
+      if (!locations.length) list.textContent = window._isAdmin
+        ? 'No Locations registered yet.'
+        : 'No Locations have been shared with this account.';
+      status.textContent = window._isAdmin
+        ? `${locations.length} registered Location${locations.length === 1 ? '' : 's'}. A Location grants no People or Agent access by itself.`
+        : `${locations.length} assigned Location${locations.length === 1 ? '' : 's'}. Agent access is a separate, narrower policy.`;
+      await loadVisibilityAssignments(canonical, [], usersPayload);
+    } else {
+      // Compatibility fallback for servers without the canonical policy API.
+      const response = await checkedFetch('/api/odysseus-files/roots', { credentials: 'same-origin' });
+      const data = await response.json();
+      const roots = Array.isArray(data.roots) ? data.roots : [];
+      list.replaceChildren(...roots.map((root) => {
+        const row = document.createElement('div');
+        row.className = 'admin-user-row';
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:220px;';
+        const path = document.createElement('div');
+        path.textContent = root.display_path || root.canonical_path || root.id;
+        path.style.fontWeight = '600';
+        const meta = document.createElement('div');
+        meta.className = 'admin-toggle-sub';
+        meta.textContent = `${locationKindLabel(root)} · ${(root.capabilities || []).join(', ')} · ${root.availability || 'unknown'} · compatibility root`;
+        info.append(path, meta);
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'admin-btn-sm';
+        toggle.textContent = root.enabled ? 'Disable' : 'Enable';
+        toggle.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/odysseus-files/roots/${encodeURIComponent(root.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !root.enabled }), credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'location-access' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'admin-btn-sm';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', async () => {
+          try {
+            await checkedFetch(`/api/odysseus-files/roots/${encodeURIComponent(root.id)}`, { method: 'DELETE', credentials: 'same-origin' });
+            announceFilePolicyChanged({ mutation: 'location-remove' });
+            await loadFilesystemRoots();
+          } catch (error) { status.textContent = error.message; }
+        });
+        row.append(info, toggle, remove);
+        return row;
+      }));
+      if (!roots.length) list.textContent = 'No compatibility roots yet.';
+      status.textContent = `${roots.length} compatibility root${roots.length === 1 ? '' : 's'}.`;
+      await loadVisibilityAssignments(null, roots);
+    }
+  } catch (error) {
+    list.textContent = '';
+    status.textContent = error.message;
+  }
+  if (!_fileRootsInitialized) {
+    _fileRootsInitialized = true;
+    const add = el('odysseus-file-root-add');
+    add?.addEventListener('click', () => { void openFileLocationWizard(); });
   }
 }
 
@@ -6123,8 +7065,11 @@ async function loadPermissionGrants() {
    ═══════════════════════════════════════════ */
 export function open(tab) {
   if (!initialized) initAll();
+  if (_closeTimer) { clearTimeout(_closeTimer); _closeTimer = null; }
+  modalEl?.querySelector('.modal-content, .settings-modal-content')?.classList.remove('modal-closing');
   syncAppearanceCheckboxes();
   syncCopalNotesSettings();
+  if (tab === 'appearance' || !tab) initCopalAppearanceControls();
   if (modalEl.classList.contains('hidden')) {
     resetWindowPlacement();
   }
@@ -6145,13 +7090,11 @@ export function open(tab) {
   }
   document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
   syncAppearanceOpacity(activeTab === 'appearance');
-  if (MODEL_MANAGEMENT_TABS.has(activeTab)) window.adminModule?._initModelData?.();
-  if (activeTab === 'ai') refreshAiModelEndpoints();
+  if (activeTab === 'ai') activateAiSettings();
+  if (activeTab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
   if (MODEL_MANAGEMENT_TABS.has(activeTab)) {
-    mimoProviders.load();
-    modelSharing.load();
+    providerControl.load({ view: activeTab });
   }
-  if (activeTab === 'added-models' && window._isAdmin) loadPermissionGrants();
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
@@ -6160,6 +7103,19 @@ export function open(tab) {
 export function setCopalModule(copalModule) {
   _copalModule = copalModule;
   syncCopalNotesSettings();
+}
+
+export async function openFileLocationWizard({ suggestedPath = '', showSettings = true } = {}) {
+  if (showSettings) open('file-access');
+  const controller = await import('./fileLocationController.js');
+  return controller.openFileLocationWizard({
+    suggestedPath,
+    onAdded: async ({ path, agentAccess }) => {
+      if (initialized) await loadFilesystemRoots();
+      const status = el('odysseus-file-root-status');
+      if (status) status.textContent = `Added ${path}. Agent access is ${agentAccess ? 'enabled within this Location' : 'off'}.`;
+    },
+  });
 }
 
 export function close() {
@@ -6175,7 +7131,7 @@ export function close() {
       modalEl.classList.add('hidden');
       content.classList.remove('modal-closing');
     }, { once: true });
-    setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } }, 250);
+    _closeTimer = setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } _closeTimer = null; }, 250);
   } else {
     modalEl.classList.add('hidden');
   }
@@ -6215,7 +7171,7 @@ export function close() {
   _tryOpen();
 })();
 
-const settingsModule = { open, close, setCopalModule, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+const settingsModule = { open, close, openFileLocationWizard, setCopalModule, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 
 
 export default settingsModule;

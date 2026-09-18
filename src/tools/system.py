@@ -37,7 +37,6 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                                    raw SKILL.md text. Fails on ambiguous
                                    `old_string` (multiple matches).
       edit  {name, content}      — Replace the entire SKILL.md.
-      publish {name}             — Flip status: draft -> published.
       delete {name}              — Remove the skill directory.
       search {query}             — Relevance match on published skills.
     """
@@ -56,28 +55,21 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     name = (args.get("name") or args.get("skill_id") or "").strip()
 
     if action in ("list", "index", ""):
-        all_skills = sm.load(owner=owner)
-        if not all_skills:
+        published = sm.load_published(owner=owner)
+        if not published:
             return {"results": "No skills yet. Create one with action='add'."}
-        published = [s for s in all_skills if s.get("status") == "published"]
-        drafts = [s for s in all_skills if s.get("status") == "draft"]
         lines = []
-        if published:
-            lines.append("## Published")
-            for s in sorted(published, key=lambda x: x["name"]):
-                lines.append(f"- **{s['name']}** ({s.get('category','general')}): {s.get('description','')}")
-        if drafts:
-            lines.append("\n## Drafts")
-            for s in sorted(drafts, key=lambda x: x["name"]):
-                lines.append(f"- **{s['name']}** [draft]: {s.get('description','')}")
-        return {"results": "\n".join(lines) if lines else "No skills yet."}
+        lines.append("## Published")
+        for s in sorted(published, key=lambda x: x["name"]):
+            lines.append(f"- **{s['name']}** ({s.get('category','general')}): {s.get('description','')}")
+        return {"results": "\n".join(lines)}
 
     if action == "view":
         if not name:
             return {"error": "name is required for view", "exit_code": 1}
-        md = sm.read_skill_md(name, owner=owner)
+        md = sm.read_published_skill_md(name, owner=owner)
         if md is None:
-            return {"error": f"Skill {name!r} not found", "exit_code": 1}
+            return {"error": f"Published skill {name!r} not found", "exit_code": 1}
         return {"results": md}
 
     if action == "view_ref":
@@ -86,9 +78,12 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         ref = (args.get("path") or "").strip()
         if not ref:
             return {"error": "path is required for view_ref", "exit_code": 1}
-        text = sm.read_skill_reference(name, ref, owner=owner)
+        text = sm.read_published_skill_reference(name, ref, owner=owner)
         if text is None:
-            return {"error": f"Reference {ref!r} not found under {name!r}", "exit_code": 1}
+            return {
+                "error": f"Published reference {ref!r} not found under {name!r}",
+                "exit_code": 1,
+            }
         return {"results": text}
 
     if action == "add":
@@ -102,17 +97,6 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             proc = args.get("steps") or []
         if not proc and not args.get("body_extra") and not args.get("solution"):
             return {"error": "procedure (or solution body) is required", "exit_code": 1}
-        # Same auto-publish gate as the extractor path — when the user
-        # has auto_approve_skills on and the caller didn't pin an explicit
-        # status, publish immediately. Audit later demotes/removes on fail.
-        _status_arg = args.get("status")
-        if not _status_arg:
-            try:
-                from routes.prefs_routes import _load_for_user as _load_prefs
-                _prefs = _load_prefs(owner) or {}
-                _status_arg = "published" if _prefs.get("auto_approve_skills", True) else "draft"
-            except Exception:
-                _status_arg = "draft"
         entry = sm.add_skill(
             name=args.get("name"),
             description=(args.get("description") or args.get("title") or "").strip(),
@@ -126,7 +110,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             procedure=proc,
             pitfalls=args.get("pitfalls") or [],
             verification=args.get("verification") or [],
-            status=_status_arg,
+            status="draft",
             version=args.get("version") or "1.0.0",
             confidence=args.get("confidence", 0.8),
             source=args.get("source", "learned"),
@@ -151,7 +135,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         if entry.get("status") == "draft":
             verify_hint = (
                 "\n\nThis skill is a DRAFT. Run through the procedure once to verify, "
-                f"then publish with action='publish', name='{entry['name']}'."
+                "then ask the user to publish it in the Skills UI."
             )
         return {"results": f"Created skill `{entry['name']}` — {entry.get('description','')}{verify_hint}"}
 
@@ -166,6 +150,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         except Exception as e:
             return {"error": f"Could not parse content as SKILL.md: {e}", "exit_code": 1}
         sk_new.name = slugify(sk_new.name or name)
+        sk_new.status = "draft"
         existing = sm.load(owner=owner)
         match = next((s for s in existing if s.get("name") == name), None)
         if not match:
@@ -196,21 +181,15 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         except Exception as e:
             return {"error": f"Patched content is not valid SKILL.md: {e}", "exit_code": 1}
         sk_new.name = slugify(sk_new.name or name)
+        sk_new.status = "draft"
         ok = sm.update_skill(name, _skill_dump(sk_new), owner=owner)
         return {"results": f"Patched skill `{sk_new.name}`."} if ok else {"error": "Patch update failed", "exit_code": 1}
 
     if action == "publish":
-        if not name:
-            return {"error": "name is required for publish", "exit_code": 1}
-        all_skills = sm.load(owner=owner)
-        match = next((s for s in all_skills if s.get("name") == name), None)
-        if not match:
-            return {"error": f"Skill {name!r} not found", "exit_code": 1}
-        updates = {"status": "published"}
-        if args.get("confidence") is not None:
-            updates["confidence"] = max(0.0, min(1.0, float(args["confidence"])))
-        sm.update_skill(name, updates, owner=owner)
-        return {"results": f"✅ Published `{name}`. It now appears in the skills index for future turns."}
+        return {
+            "error": "Skills can only be published by the user in the Skills UI or by a passed audit.",
+            "exit_code": 1,
+        }
 
     if action == "delete":
         if not name:
@@ -222,7 +201,11 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         query = (args.get("query") or "").strip()
         if not query:
             return {"error": "query is required for search", "exit_code": 1}
-        results = sm.get_relevant_skills(query, sm.load(owner=owner), max_items=5)
+        results = sm.get_relevant_skills(
+            query,
+            sm.load_published(owner=owner),
+            max_items=5,
+        )
         if not results:
             return {"results": "No matching skills found."}
         lines = []
@@ -235,7 +218,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     return {
         "error": (
             f"Unknown action: {action!r}. "
-            "Use one of: list, view, view_ref, add, edit, patch, publish, delete, search."
+            "Use one of: list, view, view_ref, add, edit, patch, delete, search."
         ),
         "exit_code": 1,
     }
@@ -358,6 +341,7 @@ async def do_manage_tasks(
             endpoint_url = None
             model = None
             workspace = None
+            workspace_id = None
             allowed_tools = []
             if task_type in ("llm", "research"):
                 from core.database import Session as DbSession
@@ -369,6 +353,10 @@ async def do_manage_tasks(
                 endpoint_id = source.endpoint_id
                 endpoint_url = source.endpoint_url
                 model = source.model
+                workspace_id = (
+                    str(getattr(source, "workspace_id", None) or "").strip()
+                    or None
+                )
                 requested_tools = args.get("allowed_tools") or []
                 if not isinstance(requested_tools, list):
                     return {"error": "allowed_tools must be a list", "exit_code": 1}
@@ -377,8 +365,10 @@ async def do_manage_tasks(
                 unknown = set(allowed_tools) - known_tool_names()
                 if unknown:
                     return {"error": f"Unknown task tools: {', '.join(sorted(unknown))}", "exit_code": 1}
-                from src.tool_execution import get_active_workspace
-                workspace = get_active_workspace()
+                # A legacy source chat without a stable Workspace remains
+                # unbound. Do not mint new durable raw-path authority from the
+                # process context; the raw task field exists only for existing
+                # compatibility rows and explicit administrator API input.
 
             task = ScheduledTask(
                 id=task_id,
@@ -401,6 +391,7 @@ async def do_manage_tasks(
                 endpoint_url=endpoint_url,
                 model=model,
                 workspace=workspace,
+                workspace_id=workspace_id,
                 allowed_tools=json.dumps(allowed_tools),
                 interaction_policy="fail_on_interaction",
                 max_tool_calls=max(1, min(1000, int(args.get("max_tool_calls") or 20))),

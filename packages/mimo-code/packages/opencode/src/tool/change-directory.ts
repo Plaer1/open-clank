@@ -36,6 +36,16 @@ export const ChangeDirectoryTool = Tool.define(
             "The directory to switch to. Absolute or relative to current working directory. Use '~' to reset to project root.",
           ),
       }),
+      resources: (params: { path: string }, ctx: Tool.Context) => ({
+        reads:
+          params.path === "~" || params.path === ""
+            ? []
+            : [
+                path.isAbsolute(params.path)
+                  ? params.path
+                  : path.resolve(SessionCwd.get(ctx.sessionID), params.path),
+              ],
+      }),
       execute: (params: { path: string }, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const ins = yield* InstanceState.context

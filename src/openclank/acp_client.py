@@ -45,6 +45,12 @@ class ACPClient:
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def initialize(self) -> dict:
+        from core.constants import APP_VERSION
+        from src.openclank.managed_protocol import (
+            client_capability_offer,
+            validate_initialize_result,
+        )
+
         result = await self._send_request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {
@@ -53,12 +59,14 @@ class ACPClient:
                     "writeTextFile": True,
                 },
                 "terminal": True,
+                "_meta": {"openclankManaged": client_capability_offer()},
             },
             "clientInfo": {
-                "name": "openthesius",
-                "version": "0.1.0",
+                "name": "openclank",
+                "version": APP_VERSION,
             },
         })
+        validate_initialize_result(result)
         self.initialize_result = result
         self.agent_info = result.get("agentInfo")
         return result
@@ -111,6 +119,28 @@ class ACPClient:
         await self._send_request(
             "_odysseus/session/release",
             {"sessionId": session_id},
+        )
+
+    async def managed_engine_call(self, method: str, params: dict) -> dict:
+        """Call one pinned host-to-engine extension with exact wire checks."""
+
+        from src.openclank.managed_protocol import (
+            validate_engine_method_request,
+            validate_engine_method_result,
+        )
+
+        request = validate_engine_method_request(method, params)
+        result = await self._send_request(method, request)
+        return validate_engine_method_result(method, result)
+
+    async def execute_managed_operation(self, params: dict) -> dict:
+        """Execute one typed, host-authorized model operation in the engine."""
+
+        if not isinstance(params, dict):
+            raise TypeError("managed operation parameters must be an object")
+        return await self._send_request(
+            "_openclank/operations/v1/execute",
+            params,
         )
 
     async def close(self) -> None:

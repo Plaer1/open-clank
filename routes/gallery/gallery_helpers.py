@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from pydantic import BaseModel
 
 from core.database import GalleryImage
-from src.auth_helpers import _auth_disabled
+from src.generated_images import gallery_owner_key
 
 logger = logging.getLogger(__name__)
 
@@ -123,17 +123,17 @@ def _image_to_dict(img: GalleryImage, session_name: str = None) -> Dict[str, Any
 
 
 def _owner_filter(q, user, model_cls=GalleryImage):
-    """Apply owner filtering to a gallery query.
+    """Apply the exact durable Gallery principal to a query.
 
-    ``get_current_user`` returns None both in auth-disabled single-user mode
-    and when auth is enabled but no current user was resolved. Preserve the
-    single-user behavior, but fail closed for auth-enabled null-user states.
+    Auth-disabled requests map to ``local-installation``.  Legacy ``NULL``
+    rows and rows owned by named accounts remain ambiguous and are denied
+    instead of becoming globally visible in single-user mode.
     """
-    if user is not None:
-        return q.filter(model_cls.owner == user)
-    if _auth_disabled():
-        return q
-    return q.filter(False)
+
+    owner = gallery_owner_key(user)
+    if owner is None:
+        return q.filter(False)
+    return q.filter(model_cls.owner == owner)
 
 
 

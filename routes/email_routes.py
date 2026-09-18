@@ -40,7 +40,6 @@ from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPExc
 from fastapi.responses import FileResponse, StreamingResponse
 from src.constants import DATA_DIR
 
-from src.llm_core import llm_call_async
 from src.upload_limits import read_upload_limited, EMAIL_COMPOSE_UPLOAD_MAX_BYTES
 
 from routes.email_helpers import (
@@ -92,6 +91,52 @@ def _google_oauth_smtp_transport_allowed(port: int, security: str) -> bool:
 
 def _email_style_key(account_id: str | None) -> str:
     return str(account_id or "").strip()
+
+
+def _email_root_operation_id(data: dict | None) -> str | None:
+    """Return managed-operation identity supplied by an enclosing user turn."""
+    if not isinstance(data, dict):
+        return None
+    value = (
+        data.get("root_operation_id")
+        or data.get("rootOperationID")
+        or data.get("_open_clank_root_operation_id")
+    )
+    return str(value or "").strip() or None
+
+
+def _managed_email_model_label(
+    owner: str,
+    *,
+    model_route_id: str | None = None,
+    explicit_label: str | None = None,
+) -> str:
+    """Best-effort nonsecret label for legacy ``model_used`` response fields.
+
+    This is display metadata only. The managed operation router remains the
+    sole execution authority and may safely fail over within the configured
+    route set.
+    """
+    if explicit_label:
+        return str(explicit_label)
+    if model_route_id:
+        return str(model_route_id)
+    try:
+        from src.openclank.modality_facade import managed_route_summary
+
+        summary = managed_route_summary(
+            owner=owner,
+            purpose="utility",
+            operation="chat.complete",
+        ) or {}
+        return str(
+            summary.get("model_name")
+            or summary.get("model_id")
+            or summary.get("model_route_id")
+            or "managed:utility"
+        )
+    except Exception:
+        return "managed:utility"
 
 
 def _get_email_writing_style_for_account(settings: dict, account_id: str | None = None) -> str:
@@ -363,6 +408,7 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
                         result = await _auto_summarize_pass(
                             days_back=1,
                             account_id=account_id,
+                            owner=owner,
                             max_process=min(max(len(new_keys), 1), 5),
                             away_only=True,
                         )
@@ -370,7 +416,8 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
                     except Exception:
                         logger.warning("Auto away-reply pass after email_received failed", exc_info=True)
 
-                loop.create_task(_run_away_reply_check())
+                from routes.email_pollers import _track_owner_task
+                _track_owner_task(_run_away_reply_check(), owner)
             except RuntimeError:
                 logger.debug("No running event loop for immediate away-reply check")
     except Exception:
@@ -1483,6 +1530,53 @@ def setup_email_routes():
     _WARM_MAX_BYTES = 192 * 1024
     _WARM_RECENT_SECONDS = 7 * 24 * 60 * 60
     _pool_lock = _threading.Lock()
+    _OWNER_WRITER_TASKS: dict[str, set[_asyncio.Task]] = {}
+    from routes.email_pollers import _owner_activity_admit, _owner_activity_done, drain_owner_activity
+
+    def _spawn_owner_writer(coro, owner: str) -> _asyncio.Task:
+        """Track post-response IMAP/SMTP/cache writers by exact owner."""
+
+        owner_key = str(owner or "").strip().lower()
+        task = _asyncio.create_task(coro)
+        if not _owner_activity_admit(owner_key, task):
+            task.cancel()
+            return task
+        if owner_key:
+            _OWNER_WRITER_TASKS.setdefault(owner_key, set()).add(task)
+
+        def _done(done: _asyncio.Task) -> None:
+            group = _OWNER_WRITER_TASKS.get(owner_key)
+            if group is not None:
+                group.discard(done)
+                if not group:
+                    _OWNER_WRITER_TASKS.pop(owner_key, None)
+            try:
+                done.exception()
+            except (_asyncio.CancelledError, Exception):
+                pass
+            _owner_activity_done(owner_key, done)
+
+        task.add_done_callback(_done)
+        return task
+
+    async def _drain_owner_writers(owner: str) -> dict[str, object]:
+        """Wait without a guessed deadline for one owner's external writers."""
+
+        owner_key = str(owner or "").strip().lower()
+        if not owner_key:
+            raise ValueError("email lifecycle owner is required")
+        joined: set[_asyncio.Task] = set()
+        while True:
+            pending = {
+                task
+                for task in _OWNER_WRITER_TASKS.get(owner_key, set())
+                if not task.done()
+            }
+            if not pending:
+                shared = await drain_owner_activity(owner_key)
+                return {"owner": owner_key, "joined": len(joined) + int(shared.get("joined", 0))}
+            joined.update(pending)
+            await _asyncio.shield(_asyncio.gather(*pending, return_exceptions=True))
 
     def _pooled_connect(account_id, owner=""):
         """Reuse a live IMAP connection if one is in the pool and still
@@ -1636,6 +1730,46 @@ def setup_email_routes():
         "read_cache_put": _read_cache_put,
         "read_cache_key": _read_cache_key,
     }
+
+    def _invalidate_owner_runtime(owner: str) -> dict[str, int]:
+        """Forget cached message content and live IMAP state for one owner."""
+        normalized = str(owner or "").strip().lower()
+        removed = {"list": 0, "folder": 0, "read": 0, "warming": 0, "pool": 0}
+        if not normalized:
+            return removed
+        for key in list(_LIST_CACHE):
+            if len(key) > 7 and str(key[7]).strip().lower() == normalized:
+                _LIST_CACHE.pop(key, None)
+                removed["list"] += 1
+        for key in list(_FOLDER_CACHE):
+            if len(key) > 1 and str(key[1]).strip().lower() == normalized:
+                _FOLDER_CACHE.pop(key, None)
+                removed["folder"] += 1
+        for key in list(_READ_CACHE):
+            if len(key) > 3 and str(key[3]).strip().lower() == normalized:
+                _READ_CACHE.pop(key, None)
+                removed["read"] += 1
+        for key in list(_WARMING_READS):
+            if len(key) > 3 and str(key[3]).strip().lower() == normalized:
+                _WARMING_READS.discard(key)
+                removed["warming"] += 1
+        connections = []
+        with _pool_lock:
+            for key in list(_IMAP_POOL):
+                if len(key) > 1 and str(key[1]).strip().lower() == normalized:
+                    connections.append(_IMAP_POOL.pop(key)[0])
+                    removed["pool"] += 1
+        for connection in connections:
+            try:
+                connection.logout()
+            except Exception:
+                pass
+        return removed
+
+    router.invalidate_owner_runtime = _invalidate_owner_runtime
+    router.drain_owner_writers = _drain_owner_writers
+    from routes.email_pollers import owner_lifecycle_hooks
+    router.email_owner_lifecycle = owner_lifecycle_hooks()
     # Wire the module-level _imap() context manager into the pool so every
     # `with _imap(account_id, owner=owner) as conn:` reuses an existing connection
     # instead of paying TCP+TLS+LOGIN per request.
@@ -3079,7 +3213,12 @@ def setup_email_routes():
         if cached is not None:
             if mark_seen:
                 try:
-                    _asyncio.create_task(_asyncio.to_thread(_mark_email_seen_sync, uid, folder, account_id, owner))
+                    _spawn_owner_writer(
+                        _asyncio.to_thread(
+                            _mark_email_seen_sync, uid, folder, account_id, owner
+                        ),
+                        owner,
+                    )
                 except RuntimeError:
                     pass
             return cached
@@ -3089,7 +3228,16 @@ def setup_email_routes():
                 _read_cache_put(ck, persisted)
                 if mark_seen:
                     try:
-                        _asyncio.create_task(_asyncio.to_thread(_mark_email_seen_sync, uid, folder, account_id, owner))
+                        _spawn_owner_writer(
+                            _asyncio.to_thread(
+                                _mark_email_seen_sync,
+                                uid,
+                                folder,
+                                account_id,
+                                owner,
+                            ),
+                            owner,
+                        )
                     except RuntimeError:
                         pass
                 return persisted
@@ -3100,7 +3248,12 @@ def setup_email_routes():
                 _email_preview_cache_put(owner, account_id, folder, uid, result)
             if mark_seen:
                 try:
-                    _asyncio.create_task(_asyncio.to_thread(_mark_email_seen_sync, uid, folder, account_id, owner))
+                    _spawn_owner_writer(
+                        _asyncio.to_thread(
+                            _mark_email_seen_sync, uid, folder, account_id, owner
+                        ),
+                        owner,
+                    )
                 except RuntimeError:
                     pass
         return result
@@ -3153,7 +3306,7 @@ def setup_email_routes():
                     await _asyncio.sleep(0.35)
 
         try:
-            _asyncio.create_task(_warm())
+            _spawn_owner_writer(_warm(), owner)
         except RuntimeError:
             pass
 
@@ -4592,7 +4745,11 @@ def setup_email_routes():
                 return {"success": True, "queued": False, "message": f"Email sent to {req.to}", **result}
             return result
 
-        background_tasks.add_task(_deliver)
+        # Register before returning the response.  FastAPI BackgroundTasks run
+        # after the response body, beyond the account request barrier, and
+        # could otherwise deliver or repopulate owner caches after deletion.
+        del background_tasks
+        _spawn_owner_writer(_asyncio.to_thread(_deliver), owner)
         return {
             "success": True,
             "queued": True,
@@ -4714,16 +4871,8 @@ def setup_email_routes():
             if len(samples) < 3:
                 return {"success": False, "error": f"Only found {len(samples)} usable sent emails, need at least 3"}
 
-            # Call LLM to analyze writing style. Prefer the utility model;
-            # fall back to the default chat model when utility isn't set
-            # (matches how the background email tasks behave).
-            from src.endpoint_resolver import resolve_endpoint
-
-            url, model, headers = resolve_endpoint("utility", owner=owner)
-            if not url or not model:
-                url, model, headers = resolve_endpoint("default", owner=owner)
-            if not url or not model:
-                return {"success": False, "error": "No LLM endpoint configured — set a Utility or Default Chat model in Settings → AI Defaults."}
+            from src.openclank.modality_facade import complete_text
+            from src.openclank.operation_router import ManagedOperationUnavailable
 
             sample_text = "\n\n---EMAIL---\n\n".join(samples[:15])
             messages = [
@@ -4744,14 +4893,30 @@ def setup_email_routes():
                 },
             ]
 
-            style = await llm_call_async(
-                url,
-                model,
-                messages,
-                headers=headers,
-                max_tokens=2048,
-                owner=owner,
-            )
+            try:
+                style = await complete_text(
+                    owner=owner,
+                    purpose="utility",
+                    messages=messages,
+                    max_output_tokens=2048,
+                )
+            except ManagedOperationUnavailable:
+                return {
+                    "success": False,
+                    "error": (
+                        "No LLM endpoint configured — set a Utility model in "
+                        "Settings → Providers."
+                    ),
+                }
+            except Exception as e:
+                logger.warning(
+                    "Managed email style extraction failed (%s)",
+                    type(e).__name__,
+                )
+                return {
+                    "success": False,
+                    "error": "LLM failed to generate style description",
+                }
             style = _strip_think(style or "")
             if not style:
                 return {"success": False, "error": "LLM failed to generate style description"}
@@ -4772,9 +4937,8 @@ def setup_email_routes():
     async def summarize_email(data: dict, owner: str = Depends(require_owner)):
         """Generate a quick AI summary of an email body."""
         try:
-            from src.endpoint_resolver import resolve_endpoint
-            from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
-            import requests as _req
+            from src.openclank.modality_facade import complete_text
+            from src.openclank.operation_router import ManagedOperationUnavailable
 
             body = data.get("body", "")
             subject = data.get("subject", "")
@@ -4810,54 +4974,36 @@ def setup_email_routes():
             if att_text:
                 body_for_llm = body + "\n\n--- ATTACHMENTS ---\n\n" + att_text
 
-            url, model, headers = resolve_endpoint("utility", owner=owner)
-            if not url:
-                url, model, headers = resolve_endpoint("default", owner=owner)
-            if not url or not model:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull invoice totals, deadlines, key clauses, concrete numbers/dates from PDFs/docs into the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept.",
+                },
+                {
+                    "role": "user",
+                    "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>.",
+                },
+            ]
+            try:
+                content = await complete_text(
+                    owner=owner,
+                    purpose="utility",
+                    messages=messages,
+                    temperature=0.3,
+                    max_output_tokens=8192,
+                    root_operation_id=_email_root_operation_id(data),
+                )
+            except ManagedOperationUnavailable:
                 return {"success": False, "error": "No LLM endpoint configured"}
-
-            req_headers = {"Content-Type": "application/json"}
-            if headers:
-                req_headers.update(headers)
-            tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull invoice totals, deadlines, key clauses, concrete numbers/dates from PDFs/docs into the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
-                    {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
-                ],
-                tok_key: 8192,
-                "temperature": 0.3,
-                "stream": False,
-            }
-            # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.
-            if _restricts_temperature(model):
-                payload.pop("temperature", None)
-            resp = await asyncio.to_thread(
-                _req.post, url, json=payload, headers=req_headers, timeout=180
-            )
-            if not resp.ok:
-                return {"success": False, "error": f"LLM HTTP {resp.status_code}"}
-            rdata = resp.json()
-            msg = (rdata.get("choices") or [{}])[0].get("message", {})
-            content = (msg.get("content") or "").strip()
+            except Exception as e:
+                logger.warning(
+                    "Managed email summary failed (%s)",
+                    type(e).__name__,
+                )
+                return {"success": False, "error": "LLM request failed"}
+            model = _managed_email_model_label(owner)
+            content = (content or "").strip()
             content = _extract_reply(content)
-
-            if not content:
-                # Model put everything in reasoning_content — extract bullet points
-                rc = (msg.get("reasoning_content") or "").strip()
-                # Find bullet-point style output (lines starting with -, •, *, or numbered)
-                bullet_lines = []
-                for line in rc.split("\n"):
-                    stripped = line.strip()
-                    if re.match(r"^[-•*]\s+|^\d+[.)]\s+", stripped):
-                        bullet_lines.append(stripped)
-                if bullet_lines:
-                    content = "\n".join(bullet_lines)
-                else:
-                    # Last resort: take the last paragraph
-                    paragraphs = [p.strip() for p in rc.split("\n\n") if p.strip()]
-                    content = paragraphs[-1] if paragraphs else rc[:500]
 
             if not content:
                 return {"success": False, "error": "Empty response from model"}
@@ -4890,12 +5036,8 @@ def setup_email_routes():
     async def translate_email(data: dict, owner: str = Depends(require_owner)):
         """Translate an email body into a target language."""
         try:
-            from src.endpoint_resolver import (
-                resolve_endpoint,
-                resolve_utility_fallback_candidates,
-                resolve_chat_fallback_candidates,
-            )
-            from src.llm_core import llm_call_async_with_fallback
+            from src.openclank.modality_facade import complete_text
+            from src.openclank.operation_router import ManagedOperationUnavailable
 
             body = (data.get("body") or "").strip()
             subject = (data.get("subject") or "").strip()
@@ -4935,60 +5077,45 @@ def setup_email_routes():
             except Exception as e:
                 logger.warning(f"Failed to read email translation cache: {e}")
 
-            candidates = []
-            seen = set()
-
-            def _add(url, model, headers):
-                key = (url or "", model or "")
-                if not url or not model or key in seen:
-                    return
-                seen.add(key)
-                candidates.append((url, model, headers))
-
             try:
-                _add(*resolve_endpoint("utility", owner=owner))
-            except Exception:
-                pass
-            try:
-                _add(*resolve_endpoint("default", owner=owner))
-            except Exception:
-                pass
-            for cand in resolve_utility_fallback_candidates(owner=owner) or []:
-                _add(*cand)
-            for cand in resolve_chat_fallback_candidates(owner=owner) or []:
-                _add(*cand)
-            if not candidates:
+                content = await complete_text(
+                    owner=owner,
+                    purpose="utility",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You translate emails faithfully. Preserve meaning, names, dates, money, addresses, "
+                                "bullet structure, and tone. Do not summarize or answer the email. "
+                                "Output only the translation between <<<TRANSLATION>>> and <<<END>>>. "
+                                "If AUTO mode is enabled and the email is already primarily in the target language, "
+                                "output exactly <<<SAME_LANGUAGE>>>."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"AUTO mode: {'enabled' if auto else 'disabled'}\n"
+                                f"Target language: {target_language}\n\n"
+                                f"From: {sender}\nSubject: {subject}\n\n{body[:16000]}\n\n"
+                                "Translate the email unless AUTO mode is enabled and it is already primarily in the target language.\n"
+                                "Return only:\n<<<TRANSLATION>>>\ntranslated text\n<<<END>>>"
+                            ),
+                        },
+                    ],
+                    temperature=0.2,
+                    max_output_tokens=8192,
+                    root_operation_id=_email_root_operation_id(data),
+                )
+            except ManagedOperationUnavailable:
                 return {"success": False, "error": "No LLM endpoint configured"}
-
-            content = await llm_call_async_with_fallback(
-                candidates,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You translate emails faithfully. Preserve meaning, names, dates, money, addresses, "
-                            "bullet structure, and tone. Do not summarize or answer the email. "
-                            "Output only the translation between <<<TRANSLATION>>> and <<<END>>>. "
-                            "If AUTO mode is enabled and the email is already primarily in the target language, "
-                            "output exactly <<<SAME_LANGUAGE>>>."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"AUTO mode: {'enabled' if auto else 'disabled'}\n"
-                            f"Target language: {target_language}\n\n"
-                            f"From: {sender}\nSubject: {subject}\n\n{body[:16000]}\n\n"
-                            "Translate the email unless AUTO mode is enabled and it is already primarily in the target language.\n"
-                            "Return only:\n<<<TRANSLATION>>>\ntranslated text\n<<<END>>>"
-                        ),
-                    },
-                ],
-                temperature=0.2,
-                max_tokens=8192,
-                timeout=180,
-            )
-            model = candidates[0][1] if candidates else ""
+            except Exception as e:
+                logger.warning(
+                    "Managed email translation failed (%s)",
+                    type(e).__name__,
+                )
+                return {"success": False, "error": "LLM request failed"}
+            model = _managed_email_model_label(owner)
             content = (content or "").strip()
             content = _extract_reply(content)
             if "<<<SAME_LANGUAGE>>>" in content:
@@ -5040,7 +5167,13 @@ def setup_email_routes():
     async def ai_reply(data: dict, owner: str = Depends(require_owner)):
         """Generate an AI-drafted reply to an email using the user's writing style."""
         try:
-            from src.endpoint_resolver import resolve_endpoint
+            from src.openclank.chat_routing import (
+                ChatRouteUnavailable,
+                resolve_chat_model_spec,
+                resolve_chat_route,
+            )
+            from src.openclank.modality_facade import complete_text
+            from src.openclank.operation_router import ManagedOperationUnavailable
 
             to = data.get("to", "")
             subject = data.get("subject", "")
@@ -5086,77 +5219,71 @@ def setup_email_routes():
             settings = _load_settings()
             style = _get_email_writing_style_for_account(settings, account_id)
 
-            # Try session's endpoint first if session_id provided
-            url = None
-            model = requested_model
-            headers = None
-            if session_id:
+            # A requested model or session may contribute only a normalized,
+            # authorization-checked route identity. Legacy provider URLs,
+            # headers, and model strings are display metadata after cutover.
+            selected_route = None
+            if requested_model:
                 try:
-                    # The chat-session ORM model is `Session`, not `ChatSession`
-                    # — the old import threw ImportError, was swallowed by the
-                    # except, and left url=None so EVERY reply silently fell back
-                    # to the "default" endpoint (wrong model). Its auth lives in
-                    # `headers` (JSON), and `endpoint_url` is already the full
-                    # chat-completions URL the chat path uses verbatim — so use
-                    # those directly rather than rebuilding via a nonexistent
-                    # `api_key` field.
+                    selected_route = resolve_chat_model_spec(
+                        owner=owner,
+                        model_spec=requested_model,
+                    )
+                except ChatRouteUnavailable:
+                    logger.warning("Requested AI reply managed route is unavailable")
+                except Exception as e:
+                    logger.warning(
+                        "Failed to resolve requested AI reply route (%s)",
+                        type(e).__name__,
+                    )
+
+            if selected_route is None and session_id:
+                _db = None
+                try:
                     from core.database import SessionLocal as _SL, Session as _CS
                     _db = _SL()
                     sess = _db.query(_CS).filter(_CS.id == session_id, _CS.owner == owner).first()
-                    if sess and sess.endpoint_url:
-                        url = sess.endpoint_url
-                        # Some sessions stored headers double-encoded (a JSON
-                        # string inside the JSON column), so the ORM hands back
-                        # a str, not a dict — and llm_call_async's h.update()
-                        # then throws "dictionary update sequence element…".
-                        # Unwrap until we have a dict (or give up → no headers).
-                        _h = sess.headers
-                        for _ in range(3):
-                            if isinstance(_h, str):
-                                try:
-                                    _h = json.loads(_h)
-                                except Exception:
-                                    _h = None
-                                    break
-                            else:
-                                break
-                        headers = _h if isinstance(_h, dict) and _h else None
-                        if not requested_model:
-                            model = sess.model
-                    _db.close()
+                    route_id = ""
+                    if sess is not None:
+                        route_id = str(
+                            getattr(sess, "provider_model_route_id", None) or ""
+                        ).strip()
+                    if route_id:
+                        selected_route = resolve_chat_route(
+                            owner=owner,
+                            endpoint_id=getattr(sess, "endpoint_id", None),
+                            model_route_id=route_id,
+                        )
                 except Exception as e:
-                    logger.warning(f"Failed to read session endpoint: {e}")
+                    logger.warning(
+                        "Failed to resolve session managed route (%s)",
+                        type(e).__name__,
+                    )
+                finally:
+                    if _db is not None:
+                        _db.close()
 
-            if not url:
-                # Match the rest of email AI: prefer the caller's Utility
-                # model, then fall back to their Default chat model. Using the
-                # global default here could hit a stale provider/key even when
-                # chat and summaries worked for the current user.
-                url, fallback_model, headers = resolve_endpoint("utility", owner=owner)
-                if not url:
-                    url, fallback_model, headers = resolve_endpoint("default", owner=owner)
-                if not model:
-                    model = fallback_model
-
-            if not url or not model:
-                return {"success": False, "error": "No LLM endpoint configured"}
-
-            # Resolve the model against what the endpoint actually serves. A
-            # stored session model can drift from the server's
-            # --served-model-name, giving a 404 "model does not exist". Match
-            # by exact id, then basename; fall back to the first served model.
-            try:
-                from src.llm_core import list_model_ids
-                _avail = list_model_ids(url, headers=headers)
-                if _avail and model not in _avail:
-                    import os as _os
-                    _base = _os.path.basename((model or "").rstrip("/"))
-                    _match = next((a for a in _avail if _os.path.basename(a.rstrip("/")) == _base), None)
-                    model = _match or _avail[0]
-            except Exception as _e:
-                logger.warning(f"AI reply model resolve failed: {_e}")
-
-            logger.info(f"AI reply using model={model} url={url}")
+            model_route_id = (
+                selected_route.model_route_id if selected_route is not None else None
+            )
+            grant_id = (
+                selected_route.provider_grant_id if selected_route is not None else None
+            )
+            model = _managed_email_model_label(
+                owner,
+                model_route_id=model_route_id,
+                explicit_label=(
+                    selected_route.display_name if selected_route is not None else None
+                ),
+            )
+            root_operation_id = (
+                _email_root_operation_id(data)
+                or f"root_email_reply_{uuid.uuid4().hex}"
+            )
+            logger.info(
+                "AI reply using managed utility route%s",
+                f" {model_route_id}" if model_route_id else "",
+            )
 
             # Manual AI Reply should feel immediate. The heavier context mining
             # can involve multiple IMAP folder searches and attachment parsing;
@@ -5213,67 +5340,40 @@ def setup_email_routes():
                 )
             user_msg += "Draft a reply. Return only the reply body text."
 
-            # Build a candidate chain so a stale session-stored API key
-            # (the most common cause of "authentication failed" here)
-            # doesn't kill AI Reply outright — fall through to the
-            # user's Utility / Default endpoints AND their configured
-            # fallback chains. Dedupe by url+model so we don't retry
-            # the same broken endpoint.
-            from src.llm_core import llm_call_async_with_fallback
-            from src.endpoint_resolver import (
-                resolve_utility_fallback_candidates,
-                resolve_chat_fallback_candidates,
-            )
-            _seen = set()
-            _candidates = []
-            def _add(_url, _model, _headers):
-                key = (_url or "", _model or "")
-                if not _url or not _model or key in _seen:
-                    return
-                _seen.add(key)
-                _candidates.append((_url, _model, _headers))
-            # Session endpoint first (may be the broken one).
-            _add(url, model, headers)
-            # Primary utility endpoint — this is what the user has actually
-            # configured as their background-task model, with fresh creds.
-            try:
-                _u_url, _u_model, _u_headers = resolve_endpoint("utility", owner=owner)
-                _add(_u_url, _u_model, _u_headers)
-            except Exception:
-                pass
-            # Primary default chat endpoint — last working chat config.
-            try:
-                _d_url, _d_model, _d_headers = resolve_endpoint("default", owner=owner)
-                _add(_d_url, _d_model, _d_headers)
-            except Exception:
-                pass
-            # Configured fallback chains last.
-            for cand in resolve_utility_fallback_candidates(owner=owner) or []:
-                _add(*cand)
-            for cand in resolve_chat_fallback_candidates(owner=owner) or []:
-                _add(*cand)
             _messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ]
             try:
-                reply_raw = await llm_call_async_with_fallback(
-                    _candidates,
+                reply_raw = await complete_text(
+                    owner=owner,
+                    purpose="utility",
                     messages=_messages,
                     temperature=0.7,
-                    max_tokens=1024 if fast_reply else 6144,
-                    timeout=60 if fast_reply else 180,
-                    owner=owner,
+                    max_output_tokens=1024 if fast_reply else 6144,
+                    model_route_id=model_route_id,
+                    grant_id=grant_id,
+                    root_operation_id=root_operation_id,
                 )
+            except ManagedOperationUnavailable:
+                return {"success": False, "error": "No LLM endpoint configured"}
             except Exception as e:
-                detail = getattr(e, "detail", None) or str(e)
-                _attempted = ", ".join(f"{m}@{u.split('/')[2] if '/' in u else u}" for u, m, _ in _candidates) or "no candidates"
-                return {"success": False, "error": f"All endpoints failed ({_attempted}): {detail}. Check your API keys in Settings → Services."}
+                logger.warning(
+                    "Managed AI reply generation failed (%s)",
+                    type(e).__name__,
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        "AI reply generation failed. Check the managed Utility "
+                        "route in Settings → Providers."
+                    ),
+                }
 
             reply = _apply_email_style_mechanics(_extract_reply(reply_raw or ""))
             if not reply:
                 logger.warning(
-                    "AI reply returned empty usable text on first pass model=%s raw_len=%s; retrying candidates",
+                    "AI reply returned empty usable text on first pass model=%s raw_len=%s; retrying once",
                     model,
                     len(reply_raw or ""),
                 )
@@ -5288,33 +5388,40 @@ def setup_email_routes():
                     {"role": "system", "content": retry_system},
                     {"role": "user", "content": retry_user},
                 ]
-                for cand_url, cand_model, cand_headers in _candidates:
-                    try:
-                        raw_retry = await llm_call_async(
-                            cand_url,
-                            cand_model,
-                            retry_messages,
-                            headers=cand_headers,
-                            temperature=0.3,
-                            max_tokens=1536 if fast_reply else 4096,
-                            timeout=45 if fast_reply else 120,
-                            max_retries=1,
-                        )
-                        retry_reply = _apply_email_style_mechanics(_extract_reply(raw_retry or ""))
-                        if retry_reply:
-                            reply = retry_reply
-                            model = cand_model
-                            break
+                # A second completion is safe here: this operation only
+                # produces draft text and the first output was unusable. Keep
+                # the same root so the managed engine preserves account
+                # stickiness; provider/network retries remain engine-owned.
+                try:
+                    raw_retry = await complete_text(
+                        owner=owner,
+                        purpose="utility",
+                        messages=retry_messages,
+                        temperature=0.3,
+                        max_output_tokens=1536 if fast_reply else 4096,
+                        model_route_id=model_route_id,
+                        grant_id=grant_id,
+                        root_operation_id=root_operation_id,
+                    )
+                    reply = _apply_email_style_mechanics(
+                        _extract_reply(raw_retry or "")
+                    )
+                    if not reply:
                         logger.warning(
                             "AI reply retry still empty model=%s raw_len=%s",
-                            cand_model,
+                            model,
                             len(raw_retry or ""),
                         )
-                    except Exception as retry_exc:
-                        logger.warning("AI reply retry failed model=%s: %s", cand_model, retry_exc)
+                except Exception as retry_exc:
+                    logger.warning(
+                        "Managed AI reply retry failed (%s)",
+                        type(retry_exc).__name__,
+                    )
             if not reply:
-                _attempted = ", ".join(f"{m}@{u.split('/')[2] if '/' in u else u}" for u, m, _ in _candidates) or "no candidates"
-                return {"success": False, "error": f"AI reply returned blank text after retrying: {_attempted}"}
+                return {
+                    "success": False,
+                    "error": "AI reply returned blank text after retrying",
+                }
 
             # Cache so next click is instant
             if message_id:
@@ -5903,7 +6010,7 @@ def setup_email_routes():
             raise HTTPException(400, "GOOGLE_OAUTH_CLIENT_ID not set — add it to .env")
         redirect_uri = (
             os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            or f"http://{request.headers.get('host', 'localhost:7000')}/api/email/oauth/google/callback"
+            or f"http://{request.headers.get('host', 'localhost:7777')}/api/email/oauth/google/callback"
         )
         state = make_oauth_state(account_id, owner)
         params = urllib.parse.urlencode({
@@ -5940,7 +6047,7 @@ def setup_email_routes():
         client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
         redirect_uri = (
             os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
-            or f"http://{request.headers.get('host', 'localhost:7000')}/api/email/oauth/google/callback"
+            or f"http://{request.headers.get('host', 'localhost:7777')}/api/email/oauth/google/callback"
         )
         import httpx as _httpx
         try:

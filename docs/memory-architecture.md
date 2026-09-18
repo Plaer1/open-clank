@@ -150,7 +150,7 @@ question-form even as a fragment.
   force layout, no CDN).
 - `GET /api/memory/digest-preview` — the byte-identical injected blocks
   (raw digest + trusted/untrusted split with the caller's own prefs).
-- Audit trail: `.robonotes/memory-trust-brain-audit-2026-07-17.md`.
+- Audit trail: `.clankers/robonotes/memory-trust-brain-audit-2026-07-17.md`.
 
 ## Provider-always
 

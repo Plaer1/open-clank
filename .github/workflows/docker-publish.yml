@@ -33,7 +33,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-      packages: write
+      packages: write # Push this architecture's content-addressed image.
     strategy:
       fail-fast: false
       matrix:
@@ -63,12 +63,16 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Export digest
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="$BUILD_DIGEST"
           touch "/tmp/digests/${digest#sha256:}"
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -84,7 +88,8 @@ jobs:
     needs: build
     permissions:
       contents: read
-      packages: write
+      id-token: write # Mint the short-lived Fulcio identity used by cosign.
+      packages: write # Publish the multi-architecture manifest and signatures.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -132,9 +137,31 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
       - name: Inspect
+        id: inspect
         run: |
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then ref=latest; else ref=dev; fi
-          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${ref}"
+          inspection=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${ref}")
+          printf '%s\n' "$inspection"
+          digest=$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Could not resolve the pushed manifest digest" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
         env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+      - name: Keyless-sign and verify manifest
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/docker-publish.yml@${GITHUB_REF}"
+          cosign sign --yes "$image"
+          cosign verify "$image" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        env:
+          DIGEST: ${{ steps.inspect.outputs.digest }}
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}

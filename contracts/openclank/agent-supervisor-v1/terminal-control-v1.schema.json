@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.dev/contracts/agent-supervisor-v1/terminal-control-v1.schema.json",
+  "title": "Open Clank terminal control v1",
+  "type": "object",
+  "required": ["schema_version", "request_id", "session_id", "terminal_id", "command"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "terminal_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "terminal_epoch": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "lease_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "command": {"enum": ["attach", "input", "resize", "interrupt", "terminate", "ack", "takeover", "detach", "close"]},
+    "since_seq": {"type": "integer", "minimum": 0},
+    "input_b64": {"type": "string", "maxLength": 87384},
+    "cols": {"type": "integer", "minimum": 1, "maximum": 512},
+    "rows": {"type": "integer", "minimum": 1, "maximum": 512},
+    "ack_seq": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {"if": {"properties": {"command": {"const": "attach"}}}, "then": {"required": ["since_seq"]}},
+    {"if": {"properties": {"command": {"const": "input"}}}, "then": {"required": ["terminal_epoch", "lease_id", "input_b64"]}},
+    {"if": {"properties": {"command": {"const": "resize"}}}, "then": {"required": ["terminal_epoch", "lease_id", "cols", "rows"]}},
+    {"if": {"properties": {"command": {"enum": ["interrupt", "terminate", "takeover", "detach", "close"]}}}, "then": {"required": ["terminal_epoch"]}},
+    {"if": {"properties": {"command": {"const": "ack"}}}, "then": {"required": ["terminal_epoch", "ack_seq"]}}
+  ]
+}

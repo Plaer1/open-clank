@@ -6,8 +6,8 @@
  *              + an optional narrow inpaint on a seam mask if the
  *              "Seam fix" slider > 0.
  *   Canvas 2×/4× Upscale: in-browser bicubic resampling, no server.
- *   AI Upscale: Real-ESRGAN via /api/image/upscale-local.
- *   Style Transfer: img2img via /api/gallery/style-transfer.
+ *   AI Upscale and Style Transfer: managed image operations selected from
+ *   the owner's normalized Images routes.
  *
  * Plus the small `_addEmptyLayer` helper and its toolbar wiring,
  * since it lived next to these.
@@ -173,6 +173,10 @@ export function wireAIToolsMisc({
       fd.append('image', blob, 'style.png');
       fd.append('prompt', prompt);
       fd.append('strength', String(strength));
+      const selectedRoute = document.querySelector(
+        'select[data-ge-tool-model="style"]',
+      )?.value || '';
+      if (selectedRoute) fd.append('model_route_id', selectedRoute);
       const res = await fetch(`${apiBase}/api/gallery/style-transfer`, { method: 'POST', credentials: 'same-origin', body: fd });
       if (!res.ok) throw new Error('Server returned ' + res.status);
       const data = await res.json();

@@ -15,7 +15,7 @@ from src.tool_security import BUILTIN_EMAIL_TOOLS
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
-             "grep", "glob", "ls", "get_workspace", "publish_file", "manage_bg_jobs",
+             "grep", "glob", "ls", "get_workspace", "publish_file", "manage_files", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
              "chat_with_model", "create_session", "list_sessions",
@@ -28,6 +28,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
              "manage_notes", "manage_calendar",
+             "read_copal", "manage_copal",
              "resolve_contact", "manage_contact",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover

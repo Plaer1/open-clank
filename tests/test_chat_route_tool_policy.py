@@ -119,12 +119,25 @@ def test_disabled_tools_respects_missing_vs_explicit_toggles():
     )
 
 
-def test_agent_only_mode_does_not_apply_chat_auto_escalation_clamp():
-    """Agent-only routing keeps shell authority under the normal privilege gate."""
+def test_chat_mode_is_a_read_only_lane_not_an_error():
+    """Chat mode is a first-class read-only lane (QOL-pass slice 3): the route
+    accepts chat/plan/agent, rejects unknown modes, and chat applies the same
+    fail-closed read-only tool gate as plan mode. Shell authority stays under
+    the normal privilege gate for agent mode."""
     source = _CHAT_ROUTES.read_text(encoding="utf-8")
-    assert 'if requested_mode == "chat":' in source
-    assert '"Chat mode was removed. Send this request as Agent instead."' in source
+    assert 'if requested_mode not in ("", "agent", "chat", "plan"):' in source
+    assert "chat_mode_disabled_tools" in source
+    assert "Chat mode was removed" not in source
     assert "if not _privs.get(\"can_use_bash\", True):" in source
+
+
+def test_active_copal_pointer_is_injected_for_classic_and_acp_agents():
+    """Copal context must not be hidden behind the ACP-only branch."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    messages_line = source.index("messages = list(_ensure_current_request_is_latest_user")
+    pointer_line = source.index('"active Copal resource pointer"', messages_line)
+    transport_line = source.index('if model_target.transport == "acp":', messages_line)
+    assert pointer_line < transport_line
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

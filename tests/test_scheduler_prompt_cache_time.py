@@ -25,6 +25,17 @@ def _make_task(prompt="run the digest"):
     )
 
 
+def _managed_route():
+    from src.task_scheduler import _ManagedTaskRoute
+    return _ManagedTaskRoute(
+        model_route_id="pmr-tasks",
+        connection_id="pcn-tasks",
+        provider_model_id="mimo-auto",
+        public_endpoint_id="pcn-tasks",
+        capabilities={"tools": True},
+    )
+
+
 def _patch_scheduler_deps(monkeypatch):
     monkeypatch.setattr(
         "src.settings.get_setting",
@@ -63,6 +74,8 @@ async def test_scheduler_agent_loop_path(monkeypatch):
         task,
         task.session_id,
         datetime_context_msg={"role": "user", "content": "## Current date and time\nNow"},
+        managed_route=_managed_route(),
+        root_operation_id="turn-task-run:test-1",
     )
 
     msgs = captured.get("messages", [])
@@ -95,6 +108,8 @@ async def test_scheduler_has_no_agent_failure_fallback(monkeypatch):
     with pytest.raises(RuntimeError, match="SUPERVISOR_UNAVAILABLE"):
         await sched._run_agent_loop(
             task.endpoint_url, task.model, task, task.session_id,
+            managed_route=_managed_route(),
+            root_operation_id="turn-task-run:test-2",
         )
 
 

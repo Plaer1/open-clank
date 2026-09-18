@@ -17,15 +17,15 @@ logger = logging.getLogger(__name__)
 
 # OAuth redirect URI registered with every authorization server via DCR. Loopback
 # is allowed for native/desktop clients (RFC 8252); remote users finish via the
-# paste-back flow. Deployments not reachable at http://localhost:7000 (custom
+# paste-back flow. Deployments not reachable at http://localhost:7777 (custom
 # port, reverse proxy, or public domain) must set OAUTH_REDIRECT_BASE_URL (or
 # APP_PUBLIC_URL) to their externally reachable origin so the redirect lands back
 # on Open Clank. APP_PORT is intentionally not used: it is only the Docker host
-# port-map; the app always listens on 7000 inside the container.
+# port-map; the app listens on 7777 inside the default container.
 _REDIRECT_BASE = (
     os.environ.get("OAUTH_REDIRECT_BASE_URL")
     or os.environ.get("APP_PUBLIC_URL")
-    or "http://localhost:7000"
+    or "http://localhost:7777"
 ).rstrip("/")
 REDIRECT_URI = f"{_REDIRECT_BASE}/api/mcp/oauth/callback"
 

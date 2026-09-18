@@ -6,9 +6,44 @@ import {
   progressPlugin,
   ansiPlugin,
   redactPlugin,
+  securityRedact,
   longLinePlugin,
   type CleanPlugin,
 } from "../../src/tool/bash_token_efficient_pipeline"
+import { StreamingSecurityRedactor } from "../../src/util/security-redact"
+
+test("security redaction cannot be bypassed by raw mode", () => {
+  const previous = process.env.MIMOCODE_BASH_RAW
+  process.env.MIMOCODE_BASH_RAW = "1"
+  try {
+    expect(securityRedact("Bearer abcdefghijklmnopqrstuvwxyz")).toBe("Bearer <redacted>")
+  } finally {
+    if (previous === undefined) delete process.env.MIMOCODE_BASH_RAW
+    else process.env.MIMOCODE_BASH_RAW = previous
+  }
+})
+
+test("streaming redaction handles split credentials and multi-chunk PEM blocks", () => {
+  const redactor = new StreamingSecurityRedactor(8)
+  const output = [
+    redactor.push("before Bearer abcdef"),
+    redactor.push("ghijklmnopqrstuvwxyz after\n-----BEGIN PRIVATE "),
+    redactor.push("KEY-----\nsecret-body\n"),
+    redactor.push("-----END PRIVATE KEY-----\ndone"),
+    redactor.finish(),
+  ].join("")
+  expect(output).toContain("Bearer <redacted>")
+  expect(output).toContain("<redacted-pem-block>")
+  expect(output).toContain("done")
+  expect(output).not.toContain("abcdefghijklmnopqrstuvwxyz")
+  expect(output).not.toContain("secret-body")
+})
+
+test("streaming redaction drops every byte of oversized unbroken tokens", () => {
+  const redactor = new StreamingSecurityRedactor()
+  const output = [redactor.push("x".repeat(70_000)), redactor.push(" done"), redactor.finish()].join("")
+  expect(output).toBe("<redacted-long-token> done")
+})
 
 describe("progressPlugin", () => {
   test("no \\r is a no-op", () => {

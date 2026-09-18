@@ -44,3 +44,39 @@ def test_registered_everywhere():
     assert "update_plan" in {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
     # Not admin/public-gated — any user can drive their own plan.
     assert is_public_blocked_tool("update_plan") is False
+
+
+def test_session_bound_update_persists_server_plan_state(monkeypatch):
+    from src.agent_tools.interaction_tools import UpdatePlanTool
+
+    saved = {}
+
+    def save_plan_draft(session_id, owner, plan):
+        saved.update(session_id=session_id, owner=owner, plan=plan)
+        return {
+            "plan": plan,
+            "revision": 4,
+            "digest": "d" * 64,
+            "approved_revision": None,
+            "approved_digest": None,
+            "status": "draft",
+            "artifact_relpath": ".futures/plan.md",
+        }
+
+    monkeypatch.setattr("src.plan_approval.save_plan_draft", save_plan_draft)
+
+    async def run():
+        return await UpdatePlanTool().execute(
+            json.dumps({"plan": "- [x] persisted step"}),
+            {"session_id": "session-1", "owner": "alice"},
+        )
+
+    _, result = asyncio.run(run())
+    assert saved == {
+        "session_id": "session-1",
+        "owner": "alice",
+        "plan": "- [x] persisted step",
+    }
+    assert result["plan_update"]["revision"] == 4
+    assert result["plan_update"]["status"] == "draft"
+    assert result["plan_update"]["artifact_relpath"] == ".futures/plan.md"

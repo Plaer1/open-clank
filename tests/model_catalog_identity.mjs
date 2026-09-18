@@ -55,6 +55,26 @@ assert.equal(
   ),
   true,
 );
+assert.equal(
+  catalogHasModelChoice(
+    [personalRoute],
+    'xiaomi/mimo-v2.5-pro/high',
+    'mimo:auto',
+    'mimo://acp',
+  ),
+  true,
+  'the automatic MiMo selector resolves through its provider-scoped catalogue row',
+);
+assert.equal(
+  catalogHasModelChoice(
+    [sharedRoute],
+    'xiaomi/mimo-v2.5-pro/high',
+    'mimo:auto',
+    'mimo://acp',
+  ),
+  false,
+  'the automatic MiMo selector cannot silently adopt a shared route',
+);
 
 const state = new Map([['odysseus-model-favorites', '["shared-model"]']]);
 globalThis.localStorage = {

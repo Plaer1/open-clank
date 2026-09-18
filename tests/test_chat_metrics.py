@@ -63,7 +63,7 @@ def _usage_event(monkeypatch, lines):
 
     async def run():
         usage = None
-        async for chunk in llm_core.stream_llm(
+        async for chunk in llm_core._legacy_stream_llm(
             "http://127.0.0.1:8081/v1/chat/completions",
             "qwen-local",
             [{"role": "user", "content": "hi"}],
@@ -91,7 +91,7 @@ def _stream_events(monkeypatch, lines):
 
     async def run():
         events = []
-        async for chunk in llm_core.stream_llm(
+        async for chunk in llm_core._legacy_stream_llm(
             "http://127.0.0.1:8081/v1/chat/completions",
             "openrouter/auto",
             [{"role": "user", "content": "hi"}],

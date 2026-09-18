@@ -8,6 +8,7 @@ This is the single place that handles:
 - Session lifecycle (create, archive, delete)
 """
 
+import hashlib
 import json
 import uuid
 import logging
@@ -129,11 +130,15 @@ class SessionManager:
             endpoint_url=db_session.endpoint_url,
             model=db_session.model,
             endpoint_id=getattr(db_session, "endpoint_id", None),
+            provider_model_route_id=getattr(
+                db_session, "provider_model_route_id", None
+            ),
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
             history=[],
             owner=getattr(db_session, "owner", None),
+            workspace_id=getattr(db_session, "workspace_id", None),
             is_important=getattr(db_session, "is_important", False) or False,
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
@@ -188,11 +193,15 @@ class SessionManager:
             endpoint_url=db_session.endpoint_url,
             model=db_session.model,
             endpoint_id=getattr(db_session, "endpoint_id", None),
+            provider_model_route_id=getattr(
+                db_session, "provider_model_route_id", None
+            ),
             rag=db_session.rag,
             archived=db_session.archived,
             headers=headers,
             history=history,
             owner=getattr(db_session, 'owner', None),
+            workspace_id=getattr(db_session, "workspace_id", None),
             is_important=getattr(db_session, 'is_important', False) or False,
         )
 
@@ -257,7 +266,24 @@ class SessionManager:
                     f"Referenced upload is no longer available: {missing_upload_id}"
                 )
 
-            msg_id = str(uuid.uuid4())
+            reserved_id = str(
+                getattr(message, "persistence_id", None) or ""
+            ).strip()
+            message_root = str(
+                (message.metadata or {}).get("root_operation_id") or ""
+            ).strip()
+            if reserved_id and (
+                message.role != "user"
+                or message_root != reserved_id
+                or len(reserved_id) > 192
+                or not reserved_id[0].isalnum()
+                or not all(
+                    char.isalnum() or char in "._:-"
+                    for char in reserved_id
+                )
+            ):
+                raise ValueError("Invalid reserved chat-message identity")
+            msg_id = reserved_id or str(uuid.uuid4())
             msg_time = datetime.utcnow()
             if message.metadata is None:
                 message.metadata = {}
@@ -454,11 +480,15 @@ class SessionManager:
             session.name = db_session.name
             session.endpoint_url = db_session.endpoint_url or ""
             session.endpoint_id = getattr(db_session, "endpoint_id", None)
+            session.provider_model_route_id = getattr(
+                db_session, "provider_model_route_id", None
+            )
             session.model = db_session.model or ""
             session.headers = headers or {}
             session.rag = db_session.rag
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
+            session.workspace_id = getattr(db_session, "workspace_id", None)
             session.is_important = getattr(db_session, "is_important", False) or False
             session.message_count = getattr(db_session, "message_count", session.message_count) or 0
             return True
@@ -518,6 +548,8 @@ class SessionManager:
         rag: bool = False,
         owner: str = None,
         endpoint_id: str | None = None,
+        provider_model_route_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> Session:
         """Create a new session and save to database."""
         db = SessionLocal()
@@ -527,10 +559,12 @@ class SessionManager:
                 name=name,
                 endpoint_url=endpoint_url,
                 endpoint_id=endpoint_id,
+                provider_model_route_id=provider_model_route_id,
                 model=model,
                 rag=rag,
                 headers={},
                 owner=owner,
+                workspace_id=str(workspace_id).strip() or None if workspace_id else None,
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -543,9 +577,11 @@ class SessionManager:
                 endpoint_url=endpoint_url,
                 model=model,
                 endpoint_id=endpoint_id,
+                provider_model_route_id=provider_model_route_id,
                 rag=rag,
                 headers={},
                 owner=owner,
+                workspace_id=str(workspace_id).strip() or None if workspace_id else None,
             )
 
             self.sessions[session_id] = session
@@ -558,13 +594,63 @@ class SessionManager:
         finally:
             db.close()
 
+    def update_session_workspace(self, session_id: str, workspace_id: str | None) -> bool:
+        """Persist a stable Workspace ID before publishing it to the cache."""
+        value = str(workspace_id or "").strip() or None
+        cached = self.sessions.get(session_id)
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if row is None:
+                if cached is not None and getattr(cached, "incognito", False):
+                    cached.workspace_id = value
+                    return True
+                return False
+            row.workspace_id = value
+            row.updated_at = utcnow_naive()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        if cached is not None:
+            cached.workspace_id = value
+        return True
+
     def delete_session(self, session_id: str) -> bool:
         """Permanently delete a session and all its messages."""
         db = SessionLocal()
         try:
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            memory_session = self.sessions.get(session_id)
+            session_owner = (
+                getattr(db_session, "owner", None)
+                if db_session is not None
+                else getattr(memory_session, "owner", None)
+            )
+            if db_session is not None or memory_session is not None:
+                from src import bg_jobs
+
+                bg_jobs.delete_for_session_owner(
+                    session_id=session_id,
+                    owner=str(session_owner or ""),
+                )
+
+            pending_image_filenames: set[str] = set()
             try:
-                from src.session_image_cleanup import cleanup_session_images
-                cleanup_session_images(session_id, db=db)
+                from src.session_image_cleanup import (
+                    cleanup_session_image_files,
+                    cleanup_session_images,
+                    session_image_refs,
+                )
+
+                _image_ids, pending_image_filenames = session_image_refs(
+                    db,
+                    session_id,
+                    session_owner,
+                )
+                cleanup_session_images(session_id, session_owner, db=db)
             except Exception as e:
                 logger.warning(f"Image cleanup failed while deleting session {session_id}: {e}")
 
@@ -577,7 +663,6 @@ class SessionManager:
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
 
             # Delete session
-            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if db_session:
                 db.delete(db_session)
 
@@ -591,6 +676,14 @@ class SessionManager:
                 # Commit the document-detach / message-delete above (a no-op when
                 # the ghost had no rows) together with the session delete.
                 db.commit()
+                try:
+                    cleanup_session_image_files(pending_image_filenames)
+                except Exception as exc:
+                    logger.warning(
+                        "Generated-image GC failed after deleting session %s: %s",
+                        session_id,
+                        exc,
+                    )
                 logger.info(f"Deleted session {session_id}")
                 return True
             return False
@@ -675,9 +768,171 @@ class SessionManager:
         """Return sessions for a specific user (or all if username is None)."""
         if username is None:
             return self.sessions
+        normalized = str(username or "").strip().lower()
         return {
             sid: s for sid, s in self.sessions.items()
-            if s.owner == username
+            if str(getattr(s, "owner", None) or "").strip().lower() == normalized
+        }
+
+    @staticmethod
+    def _cache_owner(owner: object) -> str:
+        normalized = str(owner or "").strip().lower()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("session-cache lifecycle owner is required")
+        return normalized
+
+    def owner_cache_inventory(self, owner: str) -> dict:
+        """Return content-free, stable evidence for one owner's cached sessions."""
+        normalized = self._cache_owner(owner)
+        session_ids = sorted(
+            str(session_id)
+            for session_id, session in self.sessions.items()
+            if str(getattr(session, "owner", None) or "").strip().lower()
+            == normalized
+        )
+        material = json.dumps(session_ids, separators=(",", ":"))
+        return {
+            "schema_version": 1,
+            "count": len(session_ids),
+            "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        }
+
+    @staticmethod
+    def _same_cache_inventory(observed: dict, expected: dict | None) -> bool:
+        if expected is None:
+            return True
+        return (
+            int(observed.get("count") or 0) == int(expected.get("count") or 0)
+            and str(observed.get("fingerprint") or "")
+            == str(expected.get("fingerprint") or "")
+        )
+
+    def rename_owner_cache(
+        self,
+        source_owner: str,
+        target_owner: str,
+        *,
+        expected_source: dict | None = None,
+        expected_target: dict | None = None,
+    ) -> dict:
+        """Move exact-owner cached projections with idempotent replay checks.
+
+        SQL remains authoritative.  This operation only keeps already-loaded
+        projections coherent while the durable account saga moves their rows.
+        """
+        source = self._cache_owner(source_owner)
+        target = self._cache_owner(target_owner)
+        if source == target:
+            raise ValueError("session-cache lifecycle owners must be distinct")
+        source_before = self.owner_cache_inventory(source)
+        target_before = self.owner_cache_inventory(target)
+
+        if int(source_before["count"]):
+            if int(target_before["count"]):
+                raise RuntimeError("source and target session caches both contain state")
+            if not self._same_cache_inventory(source_before, expected_source):
+                raise RuntimeError("source session-cache inventory changed")
+            if not self._same_cache_inventory(target_before, expected_target):
+                raise RuntimeError("target session-cache inventory changed")
+            for session in self.sessions.values():
+                if (
+                    str(getattr(session, "owner", None) or "").strip().lower()
+                    == source
+                ):
+                    session.owner = target
+            state = "applied"
+        elif int(target_before["count"]):
+            if expected_source is None or not self._same_cache_inventory(
+                target_before,
+                expected_source,
+            ):
+                raise RuntimeError("unexpected target session-cache state")
+            state = "already_applied"
+        else:
+            if expected_source is not None and int(expected_source.get("count") or 0):
+                raise RuntimeError("expected session-cache state is missing")
+            state = "empty"
+
+        source_after = self.owner_cache_inventory(source)
+        target_after = self.owner_cache_inventory(target)
+        if int(source_after["count"]):
+            raise RuntimeError("source session cache remains after rename")
+        if expected_source is not None and not self._same_cache_inventory(
+            target_after,
+            expected_source,
+        ):
+            raise RuntimeError("renamed session-cache inventory does not reconcile")
+        return {
+            "state": state,
+            "moved": int(source_before["count"]),
+            "source": source_after,
+            "target": target_after,
+        }
+
+    def compensate_owner_cache(
+        self,
+        source_owner: str,
+        target_owner: str,
+        *,
+        expected_source: dict | None = None,
+    ) -> dict:
+        """Idempotently move a staged target cache back to its source owner."""
+        receipt = self.rename_owner_cache(
+            target_owner,
+            source_owner,
+            expected_source=expected_source,
+        )
+        return {**receipt, "state": "restored"}
+
+    def purge_owner_cache(
+        self,
+        owner: str,
+        *,
+        expected: dict | None = None,
+    ) -> dict:
+        """Evict one exact owner's cached projections without touching peers."""
+        normalized = self._cache_owner(owner)
+        before = self.owner_cache_inventory(normalized)
+        if int(before["count"]) and not self._same_cache_inventory(before, expected):
+            raise RuntimeError("session-cache purge inventory changed")
+        removed = sorted(
+            session_id
+            for session_id, session in list(self.sessions.items())
+            if str(getattr(session, "owner", None) or "").strip().lower()
+            == normalized
+        )
+        for session_id in removed:
+            self.sessions.pop(session_id, None)
+        after = self.owner_cache_inventory(normalized)
+        return {
+            "state": "purged" if removed else "already_applied",
+            "removed": len(removed),
+            "before": before,
+            "after": after,
+        }
+
+    def invalidate_owner_cache(self, *owners: str) -> dict:
+        """Evict exact-owner projections before account rename or deletion.
+
+        Durable session rows move in the account SQL transaction.  Mutating
+        cached objects would create a second ownership authority that cannot be
+        recovered reliably after a crash, so lifecycle convergence evicts the
+        derived objects and lets later access rehydrate from SQL.
+        """
+
+        selected = sorted({
+            self._cache_owner(owner)
+            for owner in owners
+            if str(owner or "").strip()
+        })
+        removed = sum(
+            int(self.purge_owner_cache(owner)["removed"])
+            for owner in selected
+        )
+        return {
+            "state": "invalidated",
+            "owners": selected,
+            "count": removed,
         }
 
     def save_sessions(self):
@@ -743,6 +998,12 @@ class SessionManager:
                             continue  # Too young to delete
                     if db_session.id in self.sessions:
                         del self.sessions[db_session.id]
+                    from src import bg_jobs
+
+                    bg_jobs.delete_for_session_owner(
+                        session_id=str(db_session.id),
+                        owner=str(getattr(db_session, "owner", None) or ""),
+                    )
                     db.delete(db_session)
                     stats['deleted_empty'] += 1
 

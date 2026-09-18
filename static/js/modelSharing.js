@@ -1,6 +1,8 @@
 // Named-user model sharing. The UI keeps transport and credential details out
 // of the DOM and consumes only the API's explicit display fields.
 
+import { providerDisplayName, sharedProviderLabel } from './modelLabels.js';
+
 let root;
 let status;
 let receivedList;
@@ -67,17 +69,65 @@ function normalizeOwned(value) {
   };
 }
 
-function normalizeReceived(value) {
+export function normalizeReceived(value) {
   const shareId = clean(value?.share_id, 256);
-  const modelName = clean(value?.model_name || value?.display_name || value?.model_id, 256);
-  if (!shareId || !modelName) return null;
+  const modelId = clean(value?.model_id || value?.model_name || value?.display_name, 512);
+  const modelName = clean(value?.model_name || value?.display_name || modelId, 256);
+  if (!shareId || !modelId || !modelName) return null;
+  // Normalized shares provide this from the source connection's family. The
+  // legacy `provider` value is accepted as an explicit server projection;
+  // never infer provider identity from a model ID.
+  const provider = providerDisplayName(
+    value?.provider_display_name
+      || value?.provider_family_name
+      || value?.provider,
+  );
   return {
     shareId,
+    modelId,
     modelName,
-    provider: clean(value?.provider, 128) || 'Shared model',
+    provider,
+    providerFamilyId: clean(value?.provider_family_id || value?.family_id, 128),
     sharedBy: clean(value?.shared_by, 128) || 'another user',
     enabled: Boolean(value?.enabled),
   };
+}
+
+const REASONING_LABELS = {
+  none: 'No reasoning',
+  minimal: 'Minimal reasoning',
+  low: 'Low reasoning',
+  medium: 'Medium reasoning',
+  high: 'High reasoning',
+  xhigh: 'Extra-high reasoning',
+  max: 'Maximum reasoning',
+};
+
+function titleModelPart(value) {
+  const parts = String(value || '')
+    .split(/[-_]+/)
+    .filter(Boolean);
+  const title = part => {
+    const lower = part.toLowerCase();
+    if (lower === 'mimo') return 'MiMo';
+    if (lower === 'deepseek') return 'DeepSeek';
+    if (/^v\d/i.test(part)) return `V${part.slice(1)}`;
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  };
+  if (parts[0]?.toLowerCase() === 'gpt' && parts[1]) {
+    return [`GPT-${parts[1]}`, ...parts.slice(2).map(title)].join(' ');
+  }
+  return parts.map(title).join(' ');
+}
+
+function receivedModelLabel(share) {
+  const path = share.modelId.split('/').filter(Boolean);
+  const variant = path.length > 2
+    ? REASONING_LABELS[path.at(-1).toLowerCase()]
+    : '';
+  const modelPart = variant ? path.at(-2) : path.at(-1);
+  const family = titleModelPart(modelPart) || share.modelName;
+  return variant ? `${family} · ${variant}` : family;
 }
 
 function normalizePayload(payload) {
@@ -126,43 +176,65 @@ function renderReceived() {
     setStatus('');
     return;
   }
+  const providerGroups = new Map();
   state.received.forEach(share => {
-    const card = node('div', { class: 'model-share-offer' });
-    const copy = node('div', { class: 'model-share-offer-copy' });
-    copy.append(
-      node('strong', {}, share.modelName),
-      node('span', { class: 'admin-toggle-sub' }, `${share.provider} · shared by ${share.sharedBy}`),
+    if (!providerGroups.has(share.provider)) providerGroups.set(share.provider, []);
+    providerGroups.get(share.provider).push(share);
+  });
+  [...providerGroups].forEach(([provider, shares]) => {
+    const folder = node('details', { class: 'model-share-folder' });
+    if (shares.some(share => share.enabled)) folder.setAttribute('open', '');
+    const summary = node('summary', { class: 'model-share-folder-summary' });
+    summary.append(
+        node('strong', {}, sharedProviderLabel(provider)),
+      node(
+        'span',
+        { class: 'model-share-folder-count' },
+        `${shares.length} model${shares.length === 1 ? '' : 's'}`,
+      ),
     );
-    const control = node('label', { class: 'model-share-offer-toggle' });
-    const label = node('span', {}, 'Add to my models');
-    const toggleShell = node('span', { class: 'admin-switch' });
-    const toggle = node('input', {
-      type: 'checkbox',
-      'aria-label': `Add ${share.modelName} to my models`,
-      checked: share.enabled,
+    const contents = node('div', { class: 'model-share-folder-contents' });
+    shares.forEach(share => {
+      const labelText = receivedModelLabel(share);
+      const card = node('div', { class: 'model-share-offer' });
+      const copy = node('div', { class: 'model-share-offer-copy' });
+      copy.append(
+        node('strong', {}, labelText),
+        node('span', { class: 'admin-toggle-sub' }, `Shared by ${share.sharedBy}`),
+      );
+      const control = node('label', { class: 'model-share-offer-toggle' });
+      const label = node('span', {}, 'Add to my models');
+      const toggleShell = node('span', { class: 'admin-switch' });
+      const toggle = node('input', {
+        type: 'checkbox',
+        'aria-label': `Add ${labelText} to my models`,
+        checked: share.enabled,
+      });
+      toggleShell.append(toggle, node('span', { class: 'admin-slider' }));
+      control.append(label, toggleShell);
+      toggle.addEventListener('change', async event => {
+        event.stopPropagation();
+        const wanted = toggle.checked;
+        toggle.disabled = true;
+        try {
+          await request(`/${encodeURIComponent(share.shareId)}/subscription`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabled: wanted }),
+          });
+          await load();
+          await onCatalogChanged();
+        } catch (error) {
+          toggle.checked = !wanted;
+          toggle.disabled = false;
+          setStatus(error.message, true);
+          toast(`Shared model update failed: ${error.message}`);
+        }
+      });
+      card.append(copy, control);
+      contents.append(card);
     });
-    toggleShell.append(toggle, node('span', { class: 'admin-slider' }));
-    control.append(label, toggleShell);
-    toggle.addEventListener('change', async event => {
-      event.stopPropagation();
-      const wanted = toggle.checked;
-      toggle.disabled = true;
-      try {
-        await request(`/${encodeURIComponent(share.shareId)}/subscription`, {
-          method: 'PUT',
-          body: JSON.stringify({ enabled: wanted }),
-        });
-        await load();
-        await onCatalogChanged();
-      } catch (error) {
-        toggle.checked = !wanted;
-        toggle.disabled = false;
-        setStatus(error.message, true);
-        toast(`Shared model update failed: ${error.message}`);
-      }
-    });
-    card.append(copy, control);
-    receivedList.append(card);
+    folder.append(summary, contents);
+    receivedList.append(folder);
   });
   setStatus(`${state.received.length} model${state.received.length === 1 ? '' : 's'} shared with you`);
 }

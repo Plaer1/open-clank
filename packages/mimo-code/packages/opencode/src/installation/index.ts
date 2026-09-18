@@ -14,6 +14,7 @@ import semver from "semver"
 import { InstallationChannel, InstallationVersion } from "./version"
 
 const log = Log.create({ service: "installation" })
+const OPEN_CLANK_MANAGED_BUILD = true
 
 const PACKAGE_NAME = "@mimo-ai/cli"
 
@@ -237,6 +238,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
       })
 
       const latestImpl = Effect.fn("Installation.latest")(function* (installMethod?: Method) {
+        if (OPEN_CLANK_MANAGED_BUILD) {
+          void installMethod
+          return yield* Effect.die(
+            new Error("managed engine updates are controlled exclusively by Open Clank"),
+          )
+        }
+
         const detectedMethod = installMethod || (yield* methodImpl())
 
         // TODO(mimocode): uncomment when mimocode is published to homebrew
@@ -318,6 +326,14 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
       }, Effect.orDie)
 
       const upgradeImpl = Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
+        if (OPEN_CLANK_MANAGED_BUILD) {
+          void m
+          void target
+          return yield* Effect.die(
+            new Error("managed engine updates are controlled exclusively by Open Clank"),
+          )
+        }
+
         let result: { code: ChildProcessSpawner.ExitCode; stdout: string; stderr: string } | undefined
         switch (m) {
           case "curl":

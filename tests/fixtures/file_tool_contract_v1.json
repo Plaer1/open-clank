@@ -1,0 +1,34 @@
+{
+  "contract": "open-clank.file-result/v1",
+  "required": [
+    "contract",
+    "operation",
+    "path",
+    "kind",
+    "range",
+    "page",
+    "bytes_considered",
+    "lines_considered",
+    "truncation_reason",
+    "encoding",
+    "newline",
+    "media_type",
+    "fingerprint",
+    "search_mode",
+    "items",
+    "diagnostics"
+  ],
+  "page_required": [
+    "unit",
+    "cursor",
+    "next_cursor",
+    "has_more",
+    "returned",
+    "total"
+  ],
+  "operations": ["read", "write", "edit", "list", "glob", "grep", "view_image"],
+  "kinds": ["text", "directory", "image", "pdf", "binary", "search"],
+  "page_units": ["character", "line", "entry", "result", "byte"],
+  "truncation_reasons": ["character_limit", "byte_limit", "line_limit", "result_limit"],
+  "search_modes": ["literal", "regex"]
+}

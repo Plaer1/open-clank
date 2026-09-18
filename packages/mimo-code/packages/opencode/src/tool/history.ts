@@ -5,6 +5,7 @@ import DESCRIPTION from "./history.txt"
 import * as Tool from "./tool"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import { SessionCwd } from "./session-cwd"
 
 const KIND = z.enum([
   "user_text",
@@ -130,7 +131,17 @@ export const HistoryTool = Tool.define(
           // metadata.truncated set here also opts us out of tool.ts wrap's
           // global truncate call (see tool.ts:110).
           const agent = yield* agents.get(ctx.agent)
-          const truncated = yield* truncate.output(rawOutput, { maxBytes: AROUND_MAX_BYTES }, agent)
+          const truncated = yield* truncate.output(
+            rawOutput,
+            { maxBytes: AROUND_MAX_BYTES },
+            agent,
+            {
+              owner: process.env.OPEN_CLANK_OWNER ?? "",
+              workspace: SessionCwd.get(ctx.sessionID),
+              sessionID: ctx.sessionID,
+              ...(ctx.callID ? { callID: ctx.callID } : {}),
+            },
+          )
           return {
             title: `History around ${args.message_id}`,
             output: truncated.content,

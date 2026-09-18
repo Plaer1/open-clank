@@ -38,8 +38,7 @@ class TestCompactionSummaryFailure:
         # test is hermetic (no network, no real endpoint resolution).
         orig_ctx = cc.get_context_length
         orig_est = cc.estimate_tokens
-        orig_call = cc.llm_call_async
-        orig_resolve = cc.resolve_endpoint
+        orig_call = cc._complete_text
         orig_update = cc._update_session_history
 
         async def _boom(*a, **k):
@@ -47,8 +46,7 @@ class TestCompactionSummaryFailure:
 
         cc.get_context_length = lambda url, model: context_length
         cc.estimate_tokens = lambda msgs: 10000  # well over the threshold
-        cc.llm_call_async = _boom
-        cc.resolve_endpoint = lambda *a, **k: (None, None, None)
+        cc._complete_text = _boom
         cc._update_session_history = lambda *a, **k: None
         try:
             return asyncio.run(
@@ -63,8 +61,7 @@ class TestCompactionSummaryFailure:
         finally:
             cc.get_context_length = orig_ctx
             cc.estimate_tokens = orig_est
-            cc.llm_call_async = orig_call
-            cc.resolve_endpoint = orig_resolve
+            cc._complete_text = orig_call
             cc._update_session_history = orig_update
 
     def _history(self):

@@ -42,20 +42,28 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
 // for their owning account. The settings-tab Logout button already wipes on
 // explicit logout; this catches the cases where a different user signs
 // in without the previous one logging out cleanly.
-(async () => {
+// theme.js awaits this shared boot lookup so it does not issue a second
+// auth-status request before these compatibility events are dispatched.
+window.__odysseusAuthContextPromise = (async () => {
   try {
     const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
-    if (!res.ok) return;
+    if (!res.ok) return null;
     const data = await res.json().catch(() => ({}));
     const liveUser = (data && data.username) || '';
-    if (!liveUser) return;
+    if (!liveUser) return null;
+    const accountId = String(data.account_id || '').trim();
+    if (accountId && document.body) document.body.dataset.accountId = accountId;
     const userBarName = document.getElementById('user-bar-name');
     if (userBarName) userBarName.textContent = liveUser;
     const KEY = 'odysseus-auth-user';
+    // Keep a non-secret stable owner hint for the pre-module first-paint
+    // script. Runtime preference namespaces remain keyed by account_id; the
+    // username fallback only covers loopback/auth providers without one.
+    const OWNER_KEY = 'odysseus-auth-owner';
     const cachedUser = localStorage.getItem(KEY);
     bindModelStateOwner(liveUser, cachedUser || '');
     if (cachedUser && cachedUser !== liveUser) {
-      const _keepKeys = new Set(['odysseus-last-user', KEY]);
+      const _keepKeys = new Set(['odysseus-last-user', KEY, OWNER_KEY]);
       const toRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
@@ -67,8 +75,12 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
       clearFreshComposerRestore();
     }
     localStorage.setItem(KEY, liveUser);
+    localStorage.setItem(OWNER_KEY, accountId || liveUser);
     document.dispatchEvent(new CustomEvent('openclank:auth-user-ready', {
-      detail: { username: liveUser },
+      detail: { username: liveUser, accountId },
+    }));
+    document.dispatchEvent(new CustomEvent('openclank:auth-context-changed', {
+      detail: { username: liveUser, accountId },
     }));
     // Apply per-user privilege gates to the UI. The backend enforces these
     // independently — this is purely cosmetic / "don't dangle controls the
@@ -97,7 +109,8 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
         });
       }
     } catch (_) { /* DOM not ready or unexpected shape — UI gates are non-fatal */ }
-  } catch (_) { /* anonymous / loopback mode — nothing to do */ }
+    return { username: liveUser, accountId };
+  } catch (_) { /* anonymous / loopback mode — nothing to do */ return null; }
 })();
 
 /* Sidebar section default-collapsed setup. The click-to-toggle handlers

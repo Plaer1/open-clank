@@ -18,22 +18,31 @@
 //! Binary assets live OUTSIDE the DB in `<data-dir>/assets/<blake3>.<ext>`,
 //! tracked by AssetRef docs whose history chain records every update.
 //!
-//! See `.futures/copal-jj-db-source-of-truth-metaplan.md` for the full plan.
+//! See `.clanker/futures/copal-jj-db-source-of-truth-metaplan.md` for the full plan.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use unicase::UniCase;
+use unicode_normalization::UnicodeNormalization;
 
 const DOCS: TableDefinition<&str, &str> = TableDefinition::new("docs");
 const COMMITS: TableDefinition<&str, &str> = TableDefinition::new("commits");
 const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
 const OPS: TableDefinition<&str, &str> = TableDefinition::new("ops");
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
+const OWNER_LIFECYCLES: TableDefinition<&str, &str> = TableDefinition::new("owner_lifecycles");
+const ACTIONS: TableDefinition<&str, &str> = TableDefinition::new("guarded_actions");
+// Derived note-task projections live in their own keyed table. They are
+// rebuildable views, never part of the canonical document view or operation
+// history. Keys are scoped by owner/workspace and source document id.
+const TASK_INDEX: TableDefinition<&str, &str> = TableDefinition::new("task_index");
+const TASK_INDEX_RESOURCES: TableDefinition<&str, &str> = TableDefinition::new("task_index_resources");
 
 const OP_HEAD_KEY: &str = "op_head";
 const SCHEMA_VERSION_KEY: &str = "schema_version";
@@ -66,6 +75,46 @@ fn err(message: impl Into<String>) -> DbError {
     DbError(message.into())
 }
 
+fn task_index_prefix(owner: &str, workspace_id: &str) -> String {
+    format!("r\0{}\0{}\0", owner, workspace_id)
+}
+
+fn task_index_generation_key(owner: &str, workspace_id: &str) -> String {
+    format!("g\0{}\0{}", owner, workspace_id)
+}
+
+fn task_index_count_key(owner: &str, workspace_id: &str) -> String {
+    format!("c\0{}\0{}", owner, workspace_id)
+}
+
+fn task_index_filter_count_key(owner: &str, workspace_id: &str, source: &str, checked: bool) -> String {
+    format!("f\0{}\0{}\0{}\0{}", owner, workspace_id, source, checked as u8)
+}
+
+fn task_index_row_prefix(owner: &str, workspace_id: &str) -> String {
+    format!("t\0{}\0{}\0", owner, workspace_id)
+}
+
+fn task_index_row_key(owner: &str, workspace_id: &str, item: &Value) -> String {
+    let label = item
+        .get("label")
+        .or_else(|| item.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase()
+        .replace('\0', " ");
+    let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+    format!("{}{}\0{}", task_index_row_prefix(owner, workspace_id), label, id)
+}
+
+fn task_index_resource_prefix(owner: &str, workspace_id: &str) -> String {
+    format!("m\0{}\0{}\0", owner, workspace_id)
+}
+
+fn task_index_resource_key(owner: &str, workspace_id: &str, resource_id: &str) -> String {
+    format!("{}{}", task_index_resource_prefix(owner, workspace_id), resource_id)
+}
+
 // ── Records ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,14 +136,6 @@ pub struct DocRecord {
 
 fn doc_record_schema_version() -> u64 {
     2
-}
-
-fn shared_owner() -> String {
-    "shared".to_string()
-}
-
-fn global_workspace() -> String {
-    "global".to_string()
 }
 
 fn unclaimed_owner() -> String {
@@ -166,6 +207,48 @@ pub struct OpRecord {
     pub view: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedRevision {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedGuard {
+    pub owner: String,
+    pub workspace_id: String,
+    pub id: String,
+    #[serde(default)]
+    pub revision: Option<GuardedRevision>,
+    #[serde(default)]
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedOperation {
+    pub kind: String,
+    pub owner: String,
+    pub workspace_id: String,
+    pub id: String,
+    #[serde(default)]
+    pub revision: Option<GuardedRevision>,
+    #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedRequest {
+    pub action_id: String,
+    pub actor_id: String,
+    #[serde(default)]
+    pub request_digest: Option<String>,
+    #[serde(default)]
+    pub guards: Vec<GuardedGuard>,
+    pub operations: Vec<GuardedOperation>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DocView {
     pub id: String,
@@ -232,6 +315,66 @@ pub struct ImportEntry {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerInventory {
+    pub schema_version: u64,
+    pub owner: String,
+    pub documents: usize,
+    pub active_documents: usize,
+    pub deleted_documents: usize,
+    pub commits: usize,
+    pub fingerprint: String,
+    pub content_included: bool,
+}
+
+impl OwnerInventory {
+    pub fn empty(owner: &str) -> Self {
+        let encoded = serde_json::to_vec(&json!([[], []]))
+            .expect("empty Copal lifecycle inventory must serialize");
+        Self {
+            schema_version: 1,
+            owner: owner.to_string(),
+            documents: 0,
+            active_documents: 0,
+            deleted_documents: 0,
+            commits: 0,
+            fingerprint: format!("blake3:{}", blake3::hash(&encoded).to_hex()),
+            content_included: false,
+        }
+    }
+
+    fn equivalent(&self, other: &Self) -> bool {
+        self.documents == other.documents
+            && self.active_documents == other.active_documents
+            && self.deleted_documents == other.deleted_documents
+            && self.commits == other.commits
+            && self.fingerprint == other.fingerprint
+    }
+
+    fn validate_for(&self, owner: &str) -> Result<()> {
+        let fingerprint = self.fingerprint.strip_prefix("blake3:");
+        if self.schema_version != 1
+            || self.owner != owner
+            || self.content_included
+            || self.active_documents.saturating_add(self.deleted_documents) != self.documents
+            || !fingerprint.is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err(err("invalid Copal owner lifecycle inventory"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OwnerLifecycleRecord {
+    old_owner: String,
+    new_owner: String,
+    manifest: Value,
+    state: String,
+}
+
 // ── Data-dir resolution (metaplan §2b: the debug bit) ────────────────────
 
 /// Resolve the data directory:
@@ -288,6 +431,65 @@ pub struct Db {
     assets_dir: PathBuf,
 }
 
+fn table_names(database: &Database) -> Result<BTreeSet<String>> {
+    let txn = database.begin_read()?;
+    let names = txn
+        .list_tables()?
+        .map(|table| table.name().to_string())
+        .collect();
+    Ok(names)
+}
+
+fn validate_canonical_tables(database: &Database) -> Result<()> {
+    let txn = database.begin_read()?;
+    txn.open_table(DOCS)
+        .map_err(|error| err(format!("canonical source table 'docs' is missing or corrupt: {error}")))?;
+    txn.open_table(COMMITS)
+        .map_err(|error| err(format!("canonical source table 'commits' is missing or corrupt: {error}")))?;
+    txn.open_table(BLOBS)
+        .map_err(|error| err(format!("canonical source table 'blobs' is missing or corrupt: {error}")))?;
+    txn.open_table(OPS)
+        .map_err(|error| err(format!("canonical source table 'ops' is missing or corrupt: {error}")))?;
+    txn.open_table(META)
+        .map_err(|error| err(format!("canonical source table 'meta' is missing or corrupt: {error}")))?;
+    Ok(())
+}
+
+fn repair_task_tables(database: &Database) -> Result<bool> {
+    let tables = table_names(database)?;
+    let task_index_missing = !tables.contains("task_index");
+    let resources_missing = !tables.contains("task_index_resources");
+    if !task_index_missing && !resources_missing {
+        return Ok(false);
+    }
+
+    // A current-version store can lose either derived table independently.
+    // Recreate both in one transaction and clear every derived row so an old
+    // generation can never be advertised while the resource lookup is only
+    // partially present. The next bounded task read rebuilds the projection.
+    let txn = database.begin_write()?;
+    let mut task_index = txn.open_table(TASK_INDEX)?;
+    let mut resources = txn.open_table(TASK_INDEX_RESOURCES)?;
+    let task_keys = task_index
+        .iter()?
+        .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for key in task_keys {
+        task_index.remove(key.as_str())?;
+    }
+    let resource_keys = resources
+        .iter()?
+        .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for key in resource_keys {
+        resources.remove(key.as_str())?;
+    }
+    drop(resources);
+    drop(task_index);
+    txn.commit()?;
+    Ok(true)
+}
+
 impl Db {
     /// Open (creating if needed) the database at `<data_dir>/copal.redb`
     /// with assets beside it in `<data_dir>/assets/`.
@@ -302,7 +504,8 @@ impl Db {
         let assets_dir = data_dir.join("assets");
         fs::create_dir_all(&assets_dir)?;
         let database_path = data_dir.join(format!("{store_name}.redb"));
-        let database = if database_path.exists() {
+        let database_preexisted = database_path.exists();
+        let database = if database_preexisted {
             Database::open(&database_path)?
         } else {
             Database::create(&database_path)?
@@ -311,20 +514,28 @@ impl Db {
         // TableDoesNotExist on a fresh file, and record the root `init`
         // operation (jj's virtual root op) so there is always an op to
         // restore back to.
-        let current_version = database.begin_read().ok().and_then(|txn| {
-            txn.open_table(META).ok().and_then(|table| {
-                table
-                    .get(SCHEMA_VERSION_KEY)
-                    .ok()
-                    .flatten()
-                    .and_then(|value| value.value().parse::<u64>().ok())
-            })
-        });
+        let tables = table_names(&database)?;
+        let current_version = if tables.contains("meta") {
+            let txn = database.begin_read()?;
+            txn.open_table(META)?
+                .get(SCHEMA_VERSION_KEY)?
+                .map(|value| value.value().parse::<u64>())
+                .transpose()
+                .map_err(|error| err(format!("database schema marker is invalid: {error}")))?
+        } else {
+            None
+        };
+        if database_preexisted && !tables.is_empty() && current_version.is_none() {
+            return Err(err("database schema marker is missing or invalid; refusing to treat an existing store as new"));
+        }
         if current_version.is_some_and(|version| version > SCHEMA_VERSION) {
             return Err(err(format!(
                 "database schema {} is newer than supported schema {SCHEMA_VERSION}",
                 current_version.unwrap()
             )));
+        }
+        if current_version.is_some() {
+            validate_canonical_tables(&database)?;
         }
         if current_version != Some(SCHEMA_VERSION) {
             let txn = database.begin_write()?;
@@ -333,6 +544,10 @@ impl Db {
                 txn.open_table(COMMITS)?;
                 txn.open_table(BLOBS)?;
                 txn.open_table(OPS)?;
+                txn.open_table(ACTIONS)?;
+                txn.open_table(OWNER_LIFECYCLES)?;
+                txn.open_table(TASK_INDEX)?;
+                txn.open_table(TASK_INDEX_RESOURCES)?;
                 let needs_init = txn.open_table(META)?.get(OP_HEAD_KEY)?.is_none();
                 if needs_init {
                     put_op(
@@ -374,6 +589,8 @@ impl Db {
                     .insert(SCHEMA_VERSION_KEY, target_version.as_str())?;
             }
             txn.commit()?;
+        } else {
+            repair_task_tables(&database)?;
         }
         Ok(Self {
             database,
@@ -383,6 +600,379 @@ impl Db {
 
     pub fn assets_dir(&self) -> &Path {
         &self.assets_dir
+    }
+
+    pub fn task_index_get(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        ids: Option<&[String]>,
+    ) -> Result<Value> {
+        let txn = self.database.begin_read()?;
+        let table = txn.open_table(TASK_INDEX)?;
+        let prefix = task_index_prefix(owner, workspace_id);
+        let generation = table
+            .get(task_index_generation_key(owner, workspace_id).as_str())?
+            .map(|value| value.value().to_string())
+            .unwrap_or_default();
+        let count = table
+            .get(task_index_count_key(owner, workspace_id).as_str())?
+            .and_then(|value| value.value().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut records = serde_json::Map::new();
+        if let Some(ids) = ids {
+            for document_id in ids {
+                let key = format!("{prefix}{document_id}");
+                if let Some(value) = table.get(key.as_str())? {
+                    records.insert(document_id.to_string(), serde_json::from_str(value.value())?);
+                }
+            }
+        } else {
+            for entry in table.range(prefix.as_str()..)? {
+                let (key, value) = entry?;
+                let key = key.value();
+                if !key.starts_with(prefix.as_str()) {
+                    break;
+                }
+                let Some(document_id) = key.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                records.insert(document_id.to_string(), serde_json::from_str(value.value())?);
+            }
+        }
+        Ok(json!({"schemaVersion": 1, "sourceRevision": generation, "total": count, "documents": records}))
+    }
+
+    pub fn task_index_generation(&self, owner: &str, workspace_id: &str) -> Result<Value> {
+        let txn = self.database.begin_read()?;
+        let table = txn.open_table(TASK_INDEX)?;
+        let generation = table
+            .get(task_index_generation_key(owner, workspace_id).as_str())?
+            .map(|value| value.value().to_string())
+            .unwrap_or_default();
+        let count = table
+            .get(task_index_count_key(owner, workspace_id).as_str())?
+            .and_then(|value| value.value().parse::<usize>().ok())
+            .unwrap_or(0);
+        Ok(json!({"schemaVersion": 1, "sourceRevision": generation, "total": count}))
+    }
+
+    pub fn task_index_resolve(&self, owner: &str, workspace_id: &str, resource_id: &str) -> Result<Value> {
+        let txn = self.database.begin_read()?;
+        let table = txn.open_table(TASK_INDEX_RESOURCES)?;
+        Ok(table
+            .get(task_index_resource_key(owner, workspace_id, resource_id).as_str())?
+            .map(|value| json!({"id": value.value()}))
+            .unwrap_or(Value::Null))
+    }
+
+    pub fn task_index_page(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        query: &str,
+        completed: Option<bool>,
+        source: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        generation: &str,
+    ) -> Result<Value> {
+        let txn = self.database.begin_read()?;
+        let table = txn.open_table(TASK_INDEX)?;
+        let current_generation = table
+            .get(task_index_generation_key(owner, workspace_id).as_str())?
+            .map(|value| value.value().to_string())
+            .unwrap_or_default();
+        let count = table
+            .get(task_index_count_key(owner, workspace_id).as_str())?
+            .and_then(|value| value.value().parse::<usize>().ok())
+            .unwrap_or(0);
+        if current_generation != generation {
+            return Err(err("stale_cursor"));
+        }
+        let filtered_total = if query.is_empty() {
+            let sources: Vec<&str> = if source == "all" { vec!["vault", "markdown"] } else { vec![source] };
+            completed.map_or_else(
+                || sources.iter().map(|value| {
+                    [false, true].iter().map(|checked| table
+                        .get(task_index_filter_count_key(owner, workspace_id, value, *checked).as_str())
+                        .ok()
+                        .flatten()
+                        .and_then(|entry| entry.value().parse::<usize>().ok())
+                        .unwrap_or(0)).sum::<usize>()
+                }).sum::<usize>(),
+                |checked| sources.iter().map(|value| table
+                    .get(task_index_filter_count_key(owner, workspace_id, value, checked).as_str())
+                    .ok()
+                    .flatten()
+                    .and_then(|entry| entry.value().parse::<usize>().ok())
+                    .unwrap_or(0)).sum(),
+            )
+        } else {
+            count
+        };
+        let prefix = task_index_row_prefix(owner, workspace_id);
+        let mut returned_rows = Vec::new();
+        let mut scanned_rows = 0usize;
+        let mut scanned_bytes = 0usize;
+        let needle = query.to_lowercase();
+        let mut after_cursor = cursor.is_none();
+        let mut cursor_seen = cursor.is_none();
+        let mut last_returned_key: Option<String> = None;
+        let mut next_cursor = None;
+        for entry in table.range(prefix.as_str()..)? {
+            let (key, value) = entry?;
+            let key = key.value();
+            if !key.starts_with(prefix.as_str()) {
+                break;
+            }
+            if !after_cursor {
+                if Some(key) == cursor {
+                    after_cursor = true;
+                    cursor_seen = true;
+                }
+                continue;
+            }
+            scanned_rows += 1;
+            scanned_bytes += value.value().len();
+            let item: Value = serde_json::from_str(value.value())?;
+            let matches = (source == "all"
+                || item.get("source").and_then(Value::as_str) == Some(source))
+                && completed.is_none_or(|wanted| item.get("checked").and_then(Value::as_bool) == Some(wanted))
+                && (needle.is_empty() || {
+                    let label = item.get("label").and_then(Value::as_str).unwrap_or("");
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                    format!("{text} {label}").to_lowercase().contains(&needle)
+                });
+            if !matches {
+                continue;
+            }
+            if returned_rows.len() >= limit {
+                // Keep the cursor on the last row actually returned. The
+                // next request treats it as an exclusive anchor, so the
+                // candidate used to prove continuation is not lost.
+                next_cursor = last_returned_key.clone();
+                break;
+            }
+            returned_rows.push(item);
+            last_returned_key = Some(key.to_string());
+        }
+        if !cursor_seen {
+            return Err(err("stale_cursor"));
+        }
+        let returned_count = returned_rows.len();
+        Ok(json!({
+            "items": returned_rows,
+            "nextCursor": next_cursor,
+            "sourceRevision": current_generation,
+            "scannedRows": scanned_rows,
+            "scannedBytes": scanned_bytes,
+            "returnedRows": returned_count,
+            "sourceReads": 0,
+            "rewrittenRows": 0,
+            "rewrittenBytes": 0,
+            "total": if query.is_empty() { filtered_total } else { count },
+            "indexedTotal": count,
+            "matchedTotal": if query.is_empty() { json!(filtered_total) } else { Value::Null },
+            "totalExact": query.is_empty(),
+        }))
+    }
+
+    pub fn task_index_update(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        generation: &str,
+        records: &Value,
+        removed: &[String],
+        rebuild: bool,
+        source_reads: usize,
+    ) -> Result<Value> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Err(err("owner and workspace are required"));
+        }
+        let object = records
+            .as_object()
+            .ok_or_else(|| err("task index records must be an object"))?;
+        let txn = self.database.begin_write()?;
+        let mut table = txn.open_table(TASK_INDEX)?;
+        let prefix = task_index_prefix(owner, workspace_id);
+        let row_prefix = task_index_row_prefix(owner, workspace_id);
+        let resource_prefix = task_index_resource_prefix(owner, workspace_id);
+        let mut resources = txn.open_table(TASK_INDEX_RESOURCES)?;
+        let mut rewritten_rows = 0usize;
+        let mut rewritten_bytes = 0usize;
+        let mut filter_deltas: BTreeMap<(String, bool), isize> = BTreeMap::new();
+        if rebuild {
+            let keys = table
+                .range(prefix.as_str()..)?
+                .filter_map(|entry| entry.ok().map(|(key, value)| (key.value().to_string(), value.value().len())))
+                .take_while(|(key, _)| key.starts_with(prefix.as_str()))
+                .collect::<Vec<_>>();
+            for (key, bytes) in keys {
+                table.remove(key.as_str())?;
+                rewritten_rows += 1;
+                rewritten_bytes += bytes;
+            }
+            let row_keys = table
+                .range(row_prefix.as_str()..)?
+                .filter_map(|entry| entry.ok().map(|(key, value)| (key.value().to_string(), value.value().len())))
+                .take_while(|(key, _)| key.starts_with(row_prefix.as_str()))
+                .collect::<Vec<_>>();
+            for (key, bytes) in row_keys {
+                table.remove(key.as_str())?;
+                rewritten_rows += 1;
+                rewritten_bytes += bytes;
+            }
+            let resource_keys = resources
+                .range(resource_prefix.as_str()..)?
+                .filter_map(|entry| entry.ok().map(|(key, value)| (key.value().to_string(), value.value().len())))
+                .take_while(|(key, _)| key.starts_with(resource_prefix.as_str()))
+                .collect::<Vec<_>>();
+            for (key, bytes) in resource_keys {
+                resources.remove(key.as_str())?;
+                rewritten_rows += 1;
+                rewritten_bytes += bytes;
+            }
+        }
+        let mut task_count = if rebuild {
+            0usize
+        } else {
+            table
+                .get(task_index_count_key(owner, workspace_id).as_str())?
+                .and_then(|value| value.value().parse::<usize>().ok())
+                .unwrap_or(0)
+        };
+        for (document_id, record) in object {
+            let document_key = format!("{prefix}{document_id}");
+            let previous = table
+                .get(document_key.as_str())?
+                .map(|value| value.value().to_string());
+            if let Some(previous) = previous {
+                let old: Value = serde_json::from_str(&previous)?;
+                if let Some(resource_id) = old.get("resourceId").and_then(Value::as_str) {
+                    let resource_key = task_index_resource_key(owner, workspace_id, resource_id);
+                    if let Some(value) = resources.get(resource_key.as_str())? {
+                        rewritten_bytes += value.value().len();
+                    }
+                    resources.remove(resource_key.as_str())?;
+                    rewritten_rows += 1;
+                }
+                if let Some(items) = old.get("items").and_then(Value::as_array) {
+                    task_count = task_count.saturating_sub(items.len());
+                    for item in items {
+                        if let Some(item_source) = item.get("source").and_then(Value::as_str) {
+                            if let Some(checked) = item.get("checked").and_then(Value::as_bool) {
+                                *filter_deltas.entry((item_source.to_string(), checked)).or_default() -= 1;
+                            }
+                        }
+                        let row_key = task_index_row_key(owner, workspace_id, item);
+                        let row_bytes = table.get(row_key.as_str())?.map(|row| row.value().len());
+                        if let Some(row_bytes) = row_bytes {
+                            rewritten_bytes += row_bytes;
+                            table.remove(row_key.as_str())?;
+                            rewritten_rows += 1;
+                        }
+                    }
+                }
+            }
+            let encoded = serde_json::to_string(record)?;
+            table.insert(document_key.as_str(), encoded.as_str())?;
+            rewritten_rows += 1;
+            rewritten_bytes += encoded.len();
+            if let Some(resource_id) = record.get("resourceId").and_then(Value::as_str) {
+                let resource_key = task_index_resource_key(owner, workspace_id, resource_id);
+                resources.insert(resource_key.as_str(), document_id.as_str())?;
+                rewritten_rows += 1;
+                rewritten_bytes += document_id.len();
+            }
+            if let Some(items) = record.get("items").and_then(Value::as_array) {
+                task_count += items.len();
+                for item in items {
+                    if let Some(item_source) = item.get("source").and_then(Value::as_str) {
+                        if let Some(checked) = item.get("checked").and_then(Value::as_bool) {
+                            *filter_deltas.entry((item_source.to_string(), checked)).or_default() += 1;
+                        }
+                    }
+                    let row_key = task_index_row_key(owner, workspace_id, item);
+                    let encoded_item = serde_json::to_string(item)?;
+                    table.insert(row_key.as_str(), encoded_item.as_str())?;
+                    rewritten_rows += 1;
+                    rewritten_bytes += encoded_item.len();
+                }
+            }
+        }
+        for document_id in removed {
+            let key = format!("{prefix}{document_id}");
+            let previous = table
+                .get(key.as_str())?
+                .map(|value| value.value().to_string());
+            if let Some(previous) = previous {
+                let old: Value = serde_json::from_str(&previous)?;
+                if let Some(resource_id) = old.get("resourceId").and_then(Value::as_str) {
+                    let resource_key = task_index_resource_key(owner, workspace_id, resource_id);
+                    if let Some(value) = resources.get(resource_key.as_str())? {
+                        rewritten_bytes += value.value().len();
+                    }
+                    resources.remove(resource_key.as_str())?;
+                    rewritten_rows += 1;
+                }
+                if let Some(items) = old.get("items").and_then(Value::as_array) {
+                    task_count = task_count.saturating_sub(items.len());
+                    for item in items {
+                        if let Some(item_source) = item.get("source").and_then(Value::as_str) {
+                            if let Some(checked) = item.get("checked").and_then(Value::as_bool) {
+                                *filter_deltas.entry((item_source.to_string(), checked)).or_default() -= 1;
+                            }
+                        }
+                        let row_key = task_index_row_key(owner, workspace_id, item);
+                        let row_bytes = table.get(row_key.as_str())?.map(|row| row.value().len());
+                        if let Some(row_bytes) = row_bytes {
+                            rewritten_bytes += row_bytes;
+                            table.remove(row_key.as_str())?;
+                            rewritten_rows += 1;
+                        }
+                    }
+                }
+            }
+            let previous_bytes = table.get(key.as_str())?.map(|previous| previous.value().len());
+            if let Some(previous_bytes) = previous_bytes {
+                rewritten_bytes += previous_bytes;
+                table.remove(key.as_str())?;
+                rewritten_rows += 1;
+            }
+        }
+        drop(resources);
+        table.insert(
+            task_index_generation_key(owner, workspace_id).as_str(),
+            generation,
+        )?;
+        rewritten_rows += 2;
+        rewritten_bytes += generation.len();
+        let count_value = task_count.to_string();
+        rewritten_bytes += count_value.len();
+        table.insert(task_index_count_key(owner, workspace_id).as_str(), count_value.as_str())?;
+        for ((source, checked), delta) in filter_deltas {
+            let key = task_index_filter_count_key(owner, workspace_id, &source, checked);
+            let prior = table
+                .get(key.as_str())?
+                .and_then(|value| value.value().parse::<isize>().ok())
+                .unwrap_or(0);
+            let next = (prior + delta).max(0) as usize;
+            let encoded = next.to_string();
+            table.insert(key.as_str(), encoded.as_str())?;
+            rewritten_rows += 1;
+            rewritten_bytes += encoded.len();
+        }
+        drop(table);
+        txn.commit()?;
+        Ok(json!({
+            "outcome":"applied",
+            "sourceRevision":generation,
+            "sourceReads":source_reads,
+            "rewrittenRows":rewritten_rows,
+            "rewrittenBytes":rewritten_bytes
+        }))
     }
 
     /// True when the current view contains no docs (fresh or fully-undone
@@ -760,22 +1350,25 @@ impl Db {
                     changed.insert(document_id);
                 }
             }
+            let mut changed_visible = changed.iter().map(|id| (*id).clone()).collect::<Vec<_>>();
             let docs = if let Some((owner, workspace_id)) = scope {
                 let mut affects_scope = false;
-                for document_id in changed {
+                let mut scoped_changed = Vec::new();
+                for document_id in &changed {
                     let head = op
                         .view
-                        .get(document_id)
-                        .or_else(|| parent_view.get(document_id))
+                        .get(*document_id)
+                        .or_else(|| parent_view.get(*document_id))
                         .ok_or_else(|| err("operation document head is missing"))?;
                     if scope_allows(&self.view_of(&txn, document_id, head)?, owner, workspace_id) {
                         affects_scope = true;
-                        break;
+                        scoped_changed.push((*document_id).clone());
                     }
                 }
                 if !affects_scope {
                     continue;
                 }
+                changed_visible = scoped_changed;
                 let mut visible = 0;
                 for (document_id, head) in &op.view {
                     if scope_allows(&self.view_of(&txn, document_id, head)?, owner, workspace_id) {
@@ -793,6 +1386,7 @@ impl Db {
                 "description": op.description,
                 "ts": op.ts,
                 "docs": docs,
+                "changedIds": changed_visible,
             }));
             if out.len() >= limit {
                 break;
@@ -807,64 +1401,575 @@ impl Db {
     // exactly one operation, then advances the op head. redb serializes
     // writers, so this is the whole concurrency story.
 
-    pub fn preflight_rename_owner(&self, old_owner: &str, new_owner: &str) -> Result<usize> {
-        validate_owner_rename(old_owner, new_owner)?;
-        let txn = self.database.begin_read()?;
-        let docs = txn.open_table(DOCS)?;
-        let mut source_count = 0;
-        for entry in docs.iter()? {
-            let (_, encoded) = entry?;
-            let record: DocRecord = serde_json::from_str(encoded.value())?;
-            if record.owner == new_owner {
-                return Err(err("destination owner already has Copal documents"));
-            }
-            if record.owner == old_owner {
-                source_count += 1;
-            }
+    fn owner_inventory_material(
+        owner: &str,
+        documents: Vec<(String, DocRecord)>,
+        commits: Vec<(String, CommitRecord)>,
+        view: &BTreeMap<String, String>,
+    ) -> OwnerInventory {
+        let commit_map = commits
+            .iter()
+            .map(|(id, record)| (id.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut active_documents = 0;
+        let mut deleted_documents = 0;
+        let document_material = documents
+            .iter()
+            .map(|(id, record)| {
+                let deleted = view
+                    .get(id)
+                    .and_then(|head| commit_map.get(head.as_str()))
+                    .is_some_and(|commit| matches!(commit.content, Content::Tombstone));
+                if deleted {
+                    deleted_documents += 1;
+                } else {
+                    active_documents += 1;
+                }
+                json!([
+                    id,
+                    record.schema_version,
+                    record.corpus,
+                    record.kind,
+                    record.created_op,
+                    record.workspace_id,
+                    record.builtin,
+                    deleted,
+                ])
+            })
+            .collect::<Vec<_>>();
+        let commit_material = commits
+            .iter()
+            .map(|(id, record)| json!([id, record.doc]))
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_vec(&json!([document_material, commit_material]))
+            .expect("Copal lifecycle inventory must serialize");
+        OwnerInventory {
+            schema_version: 1,
+            owner: owner.to_string(),
+            documents: documents.len(),
+            active_documents,
+            deleted_documents,
+            commits: commits.len(),
+            fingerprint: format!("blake3:{}", blake3::hash(&encoded).to_hex()),
+            content_included: false,
         }
-        Ok(source_count)
     }
 
-    pub fn rename_owner(&self, old_owner: &str, new_owner: &str) -> Result<usize> {
-        let source_count = self.preflight_rename_owner(old_owner, new_owner)?;
-        if source_count == 0 {
-            return Ok(0);
-        }
-
-        let txn = self.database.begin_write()?;
-        let (view, parent_op) = self.write_view(&txn)?;
-        let updates = {
-            let docs = txn.open_table(DOCS)?;
-            let mut updates = Vec::with_capacity(source_count);
-            for entry in docs.iter()? {
-                let (document_id, encoded) = entry?;
-                let mut record: DocRecord = serde_json::from_str(encoded.value())?;
-                if record.owner == new_owner {
-                    return Err(err("destination owner already has Copal documents"));
-                }
-                if record.owner == old_owner {
-                    record.owner = new_owner.to_string();
-                    updates.push((document_id.value().to_string(), record));
+    fn owner_inventory_in_write(
+        &self,
+        txn: &redb::WriteTransaction,
+        owner: &str,
+    ) -> Result<OwnerInventory> {
+        let documents = {
+            let table = txn.open_table(DOCS)?;
+            let mut rows = Vec::new();
+            for entry in table.iter()? {
+                let (id, encoded) = entry?;
+                let record: DocRecord = serde_json::from_str(encoded.value())?;
+                if record.owner == owner {
+                    rows.push((id.value().to_string(), record));
                 }
             }
-            updates
+            rows
+        };
+        let document_ids = documents
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<BTreeSet<_>>();
+        let commits = {
+            let table = txn.open_table(COMMITS)?;
+            let mut rows = Vec::new();
+            for entry in table.iter()? {
+                let (id, encoded) = entry?;
+                let record: CommitRecord = serde_json::from_str(encoded.value())?;
+                if document_ids.contains(record.doc.as_str()) {
+                    rows.push((id.value().to_string(), record));
+                }
+            }
+            rows
+        };
+        let (view, _) = self.write_view(txn)?;
+        Ok(Self::owner_inventory_material(
+            owner, documents, commits, &view,
+        ))
+    }
+
+    pub fn owner_inventory(&self, owner: &str) -> Result<OwnerInventory> {
+        validate_mutable_owner(owner)?;
+        let txn = self.database.begin_read()?;
+        let documents = {
+            let table = txn.open_table(DOCS)?;
+            let mut rows = Vec::new();
+            for entry in table.iter()? {
+                let (id, encoded) = entry?;
+                let record: DocRecord = serde_json::from_str(encoded.value())?;
+                if record.owner == owner {
+                    rows.push((id.value().to_string(), record));
+                }
+            }
+            rows
+        };
+        let document_ids = documents
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<BTreeSet<_>>();
+        let commits = {
+            let table = txn.open_table(COMMITS)?;
+            let mut rows = Vec::new();
+            for entry in table.iter()? {
+                let (id, encoded) = entry?;
+                let record: CommitRecord = serde_json::from_str(encoded.value())?;
+                if document_ids.contains(record.doc.as_str()) {
+                    rows.push((id.value().to_string(), record));
+                }
+            }
+            rows
+        };
+        let view = self.read_view(&txn)?;
+        Ok(Self::owner_inventory_material(
+            owner, documents, commits, &view,
+        ))
+    }
+
+    fn owner_lifecycle_key(old_owner: &str, new_owner: &str) -> String {
+        let encoded = serde_json::to_vec(&[old_owner, new_owner])
+            .expect("Copal lifecycle owner key must serialize");
+        blake3::hash(&encoded).to_hex().to_string()
+    }
+
+    pub fn load_owner_lifecycle_manifest(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+    ) -> Result<Option<Value>> {
+        validate_owner_rename(old_owner, new_owner)?;
+        let key = Self::owner_lifecycle_key(old_owner, new_owner);
+        // A write transaction lets old schema-v3 databases lazily create the
+        // coordinator table before the first account lifecycle operation.
+        let txn = self.database.begin_write()?;
+        let record = {
+            let table = txn.open_table(OWNER_LIFECYCLES)?;
+            let encoded = table
+                .get(key.as_str())?
+                .map(|guard| guard.value().to_owned());
+            encoded
+                .as_deref()
+                .map(serde_json::from_str::<OwnerLifecycleRecord>)
+                .transpose()?
+        };
+        txn.commit()?;
+        if let Some(record) = record {
+            if record.old_owner != old_owner || record.new_owner != new_owner {
+                return Err(err("Copal owner lifecycle journal key is inconsistent"));
+            }
+            Ok(Some(record.manifest))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn freeze_owner_lifecycle_manifest(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+        manifest: &Value,
+    ) -> Result<Value> {
+        validate_owner_rename(old_owner, new_owner)?;
+        let key = Self::owner_lifecycle_key(old_owner, new_owner);
+        let txn = self.database.begin_write()?;
+        let frozen = {
+            let mut table = txn.open_table(OWNER_LIFECYCLES)?;
+            let existing = table
+                .get(key.as_str())?
+                .map(|guard| guard.value().to_owned());
+            if let Some(encoded) = existing {
+                let record: OwnerLifecycleRecord = serde_json::from_str(&encoded)?;
+                if record.old_owner != old_owner
+                    || record.new_owner != new_owner
+                    || record.manifest != *manifest
+                {
+                    return Err(err("Copal owner lifecycle journal conflicts with manifest"));
+                }
+                record.manifest
+            } else {
+                let record = OwnerLifecycleRecord {
+                    old_owner: old_owner.to_string(),
+                    new_owner: new_owner.to_string(),
+                    manifest: manifest.clone(),
+                    state: "frozen".to_string(),
+                };
+                let encoded = serde_json::to_string(&record)?;
+                table.insert(key.as_str(), encoded.as_str())?;
+                record.manifest
+            }
+        };
+        txn.commit()?;
+        Ok(frozen)
+    }
+
+    pub fn mark_owner_lifecycle(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+        state: &str,
+    ) -> Result<()> {
+        let key = Self::owner_lifecycle_key(old_owner, new_owner);
+        let txn = self.database.begin_write()?;
+        {
+            let mut table = txn.open_table(OWNER_LIFECYCLES)?;
+            let encoded = table
+                .get(key.as_str())?
+                .map(|guard| guard.value().to_owned())
+                .ok_or_else(|| err("Copal owner lifecycle journal is missing"))?;
+            let mut record: OwnerLifecycleRecord = serde_json::from_str(&encoded)?;
+            if record.old_owner != old_owner || record.new_owner != new_owner {
+                return Err(err("Copal owner lifecycle journal key is inconsistent"));
+            }
+            record.state = state.to_string();
+            let updated = serde_json::to_string(&record)?;
+            table.insert(key.as_str(), updated.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn prune_owner_lifecycles(
+        &self,
+        owner: &str,
+        except_old_owner: Option<&str>,
+        except_new_owner: Option<&str>,
+    ) -> Result<usize> {
+        validate_mutable_owner(owner)?;
+        let except_key = except_old_owner
+            .zip(except_new_owner)
+            .map(|(old, new)| Self::owner_lifecycle_key(old, new));
+        let txn = self.database.begin_write()?;
+        let removals = {
+            let table = txn.open_table(OWNER_LIFECYCLES)?;
+            let mut keys = Vec::new();
+            for entry in table.iter()? {
+                let (key, encoded) = entry?;
+                let record: OwnerLifecycleRecord = serde_json::from_str(encoded.value())?;
+                if (record.old_owner == owner || record.new_owner == owner)
+                    && except_key.as_deref() != Some(key.value())
+                {
+                    keys.push(key.value().to_string());
+                }
+            }
+            keys
         };
         {
+            let mut table = txn.open_table(OWNER_LIFECYCLES)?;
+            for key in &removals {
+                table.remove(key.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(removals.len())
+    }
+
+    pub fn preflight_rename_owner(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+    ) -> Result<(OwnerInventory, OwnerInventory)> {
+        validate_owner_rename(old_owner, new_owner)?;
+        let source = self.owner_inventory(old_owner)?;
+        let target = self.owner_inventory(new_owner)?;
+        if source.documents > 0 && target.documents > 0 {
+            return Err(err("destination owner already has Copal documents"));
+        }
+        Ok((source, target))
+    }
+
+    pub fn reconcile_owner_rename(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+        expected_source: &OwnerInventory,
+        expected_target: &OwnerInventory,
+    ) -> Result<Value> {
+        validate_owner_rename(old_owner, new_owner)?;
+        expected_source.validate_for(old_owner)?;
+        expected_target.validate_for(new_owner)?;
+        if !expected_target.equivalent(&OwnerInventory::empty(new_owner)) {
+            return Err(err("destination Copal owner manifest is not empty"));
+        }
+        let txn = self.database.begin_write()?;
+        let source = self.owner_inventory_in_write(&txn, old_owner)?;
+        let target = self.owner_inventory_in_write(&txn, new_owner)?;
+        let state;
+        let mut changed = 0;
+        if expected_source.documents == 0 {
+            if source.documents > 0 || target.documents > 0 {
+                return Err(err("Copal owner state changed after preflight"));
+            }
+            state = "empty";
+        } else if source.equivalent(expected_source) && target.documents == 0 {
+            let updates = {
+                let docs = txn.open_table(DOCS)?;
+                let mut updates = Vec::with_capacity(source.documents);
+                for entry in docs.iter()? {
+                    let (document_id, encoded) = entry?;
+                    let mut record: DocRecord = serde_json::from_str(encoded.value())?;
+                    if record.owner == old_owner {
+                        record.owner = new_owner.to_string();
+                        updates.push((document_id.value().to_string(), record));
+                    }
+                }
+                updates
+            };
+            changed = updates.len();
             let mut docs = txn.open_table(DOCS)?;
             for (document_id, record) in &updates {
                 let encoded = serde_json::to_string(record)?;
                 docs.insert(document_id.as_str(), encoded.as_str())?;
             }
+            state = "applied";
+        } else if source.documents == 0 && target.equivalent(expected_source) {
+            state = "already_applied";
+        } else {
+            return Err(err("Copal owner state changed after preflight"));
         }
-        put_op(
-            &txn,
-            parent_op,
-            "rename-owner",
-            &format!("rename owner {old_owner} to {new_owner}"),
-            &view,
-        )?;
+        let source_after = self.owner_inventory_in_write(&txn, old_owner)?;
+        let target_after = self.owner_inventory_in_write(&txn, new_owner)?;
+        if source_after.documents > 0
+            || (expected_source.documents > 0 && !target_after.equivalent(expected_source))
+        {
+            return Err(err("Copal owner rename did not converge"));
+        }
         txn.commit()?;
-        Ok(updates.len())
+        Ok(json!({
+            "schema_version": 1,
+            "state": state,
+            "documents": expected_source.documents,
+            "changed_documents": changed,
+            "source": source_after,
+            "target": target_after,
+            "content_included": false,
+        }))
+    }
+
+    pub fn compensate_owner_rename(
+        &self,
+        old_owner: &str,
+        new_owner: &str,
+        expected_source: &OwnerInventory,
+        expected_target: &OwnerInventory,
+    ) -> Result<Value> {
+        validate_owner_rename(old_owner, new_owner)?;
+        expected_source.validate_for(old_owner)?;
+        expected_target.validate_for(new_owner)?;
+        if !expected_target.equivalent(&OwnerInventory::empty(new_owner)) {
+            return Err(err("destination Copal owner manifest is not empty"));
+        }
+        let mut reverse_source = expected_source.clone();
+        reverse_source.owner = new_owner.to_string();
+        let mut reverse_target = expected_target.clone();
+        reverse_target.owner = old_owner.to_string();
+        self.reconcile_owner_rename(new_owner, old_owner, &reverse_source, &reverse_target)
+    }
+
+    pub fn rename_owner(&self, old_owner: &str, new_owner: &str) -> Result<usize> {
+        let (source, target) = self.preflight_rename_owner(old_owner, new_owner)?;
+        let receipt = self.reconcile_owner_rename(old_owner, new_owner, &source, &target)?;
+        Ok(receipt["changed_documents"].as_u64().unwrap_or(0) as usize)
+    }
+
+    pub fn asset_references(&self) -> Result<BTreeSet<String>> {
+        let txn = self.database.begin_read()?;
+        let commits = txn.open_table(COMMITS)?;
+        let mut referenced = BTreeSet::new();
+        for entry in commits.iter()? {
+            let (_, encoded) = entry?;
+            let record: CommitRecord = serde_json::from_str(encoded.value())?;
+            if let Content::Asset { hash, ext, .. } = record.content {
+                referenced.insert(format!("{}.{}", hash, safe_asset_ext(&ext)));
+            }
+        }
+        drop(commits);
+        drop(txn);
+        Ok(referenced)
+    }
+
+    pub fn compact_orphan_assets(&self, additional_references: &BTreeSet<String>) -> Result<usize> {
+        let mut referenced = self.asset_references()?;
+        referenced.extend(additional_references.iter().cloned());
+        let mut removed = 0;
+        for entry in fs::read_dir(&self.assets_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(err("Copal asset store contains an unsafe entry"));
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !referenced.contains(&name) {
+                fs::remove_file(path)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn purge_owner_inner(
+        &self,
+        owner: &str,
+        expected: Option<&OwnerInventory>,
+        compact_assets: bool,
+    ) -> Result<Value> {
+        validate_mutable_owner(owner)?;
+        if let Some(frozen) = expected {
+            frozen.validate_for(owner)?;
+        }
+        let txn = self.database.begin_write()?;
+        let before = self.owner_inventory_in_write(&txn, owner)?;
+        if let Some(frozen) = expected {
+            if before.documents > 0 && !before.equivalent(frozen) {
+                return Err(err("Copal owner state changed before purge"));
+            }
+        }
+        if before.documents == 0 {
+            txn.abort()?;
+            let removed_assets = if compact_assets {
+                self.compact_orphan_assets(&BTreeSet::new())?
+            } else {
+                0
+            };
+            return Ok(json!({
+                "schema_version": 1,
+                "state": if expected.is_some() { "already_applied" } else { "empty" },
+                "before": before,
+                "after": self.owner_inventory(owner)?,
+                "removed_assets": removed_assets,
+                "content_included": false,
+                "physical_compaction": true,
+                "history_retained": false,
+            }));
+        }
+
+        let target_doc_ids = {
+            let docs = txn.open_table(DOCS)?;
+            let mut ids = BTreeSet::new();
+            for entry in docs.iter()? {
+                let (id, encoded) = entry?;
+                let record: DocRecord = serde_json::from_str(encoded.value())?;
+                if record.owner == owner {
+                    ids.insert(id.value().to_string());
+                }
+            }
+            ids
+        };
+        let mut target_commit_ids = Vec::new();
+        let mut target_blob_hashes = BTreeSet::new();
+        let mut retained_blob_hashes = BTreeSet::new();
+        {
+            let commits = txn.open_table(COMMITS)?;
+            for entry in commits.iter()? {
+                let (id, encoded) = entry?;
+                let record: CommitRecord = serde_json::from_str(encoded.value())?;
+                let is_target = target_doc_ids.contains(&record.doc);
+                match &record.content {
+                    Content::Blob { hash } => {
+                        if is_target {
+                            target_blob_hashes.insert(hash.clone());
+                        } else {
+                            retained_blob_hashes.insert(hash.clone());
+                        }
+                    }
+                    Content::Asset { .. } => {}
+                    Content::Conflict { base, sides } => {
+                        let references = base.iter().chain(sides.iter());
+                        if is_target {
+                            target_blob_hashes.extend(references.cloned());
+                        } else {
+                            retained_blob_hashes.extend(references.cloned());
+                        }
+                    }
+                    Content::Tombstone => {}
+                }
+                if is_target {
+                    target_commit_ids.push(id.value().to_string());
+                }
+            }
+        }
+        let operation_updates = {
+            let ops = txn.open_table(OPS)?;
+            let mut updates = Vec::new();
+            for entry in ops.iter()? {
+                let (id, encoded) = entry?;
+                let mut record: OpRecord = serde_json::from_str(encoded.value())?;
+                let old_len = record.view.len();
+                record
+                    .view
+                    .retain(|doc_id, _| !target_doc_ids.contains(doc_id));
+                if record.view.len() != old_len {
+                    record.kind = "owner-lifecycle-redacted".to_string();
+                    record.description = "redacted account lifecycle operation".to_string();
+                    updates.push((id.value().to_string(), record));
+                }
+            }
+            updates
+        };
+        {
+            let mut ops = txn.open_table(OPS)?;
+            for (id, record) in &operation_updates {
+                let encoded = serde_json::to_string(record)?;
+                ops.insert(id.as_str(), encoded.as_str())?;
+            }
+        }
+        {
+            let mut docs = txn.open_table(DOCS)?;
+            for id in &target_doc_ids {
+                docs.remove(id.as_str())?;
+            }
+        }
+        {
+            let mut commits = txn.open_table(COMMITS)?;
+            for id in &target_commit_ids {
+                commits.remove(id.as_str())?;
+            }
+        }
+        {
+            let mut blobs = txn.open_table(BLOBS)?;
+            for hash in target_blob_hashes.difference(&retained_blob_hashes) {
+                blobs.remove(hash.as_str())?;
+            }
+        }
+        let after = self.owner_inventory_in_write(&txn, owner)?;
+        if after.documents > 0 || after.commits > 0 {
+            return Err(err("Copal owner purge did not converge"));
+        }
+        txn.commit()?;
+        let removed_assets = if compact_assets {
+            self.compact_orphan_assets(&BTreeSet::new())?
+        } else {
+            0
+        };
+        Ok(json!({
+            "schema_version": 1,
+            "state": "applied",
+            "before": before,
+            "after": after,
+            "removed_documents": target_doc_ids.len(),
+            "removed_commits": target_commit_ids.len(),
+            "removed_assets": removed_assets,
+            "content_included": false,
+            "physical_compaction": true,
+            "history_retained": false,
+        }))
+    }
+
+    pub fn purge_owner(&self, owner: &str, expected: Option<&OwnerInventory>) -> Result<Value> {
+        self.purge_owner_inner(owner, expected, true)
+    }
+
+    pub fn purge_owner_deferred_assets(
+        &self,
+        owner: &str,
+        expected: Option<&OwnerInventory>,
+    ) -> Result<Value> {
+        self.purge_owner_inner(owner, expected, false)
     }
 
     pub fn create_doc(
@@ -1026,8 +2131,248 @@ impl Db {
         self.write_doc(id, content, base)
     }
 
+    /// Apply one same-database guarded write and its idempotency receipt in a
+    /// single Redb transaction. Cross-scope operations are rejected here;
+    /// only a coordinator may claim atomicity across database files.
+    pub fn commit_guarded(
+        &self,
+        request: &GuardedRequest,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Value> {
+        if request.action_id.trim().is_empty() || request.actor_id.trim().is_empty() {
+            return Err(err("action_id and actor_id are required"));
+        }
+        if request.operations.len() != 1 {
+            return Ok(
+                json!({"outcome":"unsupported", "reason":"managed commit supports exactly one operation"}),
+            );
+        }
+        let operation = &request.operations[0];
+        if operation.kind != "write" {
+            return Ok(
+                json!({"outcome":"unsupported", "reason":"only write operations are supported"}),
+            );
+        }
+        let material = json!({"action_id":request.action_id, "actor_id":request.actor_id, "guards":request.guards, "operations":request.operations});
+        let computed_digest = format!(
+            "blake3:{}",
+            blake3::hash(
+                serde_json::to_string(&material)
+                    .unwrap_or_default()
+                    .as_bytes()
+            )
+            .to_hex()
+        );
+        if request
+            .request_digest
+            .as_deref()
+            .is_some_and(|supplied| supplied != computed_digest)
+        {
+            return Err(err("request digest does not match payload"));
+        }
+        let digest = request.request_digest.clone().unwrap_or(computed_digest);
+        let txn = self.database.begin_write()?;
+        let mut actions = txn.open_table(ACTIONS)?;
+        if let Some(existing) = actions.get(request.action_id.as_str())? {
+            let receipt: Value = serde_json::from_str(existing.value())?;
+            if receipt.get("actor_id").and_then(Value::as_str) != Some(request.actor_id.as_str())
+                || receipt.get("request_digest").and_then(Value::as_str) != Some(digest.as_str())
+            {
+                return Ok(
+                    json!({"outcome":"idempotency_conflict", "action_id":request.action_id}),
+                );
+            }
+            return Ok(receipt);
+        }
+        let same_scope = |candidate_owner: &str, candidate_workspace: &str| {
+            candidate_owner == owner && candidate_workspace == workspace_id
+        };
+        if !same_scope(&operation.owner, &operation.workspace_id)
+            || request
+                .guards
+                .iter()
+                .any(|guard| !same_scope(&guard.owner, &guard.workspace_id))
+        {
+            return Ok(
+                json!({"outcome":"unsupported", "reason":"cross-database guarded operations require an external coordinator"}),
+            );
+        }
+        let (mut view, parent_op) = self.write_view(&txn)?;
+        let docs = txn.open_table(DOCS)?;
+        let target_record = docs
+            .get(operation.id.as_str())?
+            .ok_or_else(|| err("target document not found in selected database"))?;
+        let target_metadata: DocRecord = serde_json::from_str(target_record.value())?;
+        if target_metadata.owner != owner
+            || target_metadata.workspace_id != workspace_id
+            || target_metadata.builtin
+        {
+            return Err(err("target document is not writable in this scope"));
+        }
+        drop(target_record);
+        drop(docs);
+        let current_head = view
+            .get(&operation.id)
+            .cloned()
+            .ok_or_else(|| err("doc not found"))?;
+        let revision_value = |revision: &Option<GuardedRevision>,
+                              head: &Option<String>,
+                              label: &str|
+         -> Result<String> {
+            if let Some(tagged) = revision {
+                if tagged.kind != "copalHead" || tagged.value.trim().is_empty() {
+                    return Err(err(format!(
+                        "{label} must be a non-empty copalHead revision"
+                    )));
+                }
+                return Ok(tagged.value.clone());
+            }
+            head.clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| err(format!("{label} revision is required")))
+        };
+        let expected = revision_value(&operation.revision, &operation.head, "target")?;
+        let resource = json!({"owner":owner, "workspace_id":workspace_id, "id":operation.id});
+        let receipt = |outcome: &str,
+                       before: Option<&str>,
+                       after: Option<&str>,
+                       reason: Option<&str>,
+                       resource: &Value| {
+            let mut value = json!({"outcome":outcome, "action_id":request.action_id, "actor_id":request.actor_id, "request_digest":digest, "resource":resource});
+            if let Some(value_before) = before {
+                value["before"] = json!({"kind":"copalHead", "value":value_before});
+            }
+            if let Some(value_after) = after {
+                value["after"] = json!({"kind":"copalHead", "value":value_after});
+                value["revision"] = value["after"].clone();
+            }
+            if let Some(value_reason) = reason {
+                value["reason"] = json!(value_reason);
+            }
+            value
+        };
+        let mut conflict = None;
+        for guard in &request.guards {
+            let docs = txn.open_table(DOCS)?;
+            let guard_record = docs
+                .get(guard.id.as_str())?
+                .ok_or_else(|| err("guard document not found in selected database"))?;
+            let guard_metadata: DocRecord = serde_json::from_str(guard_record.value())?;
+            if guard_metadata.owner != owner || guard_metadata.workspace_id != workspace_id {
+                return Err(err("cross-scope guard requires an external coordinator"));
+            }
+            drop(guard_record);
+            drop(docs);
+            let guard_head = revision_value(&guard.revision, &guard.head, "guard")?;
+            let actual = view
+                .get(&guard.id)
+                .cloned()
+                .ok_or_else(|| err("guard document not found"))?;
+            if guard_head != actual {
+                conflict = Some(
+                    json!({"outcome":"conflict", "action_id":request.action_id, "actor_id":request.actor_id, "request_digest":digest, "resource":{"owner":owner, "workspace_id":workspace_id, "id":guard.id}, "expected":{"kind":"copalHead","value":guard_head}, "actual":{"kind":"copalHead","value":actual}, "reason":"guard revision mismatch"}),
+                );
+                break;
+            }
+        }
+        if conflict.is_none() && expected != current_head {
+            conflict = Some(receipt(
+                "conflict",
+                Some(&expected),
+                Some(&current_head),
+                Some("target revision mismatch"),
+                &resource,
+            ));
+        }
+        if let Some(value) = conflict {
+            let encoded = serde_json::to_string(&value)?;
+            actions.insert(request.action_id.as_str(), encoded.as_str())?;
+            drop(actions);
+            txn.commit()?;
+            return Ok(value);
+        }
+        let commit = load_commit_in_txn(&txn, &current_head)?;
+        if matches!(commit.content, Content::Tombstone) {
+            return Err(err("doc not found"));
+        }
+        if !matches!(commit.content, Content::Blob { .. }) {
+            return Ok(json!({
+                "outcome":"unsupported",
+                "action_id":request.action_id,
+                "reason":"managed guarded writes require Blob text content"
+            }));
+        }
+        if let Content::Blob { hash } = &commit.content {
+            let unchanged = {
+                let blobs = txn.open_table(BLOBS)?;
+                let current = blobs
+                    .get(hash.as_str())?
+                    .ok_or_else(|| err("missing blob"))?;
+                String::from_utf8_lossy(current.value()) == operation.content
+            };
+            if unchanged {
+                let value = receipt(
+                    "unchanged",
+                    Some(&current_head),
+                    Some(&current_head),
+                    None,
+                    &resource,
+                );
+                let encoded = serde_json::to_string(&value)?;
+                actions.insert(request.action_id.as_str(), encoded.as_str())?;
+                drop(actions);
+                txn.commit()?;
+                return Ok(value);
+            }
+        }
+        let hash = put_blob(&txn, operation.content.as_bytes())?;
+        let new_commit = CommitRecord {
+            doc: operation.id.clone(),
+            parent: commit.parent.clone(),
+            predecessors: vec![current_head.clone()],
+            name: commit.name.clone(),
+            content: Content::Blob { hash },
+            ts: now_ms(),
+            message: None,
+        };
+        let new_head = put_commit(&txn, &new_commit)?;
+        view.insert(operation.id.clone(), new_head.clone());
+        put_op(
+            &txn,
+            parent_op,
+            "guarded-write",
+            &format!("guarded write {}", commit.name),
+            &view,
+        )?;
+        let value = receipt(
+            "applied",
+            Some(&current_head),
+            Some(&new_head),
+            None,
+            &resource,
+        );
+        let encoded = serde_json::to_string(&value)?;
+        actions.insert(request.action_id.as_str(), encoded.as_str())?;
+        drop(actions);
+        txn.commit()?;
+        Ok(value)
+    }
+
     pub fn history_scoped(&self, id: &str, owner: &str, workspace_id: &str) -> Result<Value> {
-        self.require_scope(id, owner, workspace_id)?;
+        // A tombstone remains an owner-scoped history object after trash.  A
+        // normal `get_doc_scoped` deliberately hides it from active reads,
+        // so inspect the current commit directly for this history-only path.
+        let txn = self.database.begin_read()?;
+        let view = self.read_view(&txn)?;
+        let Some(head) = view.get(id) else {
+            return Err(err("doc not found in this scope"));
+        };
+        let current = self.view_of(&txn, id, head)?;
+        if !scope_allows(&current, owner, workspace_id) {
+            return Err(err("doc not found in this scope"));
+        }
+        drop(txn);
         self.history(id)
     }
 
@@ -1472,11 +2817,28 @@ impl Db {
     /// amend the AssetRef doc named `name`. Old versions stay on disk;
     /// the doc's history is the chain of hashes.
     pub fn put_asset(&self, name: &str, ext: &str, bytes: &[u8]) -> Result<DocView> {
+        self.put_asset_scoped("shared", "global", name, ext, bytes)
+    }
+
+    /// Write a content-addressed asset into an owner/workspace scope. This is
+    /// the native primitive used by `.memes` import so imported asset IDs are
+    /// scoped and cannot be supplied by an archive.
+    pub fn put_asset_scoped(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        name: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Result<DocView> {
+        if owner.trim().is_empty() || workspace_id.trim().is_empty() {
+            return Err(err("owner and workspace are required"));
+        }
         let ext = safe_asset_ext(ext.trim_start_matches('.'));
         let content = store_import_asset(&self.assets_dir, &ext, bytes)?;
         let existing = self.list_docs()?.into_iter().find(|doc| {
-            doc.owner == "shared"
-                && doc.workspace_id == "global"
+            doc.owner == owner
+                && doc.workspace_id == workspace_id
                 && !doc.builtin
                 && doc.kind == "asset"
                 && doc.corpus == "system"
@@ -1523,8 +2885,8 @@ impl Db {
                         corpus: "system".to_string(),
                         kind: "asset".to_string(),
                         created_op: "pending".to_string(),
-                        owner: shared_owner(),
-                        workspace_id: global_workspace(),
+                        owner: owner.to_string(),
+                        workspace_id: workspace_id.to_string(),
                         builtin: false,
                     };
                     docs.insert(doc_id.as_str(), serde_json::to_string(&record)?.as_str())?;
@@ -1618,6 +2980,30 @@ impl Db {
         note_kind: &str,
         restore_ids: &BTreeMap<String, ImportIdentity>,
     ) -> Result<ImportStats> {
+        self.import_vault_scoped_as_with_ids_and_heads(
+            vault_dir,
+            planning_file,
+            owner,
+            workspace_id,
+            note_kind,
+            restore_ids,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Restore a native export with an atomic expected-head check. Empty
+    /// `expected_heads` retains ordinary import behavior; populated maps are
+    /// checked inside the same write operation that applies the import.
+    pub fn import_vault_scoped_as_with_ids_and_heads(
+        &self,
+        vault_dir: &Path,
+        planning_file: Option<&Path>,
+        owner: &str,
+        workspace_id: &str,
+        note_kind: &str,
+        restore_ids: &BTreeMap<String, ImportIdentity>,
+        expected_heads: &BTreeMap<String, String>,
+    ) -> Result<ImportStats> {
         if owner.trim().is_empty() || workspace_id.trim().is_empty() {
             return Err(err("owner and workspace are required"));
         }
@@ -1654,26 +3040,177 @@ impl Db {
 
         let mut files = Vec::new();
         collect_files(vault_dir, &mut files)?;
-        let existing: BTreeMap<(String, String, String), DocView> = self
-            .list_docs()?
-            .into_iter()
-            .filter(|doc| {
-                doc.owner == owner
-                    && doc.workspace_id == workspace_id
-                    && !(owner == "shared" && workspace_id == "global" && doc.builtin)
-            })
-            .map(|doc| {
-                (
-                    (doc.corpus.clone(), doc.kind.clone(), doc.name.clone()),
-                    doc,
-                )
-            })
-            .collect();
-
         let mut stats = ImportStats::default();
         let mut restored_paths = BTreeSet::new();
         let txn = self.database.begin_write()?;
         let (mut view, parent_op) = self.write_view(&txn)?;
+        // Build the authoritative existing-document snapshot from this write
+        // transaction.  Name, identity, and expected-head checks must observe
+        // the same serialized state that the import mutates; a read followed
+        // by begin_write would allow an intervening writer to slip past a
+        // restore guard.
+        let mut all_existing = BTreeMap::new();
+        let mut existing = BTreeMap::new();
+        let mut portable_names: BTreeMap<String, (String, String, String)> = BTreeMap::new();
+        for (document_id, head) in &view {
+            let document = view_of_in_txn(&txn, document_id, head)?;
+            all_existing.insert(document.id.clone(), document.clone());
+            if document.deleted
+                || document.owner != owner
+                || document.workspace_id != workspace_id
+                || (owner == "shared" && workspace_id == "global" && document.builtin)
+            {
+                continue;
+            }
+            existing.insert(
+                (
+                    document.corpus.clone(),
+                    document.kind.clone(),
+                    document.name.clone(),
+                ),
+                document.clone(),
+            );
+            if document.corpus == "wiki" {
+                let portable = portable_name_key(&document.name);
+                if let Some(previous) = portable_names.insert(
+                    portable,
+                    (
+                        document.id.clone(),
+                        document.name.clone(),
+                        document.kind.clone(),
+                    ),
+                ) {
+                    if previous.0 != document.id {
+                        return Err(err(format!(
+                            "Wiki resources collide on portable path: {} and {}",
+                            previous.1, document.name
+                        )));
+                    }
+                }
+            }
+        }
+
+        let mut restore_destination_ids = BTreeSet::new();
+        for (path, identity) in restore_ids {
+            if !restore_destination_ids.insert(identity.id.clone()) {
+                return Err(err(format!(
+                    "restore identity is duplicated by imported path {path}"
+                )));
+            }
+            if let Some(current) = all_existing.get(&identity.id) {
+                if current.deleted
+                    || current.builtin
+                    || current.owner != owner
+                    || current.workspace_id != workspace_id
+                    || current.corpus != identity.corpus
+                    || current.kind != identity.kind
+                {
+                    return Err(err(format!(
+                        "restore identity is owned outside the requested scope: {}",
+                        identity.id
+                    )));
+                }
+            }
+        }
+
+        for (document_id, expected_head) in expected_heads {
+            let current = existing
+                .values()
+                .find(|document| document.id == *document_id);
+            if current.is_some_and(|document| document.head != *expected_head) {
+                return Err(err(format!("stale restore head for {document_id}")));
+            }
+            if current.is_none() {
+                return Err(err(format!("restore head is missing for {document_id}")));
+            }
+        }
+
+        // Preflight every Wiki path against this same transaction snapshot
+        // before writing a blob or content-addressed asset.  The staged vault
+        // is one portable namespace: a page and an asset cannot differ only
+        // by kind, case, or Unicode composition, including when another
+        // writer commits between the caller's list and this import.
+        let mut preflight_names = portable_names.clone();
+        for path in &files {
+            let rel = path
+                .strip_prefix(vault_dir)
+                .map_err(|_| err("import path escaped its vault root"))?;
+            let archive_name = rel.to_string_lossy().replace('\\', "/");
+            let restore_identity = restore_ids.get(&archive_name);
+            let is_planning = planning_file.is_some_and(|planning| planning == path.as_path());
+            let is_treehouse = archive_name == ".copal/treehouse-state.json";
+            if is_planning || is_treehouse {
+                continue;
+            }
+            let wiki_relative = rel
+                .strip_prefix(Path::new(".copal/wiki"))
+                .ok()
+                .filter(|value| !value.as_os_str().is_empty());
+            let event_relative = rel
+                .strip_prefix(Path::new(".events"))
+                .ok()
+                .filter(|value| !value.as_os_str().is_empty());
+            if event_relative.is_some() {
+                continue;
+            }
+            let record_relative = wiki_relative.unwrap_or(rel);
+            let rel_name = record_relative.to_string_lossy().replace('\\', "/");
+            let effective_note_kind = if wiki_relative.is_some() {
+                "wiki"
+            } else {
+                note_kind
+            };
+            let corpus = match effective_note_kind {
+                "wiki" => "wiki",
+                _ => "notes",
+            };
+            if corpus != "wiki" {
+                continue;
+            }
+            let hidden = record_relative
+                .components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'));
+            let raw_ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let native_wiki_note = wiki_relative.is_some()
+                && restore_identity.is_some_and(|identity| identity.kind == "wiki");
+            let native_wiki_asset = wiki_relative.is_some()
+                && restore_identity.is_some_and(|identity| identity.kind == "asset");
+            let note_candidate = (!hidden || native_wiki_note)
+                && (NOTE_SUFFIXES.contains(&raw_ext.as_str()) || native_wiki_note);
+            let kind = if note_candidate {
+                "wiki"
+            } else if hidden && !native_wiki_asset {
+                "compatibility"
+            } else {
+                "asset"
+            };
+            if let Some(identity) = restore_identity {
+                if let Some(current) = all_existing.get(&identity.id) {
+                    if current.name != rel_name || current.corpus != corpus || current.kind != kind
+                    {
+                        return Err(err(format!(
+                            "restore identity does not match imported path: {}",
+                            rel_name
+                        )));
+                    }
+                }
+            }
+            check_portable_wiki_name(&preflight_names, corpus, kind, &rel_name, restore_identity)?;
+            let key = portable_name_key(&rel_name);
+            preflight_names.entry(key).or_insert_with(|| {
+                (
+                    restore_identity
+                        .map(|identity| identity.id.clone())
+                        .unwrap_or_else(|| archive_name.clone()),
+                    rel_name,
+                    kind.to_string(),
+                )
+            });
+        }
 
         for path in files {
             let rel = path
@@ -1720,6 +3257,10 @@ impl Db {
                 .to_ascii_lowercase();
             let reserved_event_note =
                 event_relative.is_some() && matches!(raw_ext.as_str(), "md" | "markdown");
+            let native_wiki_note = wiki_relative.is_some()
+                && restore_identity.is_some_and(|identity| identity.kind == "wiki");
+            let native_wiki_asset = wiki_relative.is_some()
+                && restore_identity.is_some_and(|identity| identity.kind == "asset");
             if let Some(kind) = match archive_name.as_str() {
                 ".copal/tracks.json" => Some("copal-tracks"),
                 ".copal/planning-migration.json" => Some("copal-migration"),
@@ -1730,7 +3271,12 @@ impl Db {
                     .ok()
                     .and_then(|content| serde_json::from_str::<Value>(content).ok())
                     .is_some_and(|value| {
-                        value.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+                        let schema = value.get("schemaVersion").and_then(Value::as_u64);
+                        match kind {
+                            "copal-tracks" => matches!(schema, Some(1) | Some(2)),
+                            "copal-migration" => schema == Some(1),
+                            _ => false,
+                        }
                     });
                 let (stored_kind, content, reason) = if valid {
                     let hash = put_blob(&txn, &bytes)?;
@@ -1746,6 +3292,7 @@ impl Db {
                     &txn,
                     &mut view,
                     &existing,
+                    &mut portable_names,
                     owner,
                     workspace_id,
                     "events",
@@ -1774,7 +3321,9 @@ impl Db {
                 });
                 continue;
             }
-            if (!hidden || reserved_event_note) && NOTE_SUFFIXES.contains(&raw_ext.as_str()) {
+            if (!hidden || reserved_event_note || native_wiki_note)
+                && (NOTE_SUFFIXES.contains(&raw_ext.as_str()) || native_wiki_note)
+            {
                 let content = match fs::read_to_string(&path) {
                     Ok(content) => content,
                     Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -1785,6 +3334,7 @@ impl Db {
                             &txn,
                             &mut view,
                             &existing,
+                            &mut portable_names,
                             owner,
                             workspace_id,
                             corpus,
@@ -1816,6 +3366,7 @@ impl Db {
                 let invalid_reserved_event =
                     reserved_event_note && !is_copal_event_record(&content);
                 let invalid_canonical_note = !reserved_event_note
+                    && !native_wiki_note
                     && matches!(raw_ext.as_str(), "md" | "markdown")
                     && matches!(effective_note_kind, "note" | "wiki")
                     && !is_copal_note_record(&content);
@@ -1826,6 +3377,7 @@ impl Db {
                         &txn,
                         &mut view,
                         &existing,
+                        &mut portable_names,
                         owner,
                         workspace_id,
                         corpus,
@@ -1863,6 +3415,7 @@ impl Db {
                         "base" => "base",
                         "canvas" => "canvas",
                         "md" | "markdown" => effective_note_kind,
+                        _ if native_wiki_note => "wiki",
                         _ => "markdown",
                     }
                 };
@@ -1871,6 +3424,7 @@ impl Db {
                     &txn,
                     &mut view,
                     &existing,
+                    &mut portable_names,
                     owner,
                     workspace_id,
                     corpus,
@@ -1899,11 +3453,18 @@ impl Db {
                 let bytes = fs::read(&path)?;
                 let ext = safe_asset_ext(&raw_ext);
                 let content = store_import_asset(&self.assets_dir, &ext, &bytes)?;
-                let kind = if hidden { "compatibility" } else { "asset" };
+                let kind = if native_wiki_asset {
+                    "asset"
+                } else if hidden {
+                    "compatibility"
+                } else {
+                    "asset"
+                };
                 let status = import_content_in_txn(
                     &txn,
                     &mut view,
                     &existing,
+                    &mut portable_names,
                     owner,
                     workspace_id,
                     corpus,
@@ -1918,7 +3479,7 @@ impl Db {
                 }
                 if status == "unchanged" {
                     stats.unchanged += 1;
-                } else if hidden {
+                } else if hidden && !native_wiki_asset {
                     stats.compatibility += 1;
                 } else {
                     stats.assets += 1;
@@ -1948,6 +3509,7 @@ impl Db {
                 &txn,
                 &mut view,
                 &existing,
+                &mut portable_names,
                 owner,
                 workspace_id,
                 "events",
@@ -1984,6 +3546,7 @@ impl Db {
                 &txn,
                 &mut view,
                 &existing,
+                &mut portable_names,
                 owner,
                 workspace_id,
                 "treehouse",
@@ -2053,6 +3616,44 @@ impl Db {
     }
 }
 
+fn view_of_in_txn(txn: &redb::WriteTransaction, id: &str, head: &str) -> Result<DocView> {
+    let commit = load_commit_in_txn(txn, head)?;
+    let text = match &commit.content {
+        Content::Blob { hash } => {
+            let blobs = txn.open_table(BLOBS)?;
+            let bytes = blobs
+                .get(hash.as_str())?
+                .ok_or_else(|| err(format!("missing blob {hash}")))?;
+            Some(String::from_utf8_lossy(bytes.value()).into_owned())
+        }
+        _ => None,
+    };
+    let doc = load_doc_record_in_txn(txn, id)?;
+    let hidden = hidden_name(&commit.name);
+    let deleted = matches!(commit.content, Content::Tombstone);
+    let corpus = if doc.corpus.is_empty() {
+        canonical_corpus(&doc.kind).to_string()
+    } else {
+        doc.corpus.clone()
+    };
+    Ok(DocView {
+        id: id.to_string(),
+        record_schema_version: doc.schema_version,
+        corpus,
+        kind: doc.kind,
+        owner: doc.owner,
+        workspace_id: doc.workspace_id,
+        builtin: doc.builtin,
+        name: commit.name,
+        head: head.to_string(),
+        ts: commit.ts,
+        hidden,
+        deleted,
+        content: commit.content,
+        text,
+    })
+}
+
 fn load_commit_in_txn(txn: &redb::WriteTransaction, id: &str) -> Result<CommitRecord> {
     let commits = txn.open_table(COMMITS)?;
     let record = commits
@@ -2119,6 +3720,41 @@ fn safe_asset_ext(extension: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn portable_name_key(name: &str) -> String {
+    let nfc = name.nfc().collect::<String>();
+    UniCase::new(nfc).to_folded_case()
+}
+
+fn check_portable_wiki_name(
+    portable_names: &BTreeMap<String, (String, String, String)>,
+    corpus: &str,
+    kind: &str,
+    name: &str,
+    restore_identity: Option<&ImportIdentity>,
+) -> Result<()> {
+    if corpus != "wiki" {
+        return Ok(());
+    }
+    let portable = portable_name_key(name);
+    if let Some((existing_id, existing_name, existing_kind)) = portable_names.get(&portable) {
+        let ordinary_same_name =
+            restore_identity.is_none() && existing_name == name && existing_kind == kind;
+        let guarded_same_identity = restore_identity.is_some_and(|identity| {
+            identity.id == *existing_id
+                && identity.corpus == corpus
+                && identity.kind == kind
+                && existing_name == name
+        });
+        if !ordinary_same_name && !guarded_same_identity {
+            return Err(err(format!(
+                "Wiki resources collide on portable path: {}",
+                name
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_copal_note_record(content: &str) -> bool {
@@ -2197,6 +3833,7 @@ fn import_content_in_txn(
     txn: &redb::WriteTransaction,
     view: &mut BTreeMap<String, String>,
     existing: &BTreeMap<(String, String, String), DocView>,
+    portable_names: &mut BTreeMap<String, (String, String, String)>,
     owner: &str,
     workspace_id: &str,
     corpus: &str,
@@ -2205,11 +3842,15 @@ fn import_content_in_txn(
     content: Content,
     restore_identity: Option<&ImportIdentity>,
 ) -> Result<&'static str> {
+    check_portable_wiki_name(portable_names, corpus, kind, name, restore_identity)?;
     let key = (corpus.to_string(), kind.to_string(), name.to_string());
     if let Some(identity) = restore_identity {
         if identity.corpus != corpus || identity.kind != kind {
             return Err(err(
-                "restore identity does not match imported corpus and kind",
+                format!(
+                    "restore identity does not match imported corpus and kind: expected {}/{} got {}/{}",
+                    identity.corpus, identity.kind, corpus, kind
+                ),
             ));
         }
     }
@@ -2255,6 +3896,12 @@ fn import_content_in_txn(
             document_id.as_str(),
             serde_json::to_string(&record)?.as_str(),
         )?;
+    }
+    if corpus == "wiki" {
+        portable_names.insert(
+            portable_name_key(name),
+            (document_id.clone(), name.to_string(), kind.to_string()),
+        );
     }
     let commit = CommitRecord {
         doc: document_id.clone(),
@@ -2399,6 +4046,8 @@ fn new_ulid() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn temp_db() -> (Db, PathBuf) {
         let dir = std::env::temp_dir().join(format!("copal-db-test-{}", new_ulid()));
@@ -2413,6 +4062,438 @@ mod tests {
             docs.insert(id, encoded.as_str()).unwrap();
         }
         txn.commit().unwrap();
+    }
+
+    fn install_conflict_commit(db: &Db, id: &str) -> DocView {
+        let txn = db.database.begin_write().unwrap();
+        let (mut view, parent_op) = db.write_view(&txn).unwrap();
+        let previous = view.get(id).cloned().unwrap();
+        let current = load_commit_in_txn(&txn, &previous).unwrap();
+        let commit = CommitRecord {
+            doc: id.into(),
+            parent: Some(previous.clone()),
+            predecessors: vec![previous],
+            name: current.name,
+            content: Content::Conflict {
+                base: Some(current.doc),
+                sides: vec!["left".into(), "right".into()],
+            },
+            ts: now_ms(),
+            message: None,
+        };
+        let head = put_commit(&txn, &commit).unwrap();
+        view.insert(id.into(), head);
+        put_op(&txn, parent_op, "test-conflict", "test conflict", &view).unwrap();
+        txn.commit().unwrap();
+        db.get_doc(id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn guarded_commit_is_atomic_idempotent_and_scope_bound() {
+        let (db, _dir) = temp_db();
+        let doc = db
+            .create_doc_scoped("alice", "course", "markdown", "progress.md", "one", None)
+            .unwrap();
+        let request = GuardedRequest {
+            action_id: "action-1".into(),
+            actor_id: "learner".into(),
+            request_digest: None,
+            guards: vec![GuardedGuard {
+                owner: "alice".into(),
+                workspace_id: "course".into(),
+                id: doc.id.clone(),
+                revision: Some(GuardedRevision {
+                    kind: "copalHead".into(),
+                    value: doc.head.clone(),
+                }),
+                head: None,
+            }],
+            operations: vec![GuardedOperation {
+                kind: "write".into(),
+                owner: "alice".into(),
+                workspace_id: "course".into(),
+                id: doc.id.clone(),
+                revision: Some(GuardedRevision {
+                    kind: "copalHead".into(),
+                    value: doc.head.clone(),
+                }),
+                head: None,
+                content: "two".into(),
+            }],
+        };
+        let applied = db.commit_guarded(&request, "alice", "course").unwrap();
+        assert_eq!(applied["outcome"], "applied");
+        let replay = db.commit_guarded(&request, "alice", "course").unwrap();
+        assert_eq!(replay, applied);
+        let changed_payload = db
+            .commit_guarded(
+                &GuardedRequest {
+                    operations: vec![GuardedOperation {
+                        content: "changed".into(),
+                        ..request.operations[0].clone()
+                    }],
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap();
+        assert_eq!(changed_payload["outcome"], "idempotency_conflict");
+        let mismatch = db
+            .commit_guarded(
+                &GuardedRequest {
+                    actor_id: "other".into(),
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap();
+        assert_eq!(mismatch["outcome"], "idempotency_conflict");
+        let current = db.get_doc(&doc.id).unwrap().unwrap();
+        let stale = db
+            .commit_guarded(
+                &GuardedRequest {
+                    action_id: "action-2".into(),
+                    operations: vec![GuardedOperation {
+                        revision: Some(GuardedRevision {
+                            kind: "copalHead".into(),
+                            value: doc.head.clone(),
+                        }),
+                        content: "three".into(),
+                        ..request.operations[0].clone()
+                    }],
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap();
+        assert_eq!(stale["outcome"], "conflict");
+        assert_eq!(db.get_doc(&doc.id).unwrap().unwrap().head, current.head);
+        let cross = db
+            .commit_guarded(
+                &GuardedRequest {
+                    action_id: "action-3".into(),
+                    ..request.clone()
+                },
+                "bob",
+                "other",
+            )
+            .unwrap();
+        assert_eq!(cross["outcome"], "unsupported");
+        let wrong_kind = db
+            .commit_guarded(
+                &GuardedRequest {
+                    action_id: "action-4".into(),
+                    guards: vec![GuardedGuard {
+                        revision: Some(GuardedRevision {
+                            kind: "wrong".into(),
+                            value: doc.head.clone(),
+                        }),
+                        ..request.guards[0].clone()
+                    }],
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap_err();
+        assert!(wrong_kind.0.contains("copalHead"));
+        let wrong_target_kind = db
+            .commit_guarded(
+                &GuardedRequest {
+                    action_id: "action-target-kind".into(),
+                    operations: vec![GuardedOperation {
+                        revision: Some(GuardedRevision {
+                            kind: "wrong".into(),
+                            value: doc.head.clone(),
+                        }),
+                        ..request.operations[0].clone()
+                    }],
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap_err();
+        assert!(wrong_target_kind.0.contains("copalHead"));
+        let missing_guard = db
+            .commit_guarded(
+                &GuardedRequest {
+                    action_id: "action-5".into(),
+                    guards: vec![GuardedGuard {
+                        id: "missing".into(),
+                        ..request.guards[0].clone()
+                    }],
+                    ..request.clone()
+                },
+                "alice",
+                "course",
+            )
+            .unwrap_err();
+        assert!(missing_guard.0.contains("selected database"));
+        let builtin = db
+            .create_builtin_seed_doc("markdown", "builtin.md", "built", None)
+            .unwrap();
+        let builtin_request = GuardedRequest {
+            action_id: "action-6".into(),
+            actor_id: "learner".into(),
+            request_digest: None,
+            guards: vec![],
+            operations: vec![GuardedOperation {
+                kind: "write".into(),
+                owner: "shared".into(),
+                workspace_id: "global".into(),
+                id: builtin.id,
+                revision: Some(GuardedRevision {
+                    kind: "copalHead".into(),
+                    value: builtin.head,
+                }),
+                head: None,
+                content: "nope".into(),
+            }],
+        };
+        assert!(db
+            .commit_guarded(&builtin_request, "shared", "global")
+            .is_err());
+    }
+
+    #[test]
+    fn guarded_commit_reopens_database_for_reset_orders() {
+        fn setup() -> (PathBuf, DocView, DocView) {
+            let (db, dir) = temp_db();
+            let source = db
+                .create_doc_scoped("alice", "course", "markdown", "source.md", "rev-1", None)
+                .unwrap();
+            let target = db
+                .create_doc_scoped("alice", "course", "markdown", "target.md", "before", None)
+                .unwrap();
+            (dir, source, target)
+        }
+        fn progress(source: &DocView, target: &DocView) -> GuardedRequest {
+            GuardedRequest {
+                action_id: "progress".into(),
+                actor_id: "learner".into(),
+                request_digest: None,
+                guards: vec![GuardedGuard {
+                    owner: "alice".into(),
+                    workspace_id: "course".into(),
+                    id: source.id.clone(),
+                    revision: Some(GuardedRevision {
+                        kind: "copalHead".into(),
+                        value: source.head.clone(),
+                    }),
+                    head: None,
+                }],
+                operations: vec![GuardedOperation {
+                    kind: "write".into(),
+                    owner: "alice".into(),
+                    workspace_id: "course".into(),
+                    id: target.id.clone(),
+                    revision: Some(GuardedRevision {
+                        kind: "copalHead".into(),
+                        value: target.head.clone(),
+                    }),
+                    head: None,
+                    content: "done".into(),
+                }],
+            }
+        }
+        let (dir, source, target) = setup();
+        let progress_db = Db::open(&dir).unwrap();
+        assert_eq!(
+            progress_db
+                .commit_guarded(&progress(&source, &target), "alice", "course")
+                .unwrap()["outcome"],
+            "applied"
+        );
+        drop(progress_db);
+        let reset_db = Db::open(&dir).unwrap();
+        assert!(matches!(
+            reset_db
+                .write_doc_scoped(
+                    &source.id,
+                    "rev-reset",
+                    Some(&source.head),
+                    "alice",
+                    "course"
+                )
+                .unwrap(),
+            WriteOutcome::Committed { .. }
+        ));
+        let (dir, source, target) = setup();
+        let reset_db = Db::open(&dir).unwrap();
+        assert!(matches!(
+            reset_db
+                .write_doc_scoped(
+                    &source.id,
+                    "rev-reset",
+                    Some(&source.head),
+                    "alice",
+                    "course"
+                )
+                .unwrap(),
+            WriteOutcome::Committed { .. }
+        ));
+        drop(reset_db);
+        let progress_db = Db::open(&dir).unwrap();
+        let conflict = progress_db
+            .commit_guarded(&progress(&source, &target), "alice", "course")
+            .unwrap();
+        assert_eq!(conflict["outcome"], "conflict");
+        assert_eq!(conflict["resource"]["id"], source.id);
+        assert_eq!(
+            progress_db
+                .get_doc(&target.id)
+                .unwrap()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("before")
+        );
+    }
+
+    #[test]
+    fn guarded_commit_races_shared_db_progress_and_reset_without_mixed_effects() {
+        for _ in 0..8 {
+            let (db, _dir) = temp_db();
+            let source = db
+                .create_doc_scoped("alice", "course", "markdown", "source.md", "rev-1", None)
+                .unwrap();
+            let target = db
+                .create_doc_scoped("alice", "course", "markdown", "target.md", "before", None)
+                .unwrap();
+            let progress = GuardedRequest {
+                action_id: format!("progress-{}", new_ulid()),
+                actor_id: "learner".into(),
+                request_digest: None,
+                guards: vec![GuardedGuard {
+                    owner: "alice".into(),
+                    workspace_id: "course".into(),
+                    id: source.id.clone(),
+                    revision: Some(GuardedRevision {
+                        kind: "copalHead".into(),
+                        value: source.head.clone(),
+                    }),
+                    head: None,
+                }],
+                operations: vec![GuardedOperation {
+                    kind: "write".into(),
+                    owner: "alice".into(),
+                    workspace_id: "course".into(),
+                    id: target.id.clone(),
+                    revision: Some(GuardedRevision {
+                        kind: "copalHead".into(),
+                        value: target.head.clone(),
+                    }),
+                    head: None,
+                    content: "done".into(),
+                }],
+            };
+            let shared = Arc::new(db);
+            let barrier = Arc::new(Barrier::new(2));
+            let progress_db = Arc::clone(&shared);
+            let progress_barrier = Arc::clone(&barrier);
+            let progress_request = progress.clone();
+            let progress_thread = thread::spawn(move || {
+                progress_barrier.wait();
+                progress_db
+                    .commit_guarded(&progress_request, "alice", "course")
+                    .unwrap()
+            });
+            let reset_db = Arc::clone(&shared);
+            let reset_barrier = Arc::clone(&barrier);
+            let source_id = source.id.clone();
+            let source_head = source.head.clone();
+            let reset_thread = thread::spawn(move || {
+                reset_barrier.wait();
+                reset_db
+                    .write_doc_scoped(
+                        &source_id,
+                        "rev-reset",
+                        Some(&source_head),
+                        "alice",
+                        "course",
+                    )
+                    .unwrap()
+            });
+            let guarded = progress_thread.join().unwrap();
+            let reset = reset_thread.join().unwrap();
+            let guarded_applied = guarded["outcome"] == "applied";
+            assert!(guarded_applied || guarded["outcome"] == "conflict");
+            assert!(matches!(reset, WriteOutcome::Committed { .. }));
+            let final_target = shared.get_doc(&target.id).unwrap().unwrap();
+            assert_eq!(
+                final_target.text.as_deref(),
+                if guarded_applied {
+                    Some("done")
+                } else {
+                    Some("before")
+                }
+            );
+            let final_source = shared.get_doc(&source.id).unwrap().unwrap();
+            assert_eq!(final_source.text.as_deref(), Some("rev-reset"));
+        }
+    }
+
+    #[test]
+    fn guarded_commit_rejects_asset_and_conflict_content() {
+        let (db, _dir) = temp_db();
+        let asset = db.put_asset("asset.bin", "bin", b"bytes").unwrap();
+        let asset_request = GuardedRequest {
+            action_id: "asset-action".into(),
+            actor_id: "learner".into(),
+            request_digest: None,
+            guards: vec![],
+            operations: vec![GuardedOperation {
+                kind: "write".into(),
+                owner: "shared".into(),
+                workspace_id: "global".into(),
+                id: asset.id.clone(),
+                revision: Some(GuardedRevision {
+                    kind: "copalHead".into(),
+                    value: asset.head.clone(),
+                }),
+                head: None,
+                content: "wrong".into(),
+            }],
+        };
+        let asset_result = db
+            .commit_guarded(&asset_request, "shared", "global")
+            .unwrap();
+        assert_eq!(asset_result["outcome"], "unsupported");
+        assert_eq!(db.get_doc(&asset.id).unwrap().unwrap().head, asset.head);
+        let conflict_doc = db
+            .create_doc_scoped("alice", "course", "markdown", "conflict.md", "base", None)
+            .unwrap();
+        let conflict = install_conflict_commit(&db, &conflict_doc.id);
+        let conflict_request = GuardedRequest {
+            action_id: "conflict-action".into(),
+            actor_id: "learner".into(),
+            request_digest: None,
+            guards: vec![],
+            operations: vec![GuardedOperation {
+                kind: "write".into(),
+                owner: "alice".into(),
+                workspace_id: "course".into(),
+                id: conflict.id.clone(),
+                revision: Some(GuardedRevision {
+                    kind: "copalHead".into(),
+                    value: conflict.head.clone(),
+                }),
+                head: None,
+                content: "wrong".into(),
+            }],
+        };
+        let conflict_result = db
+            .commit_guarded(&conflict_request, "alice", "course")
+            .unwrap();
+        assert_eq!(conflict_result["outcome"], "unsupported");
+        assert_eq!(
+            db.get_doc(&conflict.id).unwrap().unwrap().head,
+            conflict.head
+        );
     }
 
     #[test]
@@ -2787,6 +4868,174 @@ mod tests {
     }
 
     #[test]
+    fn owner_lifecycle_inventory_replays_compensates_and_is_content_free() {
+        let (db, _dir) = temp_db();
+        db.create_doc_scoped(
+            "alice",
+            "home",
+            "markdown",
+            "private-name.md",
+            "ALICE SECRET BODY",
+            None,
+        )
+        .unwrap();
+        db.create_doc_scoped("bob", "home", "markdown", "bob.md", "BOB BODY", None)
+            .unwrap();
+        let bob_before = db.owner_inventory("bob").unwrap();
+        let (source, target) = db.preflight_rename_owner("alice", "alice2").unwrap();
+        let encoded = serde_json::to_string(&source).unwrap();
+        assert!(!encoded.contains("ALICE SECRET BODY"));
+        assert!(!encoded.contains("private-name.md"));
+
+        let applied = db
+            .reconcile_owner_rename("alice", "alice2", &source, &target)
+            .unwrap();
+        assert_eq!(applied["state"], "applied");
+        assert_eq!(
+            db.owner_inventory("bob").unwrap().fingerprint,
+            bob_before.fingerprint
+        );
+
+        let replay = db
+            .reconcile_owner_rename("alice", "alice2", &source, &target)
+            .unwrap();
+        assert_eq!(replay["state"], "already_applied");
+
+        let compensated = db
+            .compensate_owner_rename("alice", "alice2", &source, &target)
+            .unwrap();
+        assert_eq!(compensated["state"], "applied");
+        assert!(db.owner_inventory("alice").unwrap().equivalent(&source));
+        assert_eq!(db.owner_inventory("alice2").unwrap().documents, 0);
+
+        let compensation_replay = db
+            .compensate_owner_rename("alice", "alice2", &source, &target)
+            .unwrap();
+        assert_eq!(compensation_replay["state"], "already_applied");
+    }
+
+    #[test]
+    fn owner_lifecycle_rejects_foreign_or_malformed_manifests_without_writes() {
+        let (db, _dir) = temp_db();
+        db.create_doc_scoped("alice", "home", "markdown", "private.md", "PRIVATE", None)
+            .unwrap();
+        let (source, target) = db.preflight_rename_owner("alice", "alice2").unwrap();
+        let source_before = db.owner_inventory("alice").unwrap();
+
+        let mut foreign_source = source.clone();
+        foreign_source.owner = "mallory".to_string();
+        assert!(db
+            .reconcile_owner_rename("alice", "alice2", &foreign_source, &target)
+            .is_err());
+
+        let mut malformed_source = source.clone();
+        malformed_source.active_documents += 1;
+        assert!(db
+            .reconcile_owner_rename("alice", "alice2", &malformed_source, &target)
+            .is_err());
+
+        let mut occupied_target = source.clone();
+        occupied_target.owner = "alice2".to_string();
+        assert!(db
+            .reconcile_owner_rename("alice", "alice2", &source, &occupied_target)
+            .is_err());
+
+        let mut foreign_purge = source.clone();
+        foreign_purge.owner = "mallory".to_string();
+        assert!(db.purge_owner("alice", Some(&foreign_purge)).is_err());
+
+        assert!(db
+            .owner_inventory("alice")
+            .unwrap()
+            .equivalent(&source_before));
+        assert_eq!(db.owner_inventory("alice2").unwrap().documents, 0);
+    }
+
+    #[test]
+    fn owner_purge_removes_private_history_blobs_assets_and_operation_names() {
+        let (db, data_dir) = temp_db();
+        let original = db
+            .create_doc_scoped(
+                "alice",
+                "home",
+                "markdown",
+                "AliceSecretName.md",
+                "FIRST ALICE SECRET",
+                None,
+            )
+            .unwrap();
+        let first_hash = match &original.content {
+            Content::Blob { hash } => hash.clone(),
+            _ => panic!("text doc did not use a blob"),
+        };
+        let updated = db
+            .write_doc_scoped(
+                &original.id,
+                "SECOND ALICE SECRET",
+                Some(&original.head),
+                "alice",
+                "home",
+            )
+            .unwrap();
+        let WriteOutcome::Committed { view: updated, .. } = updated else {
+            panic!("expected update commit")
+        };
+        let second_hash = match &updated.content {
+            Content::Blob { hash } => hash.clone(),
+            _ => panic!("text doc did not use a blob"),
+        };
+        db.create_doc_scoped("bob", "home", "markdown", "bob.md", "BOB SURVIVES", None)
+            .unwrap();
+        let bob_before = db.owner_inventory("bob").unwrap();
+
+        let vault = data_dir.join("alice-asset-vault");
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("private.bin"), b"ALICE PRIVATE ASSET").unwrap();
+        db.import_vault_scoped(&vault, None, "alice", "home")
+            .unwrap();
+        let asset = db
+            .list_docs_scoped("alice", "home")
+            .unwrap()
+            .into_iter()
+            .find(|doc| matches!(doc.content, Content::Asset { .. }))
+            .unwrap();
+        let Content::Asset { hash, ext, .. } = asset.content else {
+            unreachable!()
+        };
+        let asset_path = db.asset_file(&hash, &ext);
+        assert!(asset_path.exists());
+
+        let expected = db.owner_inventory("alice").unwrap();
+        let receipt = db.purge_owner("alice", Some(&expected)).unwrap();
+        assert_eq!(receipt["state"], "applied");
+        assert_eq!(receipt["history_retained"], false);
+        assert_eq!(db.owner_inventory("alice").unwrap().documents, 0);
+        assert_eq!(
+            db.owner_inventory("bob").unwrap().fingerprint,
+            bob_before.fingerprint
+        );
+        assert!(db.blob_bytes(&first_hash).unwrap().is_none());
+        assert!(db.blob_bytes(&second_hash).unwrap().is_none());
+        assert!(!asset_path.exists());
+        assert!(db.history(&original.id).is_err());
+        let serialized = serde_json::to_string(&receipt).unwrap();
+        assert!(!serialized.contains("ALICE SECRET"));
+
+        let txn = db.database.begin_read().unwrap();
+        let ops = txn.open_table(OPS).unwrap();
+        for entry in ops.iter().unwrap() {
+            let (_, encoded) = entry.unwrap();
+            assert!(!encoded.value().contains("AliceSecretName"));
+        }
+        drop(ops);
+        drop(txn);
+
+        let replay = db.purge_owner("alice", Some(&expected)).unwrap();
+        assert_eq!(replay["state"], "already_applied");
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
     fn scoped_diff_rejects_commit_hashes_from_another_document() {
         let (db, _dir) = temp_db();
         let alice = db
@@ -3093,6 +5342,233 @@ mod tests {
     }
 
     #[test]
+    fn native_memes_paths_keep_extensionless_pages_raw_failures_and_assets() {
+        let (db, data_dir) = temp_db();
+        let vault = std::env::temp_dir().join(format!("copal-native-memes-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".copal/wiki/.memes")).unwrap();
+        fs::write(
+            vault.join(".copal/wiki/.memes/Native Page"),
+            br#"{"schemaVersion":1,"futureField":{"keep":true}}"#,
+        )
+        .unwrap();
+        fs::write(
+            vault.join(".copal/wiki/.memes/Broken Page"),
+            b"future native bytes",
+        )
+        .unwrap();
+        fs::write(vault.join(".copal/wiki/.memes/photo.bin"), b"binary bytes").unwrap();
+        let mut identities = BTreeMap::new();
+        identities.insert(
+            ".copal/wiki/.memes/Native Page".to_string(),
+            ImportIdentity {
+                id: "MEME-NATIVE".to_string(),
+                corpus: "wiki".to_string(),
+                kind: "wiki".to_string(),
+            },
+        );
+        identities.insert(
+            ".copal/wiki/.memes/Broken Page".to_string(),
+            ImportIdentity {
+                id: "MEME-BROKEN".to_string(),
+                corpus: "wiki".to_string(),
+                kind: "wiki".to_string(),
+            },
+        );
+        identities.insert(
+            ".copal/wiki/.memes/photo.bin".to_string(),
+            ImportIdentity {
+                id: "ASSET-NATIVE".to_string(),
+                corpus: "wiki".to_string(),
+                kind: "asset".to_string(),
+            },
+        );
+
+        let stats = db
+            .import_vault_scoped_as_with_ids(&vault, None, "alice", "home", "wiki", &identities)
+            .unwrap();
+        assert_eq!(stats.notes, 2);
+        assert_eq!(stats.assets, 1);
+        let documents = db.list_docs_scoped("alice", "home").unwrap();
+        assert_eq!(documents.len(), 3);
+        assert_eq!(
+            documents
+                .iter()
+                .find(|doc| doc.id == "MEME-NATIVE")
+                .unwrap()
+                .name,
+            ".memes/Native Page"
+        );
+        assert_eq!(
+            documents
+                .iter()
+                .find(|doc| doc.id == "MEME-BROKEN")
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("future native bytes")
+        );
+        let asset = documents
+            .iter()
+            .find(|doc| doc.id == "ASSET-NATIVE")
+            .unwrap();
+        assert_eq!(asset.name, ".memes/photo.bin");
+        let Content::Asset { hash, ext, .. } = &asset.content else {
+            panic!("native .memes asset was not an asset")
+        };
+        assert_eq!(
+            fs::read(data_dir.join("assets").join(format!("{hash}.{ext}"))).unwrap(),
+            b"binary bytes"
+        );
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn native_memes_restore_head_guard_rejects_an_intervening_writer() {
+        let (db, _data_dir) = temp_db();
+        let page = db
+            .create_doc_scoped("alice", "home", "wiki", "page", "base", None)
+            .unwrap();
+        let vault = std::env::temp_dir().join(format!("copal-native-memes-race-{}", new_ulid()));
+        fs::create_dir_all(vault.join(".copal/wiki")).unwrap();
+        fs::write(vault.join(".copal/wiki/page"), b"updated by one writer").unwrap();
+        let identities = BTreeMap::from([(
+            ".copal/wiki/page".to_string(),
+            ImportIdentity {
+                id: page.id.clone(),
+                corpus: "wiki".to_string(),
+                kind: "wiki".to_string(),
+            },
+        )]);
+        let expected_heads = BTreeMap::from([(page.id.clone(), page.head.clone())]);
+        let shared = Arc::new(db);
+        let barrier = Arc::new(Barrier::new(2));
+        let first_db = Arc::clone(&shared);
+        let first_barrier = Arc::clone(&barrier);
+        let first_vault = vault.clone();
+        let first_identities = identities.clone();
+        let first_heads = expected_heads.clone();
+        let first = thread::spawn(move || {
+            first_barrier.wait();
+            first_db.import_vault_scoped_as_with_ids_and_heads(
+                &first_vault,
+                None,
+                "alice",
+                "home",
+                "wiki",
+                &first_identities,
+                &first_heads,
+            )
+        });
+        let second_db = Arc::clone(&shared);
+        let second_barrier = Arc::clone(&barrier);
+        let second_vault = vault.clone();
+        let second_identities = identities.clone();
+        let second_heads = expected_heads.clone();
+        let second = thread::spawn(move || {
+            second_barrier.wait();
+            second_db.import_vault_scoped_as_with_ids_and_heads(
+                &second_vault,
+                None,
+                "alice",
+                "home",
+                "wiki",
+                &second_identities,
+                &second_heads,
+            )
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(results.iter().any(|result| {
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("stale restore head"))
+        }));
+        assert_eq!(
+            shared.get_doc(&page.id).unwrap().unwrap().text.as_deref(),
+            Some("updated by one writer")
+        );
+        fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn native_memes_portable_path_guard_rejects_an_intervening_cross_kind_writer() {
+        let (db, _data_dir) = temp_db();
+        let page_vault =
+            std::env::temp_dir().join(format!("copal-native-memes-page-{}", new_ulid()));
+        let asset_vault =
+            std::env::temp_dir().join(format!("copal-native-memes-asset-{}", new_ulid()));
+        fs::create_dir_all(page_vault.join(".copal/wiki")).unwrap();
+        fs::create_dir_all(asset_vault.join(".copal/wiki")).unwrap();
+        fs::write(
+            page_vault.join(".copal/wiki/Cafe\u{301} Straße"),
+            b"wiki page",
+        )
+        .unwrap();
+        fs::write(
+            asset_vault.join(".copal/wiki/CAF\u{00c9} STRASSE"),
+            b"binary asset",
+        )
+        .unwrap();
+        let page_identities = BTreeMap::from([(
+            ".copal/wiki/Cafe\u{301} Straße".to_string(),
+            ImportIdentity {
+                id: "PAGE-RACE".to_string(),
+                corpus: "wiki".to_string(),
+                kind: "wiki".to_string(),
+            },
+        )]);
+        let asset_identities = BTreeMap::from([(
+            ".copal/wiki/CAF\u{00c9} STRASSE".to_string(),
+            ImportIdentity {
+                id: "ASSET-RACE".to_string(),
+                corpus: "wiki".to_string(),
+                kind: "asset".to_string(),
+            },
+        )]);
+        let shared = Arc::new(db);
+        let barrier = Arc::new(Barrier::new(2));
+        let page_db = Arc::clone(&shared);
+        let page_barrier = Arc::clone(&barrier);
+        let page_root = page_vault.clone();
+        let page_map = page_identities.clone();
+        let page_thread = thread::spawn(move || {
+            page_barrier.wait();
+            page_db.import_vault_scoped_as_with_ids(
+                &page_root, None, "alice", "home", "wiki", &page_map,
+            )
+        });
+        let asset_db = Arc::clone(&shared);
+        let asset_barrier = Arc::clone(&barrier);
+        let asset_root = asset_vault.clone();
+        let asset_map = asset_identities.clone();
+        let asset_thread = thread::spawn(move || {
+            asset_barrier.wait();
+            asset_db.import_vault_scoped_as_with_ids(
+                &asset_root,
+                None,
+                "alice",
+                "home",
+                "wiki",
+                &asset_map,
+            )
+        });
+        let results = [page_thread.join().unwrap(), asset_thread.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(results.iter().any(|result| {
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("portable path"))
+        }));
+        assert_eq!(shared.list_docs_scoped("alice", "home").unwrap().len(), 1);
+        fs::remove_dir_all(page_vault).unwrap();
+        fs::remove_dir_all(asset_vault).unwrap();
+    }
+
+    #[test]
     fn copal_export_restore_keeps_stable_ids_and_rejects_identity_conflicts() {
         let (db, _data_dir) = temp_db();
         let vault = std::env::temp_dir().join(format!("copal-identity-import-{}", new_ulid()));
@@ -3277,6 +5753,88 @@ mod tests {
             .unwrap();
         assert_eq!(repeated.unchanged, 4);
         fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[test]
+    fn reserved_json_versions_are_gated_per_record_kind() {
+        for (label, relative, content, expected_kind) in [
+            (
+                "tracks-v1",
+                ".copal/tracks.json",
+                br#"{"schemaVersion":1,"tracks":[]}"#.as_slice(),
+                "copal-tracks",
+            ),
+            (
+                "tracks-v2",
+                ".copal/tracks.json",
+                br#"{"schemaVersion":2,"tracks":[]}"#.as_slice(),
+                "copal-tracks",
+            ),
+            (
+                "tracks-v3",
+                ".copal/tracks.json",
+                br#"{"schemaVersion":3,"tracks":[]}"#.as_slice(),
+                "compatibility",
+            ),
+            (
+                "tracks-malformed",
+                ".copal/tracks.json",
+                b"{not-json".as_slice(),
+                "compatibility",
+            ),
+            (
+                "migration-v1",
+                ".copal/planning-migration.json",
+                br#"{"schemaVersion":1,"state":"complete"}"#.as_slice(),
+                "copal-migration",
+            ),
+            (
+                "migration-v2",
+                ".copal/planning-migration.json",
+                br#"{"schemaVersion":2,"state":"future"}"#.as_slice(),
+                "compatibility",
+            ),
+        ] {
+            let (db, data_dir) = temp_db();
+            let vault = std::env::temp_dir().join(format!("copal-{label}-{}", new_ulid()));
+            fs::create_dir_all(vault.join(".copal")).unwrap();
+            fs::write(vault.join(relative), content).unwrap();
+
+            let stats = db
+                .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+                .unwrap();
+            let document = db.list_docs_scoped("alice", "home").unwrap().pop().unwrap();
+
+            assert_eq!(document.kind, expected_kind, "{label}");
+            assert_eq!(
+                stats.notes,
+                usize::from(expected_kind != "compatibility"),
+                "{label}"
+            );
+            assert_eq!(
+                stats.compatibility,
+                usize::from(expected_kind == "compatibility"),
+                "{label}"
+            );
+            if expected_kind == "compatibility" {
+                let Content::Asset { hash, ext, .. } = &document.content else {
+                    panic!("{label} was not preserved as inert bytes")
+                };
+                assert_eq!(
+                    fs::read(data_dir.join("assets").join(format!("{hash}.{ext}"))).unwrap(),
+                    content,
+                    "{label}"
+                );
+            }
+
+            let repeated = db
+                .import_vault_scoped_as(&vault, None, "alice", "home", "note")
+                .unwrap();
+            assert_eq!(repeated.unchanged, 1, "{label}");
+            fs::remove_dir_all(vault).unwrap();
+            drop(db);
+            fs::remove_dir_all(data_dir).unwrap();
+        }
     }
 
     #[test]
@@ -3475,5 +6033,184 @@ mod tests {
                 .value(),
             "99"
         );
+    }
+
+    #[test]
+    fn current_schema_repairs_missing_task_tables_without_touching_canonical_heads() {
+        for missing in ["task_index", "task_index_resources"] {
+            let (db, data_dir) = temp_db();
+            let note = db.create_doc("note", "Repair", "payload", None).unwrap();
+            let operation_count = db.ops(100, None).unwrap()["ops"].as_array().unwrap().len();
+            {
+                let txn = db.database.begin_write().unwrap();
+                if missing == "task_index" {
+                    txn.delete_table(TASK_INDEX).unwrap();
+                } else {
+                    txn.delete_table(TASK_INDEX_RESOURCES).unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            drop(db);
+
+            let repaired = Db::open(&data_dir).unwrap();
+            assert_eq!(repaired.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(repaired.get_doc(&note.id).unwrap().unwrap().head, note.head);
+            assert_eq!(repaired.task_index_generation("alice", "home").unwrap()["sourceRevision"], "");
+            assert_eq!(repaired.ops(100, None).unwrap()["ops"].as_array().unwrap().len(), operation_count);
+            drop(repaired);
+            fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn existing_store_missing_schema_marker_or_canonical_table_is_rejected() {
+        let (db, data_dir) = temp_db();
+        {
+            let txn = db.database.begin_write().unwrap();
+            txn.open_table(META).unwrap().remove(SCHEMA_VERSION_KEY).unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+        let marker_error = match Db::open(&data_dir) {
+            Ok(_) => panic!("opening a non-empty store without a schema marker must fail"),
+            Err(error) => error,
+        };
+        assert!(marker_error.to_string().contains("schema marker is missing or invalid"));
+        fs::remove_dir_all(&data_dir).unwrap();
+
+        let (db, data_dir) = temp_db();
+        {
+            let txn = db.database.begin_write().unwrap();
+            txn.delete_table(DOCS).unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+        let canonical_error = match Db::open(&data_dir) {
+            Ok(_) => panic!("opening a store without canonical docs must fail"),
+            Err(error) => error,
+        };
+        assert!(canonical_error.to_string().contains("canonical source table 'docs' is missing or corrupt"));
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn keyed_task_index_pages_all_5000_rows_without_skips_and_tracks_writes() {
+        let (db, data_dir) = temp_db();
+        let items = (0..5000)
+            .map(|index| {
+                json!({
+                    "id": format!("DOC:{index:04}"),
+                    "source": if index % 2 == 0 { "vault" } else { "markdown" },
+                    "label": format!("Task {index:04}"),
+                    "text": format!("Task {index:04}"),
+                    "checked": index % 3 == 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let records = json!({"DOC": {"head": "h1", "items": items}});
+        let rebuilt = db
+            .task_index_update("alice", "home", "g1", &records, &[], true, 1)
+            .unwrap();
+        assert_eq!(rebuilt["sourceReads"], 1);
+        assert!(rebuilt["rewrittenRows"].as_u64().unwrap() >= 5002);
+        assert!(rebuilt["rewrittenBytes"].as_u64().unwrap() > 100_000);
+
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let page = db
+                .task_index_page("alice", "home", "", None, "all", cursor.as_deref(), 100, "g1")
+                .unwrap();
+            for item in page["items"].as_array().unwrap() {
+                assert!(seen.insert(item["id"].as_str().unwrap().to_string()));
+            }
+            cursor = page["nextCursor"].as_str().map(ToString::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 5000);
+
+        let markdown = db
+            .task_index_page("alice", "home", "", None, "markdown", None, 100, "g1")
+            .unwrap();
+        assert!(markdown["items"].as_array().unwrap().iter().all(|item| item["source"] == "markdown"));
+        assert_eq!(markdown["total"], 2500);
+        assert_eq!(markdown["indexedTotal"], 5000);
+        assert_eq!(markdown["matchedTotal"], 2500);
+        assert!(markdown["scannedRows"].as_u64().unwrap() > markdown["returnedRows"].as_u64().unwrap());
+
+        assert!(db
+            .task_index_page("alice", "home", "", None, "all", Some("missing-anchor"), 100, "g1")
+            .is_err());
+        db.task_index_update("alice", "home", "g2", &json!({}), &["DOC".to_string()], false, 1)
+            .unwrap();
+        let after_delete = db
+            .task_index_page("alice", "home", "", None, "all", None, 10, "g2")
+            .unwrap();
+        assert!(after_delete["items"].as_array().unwrap().is_empty());
+        drop(db);
+        let restarted = Db::open(&data_dir).unwrap();
+        assert_eq!(restarted.task_index_generation("alice", "home").unwrap()["total"], 0);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn keyed_task_index_changes_one_of_5000_documents_without_corpus_rebuild() {
+        let (db, data_dir) = temp_db();
+        let records = (0..5000)
+            .map(|index| {
+                (
+                    format!("DOC:{index:04}"),
+                    json!({
+                        "head": format!("h{index}"),
+                        "items": [{
+                            "id": format!("DOC:{index:04}:1"),
+                            "source": "markdown",
+                            "label": format!("Task {index:04}"),
+                            "text": format!("Task {index:04}"),
+                            "checked": false,
+                        }],
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let rebuilt = db
+            .task_index_update("alice", "home", "g1", &Value::Object(records), &[], true, 5000)
+            .unwrap();
+        assert_eq!(rebuilt["sourceReads"], 5000);
+        let warm = db
+            .task_index_page("alice", "home", "", None, "all", None, 100, "g1")
+            .unwrap();
+        assert_eq!(warm["returnedRows"], 100);
+        assert!(warm["scannedRows"].as_u64().unwrap() <= 101);
+
+        let changed = json!({
+            "DOC:2500": {
+                "head": "h2500-next",
+                "items": [{
+                    "id": "DOC:2500:1",
+                    "source": "markdown",
+                    "label": "Task 2500",
+                    "text": "Task 2500",
+                    "checked": true,
+                }],
+            },
+        });
+        let patched = db
+            .task_index_update("alice", "home", "g2", &changed, &[], false, 1)
+            .unwrap();
+        assert_eq!(patched["sourceReads"], 1);
+        assert!(patched["rewrittenRows"].as_u64().unwrap() <= 7);
+        assert!(patched["rewrittenBytes"].as_u64().unwrap() < 2000);
+        let after = db
+            .task_index_page("alice", "home", "2500", None, "all", None, 10, "g2")
+            .unwrap();
+        assert_eq!(after["items"][0]["checked"], true);
+        assert_eq!(db.task_index_generation("alice", "home").unwrap()["sourceRevision"], "g2");
+        drop(db);
+        let restarted = Db::open(&data_dir).unwrap();
+        assert_eq!(restarted.task_index_generation("alice", "home").unwrap()["total"], 5000);
+        fs::remove_dir_all(data_dir).unwrap();
     }
 }

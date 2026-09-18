@@ -123,13 +123,13 @@ def _patch_flow(monkeypatch, llm_behaviour, captured):
         captured["kwargs"] = kwargs
         return ("web context", [{"title": "src"}])
 
-    def _fake_llm(*args, **kwargs):
+    async def _fake_llm(*args, **kwargs):
         if isinstance(llm_behaviour, Exception):
             raise llm_behaviour
         return llm_behaviour
 
     monkeypatch.setattr("src.chat_processor.comprehensive_web_search", _fake_search)
-    monkeypatch.setattr("src.llm_core.llm_call", _fake_llm)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", _fake_llm)
 
 
 def test_generated_query_is_used_and_sanitized(monkeypatch):

@@ -95,25 +95,19 @@ class _FakeSession:
 def _compact_prompt_for(monkeypatch, history):
     captured = {}
 
-    async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
-        captured["messages"] = messages
+    async def fake_complete_text(**kwargs):
+        captured.update(kwargs)
         return "Summary text"
 
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
     monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
 
     import src.agent_runs as agent_runs
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
     import src.model_context as model_context
+    import src.openclank.modality_facade as modality_facade
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
-    def fake_resolve_endpoint(kind, owner=None):
-        captured.setdefault("resolve_calls", []).append((kind, owner))
-        return None, None, {}
-
-    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
     monkeypatch.setattr(model_context, "estimate_tokens", lambda messages: 100)
     monkeypatch.setattr(model_context, "get_context_length", lambda endpoint_url, model: 1000)
 
@@ -133,8 +127,8 @@ def _compact_prompt_for(monkeypatch, history):
 def _registered_compact_response(monkeypatch, history, active_run=False):
     captured = {}
 
-    async def fake_llm_call_async(endpoint_url, model, messages, **kwargs):
-        captured["messages"] = messages
+    async def fake_complete_text(**kwargs):
+        captured.update(kwargs)
         return "Summary text"
 
     monkeypatch.setattr(
@@ -147,16 +141,10 @@ def _registered_compact_response(monkeypatch, history, active_run=False):
     monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
 
     import src.agent_runs as agent_runs
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
+    import src.openclank.modality_facade as modality_facade
 
     monkeypatch.setattr(agent_runs, "is_active", lambda session_id: active_run)
-    def fake_resolve_endpoint(kind, owner=None):
-        captured.setdefault("resolve_calls", []).append((kind, owner))
-        return None, None, {}
-
-    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
 
     session = _FakeSession(history)
     manager = _FakeSessionManager(session)
@@ -236,7 +224,8 @@ def test_registered_manual_compact_route_uses_session_owner(monkeypatch):
 
     assert response.status_code == 200
     assert manager.replaced_messages is not None
-    assert ("utility", "session-owner") in captured["resolve_calls"]
+    assert captured["purpose"] == "utility"
+    assert captured["owner"] == "session-owner"
 
 
 def test_registered_manual_compact_route_rejects_active_agent_run(monkeypatch):

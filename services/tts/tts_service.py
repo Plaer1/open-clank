@@ -1,11 +1,16 @@
 # src/tts_service.py
-"""Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
+"""Speech settings/cache compatibility plus managed Kokoro executor internals.
+
+Server-side synthesis is dispatched by ``src.openclank.modality_facade``.  The
+public methods here fail closed for stale local/endpoint settings; the private
+fixed-recipe primitive remains available to the managed host broker.  Browser
+speech stays client-side and performs no server model inference.
+"""
 
 import io
 import wave
 import logging
 import hashlib
-import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -27,14 +32,14 @@ def _safe_speed(value, default: float = 1.0) -> float:
 
 
 class TTSService:
-    """Multi-provider TTS service.
+    """Legacy speech-settings facade with managed-executor internals.
 
     Reads provider config from data/settings.json on each call.
     Providers:
       "disabled"        — no TTS
       "browser"         — client-side Web Speech API (no server synthesis)
-      "local"           — Kokoro-82M on GPU
-      "endpoint:<id>"   — OpenAI-compatible /audio/speech via ModelEndpoint
+      "local"           — retired public selector; broker recipe owns execution
+      "endpoint:<id>"   — retired direct-provider selector
     """
 
     def __init__(self, cache_dir: str = TTS_CACHE_DIR):
@@ -68,11 +73,9 @@ class TTSService:
         if provider == "browser":
             return True  # handled client-side
         if provider == "local":
-            kokoro = self._get_kokoro()
-            return kokoro is not None and kokoro.available
+            return False
         if isinstance(provider, str) and provider.startswith("endpoint:"):
-            endpoint_id = provider.split(":", 1)[1]
-            return self._owned_endpoint(endpoint_id, owner) is not None
+            return False
         return False
 
     # ── Cache ──
@@ -107,104 +110,21 @@ class TTSService:
             self._kokoro = _KokoroPipeline()
         return self._kokoro
 
-    # ── API endpoint ──
-
-    @staticmethod
-    def _owned_endpoint(endpoint_id: str, owner: str | None = None):
-        from src.database import SessionLocal, ModelEndpoint
-
-        db = SessionLocal()
-        try:
-            query = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
-            normalized_owner = (owner or "").strip().lower()
-            if normalized_owner:
-                query = query.filter(ModelEndpoint.owner == normalized_owner)
-            else:
-                query = query.filter(ModelEndpoint.owner.is_(None))
-            ep = query.first()
-            if ep is None:
-                return None
-            return {"base_url": ep.base_url.rstrip("/"), "api_key": ep.api_key}
-        finally:
-            db.close()
-
-    def _synthesize_api(self, text: str, endpoint_id: str, model: str, voice: str,
-                        speed: float = 1.0, owner: str | None = None) -> Optional[bytes]:
-        endpoint = self._owned_endpoint(endpoint_id, owner)
-        if endpoint is None:
-            logger.error(f"TTS endpoint {endpoint_id} not found for owner")
-            return None
-        base_url = endpoint["base_url"]
-        api_key = endpoint["api_key"]
-
-        url = base_url + "/audio/speech"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        payload = {
-            "model": model,
-            "input": text,
-            "voice": voice,
-            "response_format": "mp3",
-            "speed": speed,
-        }
-
-        try:
-            r = httpx.post(url, json=payload, headers=headers, timeout=60)
-            r.raise_for_status()
-            logger.info(f"API TTS: {len(r.content)} bytes from {base_url}")
-            return r.content
-        except Exception as e:
-            logger.error(f"API TTS synthesis failed: {e}")
-            return None
-
     # ── Public interface ──
 
     def synthesize(self, text: str, use_cache: bool = True,
                    owner: str | None = None) -> Optional[bytes]:
+        """Fail closed when legacy callers bypass the managed operation router."""
+
+        del text, use_cache
         settings = self._load_settings(owner)
-        if settings.get("tts_enabled") is False:
+        provider = settings.get("tts_provider")
+        if settings.get("tts_enabled") is False or provider in ("disabled", "browser"):
             return None
-        provider = settings["tts_provider"]
-        model = settings["tts_model"]
-        voice = settings["tts_voice"]
-        speed = _safe_speed(settings.get("tts_speed", "1"))
-
-        if provider in ("disabled", "browser"):
-            return None
-
-        if len(text) > 5000:
-            text = text[:5000]
-
-        if use_cache:
-            key = self._cache_key(text, provider, model, voice, speed, owner)
-            cached = self._get_cached(key)
-            if cached:
-                logger.info(f"TTS cache hit ({len(text)} chars)")
-                return cached
-
-        audio_data = None
-
-        if provider == "local":
-            kokoro = self._get_kokoro()
-            if kokoro and kokoro.available:
-                audio_data = kokoro.synthesize_raw(text, voice)
-            else:
-                logger.warning("Kokoro TTS not available")
-                return None
-        elif provider.startswith("endpoint:"):
-            endpoint_id = provider.split(":", 1)[1]
-            audio_data = self._synthesize_api(text, endpoint_id, model, voice, speed, owner)
-        else:
-            logger.error(f"Unknown TTS provider: {provider}")
-            return None
-
-        if audio_data and use_cache:
-            key = self._cache_key(text, provider, model, voice, speed, owner)
-            self._put_cache(key, audio_data)
-
-        return audio_data
+        logger.warning(
+            "Direct TTS service execution is retired; use audio.synthesize"
+        )
+        return None
 
     def synthesize_to_base64(self, text: str, owner: str | None = None) -> Optional[str]:
         import base64
@@ -237,11 +157,11 @@ class TTSService:
         }
 
         if provider == "local":
-            kokoro = self._get_kokoro()
-            stats["model"] = "Kokoro-82M (GPU)" if (kokoro and kokoro.available) else "Kokoro (not loaded)"
+            stats["model"] = "Kokoro (managed local executor)"
+            stats["managed_executor"] = "kokoro-82m"
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
-        elif provider.startswith("endpoint:") and is_available:
+        elif isinstance(provider, str) and provider.startswith("endpoint:") and is_available:
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
         return stats

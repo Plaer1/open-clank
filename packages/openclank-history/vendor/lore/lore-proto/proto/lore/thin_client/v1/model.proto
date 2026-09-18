@@ -1,0 +1,254 @@
+syntax = "proto3";
+
+package lore.thin_client.v1;
+
+import "lore/model/v1/model.proto";
+
+// File-system entry kind for tree listings and diff entries.
+enum NodeType {
+  // A directory.
+  DIRECTORY = 0;
+  // A regular file.
+  FILE = 1;
+  // A symbolic link.
+  LINK = 2;
+}
+
+// File mode for a file-system entry.
+enum FileMode {
+  // No special file mode.
+  NONE = 0;
+  // File is executable.
+  EXECUTABLE = 1;
+}
+
+// Per-path action describing what happened between two states (or relative
+// to the common ancestor in 3-way merges).
+enum Action {
+  // No change at this path.
+  KEEP = 0;
+  // The path was added.
+  ADD = 1;
+  // The path was removed.
+  DELETE = 2;
+  // The path was moved (rename + parent change).
+  MOVE = 3;
+  // The path was copied to a new location.
+  COPY = 4;
+}
+
+// Type tag for a Metadata value, mirroring the corresponding urc enum.
+enum MetadataType {
+  // Address bytes (content reference).
+  ADDRESS = 0;
+  // Boolean value encoded as "true" / "false" string.
+  BOOLEAN = 1;
+  // Opaque binary value.
+  BINARY = 2;
+  // Addressing context bytes.
+  CONTEXT = 3;
+  // Hash bytes.
+  HASH = 4;
+  // Numeric value encoded as a string.
+  NUMERIC = 5;
+  // UTF-8 string value.
+  STRING = 6;
+}
+
+// One per-path change in a revision diff. Replaces the old urc Path +
+// PathDiff pair with a single "what happened to this path" entry.
+// In 3-way mode wrapped inside DiffConflict, the change is rooted at the
+// common ancestor.
+message DiffChange {
+  // Destination path (where the entry lives in the "to" side).
+  string path = 1;
+  // Source path for MOVE / COPY actions; empty otherwise.
+  string path_from = 2;
+  // What kind of change occurred at this path.
+  Action action = 3;
+  // The kind of node at `path` in the "to" side.
+  NodeType node_type = 4;
+  // Content address on the "from" side; empty if the action is ADD or
+  // the side has no content here.
+  bytes content_from = 5;
+  // Content address on the "to" side; empty if the action is DELETE or
+  // the side has no content here.
+  bytes content_to = 6;
+  // True when the server auto-resolved this change in 3-way mode (only
+  // meaningful when the request set `autoresolve = true`).
+  bool automerged = 7;
+  // Index into the per-stream partition table built from `DiffPartition`
+  // payloads. 0 = the request's repository (the parent partition, never
+  // announced). Non-zero values MUST be preceded on the same stream by
+  // a `DiffPartition` whose `index` matches; the consumer's content
+  // fetch for this change MUST target the corresponding partition,
+  // not the request's repository id.
+  uint32 link_repository_index = 8;
+  // True when a link change tracks its parent's branch; false for pinned
+  // links and non-link changes. Only meaningful on a LINK-typed entry; read
+  // it from the entry for the mount path itself.
+  bool tracking = 9;
+}
+
+// Pair of per-path changes describing a 3-way merge conflict at a single
+// path. Each side's change is rooted at the common ancestor: in particular
+// `change_from.content_from == change_to.content_from` and both equal the
+// resolved base's content address for that path.
+message DiffConflict {
+  // The change one side made relative to the common ancestor.
+  DiffChange change_from = 1;
+  // The change the other side made relative to the common ancestor.
+  DiffChange change_to = 2;
+}
+
+// Per-stream partition table entry. Announces a linked partition and
+// the stable index that `DiffChange.link_repository_index` will use to
+// reference it for the remainder of this stream. Server emits each entry
+// at most once, in discovery order starting at index 1, strictly before
+// the first `DiffChange` (or `DiffConflict` half) that references it.
+// Index 0 is reserved for the parent partition and never announced.
+message DiffPartition {
+  // Stable per-stream index. Server assigns 1, 2, 3, … in discovery
+  // order. Never zero.
+  uint32 index = 1;
+  // The partition bytes corresponding to `index` (a Lore `Partition`,
+  // i.e. the repository scope the content of every `DiffChange` with
+  // `link_repository_index == index` resolves under).
+  bytes link_partition = 2;
+}
+
+// A single entry in a revision tree listing.
+message TreeNode {
+  // Repository-relative path of this entry.
+  string path = 1;
+  // Whether this entry is a directory, file, or link.
+  NodeType node_type = 2;
+  // Content address for FILE / LINK entries; unused for DIRECTORY.
+  lore.model.v1.Address address = 3;
+  // Original size in bytes. For DIRECTORY entries, this is the cumulative size of its descendant files.
+  uint64 size = 4;
+  // File mode for this entry. For possible flags and values, see enum FileMode.
+  uint64 mode = 5;
+  // True when a link entry tracks its parent's branch; false for pinned links
+  // and non-link entries.
+  bool tracking = 6;
+}
+
+// Self-describing revision record. Carries the resolved RevisionIdentifier
+// so callers querying by bare signature learn the resolved (branch, number)
+// in the same response.
+message Revision {
+  // Content signature of this revision. Globally unique; never appears on
+  // two branches.
+  bytes signature = 1;
+  // Resolved (branch, number) for this revision. Echoed by the server so
+  // signature-only queries can recover the per-branch coordinates.
+  lore.model.v1.RevisionIdentifier identifier = 2;
+  // Free-form commit message.
+  string commit_message = 3;
+  // Commit timestamp (Unix epoch milliseconds). Always commit time, never
+  // authorship time.
+  uint64 timestamp = 4;
+  // Identity that originally created the revision.
+  string created_by = 5;
+  // Identity that committed the revision (may differ from created_by).
+  string committed_by = 6;
+  // Per-revision metadata entries.
+  repeated Metadata metadata = 7;
+  // Self-side parent (the predecessor on this revision's own branch).
+  // Unset on a branch root; otherwise set.
+  optional Parent parent_self = 8;
+  // Other-side parent (only set on merge commits).
+  optional Parent parent_other = 9;
+  // Per-branch revision number.
+  uint64 number = 10;
+
+  // A parent reference grouping the parent revision's signature and
+  // resolved identifier.
+  message Parent {
+    // Signature of the parent revision.
+    bytes signature = 1;
+    // Resolved (branch, number) for the parent revision.
+    lore.model.v1.RevisionIdentifier identifier = 2;
+  }
+}
+
+// Typed metadata key/value pair associated with a Branch or Revision.
+message Metadata {
+  // Caller-defined key.
+  string key = 1;
+  // Encoded value; interpretation depends on `metadata_type`.
+  string value = 2;
+  // Type tag indicating how `value` should be parsed.
+  MetadataType metadata_type = 3;
+}
+
+// File-content diff request. ContentDiff is server-streaming and operates
+// purely on CAS addresses — no path field, no per-revision context.
+message ContentDiffRequest {
+  // Content address of the "from" side. Empty bytes represent
+  // "no content" (e.g. file added).
+  bytes address_from = 1;
+  // Content address of the "to" side. Empty bytes represent
+  // "no content" (e.g. file deleted).
+  bytes address_to = 2;
+  // Common ancestor's content address. Presence (set, non-empty)
+  // triggers 3-way merge mode; absence gives 2-way unified diff. There
+  // is no separate mode flag.
+  optional bytes address_base = 3;
+  // Number of context lines around each hunk in the unified diff
+  // output. Server picks a default if unset.
+  optional uint32 context_lines = 4;
+  // When true, lines that differ only in trailing whitespace are
+  // treated as equal for stat / change-detection purposes. The
+  // displayed diff text uses original (un-normalised) content.
+  bool ignore_whitespace_eol = 5;
+  // When true, runs of internal whitespace are collapsed to a single
+  // space before comparing for stat / change-detection purposes.
+  bool ignore_whitespace_inline = 6;
+  // Maximum size in bytes of the generated diff text. When exceeded,
+  // the response header sets `truncated = true` and emits no chunks;
+  // summary stats are still computed.
+  optional uint64 max_diff_size = 7;
+}
+
+// Server-streamed response for ContentDiff. The first message MUST carry
+// `payload.header`; subsequent messages carry `payload.chunk`. Server MUST
+// NOT emit a ContentDiffResponse with `payload` unset.
+message ContentDiffResponse {
+  oneof payload {
+    // Summary stats and mode flags, computed up-front and emitted first.
+    ContentDiffHeader header = 1;
+    // A chunk of diff text. Concatenating `chunk.diff` strings in
+    // arrival order reproduces the full diff text.
+    ContentDiffChunkResponse chunk = 2;
+  }
+}
+
+// Header for a ContentDiff stream. Reports summary stats and short-circuit
+// flags that may end the stream after the header.
+message ContentDiffHeader {
+  // Number of lines added (after any whitespace preprocessing).
+  uint64 lines_added = 1;
+  // Number of lines deleted (after any whitespace preprocessing).
+  uint64 lines_deleted = 2;
+  // True when the input is detected as binary; the stream emits no
+  // chunks and stats are zero.
+  bool binary = 3;
+  // True when the generated diff would exceed `max_diff_size`; the
+  // stream emits no chunks but stats are still reported.
+  bool truncated = 4;
+  // True only in 3-way mode when the merge produced conflict markers.
+  bool has_conflicts = 5;
+  // Number of conflict regions in the merged text (3-way only).
+  uint32 conflict_count = 6;
+}
+
+// A single chunk of diff text. Server picks chunk boundaries on UTF-8
+// character boundaries; clients MUST NOT assume line alignment. Reserved
+// for future additive fields (hunk index, byte offsets, etc.) under
+// proto3 append-only rules.
+message ContentDiffChunkResponse {
+  // Diff text for this chunk.
+  string diff = 1;
+}

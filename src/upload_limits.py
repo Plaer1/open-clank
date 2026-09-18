@@ -63,6 +63,12 @@ ICS_MAX_BYTES = read_byte_limit_env(
 COPAL_IMPORT_MAX_BYTES = read_byte_limit_env(
     "ODYSSEUS_COPAL_IMPORT_MAX_BYTES", 256 * 1024 * 1024
 )
+# Files OS drops use the same ceiling as Copal imports unless the target
+# provider advertises a lower limit.  The route streams through provider-owned
+# staging and never creates a whole-file base64 payload.
+FILES_IMPORT_MAX_BYTES = read_byte_limit_env(
+    "ODYSSEUS_FILES_IMPORT_MAX_BYTES", COPAL_IMPORT_MAX_BYTES
+)
 
 
 async def read_upload_limited(upload: UploadFile, limit: int, label: str = "Upload") -> bytes:

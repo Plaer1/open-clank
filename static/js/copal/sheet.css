@@ -1,0 +1,60 @@
+/* Scoped to the single spreadsheet leaf mounted inside Editor. */
+.copal-sheet-surface {
+  --copal-sheet-row-height: 34px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  color: var(--fg, currentColor);
+  background: var(--bg, transparent);
+}
+.copal-sheet-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px 6px; }
+.copal-sheet-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.copal-sheet-title h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.copal-sheet-resource { color: var(--color-muted, #888); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-sheet-state { color: var(--color-muted, #888); font-size: 12px; }
+.copal-sheet-view-controls { display: flex; align-items: end; gap: 8px; min-width: 0; }
+.copal-sheet-tabs, .copal-sheet-toolbar { display: flex; align-items: center; gap: 5px; min-height: 34px; padding: 0 14px; overflow-x: auto; }
+.copal-sheet-view-controls .copal-sheet-tabs { flex: 1; padding-inline: 0; }
+.copal-sheet-tab { border: 0; border-bottom: 2px solid transparent; background: transparent; color: inherit; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+.copal-sheet-tab.active { border-bottom-color: var(--red, #e66); color: var(--red, #e66); font-weight: 600; }
+.copal-sheet-toolbar { border-block: 1px solid var(--border, color-mix(in srgb, currentColor 18%, transparent)); flex-wrap: wrap; padding-block: 5px; }
+.copal-sheet-tool { flex: 0 0 auto; }
+.copal-sheet-search { margin-left: auto; min-width: 150px; max-width: 240px; padding: 5px 8px; color: inherit; background: var(--panel, transparent); border: 1px solid var(--border, #777); border-radius: 5px; }
+.copal-sheet-grid-wrap { flex: 1; min-height: 0; overflow: auto; contain: layout paint; }
+.copal-sheet-column-menu { border: 0; background: transparent; color: inherit; padding: 2px 0; font: inherit; cursor: pointer; }
+.copal-sheet-column-menu:hover, .copal-sheet-column-menu:focus-visible { color: var(--red, #e66); text-decoration: underline; }
+.copal-sheet-grid { border-collapse: separate; border-spacing: 0; min-width: 100%; table-layout: fixed; }
+.copal-sheet-grid th, .copal-sheet-grid td { border-right: 1px solid var(--border, color-mix(in srgb, currentColor 14%, transparent)); border-bottom: 1px solid var(--border, color-mix(in srgb, currentColor 14%, transparent)); }
+.copal-sheet-grid th { position: sticky; top: 0; z-index: 2; height: var(--copal-sheet-row-height); padding: 0 9px; text-align: left; white-space: nowrap; background: var(--panel, var(--bg, #222)); color: var(--color-muted, inherit); font-size: 12px; }
+.copal-sheet-grid td { height: var(--copal-sheet-row-height); padding: 0; background: var(--bg, transparent); }
+.copal-sheet-cell { display: flex; align-items: center; width: 100%; min-height: var(--copal-sheet-row-height); box-sizing: border-box; padding: 5px 9px; outline: 0; cursor: cell; }
+.copal-sheet-cell:focus-visible, .copal-sheet-cell.selected { box-shadow: inset 0 0 0 2px var(--red, #e66); background: color-mix(in srgb, var(--red, #e66) 10%, transparent); }
+.copal-sheet-cell.readonly { color: var(--color-muted, #999); cursor: default; }
+.copal-sheet-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-sheet-value.wrap { white-space: normal; overflow-wrap: anywhere; }
+.copal-sheet-chips { display: flex; gap: 4px; min-width: 0; overflow: hidden; }
+.copal-sheet-chip { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border-radius: 10px; background: color-mix(in srgb, var(--red, #e66) 15%, transparent); }
+.copal-sheet-editor { width: 100%; min-width: 0; box-sizing: border-box; margin: -1px; padding: 5px 7px; color: inherit; background: var(--panel, var(--bg, transparent)); border: 2px solid var(--red, #e66); border-radius: 3px; }
+.copal-sheet-message { margin: 10px 14px; padding: 10px; border: 1px solid var(--border, #777); border-radius: 6px; }
+.copal-sheet-message.error { color: var(--color-error, #e66); }
+.copal-sheet-cards, .copal-sheet-lists { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.copal-sheet-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); align-content: start; gap: 10px; }
+.copal-sheet-card { border: 1px solid var(--border, #777); border-radius: 8px; padding: 10px; background: var(--panel, transparent); }
+.copal-sheet-lists { display: flex; flex-direction: column; gap: 2px; }
+.copal-sheet-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--border, #777); }
+.copal-sheet-field { min-width: 0; }
+.copal-sheet-field-label { display: block; margin-bottom: 2px; color: var(--color-muted, #888); font-size: 11px; }
+.copal-sheet-field .copal-sheet-cell { min-height: 30px; padding: 3px 5px; border: 0; background: transparent; text-align: left; }
+.copal-sheet-paste-preview { width: min(420px, calc(100vw - 24px)); }
+.copal-sheet-paste-summary { font-weight: 600; }
+.copal-sheet-paste-rejections { max-height: 150px; overflow: auto; padding-left: 20px; }
+.copal-sheet-footer { flex: 0 0 auto; padding: 6px 14px; color: var(--color-muted, #888); font-size: 11px; }
+.copal-sheet-surface.density-comfortable { --copal-sheet-row-height: 44px; }
+@media (max-width: 760px) {
+  .copal-sheet-header, .copal-sheet-tabs, .copal-sheet-toolbar, .copal-sheet-footer { padding-inline: 8px; }
+  .copal-sheet-search { min-width: 120px; max-width: 100%; flex: 1 1 120px; margin-left: 0; }
+  .copal-sheet-view-controls { align-items: stretch; }
+  .copal-sheet-view-controls .copal-sheet-add-view { align-self: center; }
+  .copal-sheet-cards, .copal-sheet-lists { padding-inline: 8px; }
+}

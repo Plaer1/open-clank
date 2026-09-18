@@ -2,11 +2,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use fm_core::config::FmConfig;
-use fm_core::embed::{EmbeddingClient, HttpEmbeddingClient, NoopEmbeddingClient};
+use fm_core::embed::{DisabledEmbeddingClient, EmbeddingClient};
 use fm_core::provider::native::NativeProvider;
 use fm_core::provider::{GroomOpArgs, MemoryProvider};
 use fm_core::record::*;
-use fm_core::store::sqlite::SqliteStore;
+use fm_core::store::sqlite::{ForgetSelector, RetentionPolicy, SqliteStore};
 use rmcp::{
     handler::server::{tool::Parameters, tool::ToolCallContext, ServerHandler},
     model::*,
@@ -266,6 +266,18 @@ struct CandidateReviewParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct CandidateUpdateParams {
+    id: String,
+    content: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    owner: String,
+    workspace_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DigestParams {
     #[serde(default)]
     owner: Option<String>,
@@ -308,6 +320,73 @@ struct OwnerLifecycleParams {
     workspace_id: Option<String>,
     #[serde(default)]
     new_owner: Option<String>,
+    #[serde(default)]
+    components: Vec<String>,
+    #[serde(default)]
+    expected_counts: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryRetentionParams {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    raw_days: Option<u32>,
+    #[serde(default)]
+    candidate_days: Option<u32>,
+    #[serde(default)]
+    curated_days: Option<u32>,
+    #[serde(default)]
+    clear_curated_days: bool,
+    #[serde(default)]
+    graph_days: Option<u32>,
+    #[serde(default)]
+    clear_graph_days: bool,
+    #[serde(default)]
+    recovery_seconds: Option<u32>,
+    #[serde(default)]
+    preview_token: Option<String>,
+    #[serde(default)]
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryForgetParams {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    selector_kind: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    preview_token: Option<String>,
+    #[serde(default)]
+    tombstone_id: Option<String>,
+    #[serde(default)]
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScopedExportParams {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryExplainParams {
+    id: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -320,6 +399,24 @@ struct QuarantineMigrationParams {
 
 fn default_true() -> bool {
     true
+}
+
+fn forget_selector(
+    kind: Option<&str>,
+    value: Option<String>,
+) -> Result<ForgetSelector, rmcp::ErrorData> {
+    let value = value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("selector is required", None))?;
+    match kind.unwrap_or("record_id") {
+        "record_id" => Ok(ForgetSelector::RecordId(value)),
+        "source_uri" => Ok(ForgetSelector::SourceUri(value)),
+        "source_message_id" => Ok(ForgetSelector::SourceMessageId(value)),
+        _ => Err(rmcp::ErrorData::invalid_params(
+            "selector_kind must be record_id|source_uri|source_message_id",
+            None,
+        )),
+    }
 }
 
 fn parse_memory_kind(value: &str) -> Option<MemoryKind> {
@@ -377,6 +474,8 @@ struct GraphWalkParams {
     dst_id: Option<String>,
     #[serde(default)]
     max_depth: Option<usize>,
+    /// For action=impact: maximum returned files; the response always carries
+    /// the exact total and a truncated flag.
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -396,6 +495,8 @@ struct CodeIndexParams {
     rel_path: Option<String>,
     #[serde(default)]
     max_depth: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[tool_router]
@@ -527,6 +628,45 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "update_candidate",
+        description = "Edit one still-pending admission candidate in its exact owner/workspace scope without publishing it."
+    )]
+    async fn update_candidate(
+        &self,
+        Parameters(params): Parameters<CandidateUpdateParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("update_candidate")?;
+        let scope = request_scope(Some(params.owner), Some(params.workspace_id), false)?;
+        let kind = params.category.as_deref().and_then(parse_memory_kind);
+        if params.category.is_some() && kind.is_none() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "unsupported memory category",
+                None,
+            ));
+        }
+        let candidate = self
+            .provider
+            .update_candidate(
+                &params.id,
+                &scope.owner,
+                &scope.workspace_id,
+                &params.content,
+                kind,
+                params.reason.as_deref().unwrap_or("edited_by_user"),
+            )
+            .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
+        let candidate = candidate.ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                "pending candidate not found in this scope or edit was rejected",
+                None,
+            )
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"updated": true, "candidate": candidate}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "review_candidate",
         description = "Accept or reject one candidate. Owner and workspace are mandatory; acceptance creates the only curated record and embedding."
     )]
@@ -616,7 +756,7 @@ impl FrankenmemoryServer {
         } else {
             self.provider.quality_status()
         }
-        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
@@ -624,7 +764,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "owner_lifecycle",
-        description = "Privileged owner-scoped lifecycle operation. action=stats counts every memory tier; action=purge atomically removes the authenticated owner's tiers and graph; action=rename atomically moves them to new_owner."
+        description = "Privileged owner-scoped lifecycle operation. reset_preview returns exact count/fingerprint snapshots for selected memories, graph, or ingest components; reset_commit atomically validates that snapshot and erases it. Memories defensively expands to its graph and ingest dependency closure."
     )]
     async fn owner_lifecycle(
         &self,
@@ -641,16 +781,235 @@ impl FrankenmemoryServer {
                 })?;
                 self.graph_store.rename_owner(&scope.owner, new_owner)
             }
+            "reset_preview" | "reset_commit" => self.graph_store.reset_owner(
+                &params.action,
+                &scope.owner,
+                &params.components,
+                params.expected_counts.as_ref(),
+            ),
             _ => {
                 return Err(rmcp::ErrorData::invalid_params(
-                    "action must be stats|purge|rename",
+                    "action must be stats|purge|rename|reset_preview|reset_commit",
                     None,
                 ));
             }
         }
-        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_retention",
+        description = "Get, set, preview expiry, expire, or query expiry status for bounded owner/workspace memory retention. preview_expire returns the exact current closure and token. Token-checked expire also requires a client-generated 32-hex operation_id for exact retry recovery; status returns absent or the committed closure. Raw, candidate, curated, and graph tiers are independent; omitted curated/graph retention means keep. Mutations are unavailable through an Agent bridge."
+    )]
+    async fn memory_retention(
+        &self,
+        Parameters(params): Parameters<MemoryRetentionParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = match params.action.as_str() {
+            "get" => serde_json::to_value(
+                self.graph_store
+                    .retention_policy(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+            ),
+            "set" => {
+                reject_agent_bridge_internal_tool("memory_retention set")?;
+                let current = self
+                    .graph_store
+                    .retention_policy(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+                let policy = RetentionPolicy {
+                    raw_days: params.raw_days.unwrap_or(current.raw_days),
+                    candidate_days: params.candidate_days.unwrap_or(current.candidate_days),
+                    curated_days: if params.clear_curated_days {
+                        None
+                    } else {
+                        params.curated_days.or(current.curated_days)
+                    },
+                    graph_days: if params.clear_graph_days {
+                        None
+                    } else {
+                        params.graph_days.or(current.graph_days)
+                    },
+                    recovery_seconds: params.recovery_seconds.unwrap_or(current.recovery_seconds),
+                };
+                serde_json::to_value(
+                    self.graph_store
+                        .set_retention_policy(&scope.owner, &scope.workspace_id, &policy)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            "preview_expire" => serde_json::to_value(
+                self.graph_store
+                    .preview_expire_retention(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+            ),
+            "expire" => {
+                reject_agent_bridge_internal_tool("memory_retention expire")?;
+                let closure = match (
+                    params.preview_token.as_deref(),
+                    params.operation_id.as_deref(),
+                ) {
+                    (Some(token), Some(operation_id)) => self
+                        .graph_store
+                        .expire_retention_with_operation(
+                            &scope.owner,
+                            &scope.workspace_id,
+                            token,
+                            operation_id,
+                        )
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                    (None, None) => self
+                        .graph_store
+                        .expire_retention(&scope.owner, &scope.workspace_id)
+                        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+                    (Some(_), None) => {
+                        return Err(rmcp::ErrorData::invalid_params(
+                            "operation_id is required with preview_token",
+                            None,
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        return Err(rmcp::ErrorData::invalid_params(
+                            "preview_token is required with operation_id",
+                            None,
+                        ));
+                    }
+                };
+                serde_json::to_value(closure)
+            }
+            "status" => {
+                let operation_id = params.operation_id.as_deref().ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .retention_operation_status(&scope.owner, &scope.workspace_id, operation_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            _ => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "action must be get|set|preview_expire|expire|status",
+                    None,
+                ));
+            }
+        }
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_forget",
+        description = "Preview or commit a provenance-closure forget, restore it within the configured recovery window, or query an operation status. Commit requires the exact preview token plus a client-generated 32-hex operation_id, making transport retries idempotent. All actions are unavailable through an Agent bridge."
+    )]
+    async fn memory_forget(
+        &self,
+        Parameters(params): Parameters<MemoryForgetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("memory_forget")?;
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = match params.action.as_str() {
+            "preview" => {
+                let selector = forget_selector(params.selector_kind.as_deref(), params.selector)?;
+                serde_json::to_value(
+                    self.graph_store
+                        .preview_forget(&scope.owner, &scope.workspace_id, selector)
+                        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+                )
+            }
+            "commit" => {
+                let selector = forget_selector(params.selector_kind.as_deref(), params.selector)?;
+                let token = params.preview_token.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("preview_token is required", None)
+                })?;
+                let operation_id = params.operation_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .commit_forget_with_operation(
+                            &scope.owner,
+                            &scope.workspace_id,
+                            selector,
+                            &token,
+                            &operation_id,
+                        )
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            "status" => {
+                let operation_id = params.operation_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .forget_operation_status(&scope.owner, &scope.workspace_id, &operation_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            "restore" => {
+                let tombstone_id = params.tombstone_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("tombstone_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .restore_forget(&scope.owner, &scope.workspace_id, &tombstone_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            _ => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "action must be preview|commit|status|restore",
+                    None,
+                ));
+            }
+        }
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_export",
+        description = "Export the authenticated owner/workspace memory tiers with provenance, trust, policy, graph nodes, and non-sensitive tombstone metadata. Unavailable through an Agent bridge."
+    )]
+    async fn memory_export(
+        &self,
+        Parameters(params): Parameters<ScopedExportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("memory_export")?;
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = self
+            .graph_store
+            .export_scope(&scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_explain",
+        description = "Explain one curated memory's source identity, revision, trust, evidence, and graph projection in the authenticated scope."
+    )]
+    async fn memory_explain(
+        &self,
+        Parameters(params): Parameters<MemoryExplainParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = self
+            .graph_store
+            .explain_memory(&params.id, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"explanation": result}).to_string(),
         )]))
     }
 
@@ -917,6 +1276,24 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "reopen_memory",
+        description = "Reopen one previously resolved question in the exact owner/workspace scope. Only archived unknown-kind records are eligible."
+    )]
+    async fn reopen_memory(
+        &self,
+        Parameters(params): Parameters<MemoryGetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let reopened = self
+            .provider
+            .reopen_unknown(&params.id, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"id": params.id, "reopened": reopened}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "delete_memory",
         description = "Delete one curated memory by id within the owner/workspace scope."
     )]
@@ -1105,7 +1482,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "code_index",
-        description = "OPT-IN code graph. action=index parses a codebase (Rust/Python/TypeScript) into symbols, imports and name-matched call edges — nothing is ever indexed without this explicit call. action=status reports file/symbol counts, action=remove deletes the codebase's entire namespace, action=impact lists files transitively importing rel_path (blast radius). Explore results with graph_walk."
+        description = "OPT-IN code graph. action=index parses a codebase (Rust/Python/TypeScript) into symbols, imports and name-matched call edges — nothing is ever indexed without this explicit call. Per-file failures are tolerated: a file that cannot be read or parsed does not abort the run; it is reported in the result's errors/coverage and retried on the next run, while the rest of the codebase is indexed and published. action=status reports file/symbol counts and the ready generation, action=remove deletes the codebase's entire namespace, action=impact lists files transitively importing rel_path with exact total/truncation accounting. Explore results with graph_walk."
     )]
     async fn code_index(
         &self,
@@ -1135,7 +1512,23 @@ impl FrankenmemoryServer {
                     .graph_store
                     .code_status(&scope, &params.path)
                     .map_err(|e| ierr(format!("status failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "files": files, "symbols": symbols, "last_indexed": last })
+                let repository_id = std::path::Path::new(&params.path)
+                    .is_dir()
+                    .then(|| fm_core::code::repository_id(std::path::Path::new(&params.path)).ok())
+                    .flatten()
+                    .unwrap_or_else(|| params.path.clone());
+                let head = self
+                    .graph_store
+                    .code_index_head(&scope, &params.path)
+                    .map_err(|e| ierr(format!("status head failed: {e}")))?;
+                serde_json::json!({
+                    "repository_id": repository_id,
+                    "files": files,
+                    "symbols": symbols,
+                    "last_indexed": last,
+                    "ready_generation": head,
+                    "code_index_lease_seconds": self.graph_store.code_index_lease_seconds(),
+                })
             }
             "stale" => {
                 let root = std::path::Path::new(&params.path);
@@ -1156,7 +1549,12 @@ impl FrankenmemoryServer {
                     .graph_store
                     .code_remove(&scope, &params.path)
                     .map_err(|e| ierr(format!("remove failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "files_removed": removed })
+                let repository_id = std::path::Path::new(&params.path)
+                    .is_dir()
+                    .then(|| fm_core::code::repository_id(std::path::Path::new(&params.path)).ok())
+                    .flatten()
+                    .unwrap_or_else(|| params.path.clone());
+                serde_json::json!({ "repository_id": repository_id, "files_removed": removed })
             }
             "impact" => {
                 let rel = params
@@ -1164,9 +1562,20 @@ impl FrankenmemoryServer {
                     .ok_or_else(|| err("action=impact requires 'rel_path'".into()))?;
                 let impacted = self
                     .graph_store
-                    .code_impact(&scope, &params.path, &rel, params.max_depth.unwrap_or(4))
+                    .code_impact_bounded(
+                        &scope,
+                        &params.path,
+                        &rel,
+                        params.max_depth.unwrap_or(4),
+                        params.limit.unwrap_or(100).min(1000),
+                    )
                     .map_err(|e| ierr(format!("impact failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "rel_path": rel, "impacted_files": impacted })
+                let repository_id = std::path::Path::new(&params.path)
+                    .is_dir()
+                    .then(|| fm_core::code::repository_id(std::path::Path::new(&params.path)).ok())
+                    .flatten()
+                    .unwrap_or_else(|| params.path.clone());
+                serde_json::json!({ "repository_id": repository_id, "rel_path": rel, "impacted_files": impacted.impacted_files, "total": impacted.total, "truncated": impacted.truncated })
             }
             other => {
                 return Err(err(format!(
@@ -1217,6 +1626,10 @@ impl FrankenmemoryServer {
             "records_archived": result.records_archived,
             "records_merged": result.records_merged,
             "records_reflected": result.records_reflected,
+            "records_selected": result.records_selected,
+            "records_changed": result.records_changed,
+            "records_skipped": result.records_skipped,
+            "records_conflicted": result.records_conflicted,
             "alerts": result.alerts,
         });
 
@@ -1294,10 +1707,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let store = Arc::new(SqliteStore::new(
-        &config.db_path,
-        config.embedding.dimensions,
-    )?);
+    let mut store = SqliteStore::new(&config.db_path, config.embedding.dimensions)?;
+    store
+        .set_code_index_lease_seconds(config.code_index.lease_seconds)
+        .map_err(|error| format!("invalid code-index configuration: {error}"))?;
+    let store = Arc::new(store);
     let (database_id, schema_version) = store.database_identity()?;
     if let Ok(expected) = std::env::var("FM_DB_ID") {
         if !expected.trim().is_empty() && expected.trim() != database_id {
@@ -1310,31 +1724,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     tracing::info!(database_id, schema_version, path = %config.db_path, "frankenmemory database ready");
-    // Real embeddings by DEFAULT: unset FM_EMBED_API_BASE means the local
-    // ollama endpoint baked into EmbeddingConfig::default(). If that isn't
-    // running, per-call embed errors degrade gracefully to vectorless
-    // records + FTS-only recall — honest, unlike hash pseudo-vectors.
-    // FM_EMBED_API_BASE=none opts into the deterministic hash embedder
-    // (offline tests, air-gapped machines).
-    let embed_mode = std::env::var("FM_EMBED_API_BASE").unwrap_or_default();
-    let embed: Arc<dyn EmbeddingClient> = if matches!(embed_mode.trim(), "none" | "noop" | "off") {
-        tracing::info!("embeddings: deterministic noop (FM_EMBED_API_BASE={embed_mode})");
-        Arc::new(NoopEmbeddingClient::new(config.embedding.dimensions))
-    } else {
-        tracing::info!(
-            "embeddings: http {} model={} dims={}",
-            config.embedding.api_base,
-            config.embedding.model,
-            config.embedding.dimensions
-        );
-        Arc::new(HttpEmbeddingClient::with_api_key(
-            &config.embedding.api_base,
-            &config.embedding.model,
-            config.embedding.dimensions,
-            config.embedding.cache_size,
-            config.embedding.api_key.clone(),
-        ))
-    };
+    // Curated/raw memory rows currently lack the immutable route, adapter,
+    // model, and dimension generation metadata required for safe provider
+    // rotation.  Fail closed and retain exact/FTS recall.  Document vectors
+    // use the fingerprinted Python generation schema and Open Clank's managed
+    // ``embeddings.create`` operation instead.
+    tracing::info!("embeddings: disabled for unfingerprinted curated-memory rows");
+    let embed: Arc<dyn EmbeddingClient> =
+        Arc::new(DisabledEmbeddingClient::new(config.embedding.dimensions));
     let provider = Arc::new(NativeProvider::new(store.clone(), embed, config));
 
     let server = FrankenmemoryServer::new(provider, store);

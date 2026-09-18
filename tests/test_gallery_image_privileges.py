@@ -33,7 +33,7 @@ def test_image_generation_endpoints_require_image_privilege():
 
     for name in GATED_IMAGE_FUNCTIONS:
         assert name in functions
-        assert 'require_privilege(request, "can_generate_images")' in functions[name]
+        assert '_require_gallery_privilege(request, "can_generate_images")' in functions[name]
 
 
 def test_gallery_routes_imports_privilege_helper():

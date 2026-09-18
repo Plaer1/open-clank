@@ -3,7 +3,7 @@
 
 import Storage from './storage.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260722ctxheader1';
+import chatRenderer from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';
 import themeModule from './theme.js';
@@ -239,8 +239,8 @@ function _installHistoryPager(id, pageInfo, modelName) {
       }
       _historyPager.offset = Number(data.offset || nextOffset);
       _historyPager.done = !data.has_more_before;
-      if (window.hljs) {
-        newEls.forEach(el => el.querySelectorAll('pre code:not(.hljs)').forEach(block => window.hljs.highlightElement(block)));
+      if (window.odysseusHighlight) {
+        newEls.forEach(el => window.odysseusHighlight.highlightAll(el));
       }
       const heightDelta = box.scrollHeight - beforeHeight;
       box.scrollTop += heightDelta;
@@ -548,6 +548,8 @@ function createSessionItem(s) {
     icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
   } else if (s.mode === 'research') {
     icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+  } else if (s.mode === 'plan') {
+    icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><polyline points="3 6 4 7 6 5"/><polyline points="3 12 4 13 6 11"/><polyline points="3 18 4 19 6 17"/></svg>';
   } else {
     icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
   }
@@ -1899,6 +1901,39 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
         window.chatModule.abortCurrentRequest();
       }
     }
+
+    // The active workspace belongs to the selected chat, not to the browser
+    // profile globally. Do this only after detaching the prior chat's stream,
+    // then resolve the opaque ID through current Agent authority. A stale
+    // navigation can never repaint a later-selected chat.
+    try {
+      const workspaceModule = await import('./workspace.js');
+      // Clear both the visible pill and the browser's send pointer before the
+      // async resolve. Hiding only the pill leaves a window where a fast send
+      // can submit the previous chat's workspace ID into this chat.
+      await workspaceModule.setWorkspace('', '', { persist: false });
+      if (meta?.workspace_id) {
+        const resolved = await workspaceModule.resolveWorkspaceId(
+          meta.workspace_id,
+          'agent_workspace',
+        );
+        if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+        await workspaceModule.setWorkspace(
+          resolved.path,
+          resolved.id,
+          { persist: false },
+        );
+      } else {
+        await workspaceModule.setWorkspace('', '', { persist: false });
+      }
+    } catch (error) {
+      if (navToken !== _sessionNavToken || currentSessionId !== id) return;
+      try {
+        const workspaceModule = await import('./workspace.js');
+        await workspaceModule.setWorkspace('', '', { persist: false });
+      } catch (_) {}
+      uiModule.showToast('This chat’s Workspace is no longer available', 5000);
+    }
     // Reset send button to idle state
     if (window._updateSendBtnIcon) window._updateSendBtnIcon();
     const sendBtn = document.querySelector('.send-btn');
@@ -2076,11 +2111,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       chatHistory.style.opacity = '1';
       chatHistory.classList.remove('no-animate');
     }
-    if (window.hljs) {
-      document.querySelectorAll('pre code:not(.hljs)').forEach(block => {
-        window.hljs.highlightElement(block);
-      });
-    }
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(document);
     // Hide research button on session switch — it's only for the session that started it
     var _rBtn = document.getElementById('research-toggle-btn');
     var _rChk = document.getElementById('research-toggle');
@@ -2266,6 +2297,10 @@ export async function materializePendingSession() {
     if (pending.endpointId) {
       fd.append('endpoint_id', pending.endpointId);
     }
+    const pendingWorkspaceId = Storage.get(Storage.KEYS.WORKSPACE_ID, '') || '';
+    if (pendingWorkspaceId) {
+      fd.append('workspace_id', pendingWorkspaceId);
+    }
 
     let res;
     try {
@@ -2284,6 +2319,10 @@ export async function materializePendingSession() {
 
     if (!res.ok) {
       uiModule.showError(`Session create failed (${res.status}) ${payload.detail || JSON.stringify(payload)}`);
+      return false;
+    }
+    if (!payload.id) {
+      uiModule.showError('Session create failed: backend returned no session ID');
       return false;
     }
 
@@ -2305,11 +2344,21 @@ export async function materializePendingSession() {
     if (window.documentModule?.clearSelection) {
       try { window.documentModule.clearSelection(); } catch {}
     }
+    const materialized = {
+      ...payload,
+      model: payload.model || pending.modelId || '',
+      endpoint_url: payload.endpoint_url || pending.url || '',
+      endpoint_id: payload.endpoint_id || pending.endpointId || '',
+    };
+    const existingIndex = sessions.findIndex(item => item.id === materialized.id);
+    if (existingIndex >= 0) sessions[existingIndex] = { ...sessions[existingIndex], ...materialized };
+    else sessions.unshift(materialized);
     _pendingChat = null;
-    currentSessionId = payload.id;
+    currentSessionId = materialized.id;
     if (!isIncognito) {
-      Storage.set('lastSessionId', payload.id);
+      Storage.set('lastSessionId', materialized.id);
     }
+    updateModelPicker();
 
     // Reload the sidebar in the background. Awaiting this used to block the first
     // prompt in a new/pending chat behind startup fetches and slow /api/sessions
@@ -2360,6 +2409,11 @@ export function isCurrentSessionIncognito() {
 
 export function getSessions() {
   return sessions;
+}
+
+export function setSessionWorkspaceId(sessionId, workspaceId) {
+  const session = sessions.find((item) => item.id === sessionId);
+  if (session) session.workspace_id = String(workspaceId || '') || null;
 }
 
 export function getCurrentModel() {
@@ -3642,6 +3696,7 @@ const sessionModule = {
   clearPendingChat,
   getCurrentSessionId,
   getSessions,
+  setSessionWorkspaceId,
   getCurrentModel,
   getCurrentEndpointUrl,
   setCurrentSessionId,

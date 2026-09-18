@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "product": "Open Clank",
+  "component": "managed-model-engine",
+  "vendor": {
+    "name": "MiMo Code",
+    "upstream_repository": "https://github.com/XiaomiMiMo/mimo-code.git",
+    "upstream_commit": "60af8f1ff73272f830d327b4e1a0794c7a67eefe",
+    "open_clank_import_commit": "f53c8a3e86f258164ff47eae00a03559a38895cf",
+    "open_clank_import_tree": "26804958956abe82dfe4d46bec0f9ac07d334c39"
+  },
+  "license": {
+    "spdx": "MIT",
+    "path": "LICENSE",
+    "sha256": "d7201a5532f4ce12324aec5469dc1dfe290654d085c2547bc7384932881ac448"
+  },
+  "toolchain": {
+    "bun": {
+      "version": "1.3.14",
+      "release_repository": "https://github.com/oven-sh/bun",
+      "downloads": {
+        "darwin-arm64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip",
+          "sha256": "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
+        },
+        "darwin-x64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-x64.zip",
+          "sha256": "4183df3374623e5bab315c547cfa0974533cd457d86b73b639f7a87974cd6633"
+        },
+        "linux-arm64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip",
+          "sha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b"
+        },
+        "linux-x64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip",
+          "sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+        },
+        "windows-x64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip",
+          "sha256": "0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922"
+        }
+      }
+    }
+  },
+  "inputs": {
+    "lockfile": {
+      "path": "bun.lock",
+      "sha256": "a52e38d84b446edca0a88a365a4f5f4ef3d2ca3191b78b0fc8d0627b1ed2c494"
+    },
+    "model_catalog": {
+      "path": "packages/opencode/test/tool/fixtures/models-api.json",
+      "sha256": "33f836f532fd8ada58f255f11030ff5500d45b0cf7e63587772221050ffb1f48"
+    }
+  },
+  "protocols": {
+    "managed_acp": 1,
+    "provider_store": 1,
+    "operation_router": 1
+  },
+  "managed_schema": {
+    "id": "https://openclank.dev/contracts/managed-provider/v1",
+    "version": 1,
+    "repository_path": "contracts/openclank/managed-provider-v1.schema.json",
+    "sha256": "f9b9c7eb4dd50fa5d00f65f3662c9e9aa2702de63de94ada1e13321d131d0bbb"
+  },
+  "build": {
+    "contract_version": 1,
+    "source_date_epoch": 1785240447,
+    "source_hash_algorithm": "openclank-tree-sha256-v1",
+    "source_sha256": "1814f6bca5aba88c37fb3e32c44995873926d8cdb8ecacab557db165d1fbbc91",
+    "tier_1_targets": [
+      "linux-x64",
+      "linux-arm64",
+      "darwin-arm64",
+      "darwin-x64",
+      "windows-x64"
+    ],
+    "experimental_targets": [
+      "linux-x64-baseline",
+      "linux-x64-musl",
+      "linux-arm64-musl",
+      "windows-arm64"
+    ]
+  }
+}

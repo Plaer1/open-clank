@@ -1,3 +1,5 @@
+import { registerAdapter } from '../custom-context-menu.js';
+
 // TableModel — Markdown table parser, serializer, mutation engine, and formula evaluator.
 // Parses Markdown tables into a structured model with source-position tracking.
 // All mutations produce valid Markdown and CodeMirror-compatible change arrays.
@@ -663,6 +665,8 @@ function formatResult(val) {
 
 // ─── Interactive table widget ────────────────────────────────────────────────
 
+const tableOwners = new WeakMap();
+
 export function createTableWidget(model, onEdit, { h } = {}) {
   // h: hyperscript helper (optional, falls back to DOM APIs)
   const el = (tag, attrs, ...children) => {
@@ -790,37 +794,9 @@ export function createTableWidget(model, onEdit, { h } = {}) {
     }
   }
 
-  function showContextMenu(e, r, c) {
-    e.preventDefault();
-    hideContextMenu();
-    contextMenu = el('div', { class: 'copal-table-context-menu' });
-    const items = [];
-    if (r === 0) {
-      // Column operations
-      items.push({ label: 'Insert column left', action: () => onEdit({ type: 'insertColumn', afterCol: c - 1 }) });
-      items.push({ label: 'Insert column right', action: () => onEdit({ type: 'insertColumn', afterCol: c }) });
-      items.push({ label: 'Delete column', action: () => onEdit({ type: 'deleteColumn', col: c }) });
-      items.push({ label: 'Sort ascending', action: () => onEdit({ type: 'sort', col: c, direction: 'asc' }) });
-      items.push({ label: 'Sort descending', action: () => onEdit({ type: 'sort', col: c, direction: 'desc' }) });
-      const align = widgetModel.alignments[c] || 'left';
-      const next = align === 'left' ? 'center' : align === 'center' ? 'right' : 'left';
-      items.push({ label: `Align ${next}`, action: () => onEdit({ type: 'setAlignment', col: c, alignment: next }) });
-    } else {
-      items.push({ label: 'Insert row above', action: () => onEdit({ type: 'insertRow', afterRow: r - 1 }) });
-      items.push({ label: 'Insert row below', action: () => onEdit({ type: 'insertRow', afterRow: r }) });
-      items.push({ label: 'Delete row', action: () => onEdit({ type: 'deleteRow', row: r }) });
-    }
-    items.push({ label: 'Transpose', action: () => onEdit({ type: 'transpose' }) });
-
-    for (const item of items) {
-      const btn = el('button', { class: 'copal-table-context-item', text: item.label, onclick: () => { hideContextMenu(); item.action(); } });
-      contextMenu.append(btn);
-    }
-    contextMenu.style.left = `${e.clientX}px`;
-    contextMenu.style.top = `${e.clientY}px`;
-    document.body.append(contextMenu);
-    const dismiss = (ev) => { if (!contextMenu?.contains(ev.target)) { hideContextMenu(); document.removeEventListener('mousedown', dismiss); } };
-    setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
+  function showContextMenu() {
+    // The shared menu owns contextmenu events when enabled.  When it is off,
+    // this handler deliberately does nothing so the browser menu is exposed.
   }
 
   function hideContextMenu() {
@@ -834,6 +810,7 @@ export function createTableWidget(model, onEdit, { h } = {}) {
     for (let c = 0; c < widgetModel.columns; c++) {
       const th = el('th', {
         'data-row': '0', 'data-col': String(c),
+        'data-copal-context-object': 'table',
         tabindex: '-1',
         onclick: () => setActiveCell(0, c),
         ondblclick: () => startEdit(0, c),
@@ -858,8 +835,9 @@ export function createTableWidget(model, onEdit, { h } = {}) {
     for (let r = 1; r < widgetModel.rows.length; r++) {
       const tr = el('tr');
       for (let c = 0; c < widgetModel.columns; c++) {
-        const td = el('td', {
-          'data-row': String(r), 'data-col': String(c),
+      const td = el('td', {
+        'data-row': String(r), 'data-col': String(c),
+        'data-copal-context-object': 'table',
           tabindex: '-1',
           onclick: () => setActiveCell(r, c),
           ondblclick: () => startEdit(r, c),
@@ -884,6 +862,45 @@ export function createTableWidget(model, onEdit, { h } = {}) {
   container.addEventListener('focus', () => {
     if (activeRow < 0) setActiveCell(0, 0);
   });
+
+  const tableAdapter = {
+    capture: (target) => ({ row:Number(target?.dataset?.row), col:Number(target?.dataset?.col) }),
+    commands: (request) => {
+      const row = Number(request.adapterContext?.row); const col = Number(request.adapterContext?.col);
+      if (!Number.isInteger(row) || !Number.isInteger(col)) return [];
+      if (row === 0) return [
+        { label:'Insert column left', id:'table-insert-column-left' },
+        { label:'Insert column right', id:'table-insert-column-right' },
+        { label:'Delete column', id:'table-delete-column', disabled:widgetModel.columns <= 1 },
+      ];
+      return [
+        { label:'Insert row above', id:'table-insert-row-above' },
+        { label:'Insert row below', id:'table-insert-row-below' },
+        { label:'Delete row', id:'table-delete-row', disabled:widgetModel.rows.length <= 2 },
+      ];
+    },
+    execute: (command, request) => {
+      const row = Number(request.adapterContext?.row); const col = Number(request.adapterContext?.col);
+      if (!Number.isInteger(row) || !Number.isInteger(col)) return false;
+      if (row === 0 && command === 'table-insert-column-left') onEdit({ type:'insertColumn', afterCol:col - 1 });
+      else if (row === 0 && command === 'table-insert-column-right') onEdit({ type:'insertColumn', afterCol:col });
+      else if (row === 0 && command === 'table-delete-column' && widgetModel.columns > 1) onEdit({ type:'deleteColumn', col });
+      else if (row > 0 && command === 'table-insert-row-above') onEdit({ type:'insertRow', afterRow:row - 1 });
+      else if (row > 0 && command === 'table-insert-row-below') onEdit({ type:'insertRow', afterRow:row });
+      else if (row > 0 && command === 'table-delete-row' && widgetModel.rows.length > 2) onEdit({ type:'deleteRow', row });
+      else return false;
+      return true;
+    },
+  };
+  tableOwners.set(container, tableAdapter);
+  registerAdapter(container, tableAdapter);
+  window.__openClankTableContextCommand = (command, target) => {
+    const owner = target?.closest?.('.copal-table-widget');
+    const adapter = owner ? tableOwners.get(owner) : null;
+    if (!adapter) return false;
+    const request = { adapterContext:adapter.capture(target) };
+    return adapter.execute(command, request);
+  };
 
   renderBody();
   return container;

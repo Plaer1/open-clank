@@ -1,66 +1,159 @@
-"""Image-domain tool implementations.
+"""Owner-bound managed image editing tools."""
 
-Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
-Holds the edit_image (gallery) tool.
-``src.tool_implementations`` re-exports these for backward compatibility.
-``_INTERNAL_BASE`` still lives in tool_implementations.py and is pulled back
-function-locally here.
-"""
+from __future__ import annotations
+
+import base64
+import hashlib
 from typing import Dict, Optional
 
 from src.tools._common import _parse_tool_args
 
 
-async def do_edit_image(content: str, owner: Optional[str] = None) -> Dict:
-    """Edit a gallery image (upscale, rembg, inpaint, harmonize)."""
-    import httpx
-    from src.tool_implementations import _INTERNAL_BASE  # shared constant, still lives in the facade
+async def do_edit_image(
+    content: str,
+    owner: Optional[str] = None,
+    *,
+    root_operation_id: Optional[str] = None,
+    grant_id: Optional[str] = None,
+) -> Dict:
+    """Edit a Gallery image through the typed MiMo operation router."""
+
+    from src.ai_interaction import _save_managed_gallery_image
+    from src.database import GalleryImage, SessionLocal
+    from src.generated_images import gallery_owner_key, resolve_generated_image_path
+    from src.openclank.modality_facade import transform_image
+    from src.openclank.operation_router import (
+        ManagedOperationDenied,
+        ManagedOperationUnavailable,
+    )
+
     try:
         args = _parse_tool_args(content)
     except ValueError:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
-    image_id = args.get("image_id", "")
-    action = args.get("action", "")
-    if not image_id or not action:
-        return {"error": "image_id and action are required", "exit_code": 1}
-    payload = {"image_id": image_id}
-    if args.get("prompt"):
-        payload["prompt"] = args["prompt"]
-    if args.get("scale"):
-        payload["scale"] = args["scale"]
+    image_id = str(args.get("image_id") or "").strip()
+    action = str(args.get("action") or "").strip().lower()
+    if not image_id or action not in {"upscale", "rembg", "inpaint", "harmonize"}:
+        return {
+            "error": "image_id and a supported action are required",
+            "exit_code": 1,
+        }
+
+    owner_key = gallery_owner_key(owner)
+    if owner_key is None:
+        return {"error": "Gallery image not found", "exit_code": 1}
+
+    with SessionLocal() as db:
+        query = db.query(GalleryImage).filter(
+            GalleryImage.id == image_id,
+            GalleryImage.is_active.is_(True),
+            GalleryImage.owner == owner_key,
+        )
+        source = query.first()
+        if source is None:
+            return {"error": "Gallery image not found", "exit_code": 1}
+        filename = source.filename
+        session_id = source.session_id
+
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{_INTERNAL_BASE}/api/gallery/{action}", json=payload)
-            data = resp.json()
-        new_id = data.get("id") or data.get("image_id")
-        if data.get("success") or new_id:
-            result = {
-                "output": f"Image edited ({action}). New image ID: {new_id or '?'}",
-                "exit_code": 0,
+        path = resolve_generated_image_path(filename)
+        image = path.read_bytes()
+    except Exception:
+        return {"error": "Gallery image file not found", "exit_code": 1}
+
+    operation = {
+        "upscale": "image.upscale",
+        "rembg": "image.remove_background",
+        "inpaint": "image.inpaint",
+        "harmonize": "image.img2img",
+    }[action]
+    prompt = str(args.get("prompt") or "").strip()
+    mask = None
+    if action == "inpaint":
+        encoded_mask = str(args.get("mask") or "").strip()
+        if not prompt or not encoded_mask:
+            return {
+                "error": "inpaint requires prompt and mask",
+                "exit_code": 1,
             }
-            if new_id:
-                result["image_id"] = new_id
-                try:
-                    from src.database import GalleryImage, SessionLocal
-                    db = SessionLocal()
-                    try:
-                        q = db.query(GalleryImage).filter(GalleryImage.id == new_id)
-                        if owner:
-                            q = q.filter(GalleryImage.owner == owner)
-                        img = q.first()
-                        if img and img.filename:
-                            result.update({
-                                "image_url": f"/api/generated-image/{img.filename}",
-                                "image_prompt": img.prompt or args.get("prompt") or action,
-                                "image_model": img.model or "edit_image",
-                                "image_size": img.size or "",
-                                "image_quality": img.quality or "",
-                            })
-                    finally:
-                        db.close()
-                except Exception:
-                    pass
-            return result
-        return {"error": data.get("error", f"{action} failed"), "exit_code": 1}
-    except Exception as e:
-        return {"error": str(e), "exit_code": 1}
+        if encoded_mask.startswith("data:") and "," in encoded_mask:
+            encoded_mask = encoded_mask.split(",", 1)[1]
+        try:
+            mask = base64.b64decode(encoded_mask, validate=True)
+        except Exception:
+            return {"error": "inpaint mask is invalid", "exit_code": 1}
+        if not mask or len(mask) > 32 * 1024 * 1024:
+            return {"error": "inpaint mask exceeds its size limit", "exit_code": 1}
+
+    try:
+        scale = int(args.get("scale") or 2)
+    except (TypeError, ValueError):
+        scale = 2
+    input_payload = {
+        "prompt": (
+            prompt
+            or (
+                "Remove the background and preserve the foreground"
+                if action == "rembg"
+                else "Preserve the image while applying the requested transform"
+            )
+        ),
+        "scale": 2 if scale not in (2, 4) else scale,
+        "strength": 0.45,
+    }
+    try:
+        output, media_type, result = await transform_image(
+            owner=owner_key,
+            operation=operation,
+            image=image,
+            media_type=(
+                "image/jpeg"
+                if image.startswith(b"\xff\xd8\xff")
+                else "image/webp"
+                if image.startswith(b"RIFF") and image[8:12] == b"WEBP"
+                else "image/png"
+            ),
+            input=input_payload,
+            mask=mask,
+            model_route_id=(
+                str(args.get("model_route_id") or "").strip() or None
+            ),
+            grant_id=grant_id,
+            root_operation_id=root_operation_id,
+            idempotency_key=(
+                "tool_image_" + hashlib.sha256(
+                    f"{root_operation_id}\0{image_id}\0{action}\0{content}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                if root_operation_id
+                else None
+            ),
+        )
+    except ManagedOperationDenied:
+        return {"error": "The selected image route denied this edit", "exit_code": 1}
+    except ManagedOperationUnavailable:
+        return {"error": "No managed Images route supports this edit", "exit_code": 1}
+    except Exception:
+        return {"error": "Managed image edit failed", "exit_code": 1}
+
+    image_url, new_id = _save_managed_gallery_image(
+        image_bytes=output,
+        media_type=media_type,
+        prompt=prompt or action,
+        model_route_id=result.model_route_id,
+        size="",
+        quality="",
+        session_id=session_id,
+        owner=owner_key,
+    )
+    return {
+        "output": f"Image edited ({action}). New image ID: {new_id or '?'}",
+        "exit_code": 0,
+        "image_id": new_id,
+        "image_url": image_url,
+        "image_prompt": prompt or action,
+        "image_model": result.model_route_id,
+        "image_size": "",
+        "image_quality": "",
+    }

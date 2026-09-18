@@ -1,0 +1,5 @@
+# Development-only generator lock for proto/files_transport.proto. Installed
+# macOS apps use requirements.txt and the checked-in stubs, never grpcio-tools.
+grpcio==1.83.0
+grpcio-tools==1.83.0
+protobuf==7.35.1

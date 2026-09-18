@@ -1,0 +1,49 @@
+{
+  "schema": "openclank.agent-supervisor.compatibility-fixtures.v1",
+  "readiness": {
+    "ok": true,
+    "event_loop": true,
+    "owner_workers": 1
+  },
+  "owner_generation": {
+    "owner": "alice",
+    "generation": 7,
+    "fingerprint": "fixture-fingerprint-7",
+    "status": "ready"
+  },
+  "lease": {
+    "owner": "alice",
+    "generation": 7,
+    "fingerprint": "fixture-fingerprint-7",
+    "projection_pending": false,
+    "release": {"successful_terminal": true}
+  },
+  "model_catalog": {
+    "models": [{"modelId": "provider/model", "provider": "provider"}],
+    "provider_apis": {"provider": "managed"}
+  },
+  "session": {
+    "canonical_id": "session-1",
+    "runtime_id": "runtime-1",
+    "config": {"mode": "build"},
+    "request": {"method": "POST", "suffix": "command"}
+  },
+  "sse": [
+    {"event": "message", "data": {"type": "assistant.delta", "seq": 1}},
+    {"event": "done", "data": {"seq": 2}}
+  ],
+  "interactions": {
+    "permission": {"request_id": "permission-1", "owner": "alice"},
+    "question": {"request_id": "question-1", "owner": "alice"},
+    "plan": {"revision": 1, "approved_revision": 1}
+  },
+  "managed_operation": {
+    "method": "provider.list",
+    "result": {"ok": true}
+  },
+  "lifecycle": [
+    {"operation": "rename_owner", "old_owner": "alice", "new_owner": "alice2"},
+    {"operation": "purge_owner", "owner": "alice2"},
+    {"operation": "shutdown", "idempotency_key": "shutdown-fixture-1"}
+  ]
+}

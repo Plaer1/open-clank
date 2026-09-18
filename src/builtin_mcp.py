@@ -66,11 +66,11 @@ def _find_npx() -> str:
 # execution (src/tool_execution.py:_direct_fallback). Those trivial subprocess
 # wrappers are gone.
 #
-# image_gen / memory / rag / email still run as stdio MCP servers — each
-# carries hundreds of LOC of unique IMAP / HTTP / manager logic not worth
-# duplicating into the native path right now.
+# Image generation runs in the main process through the owner-bound managed
+# operation router. A standalone stdio child cannot inherit the supervisor's
+# capability binding, so it is deliberately not auto-registered here.
+# RAG / email remain separate non-model integration MCP servers.
 _BUILTIN_SERVERS = {
-    "image_gen":  ("mcp_servers/image_gen_server.py",  "Built-in: Image Generation"),
     # Memory is owner-scoped through the active provider / Agent ACP bridge.
     # Starting memory_server.py here creates a second, unscoped provider path.
     "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),

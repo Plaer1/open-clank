@@ -51,7 +51,19 @@ WIRE_RECORD = {
     "last_accessed_at": "2026-07-17T02:00:00Z",
     "exempt_from_decay": True,
     "exempt_from_dedup": False,
-    "metadata": {"pinned": True},
+    "metadata": {
+        "pinned": True,
+        "source_uri": "message://alice/sess-1/msg-1",
+        "source_revision": 3,
+        "content_hash": "abc123",
+        "recall_explanation": {
+            "strategy": "hybrid_rrf",
+            "lexical_rrf": 0.01,
+            "vector_rrf": 0.02,
+            "graph": 0.0,
+        },
+        "provenance_conflict": True,
+    },
 }
 
 
@@ -72,6 +84,11 @@ def test_record_mapping_carries_full_signal_set():
     assert record.exempt_from_dedup is False
     assert record.last_accessed_at == "2026-07-17T02:00:00Z"
     assert record.pinned is True
+    assert record.source_uri == "message://alice/sess-1/msg-1"
+    assert record.source_revision == 3
+    assert record.content_hash == "abc123"
+    assert record.recall_explanation["strategy"] == "hybrid_rrf"
+    assert record.provenance_conflict is True
 
 
 def test_record_mapping_defaults_when_fields_absent():
@@ -85,6 +102,9 @@ def test_record_mapping_defaults_when_fields_absent():
     assert record.archived is False
     assert record.exempt_from_decay is False
     assert record.last_accessed_at is None
+    assert record.source_uri is None
+    assert record.recall_explanation == {}
+    assert record.provenance_conflict is False
 
 
 def test_native_record_defaults_read_as_hand_authored():
@@ -160,6 +180,11 @@ def _full_record():
         uses=3,
         metadata={"pinned": True},
         pinned=True,
+        source_uri="message://alice/sess-1/msg-1",
+        source_revision=3,
+        content_hash="abc123",
+        recall_explanation={"strategy": "hybrid_rrf", "graph": 0.0},
+        provenance_conflict=True,
     )
 
 
@@ -174,7 +199,8 @@ def test_list_payload_serializes_enriched_record(monkeypatch):
         "importance_score", "scene_name", "tags", "source_message_ids",
         "workspace_id", "workspace_path", "archived", "exempt_from_decay",
         "exempt_from_dedup", "last_accessed_at", "created_at", "updated_at",
-        "uses",
+        "uses", "source_uri", "source_revision", "content_hash",
+        "recall_explanation", "provenance_conflict",
     ):
         assert key in row, key
     assert row["kind"] == "instruction"
@@ -182,6 +208,11 @@ def test_list_payload_serializes_enriched_record(monkeypatch):
     assert row["trust_score"] == pytest.approx(0.9)
     assert row["tags"] == ["units"]
     assert row["exempt_from_decay"] is True
+    assert row["source_uri"] == "message://alice/sess-1/msg-1"
+    assert row["source_revision"] == 3
+    assert row["content_hash"] == "abc123"
+    assert row["recall_explanation"]["strategy"] == "hybrid_rrf"
+    assert row["provenance_conflict"] is True
 
 
 def test_graph_endpoint_scopes_to_caller_and_validates_op(monkeypatch):
@@ -303,5 +334,37 @@ async def test_live_graph_overview_scoped_round_trip(tmp_path):
 
         foreign = await provider.graph("overview", owner="mallory", limit=50)
         assert foreign["nodes"] == [] and foreign["node_total"] == 0
+
+        narrow = await provider.graph("overview", owner="alice", limit=1)
+        visible = {node["id"] for node in narrow["nodes"]}
+        assert all(
+            edge["src_id"] in visible and edge["dst_id"] in visible
+            for edge in narrow["edges"]
+        )
+    finally:
+        await asyncio.create_task(provider.shutdown())
+
+
+@needs_fm
+async def test_live_canonical_graph_trace_uses_node_ids(tmp_path):
+    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    await asyncio.create_task(provider.initialize())
+    try:
+        record = await provider.remember(
+            "Alice keeps the amber key.", owner="alice", category="persona"
+        )
+        overview = await provider.graph("overview", owner="alice", limit=50)
+        entity = next(node for node in overview["nodes"] if node["id"].startswith("entity_"))
+        block = next(node for node in overview["nodes"] if node["id"].startswith("block_"))
+        trace = await provider.graph(
+            "trace",
+            owner="alice",
+            node_id=entity["id"],
+            to_node_id=block["id"],
+            limit=5,
+        )
+        assert trace["paths"]
+        assert trace["paths"][0]["node_ids"] == [entity["id"], block["id"]]
+        assert record.id in {item["id"] for item in await provider.inspect_tier("curated", owner="alice")}
     finally:
         await asyncio.create_task(provider.shutdown())

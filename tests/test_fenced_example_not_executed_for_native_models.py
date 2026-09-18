@@ -23,6 +23,7 @@ assertions) end-to-end with a mocked LLM stream, and assert on whether
 """
 import asyncio
 import json
+from types import SimpleNamespace
 
 import src.agent_loop as al
 
@@ -50,6 +51,20 @@ def _patch_common(monkeypatch, exec_calls):
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    monkeypatch.setattr(
+        al,
+        "resolve_chat_route",
+        lambda **kwargs: SimpleNamespace(
+            provider_model_id=kwargs.get("model_id") or "test-model",
+            model_route_id="route-test",
+            provider_grant_id=None,
+            connection_id="connection-test",
+            runtime_model=f"connection-test/{kwargs.get('model_id') or 'test-model'}",
+            capabilities={
+                "tools": not str(kwargs.get("model_id") or "").startswith("llama-2")
+            },
+        ),
+    )
 
     async def _fake_exec(block, *a, **k):
         exec_calls.append(block)
@@ -79,7 +94,7 @@ def _run_loop(monkeypatch, model, deltas, native_calls=None, max_rounds=2, endpo
             yield f'data: {json.dumps({"delta": "All done, here is your answer."})}\n\n'
             yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     gen = al.stream_agent_loop(
         endpoint_url or "https://api.openai.com/v1", model,
@@ -134,10 +149,8 @@ def test_native_model_real_native_tool_call_is_executed(monkeypatch):
 def test_non_native_model_fenced_tool_call_still_executed(monkeypatch):
     exec_calls = []
     _patch_common(monkeypatch, exec_calls)
-    # Neither this model name nor this endpoint host match any of the
-    # native-capable keyword/host checks, so _is_api_model resolves to False
-    # and the model must rely on the textual fenced-block convention to
-    # invoke tools at all.
+    # This normalized route explicitly disables native tool protocol, so the
+    # model relies on the textual fenced-block convention to invoke tools.
     events = _run_loop(
         monkeypatch, "llama-2-7b-chat",
         ["```bash\necho hi\n```"],

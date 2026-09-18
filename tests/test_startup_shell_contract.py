@@ -9,10 +9,14 @@ def test_startup_shell_keeps_html_and_modules_in_sync():
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
 
     assert "HTML (navigation): network-first" in worker
-    assert "open-clank-v349-upstream-sync" in worker
-    assert "/static/app.js?v=20260728syncshell1" in index
+    assert "open-clank-v352-qol2-s01" in worker
+    # Keep the contract tied to the current shell revision. The service worker
+    # is network-first for HTML/modules, so a stale historical query string is
+    # a test failure rather than a reason to roll the frontend back.
+    assert "/static/app.js?v=20260816qol2s01" in index
     assert "/static/js/init.js?v=20260728syncshell1" in index
     assert 'name="viewport" content="width=device-width' in index
+    assert "./js/permission-mode.js" in (ROOT / "static/app.js").read_text(encoding="utf-8")
 
 
 def test_authenticated_startup_owns_username_and_sidebar_model_visibility():
@@ -30,4 +34,5 @@ def test_merged_frontend_modules_are_syntax_valid():
 
     assert sessions.count("const _isFirstLoad =") == 1
     assert chat.count("function _setStoredPlan(") == 1
-    assert "function _setApprovedPlan(" in chat
+    assert "_readSessionState('plan'" in chat
+    assert "localStorage.setItem(PLAN_STORAGE_KEY" not in chat

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 
-from src.constants import GENERATED_IMAGES_DIR
+from fastapi import HTTPException
+
+from src.generated_images import (
+    GENERATED_IMAGE_DIR,
+    gallery_owner_key,
+    resolve_gallery_image_path,
+)
 
 logger = logging.getLogger(__name__)
+GENERATED_IMAGES_DIR = GENERATED_IMAGE_DIR
 
 
 def _database_models():
@@ -21,19 +27,10 @@ def _database_models():
 
 
 def _generated_image_path_for_cleanup(filename: str) -> Path | None:
-    if not isinstance(filename, str) or not filename:
-        return None
-    name = Path(filename).name
-    if name != filename or name in {".", ".."}:
-        return None
-    root = Path(GENERATED_IMAGES_DIR).resolve()
-    path = (root / name).resolve()
     try:
-        if os.path.commonpath([str(root), str(path)]) != str(root):
-            return None
-    except Exception:
+        return resolve_gallery_image_path(filename, root=GENERATED_IMAGES_DIR)
+    except HTTPException:
         return None
-    return path
 
 
 def _image_filename_from_url(url: str) -> str:
@@ -43,13 +40,28 @@ def _image_filename_from_url(url: str) -> str:
     return match.group(1) if match else ""
 
 
-def session_image_refs(db, session_id: str) -> tuple[set[str], set[str]]:
+def session_image_refs(db, session_id: str, owner: str | None) -> tuple[set[str], set[str]]:
     """Return gallery image ids and generated-image filenames referenced by a chat."""
     ChatMessage, GalleryImage, _ = _database_models()
     image_ids: set[str] = set()
     filenames: set[str] = set()
+    owner_key = gallery_owner_key(owner)
+    if owner_key is None:
+        return image_ids, filenames
 
-    rows = db.query(GalleryImage).filter(GalleryImage.session_id == session_id).all()
+    from core.database import Session as DbSession
+
+    owned_session = db.query(DbSession.id).filter(
+        DbSession.id == session_id,
+        DbSession.owner == owner_key,
+    ).first()
+    if owned_session is None:
+        return image_ids, filenames
+
+    rows = db.query(GalleryImage).filter(
+        GalleryImage.session_id == session_id,
+        GalleryImage.owner == owner_key,
+    ).all()
     for img in rows:
         if img.id:
             image_ids.add(str(img.id))
@@ -81,45 +93,81 @@ def session_image_refs(db, session_id: str) -> tuple[set[str], set[str]]:
     return image_ids, filenames
 
 
-def cleanup_session_images(session_id: str, db=None) -> int:
+def cleanup_session_image_files(filenames: set[str]) -> int:
+    """Unlink only filenames with no active Gallery metadata reference."""
+
+    _, GalleryImage, SessionLocal = _database_models()
+    if not filenames:
+        return 0
+    db = SessionLocal()
+    removed = 0
+    try:
+        for filename in filenames:
+            referenced = db.query(GalleryImage.id).filter(
+                GalleryImage.filename == filename,
+                GalleryImage.is_active == True,
+            ).first()
+            if referenced is not None:
+                continue
+            path = _generated_image_path_for_cleanup(filename)
+            if path and path.exists():
+                try:
+                    path.unlink()
+                    removed += 1
+                except Exception as exc:
+                    logger.warning(
+                        "Could not remove unreferenced generated image %s: %s",
+                        filename,
+                        exc,
+                    )
+        return removed
+    finally:
+        db.close()
+
+
+def cleanup_session_images(session_id: str, owner: str | None, db=None) -> int:
     """Soft-delete Gallery rows and unlink generated files owned by a chat."""
     _, GalleryImage, SessionLocal = _database_models()
+    owner_key = gallery_owner_key(owner)
+    if owner_key is None:
+        return 0
     owns_db = db is None
     db = db or SessionLocal()
     try:
-        image_ids, filenames = session_image_refs(db, session_id)
-        query = db.query(GalleryImage).filter(GalleryImage.session_id == session_id)
+        image_ids, filenames = session_image_refs(db, session_id, owner_key)
+        query = db.query(GalleryImage).filter(
+            GalleryImage.session_id == session_id,
+            GalleryImage.owner == owner_key,
+        )
         if image_ids or filenames:
-            from sqlalchemy import or_
+            from sqlalchemy import and_, or_
 
-            clauses = [GalleryImage.session_id == session_id]
+            clauses = [and_(
+                GalleryImage.session_id == session_id,
+                GalleryImage.owner == owner_key,
+            )]
             if image_ids:
-                clauses.append(GalleryImage.id.in_(list(image_ids)))
+                clauses.append(and_(
+                    GalleryImage.id.in_(list(image_ids)),
+                    GalleryImage.owner == owner_key,
+                ))
             if filenames:
-                clauses.append(GalleryImage.filename.in_(list(filenames)))
+                clauses.append(and_(
+                    GalleryImage.filename.in_(list(filenames)),
+                    GalleryImage.owner == owner_key,
+                ))
             query = db.query(GalleryImage).filter(or_(*clauses))
 
         images = query.all()
-        removed = 0
         for img in images:
             img.is_active = False
             if img.filename:
-                path = _generated_image_path_for_cleanup(img.filename)
-                if path and path.exists():
-                    try:
-                        path.unlink()
-                    except Exception as exc:
-                        logger.warning(
-                            "Could not remove generated image %s for deleted session %s: %s",
-                            img.filename,
-                            session_id,
-                            exc,
-                        )
-            removed += 1
+                filenames.add(str(img.filename))
 
         if owns_db and images:
             db.commit()
-        return removed
+            cleanup_session_image_files(filenames)
+        return len(images)
     except Exception as exc:
         if owns_db:
             db.rollback()

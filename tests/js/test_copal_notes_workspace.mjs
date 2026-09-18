@@ -60,16 +60,16 @@ assert.equal(clean.left.sort, 'name');
 assert.deepEqual(clean.bookmarks, []);
 assert.equal(findWorkspaceLeaf(clean)?.docId, 'a');
 assert.deepEqual(normalizeNotesSettings({ previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true }), {
-  previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true, completedVisibility:'show',
+  previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true, completedVisibility:'show', templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ previewLayout:'invalid', lineNumbers:'yes' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show', templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ completedVisibility:'hide' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'hide',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'hide', templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ completedVisibility:'invalid' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show', templateFolder:'', dailyTemplateId:'',
 });
 
 const legacy = normalizeNotesWorkspace({

@@ -3,10 +3,16 @@
 Every visible endpoint/model pair becomes a mimo provider model.
 Keys ride the credential dict (pipe FD at spawn), never config content.
 """
+import pytest
+
+pytest.skip(
+    "legacy ModelEndpoint/ody projection was retired; normalized coverage lives in "
+    "test_normalized_mimo_projection.py",
+    allow_module_level=True,
+)
+
 import json
 import uuid
-
-import pytest
 
 import core.database as cdb
 from core.database import ModelEndpoint
@@ -76,13 +82,27 @@ def test_enabled_endpoint_projects_with_models_and_credential(endpoint_factory):
     provider = config["provider"][provider_id]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
     assert provider["api"].startswith("https://api.example.test")
-    assert set(provider["models"]) == {"glm-5.2", "glm-pinned"}, (
-        "cached + pinned − hidden, same list Settings shows"
+    assert set(provider["models"]) == {"glm-pinned"}, (
+        "API-class rows gate on the pin allow-list: projection must match "
+        "the picker (pins − hidden), so disabled models drain from the runtime"
     )
     assert provider["only_configured_models"] is True
     assert credentials[provider_id] == "sk-test-key"
     # The key must never appear anywhere in the config content itself.
     assert "sk-test-key" not in json.dumps(config)
+
+
+def test_local_endpoint_pins_stay_additive_in_projection(endpoint_factory):
+    # Local/self-hosted endpoints use the hidden list for visibility; pins
+    # there are manual extras and must not drain the cached models.
+    ep_id = endpoint_factory(
+        base_url="http://127.0.0.1:8000/v1",
+        cached_models=json.dumps(["local-a", "local-b"]),
+        pinned_models=json.dumps(["local-extra"]),
+    )
+    config, _ = _endpoint_registry_providers("")
+    provider = config["provider"][f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"]
+    assert set(provider["models"]) == {"local-a", "local-b", "local-extra"}
 
 
 @pytest.mark.parametrize(
@@ -127,12 +147,14 @@ def test_same_vendor_endpoints_keep_distinct_runtime_ids_and_credentials(endpoin
     assert credentials[second_id] == "sk-second"
 
 
-def test_projection_snapshot_preserves_direct_source_endpoint(endpoint_factory):
+def test_projection_snapshot_does_not_import_legacy_direct_endpoint(endpoint_factory):
     ep_id = endpoint_factory(base_url="https://api.xiaomimimo.com/v1")
     snapshot = build_projection_snapshot("")
     provider_id = f"{ENDPOINT_PROVIDER_PREFIX}{ep_id}"
-    assert snapshot.source_endpoints[provider_id] == ep_id
-    assert snapshot.run_closure(provider_id, "glm-5.2") is not None
+    assert snapshot.owner == "local-installation"
+    assert provider_id not in snapshot.source_endpoints
+    assert snapshot.run_closure(provider_id, "glm-5.2") is None
+    assert snapshot.credentials == {}
 
 
 @pytest.mark.parametrize(

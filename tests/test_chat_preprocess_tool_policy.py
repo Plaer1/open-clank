@@ -23,9 +23,9 @@ async def test_preprocess_can_skip_external_context_and_attachment_work(monkeypa
     monkeypatch.setattr("src.chat_handler.extract_transcript_async", _fail_transcript)
     monkeypatch.setattr("src.chat_handler.fetch_youtube_comments", _fail_comments)
     monkeypatch.setattr(
-        "src.chat_handler.model_supports_vision",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("vision support must not be probed")
+        "src.openclank.chat_routing.resolve_chat_route",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("vision route must not be resolved")
         ),
     )
 

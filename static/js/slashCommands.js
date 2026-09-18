@@ -21,7 +21,6 @@ import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
 import { EVAL_PROMPTS } from './compare/index.js';
-import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -395,39 +394,11 @@ async function _setMimoConfig(configId, value) {
 }
 
 export async function refreshMimoModeControl(force = false) {
-  const select = document.getElementById('mimo-mode-select');
-  if (!select) return;
-  const state = await loadMimoControlState(force);
-  const modes = state.modes?.availableModes || [];
-  if (!state.available || !modes.length) {
-    select.classList.add('hidden');
-    select.replaceChildren();
-    return;
-  }
-  const selected = state.desired?.mode || state.current?.mode || state.modes?.currentModeId;
-  select.replaceChildren(...modes.map(mode => {
-    const option = document.createElement('option');
-    option.value = mode.id;
-    option.textContent = mode.name || mode.id;
-    option.title = mode.description || '';
-    option.selected = mode.id === selected;
-    return option;
-  }));
-  select.classList.remove('hidden');
-  select.onchange = async () => {
-    const previous = selected;
-    select.disabled = true;
-    try {
-      await _setMimoConfig('mode', select.value);
-      uiModule.showToast(`Open Clank agent mode: ${select.options[select.selectedIndex]?.textContent || select.value}`);
-      document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
-    } catch (error) {
-      select.value = previous;
-      uiModule.showError(error.message);
-    } finally {
-      select.disabled = false;
-    }
-  };
+  // Provider-native mode negotiation is headless.  The only public mode
+  // authority is the Open Clank Chat/Plan/Agent picker in app.js; this helper
+  // remains as a compatibility refresh for callers that also need negotiated
+  // commands/models, but it must never render or mutate a second selector.
+  return loadMimoControlState(force);
 }
 
 function _submitComposedMessage(text) {
@@ -724,222 +695,26 @@ function detectProvider(input) {
   return null;
 }
 
-function setupChatUrlForEndpoint(detected) {
-  const base = (detected.base_url || '').replace(/\/+$/, '');
-  if (detected.name === 'Anthropic') return base.replace(/\/v1$/, '') + '/v1/messages';
-  if (base.includes('ollama.com')) return 'https://ollama.com/api/chat';
-  return base + '/chat/completions';
-}
-
-async function connectDetectedSetupEndpoint(detected) {
-  const providerLabel = detected.name || 'custom endpoint';
-  const chatBox = document.getElementById('chat-history');
-  const spinnerDiv = document.createElement('div');
-  spinnerDiv.className = 'msg msg-ai';
-  const spinnerRole = document.createElement('div');
-  spinnerRole.className = 'role';
-  spinnerRole.textContent = window.__agentName || 'Open Clank';
-  spinnerDiv.appendChild(spinnerRole);
-  const spinnerBody = document.createElement('div');
-  spinnerBody.className = 'body';
-  spinnerDiv.appendChild(spinnerBody);
-  chatBox.appendChild(spinnerDiv);
-  const setupSpinner = spinnerModule.create(`Detected ${providerLabel}. Connecting`, 'right', 'wave');
-  spinnerBody.appendChild(setupSpinner.createElement());
-  setupSpinner.start(150);
-  uiModule.scrollHistory();
-
-  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(detected.base_url);
-
-  try {
-    const fd = new FormData();
-    fd.append('base_url', detected.base_url);
-    if (detected.api_key) fd.append('api_key', detected.api_key);
-    if (detected.name) fd.append('name', detected.name);
-    fd.append('require_models', 'true');
-    if (!isLocal) fd.append('skip_probe', 'true');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
-    const res = await fetch(`${API_BASE}/api/model-endpoints`, { method: 'POST', body: fd, credentials: 'same-origin', signal: controller.signal });
-    clearTimeout(timer);
-    const data = await res.json();
-
-    if (!res.ok) {
-      setupSpinner.destroy();
-      spinnerDiv.remove();
-      setupMode = 'endpoint-provider-first';
-      await typewriterReply(`Endpoint was not saved: ${data.detail || 'connection failed'}`);
-      return;
-    }
-
-    const count = (data.models || []).length;
-    if (count > 0) {
-      setupSpinner.destroy();
-      spinnerDiv.remove();
-      await typewriterReply(`Found ${count} model${count > 1 ? 's' : ''} on ${providerLabel}. Starting a chat...`);
-      if (modelsModule) await modelsModule.refreshModels(true);
-      const firstModel = data.models[0];
-      const chatUrl = setupChatUrlForEndpoint(detected);
-      if (sessionModule) {
-        await sessionModule.createDirectChat(chatUrl, firstModel, data.id);
-      }
-      await typewriterReply("You're all set. Type /tour for a walkthrough, or /setup endpoint to add another endpoint or key.");
-      _clearSetupGuideMessages();
-      return;
-    }
-
-    setupSpinner.destroy();
-    spinnerDiv.remove();
-    setupMode = 'endpoint-provider-first';
-    await typewriterReply("Endpoint saved, but no models were found. Check the provider, key, or service status, then try /setup endpoint again.");
-    if (modelsModule) modelsModule.refreshModels(true);
-  } catch {
-    setupSpinner.destroy();
-    spinnerDiv.remove();
-    setupMode = 'endpoint-provider-first';
-    await typewriterReply("Endpoint setup failed before it could finish. Check the provider, key, or service status, then try /setup endpoint again.");
-  }
-}
-
 /**
- * Handle setup mode input — user pasted an API key or URL.
+ * Compatibility entrypoint for tabs that entered the retired chat setup flow.
+ * Discard any pasted value without rendering or transmitting it, then send the
+ * user to the write-only managed provider control plane.
  */
 async function handleSetupInput(input) {
-  // Show masked user bubble (don't display raw key)
-  const isUrl = /^https?:\/\//i.test(input) || /^(\d{1,3}\.){1,3}\d{1,3}/i.test(input) || /^localhost/i.test(input);
-  _showSetupUserBubble(input, isUrl);
-
-  const paired = _extractSetupProviderCredential(input);
-  if (paired && paired.provider) {
-    if (paired.credential) {
-      await connectDetectedSetupEndpoint({
-        base_url: paired.provider.url,
-        api_key: paired.credential,
-        name: paired.provider.name,
-      });
-    } else {
-      pendingSetupProvider = paired.provider;
-      setupMode = 'endpoint-key-for-provider';
-      await _setupReply(`Paste your ${paired.provider.name} API key now.`);
-    }
-    return;
-  }
-
-  const detected = detectProvider(input);
-  if (!detected) {
-    setupMode = false;
-    await typewriterReply("Unrecognised format. Type /setup endpoint to try again.");
-    return;
-  }
-  if (detected.ambiguous) {
-    pendingSetupApiKey = detected.api_key;
-    setupMode = 'endpoint-provider';
-    await _setupProviderPrompt();
-    return;
-  }
-
-  await connectDetectedSetupEndpoint(detected);
+  void input;
+  setupMode = false;
+  pendingSetupApiKey = '';
+  pendingSetupProvider = null;
+  settingsModule.open('services');
+  await _setupReply('Provider settings opened. Add connections and accounts there; credentials are write-only and never stored in chat.');
+  return true;
 }
 
-/**
- * Handle setup wizard sub-modes (endpoint, theme, features).
- */
 async function handleSetupWizard(mode, input) {
-  if (mode === 'endpoint-provider-first') {
-    const detected = detectProvider(input);
-    if (detected && !detected.ambiguous) {
-      await handleSetupInput(input);
-      return;
-    }
-    if (detected?.ambiguous) {
-      pendingSetupApiKey = detected.api_key;
-      setupMode = 'endpoint-provider';
-      _showSetupUserBubble(input, false);
-      await _setupProviderPrompt();
-      return;
-    }
-    const deviceAuthProvider = _setupDeviceAuthProviderFromInput(input);
-    if (deviceAuthProvider) {
-      _addMessage('user', input);
-      setupMode = false;
-      await _setupProviderDeviceFlow(deviceAuthProvider);
-      return;
-    }
-    const paired = _extractSetupProviderCredential(input);
-    const provider = paired?.provider || _setupProviderFromInput(input);
-    if (!provider) {
-      _addMessage('user', input);
-      setupMode = false;
-      await _setupReply('Provider not recognised. Try ' + SETUP_PROVIDER_HINT + '. Type /setup endpoint to try again.');
-      return;
-    }
-    if (paired?.credential) {
-      _showSetupUserBubble(input, false);
-      await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: paired.credential, name: provider.name });
-      return;
-    }
-    _addMessage('user', provider.name);
-    pendingSetupProvider = provider;
-    setupMode = 'endpoint-key-for-provider';
-    await _setupReply(`Paste your ${provider.name} API key.`);
-    return;
+  if (String(mode || '').startsWith('endpoint')) {
+    return handleSetupInput(input);
   }
-
-  if (mode === 'endpoint-key-for-provider') {
-    const provider = pendingSetupProvider;
-    pendingSetupProvider = null;
-    if (!provider) {
-      await _setupReply('No provider selected. Type /setup endpoint and choose a provider again.');
-      return;
-    }
-    _showSetupUserBubble(input, /^https?:\/\//i.test(input));
-    const paired = _extractSetupProviderCredential(input);
-    const credential = paired?.credential || input.trim();
-    await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: credential, name: provider.name });
-    return;
-  }
-
-  if (mode === 'endpoint-provider') {
-    const raw = input.trim();
-    const key = pendingSetupApiKey;
-    pendingSetupApiKey = '';
-    _addMessage('user', input);
-
-    // User may have re-typed "provider key" together (matching the
-    // original /setup prompt's example). Honor the freshly-pasted
-    // key in that case — _setupProviderFromInput strips whitespace
-    // and would otherwise see "deepseeksk-..." and bail.
-    const paired = _extractSetupProviderCredential(raw);
-    if (paired?.provider) {
-      const credential = paired.credential || key;
-      if (!credential) {
-        await typewriterReply('No API key found. Type /setup endpoint and paste the key again.');
-        return;
-      }
-      await connectDetectedSetupEndpoint({ base_url: paired.provider.url, api_key: credential, name: paired.provider.name });
-      return;
-    }
-
-    if (!key) {
-      await typewriterReply('No pending API key. Type /setup endpoint and paste the key again.');
-      return;
-    }
-    let provider = _setupProviderFromInput(raw);
-    if (!provider && /^https?:\/\//i.test(raw)) {
-      provider = { name: '', url: raw };
-    }
-    if (!provider) {
-      pendingSetupApiKey = '';
-      setupMode = false;
-      await typewriterReply('Provider not recognised. Try ' + SETUP_PROVIDER_HINT + '. Type /setup endpoint to try again.');
-      return;
-    }
-    await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: key, name: provider.name });
-    return;
-  }
-
   _addMessage('user', input);
-
   if (mode === 'theme') {
     const name = input.trim().toLowerCase();
     const tm = themeModule;
@@ -954,9 +729,8 @@ async function handleSetupWizard(mode, input) {
     } else {
       slashReply(`Unknown theme "${name}". Try /theme to see available themes.`);
     }
-    return;
+    return true;
   }
-
   if (mode === 'features') {
     const name = input.trim().toLowerCase();
     try {
@@ -973,11 +747,13 @@ async function handleSetupWizard(mode, input) {
       } else {
         await typewriterReply(`Unknown feature "${name}". Available: ${Object.keys(features).join(', ')}`);
       }
-    } catch { await typewriterReply('Could not update features.'); }
-    return;
+    } catch (_) {
+      await typewriterReply('Could not update features.');
+    }
+    return true;
   }
-
   await typewriterReply("I didn't understand that. Try /setup to see options.");
+  return true;
 }
 
 function _syncToggleUI(name, state) {
@@ -1419,7 +1195,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Editor, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -3858,7 +3634,7 @@ async function _cmdTourNotes(args, ctx) {
     }
   }
   if (!pane) {
-    slashReply('Could not open Notes. Try clicking the Notes tool first.');
+    slashReply('Could not open Editor. Try opening Editor first.');
     return true;
   }
 
@@ -5096,180 +4872,18 @@ function _clearSetupCommandInput() {
   }
 }
 
-async function _setupProviderDeviceFlow(providerKey) {
-  _clearSetupGuideMessages();
-  const config = PROVIDER_DEVICE_FLOWS[providerKey];
-  if (!config) {
-    await _setupReply('Provider not recognised.');
-    return;
-  }
-  await _setupReply(`Starting ${config.label} sign-in...`);
-  try {
-    const result = await runProviderDeviceFlow(providerKey, {
-      onStart: async ({ start, authUrl }) => {
-        const place = providerKey === 'copilot' ? 'GitHub' : 'OpenAI';
-        const action = providerKey === 'copilot' ? 'approve the request' : 'enter the code';
-        if (providerKey === 'chatgpt-subscription') {
-          slashReply(
-            '<div class="setup-guide-no-censor" style="display:grid;gap:6px;">' +
-              '<div>Open this URL in your browser, enter the code, then come back here. Waiting...</div>' +
-              '<div>Code: <code>' + uiModule.esc(start.user_code || '') + '</code></div>' +
-              '<div><a href="' + uiModule.esc(authUrl || '') + '" target="_blank" rel="noopener noreferrer">' + uiModule.esc(authUrl || '') + '</a></div>' +
-            '</div>'
-          );
-          return;
-        }
-        await _setupReply(`Opening ${place} - ${action} (code ${start.user_code}). Waiting...`);
-      },
-      openWindow: (url) => {
-        if (providerKey === 'chatgpt-subscription') return;
-        try { if (url) window.open(url, '_blank', 'noopener'); } catch (e) {}
-      },
-    });
-    if (result.status === 'authorized') {
-      const n = ((result.endpoint && result.endpoint.models) || []).length;
-      await _setupReply(`Connected - ${n} ${config.label} model${n !== 1 ? 's' : ''} available.`);
-      if (modelsModule) modelsModule.refreshModels(true);
-      return;
-    }
-    if (result.status === 'failed') {
-      await _setupReply(`${config.label} sign-in failed (${result.error || 'denied'}).`);
-      return;
-    }
-    if (result.status === 'expired') {
-      await _setupReply(`${config.label} sign-in expired - run /setup ${providerKey} again.`);
-      return;
-    }
-  } catch (e) {
-    await _setupReply(formatDeviceFlowError(e));
-  }
-}
-
 async function _cmdSetup(args, ctx) {
+  void args;
+  void ctx;
   _hideWelcomeScreen();
   _clearSetupCommandInput();
-  const topic = (args[0] || '').trim().toLowerCase();
-  const topicArgs = args.slice(1);
-  const deviceAuthProvider = _setupDeviceAuthProviderFromInput(topic);
-  if (deviceAuthProvider) {
-    await _setupProviderDeviceFlow(deviceAuthProvider);
-    return true;
-  }
-  const provider = _setupProviderFromInput(topic);
-  if (provider) {
-    _clearSetupGuideMessages();
-    const credential = topicArgs.join(' ').trim();
-    if (credential) {
-      await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: credential, name: provider.name });
-    } else {
-      pendingSetupProvider = provider;
-      setupMode = 'endpoint-key-for-provider';
-      // Show the canonical "/setup <provider> <key>" usage so the user
-      // learns the one-shot form instead of relying on the pasted-key
-      // mode that always greets them with a generic prompt.
-      // _setupReply renders as plain text (no HTML) — use markdown
-      // backticks for the inline code instead of <code> + &lt;&gt;.
-      const _slug = (topic || '').toLowerCase();
-      await _setupReply(
-        `Paste your ${provider.name} API key, or run \`/setup ${_slug} <api-key>\` to set it in one step.`
-      );
-    }
-    return true;
-  }
-  if (topic === 'local') {
-    _clearSetupGuideMessages();
-    const rawUrl = topicArgs.join(' ').trim();
-    if (rawUrl) {
-      const normalized = _normalizeSetupBaseUrl(rawUrl);
-      await connectDetectedSetupEndpoint({ base_url: normalized, api_key: '', name: 'Local' });
-    } else {
-      setupMode = 'endpoint-provider-first';
-      await _setupReply('Paste your local endpoint URL, for example http://100.x.x.x:11434/v1.');
-    }
-    return true;
-  }
-
-  // Check if models are already configured
-  const modelsBox = document.getElementById('models');
-  const hasModels = modelsBox && modelsBox.querySelector('.models-row');
-
-  if (hasModels) {
-    if (!topic) {
-      _clearSetupGuideMessages();
-      return _showSetupEndpointGuide();
-    }
-
-    if (topic === 'endpoint' || topic === 'api' || topic === 'key') {
-      _clearSetupGuideMessages();
-      return _showSetupEndpointGuide({ simple: true, instant: true });
-    }
-
-    if (topic === 'theme' || topic === 'themes') {
-      const tm = themeModule;
-      const presets = tm && tm.THEMES ? Object.keys(tm.THEMES) : [];
-      const customObj = tm && tm.getCustomThemes ? tm.getCustomThemes() : {};
-      const customKeys = Object.keys(customObj);
-
-      // One-shot: /setup theme <name> -> apply directly
-      const themeName = topicArgs.join(' ').trim().toLowerCase().replace(/\s+/g, '-');
-      if (themeName && tm) {
-        const colors = (tm.THEMES && tm.THEMES[themeName]) || customObj[themeName];
-        if (colors) {
-          tm.applyTheme(themeName, colors);
-          await typewriterReply(`Theme: ${themeName}`);
-        } else {
-          const customLabel = customKeys.length ? ` | Custom: ${customKeys.join(', ')}` : '';
-          slashReply(`Unknown theme "${themeName}". Available: ${presets.join(', ')}${customLabel}`);
-        }
-        return true;
-      }
-
-      const current = (Storage.getJSON(Storage.KEYS.THEME, {}).name) || 'clanker-dark';
-      const customLabel = customKeys.length ? `\n\nCustom: ${customKeys.join(', ')}` : '';
-      await typewriterReply(`Current theme: ${current}\n\nAvailable: ${presets.join(', ')}${customLabel}\n\nType a theme name to switch.`);
-      setupMode = 'theme';
-      return true;
-    }
-
-    if (topic === 'memory' || topic === 'memories') {
-      try {
-        const res = await fetch(`${API_BASE}/api/memory`, { credentials: 'same-origin' });
-        const memories = await res.json();
-        const count = Array.isArray(memories) ? memories.length : 0;
-        await typewriterReply(`You have ${count} saved memor${count === 1 ? 'y' : 'ies'}.\n\nType a memory to save, or use /memory to manage them.`);
-      } catch {
-        await typewriterReply('Could not load memories.');
-      }
-      return true;
-    }
-
-    if (topic === 'features') {
-      try {
-        const res = await fetch(`${API_BASE}/api/auth/features`, { credentials: 'same-origin' });
-        const features = await res.json();
-        const lines = Object.entries(features).map(([k, v]) => `${k}: ${v ? 'on' : 'off'}`).join('\n');
-        await typewriterReply(`Feature toggles:\n\n${lines}\n\nType a feature name to toggle it.`);
-        setupMode = 'features';
-      } catch {
-        await typewriterReply('Could not load features. Check the Admin Panel.');
-      }
-      return true;
-    }
-
-    // Unknown topic — hint
-    await typewriterReply(`I don't have a setup wizard for "${topic}" yet. Try: endpoint, theme, memory, or features.`);
-    return true;
-  }
-
-  // First-time setup — paste API key flow
-  _clearSetupGuideMessages();
-  if (setupIntroShown) {
-    return _showSetupEndpointGuide();
-  }
-  setupIntroShown = true;
-  return _showSetupEndpointGuide();
+  setupMode = false;
+  pendingSetupApiKey = '';
+  pendingSetupProvider = null;
+  settingsModule.open('services');
+  await _setupReply('Provider settings opened. Connections, account pools, rotation, model routes, and shares are managed in one place.');
+  return true;
 }
-
 // ── Shortcuts ──
 
 async function _cmdShortcuts(args, ctx) {
@@ -5605,27 +5219,26 @@ async function _cmdUptime(args, ctx) {
 }
 
 async function _cmdPing(args, ctx) {
-  slashReply('<span style="opacity:0.5">Pinging endpoints...</span>');
+  slashReply('<span style="opacity:0.5">Reading managed provider status...</span>');
   try {
-    const res = await fetch(`${API_BASE}/api/ping`, { credentials: 'same-origin' });
-    const data = await res.json();
-    const eps = data.endpoints || [];
-    if (!eps.length) { slashReply('No endpoints configured.'); return true; }
+    const [connectionsRes, modelsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/v1/providers/connections`, { credentials: 'same-origin' }),
+      fetch(`${API_BASE}/api/v1/providers/models`, { credentials: 'same-origin' }),
+    ]);
+    if (!connectionsRes.ok || !modelsRes.ok) throw new Error('Provider control plane unavailable');
+    const connections = (await connectionsRes.json()).connections || [];
+    const models = (await modelsRes.json()).models || [];
+    if (!connections.length) { slashReply('No managed provider connections configured.'); return true; }
     let html = '<div style="font-family:inherit;font-size:0.9em">';
-    for (const ep of eps) {
-      const isUp = ep.status === 'online';
-      const dot = isUp ? '\u25CF' : '\u25CB';
-      const color = isUp ? 'var(--color-success)' : 'var(--color-error)';
-      const latency = ep.latency_ms != null ? ep.latency_ms + 'ms' : '--';
-      const latencyColor = !isUp ? 'var(--color-error)' : ep.latency_ms < 150 ? 'var(--color-success)' : ep.latency_ms < 500 ? 'var(--color-blind-orange)' : 'var(--color-error)';
-      const models = ep.model_count || 0;
-      const err = ep.error ? ' <span style="opacity:0.4;font-size:0.85em">(' + ctx.esc(ep.error).slice(0, 60) + ')</span>' : '';
+    for (const connection of connections) {
+      const enabled = connection.enabled !== false;
+      const dot = enabled ? '\u25CF' : '\u25CB';
+      const color = enabled ? 'var(--color-success)' : 'var(--color-error)';
+      const modelCount = models.filter(model => model.connection_id === connection.id && model.enabled !== false).length;
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0">';
       html += '<span style="color:' + color + ';font-size:12px">' + dot + '</span>';
-      html += '<span style="min-width:140px">' + ctx.esc(ep.name) + '</span>';
-      html += '<code style="min-width:60px;text-align:right;color:' + latencyColor + '">' + latency + '</code>';
-      html += '<span style="opacity:0.4;font-size:0.85em">' + models + ' model' + (models !== 1 ? 's' : '') + '</span>';
-      html += err;
+      html += '<span style="min-width:140px">' + ctx.esc(connection.label || connection.id) + '</span>';
+      html += '<span style="opacity:0.4;font-size:0.85em">' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') + '</span>';
       html += '</div>';
     }
     html += '</div>';
@@ -5637,108 +5250,10 @@ async function _cmdPing(args, ctx) {
 }
 
 async function _cmdProbe(args, ctx) {
-  // Find endpoint by name if provided
-  const query = args.join(' ').trim();
-  let url = `${API_BASE}/api/probe`;
-  if (query) {
-    // Fetch endpoint list to resolve name -> id
-    try {
-      const epRes = await fetch(`${API_BASE}/api/model-endpoints`, { credentials: 'same-origin' });
-      const eps = await epRes.json();
-      const match = eps.find(e =>
-        e.name.toLowerCase() === query.toLowerCase() ||
-        e.name.toLowerCase().includes(query.toLowerCase())
-      );
-      if (match) {
-        url += '?endpoint_id=' + encodeURIComponent(match.id);
-      } else {
-        slashReply('No endpoint matching "' + ctx.esc(query) + '". Run <code>/ping</code> to see endpoints.');
-        return true;
-      }
-    } catch (e) {
-      slashReply('Failed to look up endpoints: ' + ctx.esc(e.message));
-      return true;
-    }
-  }
-
-  slashReply('<span style="opacity:0.5">Probing models... this may take a while.</span>');
-  // Get reference to the message we just added so we can update it live
-  const chatBox = document.getElementById('chat-history');
-  const msgEl = chatBox ? chatBox.lastElementChild : null;
-  const bodyEl = msgEl ? msgEl.querySelector('.body') : null;
-  if (!bodyEl) return true;
-
-  let html = '<div style="font-family:inherit;font-size:0.9em">';
-  let currentEndpoint = '';
-  let summary = { total: 0, ok: 0 };
-
-  try {
-    const res = await fetch(url, { credentials: 'same-origin' });
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-
-          if (data.type === 'probe_start') {
-            currentEndpoint = data.endpoint;
-            const skipNote = data.skipped ? ' + ' + data.skipped + ' non-chat skipped' : '';
-            html += '<div style="margin-top:8px;font-weight:600;color:var(--fg);opacity:0.8">'
-              + ctx.esc(data.endpoint) + ' <span style="opacity:0.4;font-weight:400">(' + data.model_count + ' chat models' + skipNote + ')</span></div>';
-            if (data.error) {
-              html += '<div style="padding:2px 0 2px 20px;opacity:0.5;font-size:0.9em">' + ctx.esc(data.error) + '</div>';
-            }
-            bodyEl.innerHTML = html + '</div>';
-
-          } else if (data.type === 'probe_result') {
-            const isOk = data.status === 'ok';
-            const isTimeout = data.status === 'timeout';
-            const dot = isOk ? '\u25CF' : (isTimeout ? '\u25D0' : '\u25CB');
-            const color = isOk ? 'var(--color-success)' : (isTimeout ? 'var(--color-blind-orange)' : 'var(--color-error)');
-            const latency = data.latency_ms != null ? data.latency_ms + 'ms' : '--';
-            const latencyColor = isOk
-              ? (data.latency_ms < 2000 ? 'var(--color-success)' : 'var(--color-blind-orange)')
-              : 'var(--color-error)';
-            const modelName = (data.model || '').split('/').pop();
-            const err = data.error ? ' <span style="opacity:0.4;font-size:0.85em">(' + ctx.esc(data.error) + ')</span>' : '';
-            html += '<div style="display:flex;align-items:center;gap:8px;padding:2px 0 2px 20px">';
-            html += '<span style="color:' + color + ';font-size:12px">' + dot + '</span>';
-            html += '<span style="min-width:180px">' + ctx.esc(modelName) + '</span>';
-            html += '<code style="min-width:60px;text-align:right;color:' + latencyColor + '">' + latency + '</code>';
-            html += err;
-            html += '</div>';
-            bodyEl.innerHTML = html + '</div>';
-            if (uiModule) uiModule.scrollHistory();
-
-          } else if (data.type === 'probe_done') {
-            summary = { total: data.total || 0, ok: data.ok || 0 };
-          }
-        } catch (e) { /* skip parse errors */ }
-      }
-    }
-
-    // Final summary
-    const pct = summary.total > 0 ? Math.round((summary.ok / summary.total) * 100) : 0;
-    const sumColor = pct === 100 ? 'var(--color-success)' : pct >= 50 ? 'var(--color-blind-orange)' : 'var(--color-error)';
-    html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-weight:600;color:' + sumColor + '">';
-    html += summary.ok + '/' + summary.total + ' models responding (' + pct + '%)';
-    html += '</div>';
-    bodyEl.innerHTML = html + '</div>';
-    if (uiModule) uiModule.scrollHistory();
-
-  } catch (e) {
-    bodyEl.innerHTML = 'Failed to probe: ' + ctx.esc(e.message);
-  }
+  void args;
+  void ctx;
+  slashReply('Live provider validation and account health are managed in <strong>Settings → Providers</strong>.');
+  try { document.dispatchEvent(new CustomEvent('open-clank:open-providers')); } catch (_) {}
   return true;
 }
 
@@ -5918,34 +5433,10 @@ const COMMANDS = {
   setup: {
     alias: ['su', 'seutp'],
     category: 'Getting started',
-    help: 'Add local or API model endpoints',
+    help: 'Open provider settings',
     handler: _cmdSetup,
-    usage: '/setup local URL  ·  /setup groq KEY  ·  /setup copilot  ·  /setup chatgpt-subscription',
-    // Provider subs so the autocomplete popup surfaces "/setup deepseek",
-    // "/setup openai", etc. when the user types "/setup de". Each sub's
-    // handler is a thin wrapper that re-prepends the sub name and
-    // re-dispatches into _cmdSetup, which already knows how to handle
-    // bare-provider (prompts for the key) AND provider-with-key (saves it).
-    // Without the explicit handler, the slash-dispatcher errors with
-    // "subDef.handler is not a function".
-    subs: {
-      deepseek:   { help: 'DeepSeek',      usage: '/setup deepseek sk-...',     handler: (a, c) => _cmdSetup(['deepseek',   ...a], c) },
-      openai:     { help: 'OpenAI',        usage: '/setup openai sk-proj-...',  handler: (a, c) => _cmdSetup(['openai',     ...a], c) },
-      anthropic:  { help: 'Anthropic',     usage: '/setup anthropic sk-ant-...',handler: (a, c) => _cmdSetup(['anthropic',  ...a], c) },
-      openrouter: { help: 'OpenRouter',    usage: '/setup openrouter sk-or-...',handler: (a, c) => _cmdSetup(['openrouter', ...a], c) },
-      groq:       { help: 'Groq',          usage: '/setup groq gsk_...',        handler: (a, c) => _cmdSetup(['groq',       ...a], c) },
-      gemini:     { help: 'Google Gemini', alias: ['google'], usage: '/setup gemini AIza...', handler: (a, c) => _cmdSetup(['gemini', ...a], c) },
-      xai:        { help: 'xAI (Grok)',    alias: ['grok'],   usage: '/setup xai xai-...',   handler: (a, c) => _cmdSetup(['xai',    ...a], c) },
-      ollama:     { help: 'Ollama Cloud',  usage: '/setup ollama KEY',          handler: (a, c) => _cmdSetup(['ollama',     ...a], c) },
-      copilot:    { help: 'GitHub Copilot', usage: '/setup copilot',            handler: (a, c) => _cmdSetup(['copilot',    ...a], c) },
-      'chatgpt-subscription': { help: 'ChatGPT Subscription', alias: ['codex'], usage: '/setup chatgpt-subscription', handler: (a, c) => _cmdSetup(['chatgpt-subscription', ...a], c) },
-      local:      { help: 'Local model server (vLLM / LM Studio / llama.cpp / Ollama)',
-                    usage: '/setup local http://localhost:8000/v1',
-                    handler: (a, c) => _cmdSetup(['local', ...a], c) },
-      endpoint:   { help: 'Open the endpoint manager in Settings',
-                    usage: '/setup endpoint',
-                    handler: (a, c) => _cmdSetup(['endpoint', ...a], c) },
-    },
+    noUserBubble: true,
+    usage: '/setup',
   },
   demo: {
     alias: ['tour'],
@@ -6070,7 +5561,7 @@ const COMMANDS = {
   notes: {
     alias: [],
     category: 'Tools',
-    help: 'Open Notes',
+    help: 'Open Editor',
     handler: (args, ctx) => _cmdToolPanel('notes', args, ctx),
     usage: '/notes'
   },
@@ -6443,6 +5934,20 @@ async function handleSlashCommand(input) {
       return await cmdDef.handler(args, ctx);
     }
 
+    // Canonical public interaction modes.  These are routed through the same
+    // picker authority as clicks; ACP's provider-native Build/Plan values are
+    // never exposed as slash commands.
+    if (['chat', 'plan', 'agent'].includes(rawCmd)) {
+      _showUser();
+      if (typeof window.__odysseusSetChatMode === 'function') {
+        window.__odysseusSetChatMode(rawCmd);
+      }
+      const prompt = args.join(' ').trim();
+      if (prompt) _submitComposedMessage(prompt);
+      else uiModule.showToast(`${rawCmd[0].toUpperCase()}${rawCmd.slice(1)} mode selected`, 1600);
+      return true;
+    }
+
     // --- 4. Skill invocation: /<skill-name> [request] ---
     // If `rawCmd` matches a published skill, the backend records usage and
     // returns a skill-pinned message to submit as the next agent turn.
@@ -6460,21 +5965,6 @@ async function handleSlashCommand(input) {
 
     const mimoState = await loadMimoControlState(false);
     if (mimoState.available) {
-      const mode = (mimoState.modes?.availableModes || []).find(item => item.id === rawCmd);
-      if (mode) {
-        _showUser();
-        try {
-          await _setMimoConfig('mode', mode.id);
-        } catch (error) {
-          slashReply(`Open Clank agent rejected mode <b>${ctx.esc(mode.id)}</b>: ${ctx.esc(error.message)}`);
-          return true;
-        }
-        const prompt = args.join(' ').trim();
-        if (prompt) _submitComposedMessage(prompt);
-        else slashReply(`Open Clank agent mode is now <b>${ctx.esc(mode.name || mode.id)}</b>.`);
-        document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
-        return true;
-      }
       if ((mimoState.commands || []).some(command => command.name === rawCmd)) {
         return false;
       }

@@ -5,17 +5,23 @@ Auto-compacts conversation history when approaching context window limits.
 Summarizes older messages via the same LLM, preserving key context.
 """
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
 from src.model_context import get_context_length, estimate_tokens
-from src.llm_core import llm_call_async
-from src.endpoint_resolver import resolve_endpoint
 from core.models import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+
+async def _complete_text(**kwargs) -> str:
+    """Lazy import avoids loading the managed engine for trim-only callers."""
+    from src.openclank.modality_facade import complete_text
+
+    return await complete_text(**kwargs)
 
 
 def _content_as_text(content: Any) -> str:
@@ -325,8 +331,12 @@ async def maybe_compact(
     messages: List[Dict],
     headers: Optional[Dict] = None,
     owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ) -> tuple:
     """Check context usage and compact if above threshold.
+
+    ``headers`` is retained for compatibility but is never used for execution;
+    summary generation resolves through the owner's managed ``utility`` route.
 
     Returns (messages, context_length, was_compacted).
     """
@@ -370,12 +380,6 @@ async def maybe_compact(
         if "[Conversation summary" in m.get("content", "")
     )
 
-    # Use utility model if configured, otherwise fall back to session model
-    util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
-    compact_url = util_url or endpoint_url
-    compact_model = util_model or model
-    compact_headers = util_headers if util_url else headers
-
     prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace(
         "{count}", str(len(older))
     ).replace(
@@ -387,16 +391,17 @@ async def maybe_compact(
     ]
 
     try:
-        summary = await llm_call_async(
-            compact_url,
-            compact_model,
-            summary_messages,
-            temperature=0.2,
-            max_tokens=SUMMARY_MAX_TOKENS,
-            headers=compact_headers,
+        completion_owner = owner if owner is not None else getattr(session, "owner", None)
+        summary = await asyncio.wait_for(
+            _complete_text(
+                owner=completion_owner or "",
+                messages=summary_messages,
+                purpose="utility",
+                root_operation_id=root_operation_id,
+                temperature=0.2,
+                max_output_tokens=SUMMARY_MAX_TOKENS,
+            ),
             timeout=30,
-            owner=owner,
-            session_id=getattr(session, "id", None),
         )
     except Exception as e:
         logger.error(f"Compaction summary failed: {e}")

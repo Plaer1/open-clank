@@ -465,6 +465,14 @@ impl SqliteStore {
         input: &GraphUpsertInput,
     ) -> rusqlite::Result<GraphUpsertResult> {
         let conn = self.conn.lock().unwrap();
+        Self::graph_upsert_inner(&conn, scope, input)
+    }
+
+    fn graph_upsert_inner(
+        conn: &Connection,
+        scope: &GraphScope,
+        input: &GraphUpsertInput,
+    ) -> rusqlite::Result<GraphUpsertResult> {
         let now = Utc::now().to_rfc3339();
         let mut nodes_upserted = 0usize;
         let mut edges_upserted = 0usize;
@@ -472,7 +480,7 @@ impl SqliteStore {
 
         for n in &input.nodes {
             upsert_node_inner(
-                &conn,
+                conn,
                 scope,
                 &n.kind,
                 &n.name,
@@ -488,7 +496,7 @@ impl SqliteStore {
             // Edge endpoints are auto-created (idempotent by UUIDv5) so an
             // extraction payload never has to list every node explicitly.
             let src = upsert_node_inner(
-                &conn,
+                conn,
                 scope,
                 &e.src.kind,
                 &e.src.name,
@@ -498,7 +506,7 @@ impl SqliteStore {
                 &now,
             )?;
             let dst = upsert_node_inner(
-                &conn,
+                conn,
                 scope,
                 &e.dst.kind,
                 &e.dst.name,
@@ -585,7 +593,7 @@ impl SqliteStore {
 
         for c in &input.cues {
             let node = upsert_node_inner(
-                &conn,
+                conn,
                 scope,
                 &c.node.kind,
                 &c.node.name,
@@ -1300,7 +1308,7 @@ mod tests {
 }
 
 /// Canonical edge-tag vocabulary — keep in sync with
-/// .futures/frankenmemory-update/tag-vocabulary.md and the extraction prompt
+/// .clanker/futures/frankenmemory-update/tag-vocabulary.md and the extraction prompt
 /// in mimo's memory/graph-extract.ts.
 pub const CANONICAL_TAGS: &[&str] = &[
     "is",
@@ -1977,20 +1985,41 @@ mod rwr_tests {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct CodeIndexResult {
     pub codebase: String,
+    pub repository_id: String,
+    pub run_id: String,
+    pub source_snapshot: crate::code::CodeSourceSnapshot,
     pub files_indexed: usize,
     pub files_unchanged: usize,
     pub files_removed: usize,
     pub symbols: usize,
     pub errors: Vec<String>,
+    pub coverage: Vec<crate::code::ScanCoverage>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CodeStaleResult {
     pub codebase: String,
+    pub repository_id: String,
     pub checked_files: usize,
     pub changed_files: Vec<String>,
     pub missing_files: Vec<String>,
     pub errors: Vec<String>,
+    pub coverage: Vec<crate::code::ScanCoverage>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CodeIndexHead {
+    pub run_id: String,
+    pub status: String,
+    pub source_snapshot: crate::code::CodeSourceSnapshot,
+    pub published_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CodeImpactResult {
+    pub impacted_files: Vec<String>,
+    pub total: usize,
+    pub truncated: bool,
 }
 
 use serde::Serialize;
@@ -2001,6 +2030,193 @@ impl SqliteStore {
             "{}\u{1f}{}\u{1f}{codebase}",
             scope.owner, scope.workspace_id
         )
+    }
+
+    fn codebase_identity(codebase: &str) -> String {
+        let path = std::path::Path::new(codebase);
+        if path.is_dir() {
+            crate::code::repository_id(path).unwrap_or_else(|_| codebase.to_string())
+        } else {
+            // Accept already-opaque IDs and preserve compatibility with
+            // callers that stored an older path namespace.
+            codebase.to_string()
+        }
+    }
+
+    fn codebase_for_root(
+        conn: &Connection,
+        scope: &GraphScope,
+        root: &std::path::Path,
+    ) -> Result<String, String> {
+        let opaque = crate::code::repository_id(root)?;
+        let legacy = root.to_string_lossy().to_string();
+        if opaque == legacy {
+            return Ok(opaque);
+        }
+        let opaque_key = Self::codebase_key(scope, &opaque);
+        let has_opaque: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM code_files WHERE codebase=?1",
+                params![opaque_key],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if has_opaque > 0 {
+            return Ok(opaque);
+        }
+        let legacy_key = Self::codebase_key(scope, &legacy);
+        let has_legacy: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM code_files WHERE codebase=?1",
+                params![legacy_key],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(if has_legacy > 0 { legacy } else { opaque })
+    }
+
+    fn begin_code_index_run(
+        &self,
+        conn: &Connection,
+        scope: &GraphScope,
+        codebase: &str,
+        snapshot: &crate::code::CodeSourceSnapshot,
+    ) -> Result<String, String> {
+        // Claim the run atomically. Stale-run recovery, the active-run check
+        // and the insert must be one IMMEDIATE transaction: SQLite serializes
+        // writers under BEGIN IMMEDIATE, so a second fm-mcp process blocks
+        // (then fails the check) instead of racing the check-then-insert.
+        // A partial unique index on status='running' would be stronger but
+        // requires a schema bump, which is not available here.
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("claim code-index run: {e}"))?;
+        let claimed = self.begin_code_index_run_inner(conn, scope, codebase, snapshot);
+        match claimed {
+            Ok(run_id) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("commit code-index run claim: {e}"))?;
+                Ok(run_id)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn begin_code_index_run_inner(
+        &self,
+        conn: &Connection,
+        scope: &GraphScope,
+        codebase: &str,
+        snapshot: &crate::code::CodeSourceSnapshot,
+    ) -> Result<String, String> {
+        // A process crash cannot run a finally block. Recover only runs that
+        // are older than the lease window; a recent run is still active and
+        // must not be silently failed by a concurrent index request.
+        let stale_before = (Utc::now()
+            - chrono::Duration::seconds(self.code_index_lease_seconds() as i64))
+        .to_rfc3339();
+        conn.execute(
+            "UPDATE code_index_runs
+             SET status='failed', errors='[\"interrupted_before_completion\"]', finished_at=?1
+             WHERE owner=?2 AND workspace_id=?3 AND codebase=?4 AND status='running'
+               AND started_at < ?5",
+            params![
+                Utc::now().to_rfc3339(),
+                scope.owner,
+                scope.workspace_id,
+                codebase,
+                stale_before,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let active: Option<String> = conn
+            .query_row(
+                "SELECT run_id FROM code_index_runs
+                 WHERE owner=?1 AND workspace_id=?2 AND codebase=?3 AND status='running'
+                 ORDER BY started_at DESC LIMIT 1",
+                params![scope.owner, scope.workspace_id, codebase],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(active) = active {
+            return Err(format!("code-index run already active: {active}"));
+        }
+        let run_id = format!("codegen_{}", uuid::Uuid::new_v4().simple());
+        let source_snapshot = serde_json::to_string(snapshot).map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO code_index_runs
+             (owner, workspace_id, codebase, run_id, source_snapshot, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            params![
+                scope.owner,
+                scope.workspace_id,
+                codebase,
+                run_id,
+                source_snapshot,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(run_id)
+    }
+
+    fn finish_code_index_run(
+        conn: &Connection,
+        scope: &GraphScope,
+        codebase: &str,
+        run_id: &str,
+        status: &str,
+        result: &CodeIndexResult,
+    ) -> Result<(), String> {
+        let errors = serde_json::to_string(&result.errors).map_err(|e| e.to_string())?;
+        let coverage = serde_json::to_string(&result.coverage).map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE code_index_runs
+                 SET status=?1, files_indexed=?2, files_unchanged=?3,
+                     files_removed=?4, symbols=?5, errors=?6, coverage=?7,
+                     finished_at=?8
+                 WHERE owner=?9 AND workspace_id=?10 AND codebase=?11 AND run_id=?12",
+                params![
+                    status,
+                    result.files_indexed as i64,
+                    result.files_unchanged as i64,
+                    result.files_removed as i64,
+                    result.symbols as i64,
+                    errors,
+                    coverage,
+                    Utc::now().to_rfc3339(),
+                    scope.owner,
+                    scope.workspace_id,
+                    codebase,
+                    run_id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err(format!("code-index run {run_id} was not found"));
+        }
+        if status == "ready" {
+            conn.execute(
+                "INSERT INTO code_index_heads
+                 (owner, workspace_id, codebase, run_id, published_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(owner, workspace_id, codebase) DO UPDATE SET
+                    run_id=excluded.run_id, published_at=excluded.published_at",
+                params![
+                    scope.owner,
+                    scope.workspace_id,
+                    codebase,
+                    run_id,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     fn code_delete_file_nodes(
@@ -2040,17 +2256,23 @@ impl SqliteStore {
     }
 
     /// Index (or re-index) a codebase root. Incremental: unchanged files
-    /// (mtime_ns + size match) are skipped; changed files cascade-delete
-    /// their old nodes first; files gone from disk are swept. OPT-IN ONLY —
+    /// (content hash, mtime_ns, and size match) are skipped; changed files
+    /// cascade-delete their old nodes first; files gone from disk are swept.
+    /// Mtime/size are hints only — same-size edits with preserved timestamps
+    /// are detected by hashing before the skip decision. OPT-IN ONLY —
     /// nothing calls this except the code_index tool.
     pub fn code_stale(
         &self,
         scope: &GraphScope,
         root: &std::path::Path,
     ) -> Result<CodeStaleResult, String> {
-        let codebase = root.to_string_lossy().to_string();
+        let codebase = {
+            let conn = self.conn.lock().unwrap();
+            Self::codebase_for_root(&conn, scope, root)?
+        };
         let codebase_key = Self::codebase_key(scope, &codebase);
-        let files = crate::code::scan_codebase(root)?;
+        let scan = crate::code::scan_codebase_detailed(root)?;
+        let files = scan.files;
         let known: HashMap<String, (String, i64, i64)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn
@@ -2072,10 +2294,12 @@ impl SqliteStore {
 
         let mut result = CodeStaleResult {
             codebase: codebase.clone(),
+            repository_id: codebase.clone(),
             checked_files: 0,
             changed_files: Vec::new(),
             missing_files: Vec::new(),
             errors: Vec::new(),
+            coverage: scan.coverage,
         };
         let mut seen = HashSet::new();
         for path in files {
@@ -2129,44 +2353,107 @@ impl SqliteStore {
         scope: &GraphScope,
         root: &std::path::Path,
     ) -> Result<CodeIndexResult, String> {
-        let codebase = root.to_string_lossy().to_string();
+        let codebase = {
+            let conn = self.conn.lock().unwrap();
+            Self::codebase_for_root(&conn, scope, root)?
+        };
         let codebase_key = Self::codebase_key(scope, &codebase);
-        let files = crate::code::scan_codebase(root)?;
+        let scan = crate::code::scan_codebase_detailed(root)?;
+        let files = scan.files;
+        let source_snapshot = crate::code::source_snapshot(root, &files)?;
+        let run_id = {
+            let conn = self.conn.lock().unwrap();
+            self.begin_code_index_run(&conn, scope, &codebase, &source_snapshot)?
+        };
         let mut result = CodeIndexResult {
             codebase: codebase.clone(),
+            repository_id: codebase.clone(),
+            run_id: run_id.clone(),
+            source_snapshot,
             files_indexed: 0,
             files_unchanged: 0,
             files_removed: 0,
             symbols: 0,
             errors: vec![],
+            coverage: scan.coverage,
         };
 
-        let known: Vec<(String, i64, i64)> = {
+        let mut coverage_index: HashMap<String, usize> = result
+            .coverage
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.rel_path.clone(), index))
+            .collect();
+        let set_coverage = |coverage: &mut Vec<crate::code::ScanCoverage>,
+                            indexes: &mut HashMap<String, usize>,
+                            rel: &str,
+                            status: &str,
+                            detail: Option<String>| {
+            if let Some(index) = indexes.get(rel).copied() {
+                coverage[index].status = status.to_string();
+                coverage[index].detail = detail;
+            } else {
+                indexes.insert(rel.to_string(), coverage.len());
+                coverage.push(crate::code::ScanCoverage {
+                    rel_path: rel.to_string(),
+                    status: status.to_string(),
+                    detail,
+                });
+            }
+        };
+
+        let known: Vec<(String, String, i64, i64)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn
-                .prepare("SELECT rel_path, mtime_ns, size FROM code_files WHERE codebase = ?1")
+                .prepare(
+                    "SELECT rel_path, blake3, mtime_ns, size FROM code_files WHERE codebase = ?1",
+                )
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(params![codebase_key], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
         };
-        let known_map: HashMap<String, (i64, i64)> =
-            known.into_iter().map(|(p, m, s)| (p, (m, s))).collect();
+        let known_map: HashMap<String, (String, i64, i64)> = known
+            .into_iter()
+            .map(|(p, hash, mtime, size)| (p, (hash, mtime, size)))
+            .collect();
 
         let mut seen: HashSet<String> = HashSet::new();
+        let mut staged: Vec<crate::code::IndexedFile> = Vec::new();
         for path in files {
             let rel = path
                 .strip_prefix(root)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             seen.insert(rel.clone());
-            let meta = match std::fs::metadata(&path) {
-                Ok(m) => m,
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
                 Err(e) => {
                     result.errors.push(format!("{rel}: {e}"));
+                    set_coverage(
+                        &mut result.coverage,
+                        &mut coverage_index,
+                        &rel,
+                        "permission_denied",
+                        Some(e.to_string()),
+                    );
+                    continue;
+                }
+            };
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    result.errors.push(format!("{rel}: {e}"));
+                    set_coverage(
+                        &mut result.coverage,
+                        &mut coverage_index,
+                        &rel,
+                        "permission_denied",
+                        Some(e.to_string()),
+                    );
                     continue;
                 }
             };
@@ -2176,38 +2463,43 @@ impl SqliteStore {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(0);
-            if known_map.get(&rel) == Some(&(mtime_ns, meta.len() as i64)) {
+            let current_hash = blake3::hash(&bytes).to_hex().to_string();
+            if known_map.get(&rel) == Some(&(current_hash.clone(), mtime_ns, meta.len() as i64)) {
                 result.files_unchanged += 1;
+                set_coverage(
+                    &mut result.coverage,
+                    &mut coverage_index,
+                    &rel,
+                    "unchanged",
+                    None,
+                );
                 continue;
             }
             match crate::code::index_file(&codebase, root, &path) {
-                Ok(indexed) => {
-                    let conn = self.conn.lock().unwrap();
-                    Self::code_delete_file_nodes(&conn, scope, &codebase, &indexed.rel_path)
-                        .map_err(|e| e.to_string())?;
-                    drop(conn);
-                    self.graph_upsert(scope, &indexed.upsert)
-                        .map_err(|e| e.to_string())?;
-                    let conn = self.conn.lock().unwrap();
-                    conn.execute(
-                        "INSERT OR REPLACE INTO code_files
-                         (codebase, rel_path, blake3, mtime_ns, size, symbol_count, indexed_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![
-                            codebase_key,
-                            indexed.rel_path,
-                            indexed.blake3,
-                            indexed.mtime_ns,
-                            indexed.size,
-                            indexed.symbol_count as i64,
-                            Utc::now().to_rfc3339()
-                        ],
-                    )
-                    .map_err(|e| e.to_string())?;
-                    result.files_indexed += 1;
-                    result.symbols += indexed.symbol_count;
+                Ok(indexed) if indexed.blake3 != current_hash => {
+                    let detail = "source changed while indexing; retry against a stable snapshot";
+                    result.errors.push(format!("{rel}: {detail}"));
+                    set_coverage(
+                        &mut result.coverage,
+                        &mut coverage_index,
+                        &rel,
+                        "parse_failed",
+                        Some(detail.into()),
+                    );
                 }
-                Err(e) => result.errors.push(format!("{rel}: {e}")),
+                Ok(indexed) => {
+                    staged.push(indexed);
+                }
+                Err(e) => {
+                    result.errors.push(format!("{rel}: {e}"));
+                    set_coverage(
+                        &mut result.coverage,
+                        &mut coverage_index,
+                        &rel,
+                        "parse_failed",
+                        Some(e),
+                    );
+                }
             }
         }
 
@@ -2217,18 +2509,86 @@ impl SqliteStore {
             .filter(|k| !seen.contains(*k))
             .cloned()
             .collect();
-        if !gone.is_empty() {
-            let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap();
+        // Per-file failure policy: tolerate and report. A file that cannot be
+        // read or parsed (permission error, mid-edit mutation, unsupported
+        // construct) is recorded in `result.errors` and marked in coverage,
+        // but does NOT abort the run — the files that did index are published
+        // and the failed files stay absent from `code_files`, so the next
+        // incremental run retries them. Only structural failures (database
+        // errors below) fail the run and preserve the prior ready generation.
+        if let Err(error) = conn.execute_batch("BEGIN IMMEDIATE") {
+            let _ =
+                Self::finish_code_index_run(&conn, scope, &codebase, &run_id, "failed", &result);
+            return Err(error.to_string());
+        }
+        let committed = (|| -> rusqlite::Result<()> {
+            for indexed in &staged {
+                Self::code_delete_file_nodes(&conn, scope, &codebase, &indexed.rel_path)?;
+                Self::graph_upsert_inner(&conn, scope, &indexed.upsert)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO code_files
+                     (codebase, rel_path, blake3, mtime_ns, size, symbol_count, indexed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        codebase_key,
+                        indexed.rel_path,
+                        indexed.blake3,
+                        indexed.mtime_ns,
+                        indexed.size,
+                        indexed.symbol_count as i64,
+                        Utc::now().to_rfc3339()
+                    ],
+                )?;
+            }
             for rel in &gone {
-                Self::code_delete_file_nodes(&conn, scope, &codebase, rel)
-                    .map_err(|e| e.to_string())?;
+                Self::code_delete_file_nodes(&conn, scope, &codebase, rel)?;
                 conn.execute(
                     "DELETE FROM code_files WHERE codebase = ?1 AND rel_path = ?2",
                     params![codebase_key, rel],
-                )
-                .map_err(|e| e.to_string())?;
-                result.files_removed += 1;
+                )?;
             }
+            result.files_indexed = staged.len();
+            result.symbols = staged.iter().map(|item| item.symbol_count).sum();
+            result.files_removed = gone.len();
+            for indexed in &staged {
+                set_coverage(
+                    &mut result.coverage,
+                    &mut coverage_index,
+                    &indexed.rel_path,
+                    "indexed",
+                    None,
+                );
+            }
+            for rel in &gone {
+                set_coverage(
+                    &mut result.coverage,
+                    &mut coverage_index,
+                    rel,
+                    "deleted",
+                    Some("previously indexed file is absent".into()),
+                );
+            }
+            // The ready pointer and its manifest are committed with the graph
+            // rows. A crash before COMMIT leaves both the old graph and old
+            // pointer live; a failure is recorded after rollback below.
+            Self::finish_code_index_run(&conn, scope, &codebase, &run_id, "ready", &result)
+                .map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
+                })?;
+            Ok(())
+        })();
+        if let Err(error) = committed {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ =
+                Self::finish_code_index_run(&conn, scope, &codebase, &run_id, "failed", &result);
+            return Err(format!("publishing code index failed: {error}"));
+        }
+        if let Err(error) = conn.execute_batch("COMMIT") {
+            let _ = conn.execute_batch("ROLLBACK");
+            let _ =
+                Self::finish_code_index_run(&conn, scope, &codebase, &run_id, "failed", &result);
+            return Err(error.to_string());
         }
         Ok(result)
     }
@@ -2239,7 +2599,13 @@ impl SqliteStore {
         codebase: &str,
     ) -> rusqlite::Result<(usize, usize, Option<String>)> {
         let conn = self.conn.lock().unwrap();
-        let codebase_key = Self::codebase_key(scope, codebase);
+        let codebase = if std::path::Path::new(codebase).is_dir() {
+            Self::codebase_for_root(&conn, scope, std::path::Path::new(codebase))
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+        } else {
+            Self::codebase_identity(codebase)
+        };
+        let codebase_key = Self::codebase_key(scope, &codebase);
         let (files, symbols): (i64, i64) = conn.query_row(
             "SELECT count(*), COALESCE(SUM(symbol_count),0) FROM code_files WHERE codebase = ?1",
             params![codebase_key],
@@ -2256,8 +2622,58 @@ impl SqliteStore {
         Ok((files as usize, symbols as usize, last))
     }
 
+    /// Return the last atomically published run for a scoped repository.  A
+    /// failed or interrupted run never replaces this pointer.
+    pub fn code_index_head(
+        &self,
+        scope: &GraphScope,
+        codebase: &str,
+    ) -> rusqlite::Result<Option<CodeIndexHead>> {
+        let conn = self.conn.lock().unwrap();
+        let codebase = if std::path::Path::new(codebase).is_dir() {
+            Self::codebase_for_root(&conn, scope, std::path::Path::new(codebase))
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+        } else {
+            Self::codebase_identity(codebase)
+        };
+        let row = conn
+            .query_row(
+                "SELECT h.run_id, r.status, r.source_snapshot, h.published_at
+                 FROM code_index_heads h
+                 JOIN code_index_runs r
+                   ON r.owner=h.owner AND r.workspace_id=h.workspace_id
+                  AND r.codebase=h.codebase AND r.run_id=h.run_id
+                 WHERE h.owner=?1 AND h.workspace_id=?2 AND h.codebase=?3",
+                params![scope.owner, scope.workspace_id, codebase],
+                |row| {
+                    let snapshot: String = row.get(2)?;
+                    let snapshot = serde_json::from_str(&snapshot).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            snapshot.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(CodeIndexHead {
+                        run_id: row.get(0)?,
+                        status: row.get(1)?,
+                        source_snapshot: snapshot,
+                        published_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn code_remove(&self, scope: &GraphScope, codebase: &str) -> Result<usize, String> {
-        let codebase_key = Self::codebase_key(scope, codebase);
+        let codebase = if std::path::Path::new(codebase).is_dir() {
+            let conn = self.conn.lock().unwrap();
+            Self::codebase_for_root(&conn, scope, std::path::Path::new(codebase))?
+        } else {
+            Self::codebase_identity(codebase)
+        };
+        let codebase_key = Self::codebase_key(scope, &codebase);
         let rels: Vec<String> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn
@@ -2270,7 +2686,8 @@ impl SqliteStore {
         };
         let conn = self.conn.lock().unwrap();
         for rel in &rels {
-            Self::code_delete_file_nodes(&conn, scope, codebase, rel).map_err(|e| e.to_string())?;
+            Self::code_delete_file_nodes(&conn, scope, &codebase, rel)
+                .map_err(|e| e.to_string())?;
         }
         // Modules and callables are codebase-scoped (not file-prefixed) —
         // sweep whatever remains under the namespace.
@@ -2306,6 +2723,19 @@ impl SqliteStore {
             params![codebase_key],
         )
         .map_err(|e| e.to_string())?;
+        // A repository removal is also a projection forget: no stale ready
+        // pointer or run manifest may resurrect the deleted namespace in a
+        // later status/recovery call.
+        conn.execute(
+            "DELETE FROM code_index_heads WHERE owner=?1 AND workspace_id=?2 AND codebase=?3",
+            params![scope.owner, scope.workspace_id, codebase],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM code_index_runs WHERE owner=?1 AND workspace_id=?2 AND codebase=?3",
+            params![scope.owner, scope.workspace_id, codebase],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(rels.len())
     }
 
@@ -2319,6 +2749,12 @@ impl SqliteStore {
         max_depth: usize,
     ) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
+        let codebase = if std::path::Path::new(codebase).is_dir() {
+            Self::codebase_for_root(&conn, scope, std::path::Path::new(codebase))
+                .map_err(|_| rusqlite::Error::InvalidQuery)?
+        } else {
+            Self::codebase_identity(codebase)
+        };
         // module nodes that this file could be imported as: match rel_path
         // stem against module node names (suffix match — import strings are
         // rarely full paths).
@@ -2377,6 +2813,28 @@ impl SqliteStore {
         out.sort();
         Ok(out)
     }
+
+    /// Bounded impact view with explicit accounting. The legacy unbounded
+    /// method remains available for internal callers; MCP uses this report so
+    /// a capped answer cannot be mistaken for the complete blast radius.
+    pub fn code_impact_bounded(
+        &self,
+        scope: &GraphScope,
+        codebase: &str,
+        rel_path: &str,
+        max_depth: usize,
+        limit: usize,
+    ) -> rusqlite::Result<CodeImpactResult> {
+        let all = self.code_impact(scope, codebase, rel_path, max_depth)?;
+        let total = all.len();
+        let cap = limit.max(1);
+        let truncated = total > cap;
+        Ok(CodeImpactResult {
+            impacted_files: all.into_iter().take(cap).collect(),
+            total,
+            truncated,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2390,6 +2848,9 @@ mod code_index_tests {
 
     mod tempdir_like {
         use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
         pub struct TempRepo(pub PathBuf);
         impl TempRepo {
@@ -2397,10 +2858,7 @@ mod code_index_tests {
                 let dir = std::env::temp_dir().join(format!(
                     "fm-code-fixture-{}-{}",
                     std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
+                    NEXT_ID.fetch_add(1, Ordering::Relaxed)
                 ));
                 std::fs::create_dir_all(&dir).unwrap();
                 Self(dir)
@@ -2458,6 +2916,7 @@ mod code_index_tests {
         let s = SqliteStore::memory(4).unwrap();
         let result = s.code_index(&test_scope(), root).unwrap();
         assert_eq!(result.files_indexed, 2);
+        assert!(result.repository_id.starts_with("repo_"));
         assert_eq!(result.symbols, 2, "core_helper + main");
         assert!(result.errors.is_empty(), "{:?}", result.errors);
 
@@ -2484,6 +2943,12 @@ mod code_index_tests {
             impacted.iter().any(|f| f.ends_with("src/app.py")),
             "expected app.py in impact set, got {impacted:?}"
         );
+        let bounded = s
+            .code_impact_bounded(&test_scope(), &codebase, "src/lib.py", 4, 1)
+            .unwrap();
+        assert_eq!(bounded.total, impacted.len());
+        assert_eq!(bounded.impacted_files.len(), 1);
+        assert_eq!(bounded.truncated, impacted.len() > 1);
 
         // removal sweeps everything
         let removed = s.code_remove(&test_scope(), &codebase).unwrap();
@@ -2497,6 +2962,11 @@ mod code_index_tests {
             )
             .unwrap();
         assert_eq!(left, 0);
+        drop(conn);
+        assert!(s
+            .code_index_head(&test_scope(), &codebase)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2513,5 +2983,286 @@ mod code_index_tests {
         assert_eq!(result.files_removed, 1);
         let hits = s.graph_cues(&test_scope(), "beta", 10).unwrap();
         assert!(hits.is_empty(), "beta's cues must be gone");
+    }
+
+    #[test]
+    fn same_size_content_change_is_not_hidden_by_metadata_hint() {
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "stable.py", "def alpha():\n    return 1\n");
+        let s = SqliteStore::memory(4).unwrap();
+        assert_eq!(s.code_index(&test_scope(), root).unwrap().files_indexed, 1);
+
+        // Keep the byte length identical. The index must compare the stored
+        // content digest before treating a metadata match as unchanged.
+        write(root, "stable.py", "def alpha():\n    return 2\n");
+        let result = s.code_index(&test_scope(), root).unwrap();
+        assert_eq!(result.files_indexed, 1, "content mutation must re-index");
+        assert_eq!(result.files_unchanged, 0);
+    }
+
+    #[test]
+    fn code_index_reports_non_selected_scan_coverage() {
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "good.py", "def good():\n    return 1\n");
+        write(root, "README.md", "documentation\n");
+        write(root, "binary.rs", "placeholder\n");
+        std::fs::write(root.join("binary.rs"), [b'f', 0, b'x']).unwrap();
+        std::fs::write(root.join("huge.py"), vec![b'x'; 512 * 1024 + 1]).unwrap();
+        write(root, "target/ignored.py", "def ignored(): pass\n");
+
+        let store = SqliteStore::memory(4).unwrap();
+        let result = store.code_index(&test_scope(), root).unwrap();
+        let statuses: HashMap<_, _> = result
+            .coverage
+            .iter()
+            .map(|entry| (entry.rel_path.as_str(), entry.status.as_str()))
+            .collect();
+        assert_eq!(statuses.get("good.py"), Some(&"indexed"));
+        assert_eq!(statuses.get("README.md"), Some(&"unsupported"));
+        assert_eq!(statuses.get("binary.rs"), Some(&"binary"));
+        assert_eq!(statuses.get("huge.py"), Some(&"oversize"));
+        assert_eq!(statuses.get("target"), Some(&"ignored"));
+    }
+
+    #[test]
+    fn code_index_publishes_a_path_free_ready_generation() {
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "main.py", "def main():\n    return 1\n");
+        let store = SqliteStore::memory(4).unwrap();
+
+        let first = store.code_index(&test_scope(), root).unwrap();
+        let head = store
+            .code_index_head(&test_scope(), root.to_string_lossy().as_ref())
+            .unwrap()
+            .expect("successful index must publish a head");
+        assert_eq!(head.run_id, first.run_id);
+        assert_eq!(head.status, "ready");
+        assert_eq!(head.source_snapshot.repository_id, first.repository_id);
+        assert!(!head.source_snapshot.file_manifest_digest.is_empty());
+        let root_text = root.to_string_lossy();
+        assert!(!serde_json::to_string(&head)
+            .unwrap()
+            .contains(root_text.as_ref()));
+
+        // Simulate a process death after run creation. The next explicit
+        // request must close that abandoned run without moving the ready head.
+        let abandoned_started_at = (Utc::now()
+            - chrono::Duration::seconds(store.code_index_lease_seconds() as i64 + 1))
+        .to_rfc3339();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO code_index_runs
+                 (owner, workspace_id, codebase, run_id, source_snapshot, status, started_at)
+                 VALUES (?1, ?2, ?3, 'codegen_abandoned', ?4, 'running', ?5)",
+                params![
+                    test_scope().owner,
+                    test_scope().workspace_id,
+                    first.codebase,
+                    serde_json::to_string(&first.source_snapshot).unwrap(),
+                    abandoned_started_at
+                ],
+            )
+            .unwrap();
+        }
+
+        // A same-size content change must produce a new immutable run and
+        // move only the ready pointer; the prior run remains auditable.
+        write(root, "main.py", "def main():\n    return 2\n");
+        let second = store.code_index(&test_scope(), root).unwrap();
+        assert_ne!(first.run_id, second.run_id);
+        assert_ne!(
+            first.source_snapshot.file_manifest_digest,
+            second.source_snapshot.file_manifest_digest
+        );
+        let current = store
+            .code_index_head(&test_scope(), root.to_string_lossy().as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.run_id, second.run_id);
+
+        let conn = store.conn.lock().unwrap();
+        let (runs, ready): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), sum(status='ready') FROM code_index_runs
+                 WHERE owner=?1 AND workspace_id=?2 AND codebase=?3",
+                params![
+                    test_scope().owner,
+                    test_scope().workspace_id,
+                    second.codebase
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(runs, 3);
+        assert_eq!(ready, 2);
+        let abandoned: String = conn
+            .query_row(
+                "SELECT status FROM code_index_runs WHERE run_id='codegen_abandoned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(abandoned, "failed");
+    }
+
+    #[test]
+    fn code_index_does_not_fail_a_recent_concurrent_run() {
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "main.py", "def main():\n    return 1\n");
+        let store = SqliteStore::memory(4).unwrap();
+        let first = store.code_index(&test_scope(), root).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO code_index_runs
+                 (owner, workspace_id, codebase, run_id, source_snapshot, status, started_at)
+                 VALUES (?1, ?2, ?3, 'codegen_active', ?4, 'running', ?5)",
+                params![
+                    test_scope().owner,
+                    test_scope().workspace_id,
+                    first.codebase,
+                    serde_json::to_string(&first.source_snapshot).unwrap(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let error = store.code_index(&test_scope(), root).unwrap_err();
+        assert!(error.contains("code-index run already active: codegen_active"));
+        let conn = store.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM code_index_runs WHERE run_id='codegen_active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_index_tolerates_and_reports_per_file_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "good.py", "def good():\n    return 1\n");
+        write(root, "bad.py", "def bad():\n    return 2\n");
+        std::fs::set_permissions(root.join("bad.py"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+
+        let store = SqliteStore::memory(4).unwrap();
+        let result = store
+            .code_index(&test_scope(), root)
+            .expect("one unreadable file must not fail the run");
+        assert_eq!(result.files_indexed, 1, "good.py still indexed");
+        assert!(
+            result.errors.iter().any(|e| e.starts_with("bad.py: ")),
+            "failure must be reported in errors: {:?}",
+            result.errors
+        );
+        let coverage: HashMap<_, _> = result
+            .coverage
+            .iter()
+            .map(|entry| (entry.rel_path.as_str(), entry.status.as_str()))
+            .collect();
+        assert_eq!(coverage.get("good.py"), Some(&"indexed"));
+        assert_eq!(coverage.get("bad.py"), Some(&"permission_denied"));
+
+        // The partial generation is published and the failed file is retried
+        // once it becomes readable again.
+        let head = store
+            .code_index_head(&test_scope(), root.to_string_lossy().as_ref())
+            .unwrap()
+            .expect("a run with per-file failures still publishes a head");
+        assert_eq!(head.run_id, result.run_id);
+        std::fs::set_permissions(root.join("bad.py"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let retried = store.code_index(&test_scope(), root).unwrap();
+        assert_eq!(retried.files_indexed, 1, "bad.py indexed on retry");
+        assert!(retried.errors.is_empty(), "{:?}", retried.errors);
+    }
+
+    #[test]
+    fn code_index_run_claim_is_exclusive_across_connections() {
+        let repo = fixture_repo();
+        let root = &repo.0;
+        write(root, "main.py", "def main():\n    return 1\n");
+        let db = std::env::temp_dir().join(format!("fm-code-claim-{}.db", std::process::id()));
+        let db_path = db.to_string_lossy().to_string();
+
+        // Two stores on one database file stand in for two fm-mcp processes.
+        let store_a = SqliteStore::new(&db_path, 4).unwrap();
+        let store_b = SqliteStore::new(&db_path, 4).unwrap();
+        let snapshot = crate::code::CodeSourceSnapshot {
+            repository_id: "repo_test".into(),
+            git_commit: None,
+            git_ref: None,
+            git_dirty: false,
+            file_manifest_digest: "digest".into(),
+        };
+        let codebase = root.to_string_lossy().to_string();
+
+        let run_a = {
+            let conn = store_a.conn.lock().unwrap();
+            store_a
+                .begin_code_index_run(&conn, &test_scope(), &codebase, &snapshot)
+                .unwrap()
+        };
+        // The second process must lose the claim: the active-run check now
+        // runs inside the same IMMEDIATE transaction as the insert, so it
+        // cannot observe the pre-claim state.
+        let error = {
+            let conn = store_b.conn.lock().unwrap();
+            store_b
+                .begin_code_index_run(&conn, &test_scope(), &codebase, &snapshot)
+                .unwrap_err()
+        };
+        assert!(
+            error.contains(&format!("code-index run already active: {run_a}")),
+            "second claim must fail, got: {error}"
+        );
+
+        drop(store_a);
+        drop(store_b);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_scan_never_follows_symlinked_files_or_directories() {
+        use std::os::unix::fs::symlink;
+
+        let repo = fixture_repo();
+        let outside = fixture_repo();
+        write(&outside.0, "escape.py", "def escape():\n    return 1\n");
+        write(&repo.0, "inside.py", "def inside():\n    return 1\n");
+        symlink(outside.0.join("escape.py"), repo.0.join("escape.py")).unwrap();
+        symlink(&outside.0, repo.0.join("outside-dir")).unwrap();
+
+        let files = crate::code::scan_codebase(&repo.0).unwrap();
+        assert_eq!(files, vec![repo.0.join("inside.py")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_scan_rejects_a_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let repo = fixture_repo();
+        let link = repo.0.with_extension("-root-link");
+        symlink(&repo.0, &link).unwrap();
+        let error = crate::code::scan_codebase(&link).unwrap_err();
+        assert!(error.contains("real directory"));
+        let _ = std::fs::remove_file(link);
     }
 }

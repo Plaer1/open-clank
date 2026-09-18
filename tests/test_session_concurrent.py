@@ -11,8 +11,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from core.models import Session, ChatMessage
+from core.models import (
+    Session,
+    ChatMessage,
+    get_session_manager_instance,
+    set_session_manager_instance,
+)
 from core.session_manager import SessionManager
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_session_manager():
+    previous = get_session_manager_instance()
+    set_session_manager_instance(None)
+    yield
+    set_session_manager_instance(previous)
 
 
 @pytest.mark.asyncio

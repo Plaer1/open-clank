@@ -869,7 +869,10 @@ export const layer = Layer.effect(
               add: [
                 {
                   name: "@mimo-ai/plugin",
-                  version: InstallationLocal ? undefined : InstallationVersion,
+                  // Open Clank embeds its private engine version independently
+                  // of the published plugin SDK version. Do not ask npm for a
+                  // private engine version that cannot exist in the registry.
+                  version: InstallationLocal || process.env.OPEN_CLANK_MANAGED === "1" ? undefined : InstallationVersion,
                 },
               ],
             })

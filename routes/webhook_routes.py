@@ -5,13 +5,10 @@ import uuid
 import logging
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Form
 from pydantic import BaseModel, Field
 
-from core.database import SessionLocal, Webhook, ModelEndpoint
-from src.auth_helpers import owner_filter
-from src.url_security import validate_public_http_url
+from core.database import SessionLocal, Webhook
 from src.webhook_manager import WebhookManager, validate_webhook_url, validate_events
 
 logger = logging.getLogger(__name__)
@@ -26,20 +23,6 @@ MAX_MESSAGE_LEN = 32_000
 
 
 from core.middleware import require_admin as _require_admin
-
-
-def _select_api_chat_fallback_endpoint(db, token_owner: Optional[str]):
-    """First enabled ModelEndpoint owned exactly by token_owner. An unscoped .first() would
-    let a chat-scoped token fall back onto another user's private endpoint and
-    silently spend that owner's API key/quota. Fails closed to null-owner rows
-    only when token_owner is absent.
-    Does not validate base_url — admin-configured local/LAN endpoints remain allowed.
-    """
-    query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
-    if token_owner:
-        query = owner_filter(query, ModelEndpoint, token_owner, include_shared=False)
-        return query.order_by(ModelEndpoint.owner.desc(), ModelEndpoint.created_at).first()
-    return query.filter(ModelEndpoint.owner == None).order_by(ModelEndpoint.created_at).first()  # noqa: E711
 
 
 def _caller_owns_session(sess_owner, caller) -> bool:
@@ -184,52 +167,12 @@ def setup_webhook_routes(
     # Sync Chat Endpoint (for n8n / Make / Activepieces)
     # ================================================================
 
-    # Known provider base URLs — auto-resolved from api_key prefix or model name
-    KNOWN_PROVIDERS = {
-        "deepseek": "https://api.deepseek.com/v1",
-        "openai": "https://api.openai.com/v1",
-        "mistral": "https://api.mistral.ai/v1",
-        "groq": "https://api.groq.com/openai/v1",
-        "together": "https://api.together.xyz/v1",
-        "openrouter": "https://openrouter.ai/api/v1",
-        "ollama": "https://ollama.com/api",
-        "opencode-zen": "https://opencode.ai/zen/v1",
-        "opencode-go": "https://opencode.ai/zen/go/v1",
-        "fireworks": "https://api.fireworks.ai/inference/v1",
-        "venice": "https://api.venice.ai/api/v1",
-        "kimi-code": "https://api.kimi.com/coding/v1",
-        "kimicode": "https://api.kimi.com/coding/v1",
-    }
-
-    # Model prefix → provider mapping for auto-detection
-    MODEL_PROVIDER_MAP = {
-        "deepseek": "deepseek",
-        "gpt-": "openai",
-        "o1": "openai",
-        "o3": "openai",
-        "o4": "openai",
-        "mistral": "mistral",
-        "llama": "groq",
-        "mixtral": "groq",
-        "kimi-for-coding": "kimi-code",
-        "kimi": "kimi-code",
-    }
-
-    def _resolve_base_url(model: Optional[str], provider: Optional[str]) -> Optional[str]:
-        """Try to auto-resolve a base URL from provider name or model prefix."""
-        if provider and provider.lower() in KNOWN_PROVIDERS:
-            return KNOWN_PROVIDERS[provider.lower()]
-        if model:
-            model_lower = model.lower()
-            for prefix, prov in MODEL_PROVIDER_MAP.items():
-                if model_lower.startswith(prefix):
-                    return KNOWN_PROVIDERS[prov]
-        return None
-
     class SyncChatRequest(BaseModel):
         message: str = Field(..., max_length=MAX_MESSAGE_LEN)
         model: Optional[str] = Field(None, max_length=200)
         session: Optional[str] = Field(None, max_length=100)
+        endpoint_id: Optional[str] = Field(None, max_length=200)
+        model_route_id: Optional[str] = Field(None, max_length=200)
         api_key: Optional[str] = Field(None, max_length=256)
         base_url: Optional[str] = Field(None, max_length=MAX_URL_LEN)
         provider: Optional[str] = Field(None, max_length=50)
@@ -242,10 +185,26 @@ def setup_webhook_routes(
         if "chat" not in scopes:
             raise HTTPException(403, "API token is not scoped for chat")
         token_owner = getattr(request.state, "api_token_owner", None)
+        if not token_owner:
+            raise HTTPException(403, "API token has no provider owner")
+        if body.api_key or body.base_url or body.provider:
+            raise HTTPException(
+                400,
+                "Provider credentials and routes must be configured through /api/v1/providers",
+            )
+        if not session_manager:
+            raise HTTPException(503, "Session manager is unavailable")
 
         from core.models import ChatMessage
-        from src.llm_core import llm_call_async
-        from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base
+        from src.openclank.chat_routing import (
+            ChatRouteUnavailable,
+            MANAGED_ENGINE_PUBLIC_URL,
+            list_chat_routes,
+            normalized_provider_owner,
+            resolve_chat_route,
+        )
+        from src.openclank.modality_facade import complete_text
+        from src.openclank.provider_store import ProviderStore
 
         message = body.message.strip()
         if not message:
@@ -253,6 +212,7 @@ def setup_webhook_routes(
 
         session_id = body.session
         sess = None
+        selected_route = None
 
         # --- Case 1: Resume an existing session ---
         if session_id and session_manager:
@@ -275,114 +235,91 @@ def setup_webhook_routes(
             _sess_owner = getattr(sess, "owner", None)
             if not _caller_owns_session(_sess_owner, _tok_user):
                 raise HTTPException(404, "Session not found")
+            try:
+                selected_route = resolve_chat_route(
+                    owner=token_owner,
+                    endpoint_id=getattr(sess, "endpoint_id", None),
+                    model_id=getattr(sess, "model", None),
+                    model_route_id=getattr(
+                        sess,
+                        "provider_model_route_id",
+                        None,
+                    ),
+                )
+            except ChatRouteUnavailable as exc:
+                raise HTTPException(409, str(exc)) from exc
 
-        # --- Case 2: Direct API key + model (no pre-configured endpoint needed) ---
-        if not sess and body.api_key:
-            api_key = body.api_key.strip()
-            model = body.model or "deepseek-chat"
-
-            # Validate only token-supplied direct base_url; auto-resolved known-provider
-            # URLs are not subject to extra local/LAN blocking beyond existing provider logic.
-            direct_base_url = body.base_url.strip().rstrip("/") if body.base_url else None
-            if direct_base_url:
-                try:
-                    base_url = validate_public_http_url(direct_base_url)
-                except ValueError as e:
-                    detail = str(e).replace("URL", "base_url", 1)
-                    raise HTTPException(400, detail)
-            else:
-                base_url = _resolve_base_url(model, body.provider)
-            if not base_url:
-                raise HTTPException(400,
-                    "Could not auto-detect provider. Pass base_url (e.g. 'https://api.deepseek.com/v1') "
-                    "or provider ('deepseek', 'openai', 'groq', etc.)")
-            base_url = normalize_base(base_url)
-            endpoint_url = build_chat_url(base_url)
-
-            if not session_manager:
-                raise HTTPException(500, "Session manager not available")
+        if not sess:
+            try:
+                if body.model_route_id or body.endpoint_id:
+                    selected_route = resolve_chat_route(
+                        owner=token_owner,
+                        endpoint_id=body.endpoint_id,
+                        model_id=body.model,
+                        model_route_id=body.model_route_id,
+                    )
+                else:
+                    own, shared = list_chat_routes(token_owner)
+                    available = [*own, *shared]
+                    if body.model:
+                        available = [
+                            route
+                            for route in available
+                            if route.provider_model_id == body.model
+                        ]
+                    by_id = {
+                        route.model_route_id: route
+                        for route in available
+                    }
+                    bindings = ProviderStore().list_route_bindings(
+                        owner=normalized_provider_owner(token_owner),
+                    )
+                    selected_route = next(
+                        (
+                            by_id[binding.model_route_id]
+                            for binding in bindings
+                            if binding.purpose == "chat"
+                            and binding.enabled
+                            and binding.model_route_id in by_id
+                        ),
+                        available[0] if len(available) == 1 else None,
+                    )
+                    if selected_route is None:
+                        raise ChatRouteUnavailable(
+                            "Choose one normalized provider connection and model route"
+                        )
+            except ChatRouteUnavailable as exc:
+                raise HTTPException(400, str(exc)) from exc
 
             sid = str(uuid.uuid4())
             sess = session_manager.create_session(
-                session_id=sid, name="API Chat", endpoint_url=endpoint_url,
-                model=model, owner=token_owner,
+                session_id=sid,
+                name="API Chat",
+                endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+                model=selected_route.provider_model_id,
+                owner=token_owner,
+                endpoint_id=selected_route.public_endpoint_id,
+                provider_model_route_id=selected_route.model_route_id,
             )
-            sess.headers = build_headers(api_key, base_url)
+            sess.headers = {}
             session_manager.save_sessions()
             session_id = sid
 
-        # --- Case 3: Fall back to first configured ModelEndpoint ---
-        if not sess:
-            db = SessionLocal()
-            try:
-                ep = _select_api_chat_fallback_endpoint(db, token_owner)
-            finally:
-                db.close()
+        if selected_route is None:  # pragma: no cover - defensive invariant
+            raise HTTPException(409, "Session has no normalized provider route")
 
-            if not ep:
-                raise HTTPException(400,
-                    "No session, api_key, or configured endpoints. "
-                    "Pass api_key + model, or configure an endpoint in Admin.")
-
-            base_url = normalize_base(ep.base_url)
-            endpoint_url = build_chat_url(base_url)
-            model = body.model or "auto"
-            api_key = ep.api_key
-            if getattr(ep, "provider_auth_id", None):
-                try:
-                    from src.endpoint_resolver import resolve_endpoint_runtime
-                    base_url, api_key = resolve_endpoint_runtime(ep, owner=token_owner)
-                    endpoint_url = build_chat_url(base_url)
-                except Exception:
-                    raise HTTPException(500, "Could not resolve endpoint credentials")
-
-            if model == "auto":
-                try:
-                    async with httpx.AsyncClient(timeout=5) as client:
-                        models_url = build_models_url(base_url)
-                        hdrs = build_headers(api_key, base_url)
-                        if models_url:
-                            resp = await client.get(models_url, headers=hdrs)
-                            resp.raise_for_status()
-                            data = resp.json()
-                            items = data if isinstance(data, list) else (data.get("data") or [])
-                            ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
-                            if not ids and isinstance(data, dict):
-                                ids = [
-                                    m.get("name") or m.get("model")
-                                    for m in (data.get("models") or [])
-                                    if m.get("name") or m.get("model")
-                                ]
-                        else:
-                            import json as _json
-                            ids = _json.loads(ep.cached_models or "[]")
-                        model = ids[0] if ids else "auto"
-                except Exception:
-                    raise HTTPException(500, "Could not discover models from endpoint")
-
-            if not session_manager:
-                raise HTTPException(500, "Session manager not available")
-
-            sid = str(uuid.uuid4())
-            sess = session_manager.create_session(
-                session_id=sid, name="API Chat", endpoint_url=endpoint_url,
-                model=model, owner=token_owner,
-            )
-            if api_key:
-                sess.headers = build_headers(api_key, base_url)
-                session_manager.save_sessions()
-            session_id = sid
-
-        # --- Send message and get response ---
         sess.add_message(ChatMessage("user", message))
 
         messages = [{"role": m.role, "content": m.content} for m in sess.history]
 
-        reply = await llm_call_async(
-            sess.endpoint_url, sess.model, messages,
-            headers=sess.headers, timeout=120,
+        reply = await complete_text(
             owner=token_owner,
-            session_id=session_id,
+            purpose="chat",
+            messages=messages,
+            model_route_id=selected_route.model_route_id,
+            grant_id=selected_route.provider_grant_id,
+            root_operation_id=f"root_{uuid.uuid4().hex}",
+            idempotency_key=f"sync-chat-{uuid.uuid4().hex}",
         )
         sess.add_message(ChatMessage("assistant", reply))
         session_manager.save_sessions()

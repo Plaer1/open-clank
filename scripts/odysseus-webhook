@@ -109,7 +109,7 @@ def cmd_url(args):
             fail(f"no task with id {args.id!r}")
         if not t.webhook_token:
             fail(f"task {args.id!r} has no webhook token (rotate one first)")
-        base = (args.base or "http://localhost:7000").rstrip("/")
+        base = (args.base or "http://localhost:7777").rstrip("/")
         url = f"{base}/api/webhook/{t.webhook_token}"
         emit({
             "task_id": t.id,
@@ -146,7 +146,7 @@ def _build_parser():
 
     pu = sub.add_parser("url", parents=[common])
     pu.add_argument("id")
-    pu.add_argument("--base", help="base URL (default http://localhost:7000)")
+    pu.add_argument("--base", help="base URL (default http://localhost:7777)")
     pu.set_defaults(func=cmd_url)
 
     return p

@@ -17,9 +17,9 @@ the facts still land in the JSON store.
 import asyncio
 import tempfile
 
-import src.llm_core
 import src.event_bus
 from src.memory import MemoryManager
+from services.memory import memory_extractor
 from services.memory.memory_extractor import extract_and_store
 
 
@@ -58,10 +58,13 @@ def test_extraction_persists_facts_when_vector_store_fails_at_runtime(monkeypatc
         '{"text": "Alice prefers tea over coffee", "category": "preference"}]'
     )
 
-    async def _fake_llm(url, model, messages, **kwargs):
+    completion_calls = []
+
+    async def _fake_complete_text(**kwargs):
+        completion_calls.append(kwargs)
         return facts_json
 
-    monkeypatch.setattr(src.llm_core, "llm_call_async", _fake_llm)
+    monkeypatch.setattr(memory_extractor, "_complete_text", _fake_complete_text)
     # fire_event touches an async event loop / disk — neutralize it.
     monkeypatch.setattr(src.event_bus, "fire_event", lambda *a, **k: None)
 
@@ -75,6 +78,7 @@ def test_extraction_persists_facts_when_vector_store_fails_at_runtime(monkeypatc
             endpoint_url="http://x",
             model="m",
             headers=None,
+            root_operation_id="root_memory_1",
         ))
 
         stored = mgr.load(owner="alice")
@@ -83,6 +87,11 @@ def test_extraction_persists_facts_when_vector_store_fails_at_runtime(monkeypatc
     # The bug lost ALL of them (save() was never reached); both must survive.
     assert "Alice lives in Lisbon" in texts
     assert "Alice prefers tea over coffee" in texts
+    assert completion_calls[0]["owner"] == "alice"
+    assert completion_calls[0]["purpose"] == "memory"
+    assert completion_calls[0]["root_operation_id"] == "root_memory_1"
+    assert "endpoint_url" not in completion_calls[0]
+    assert "headers" not in completion_calls[0]
 
 
 def test_healthy_vector_store_still_dedups_normally(monkeypatch):
@@ -93,10 +102,10 @@ def test_healthy_vector_store_still_dedups_normally(monkeypatch):
     fact would be a cross-tenant false drop. Here the match is alice's own
     memory, so the dedup must still fire."""
 
-    async def _fake_llm(url, model, messages, **kwargs):
+    async def _fake_complete_text(**kwargs):
         return '[{"text": "Alice lives in Lisbon", "category": "fact"}]'
 
-    monkeypatch.setattr(src.llm_core, "llm_call_async", _fake_llm)
+    monkeypatch.setattr(memory_extractor, "_complete_text", _fake_complete_text)
     monkeypatch.setattr(src.event_bus, "fire_event", lambda *a, **k: None)
 
     with tempfile.TemporaryDirectory() as data_dir:

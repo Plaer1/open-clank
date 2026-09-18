@@ -6,7 +6,6 @@ import { Log } from "./util"
 import { ConsoleCommand } from "./cli/cmd/account"
 import { ProvidersCommand } from "./cli/cmd/providers"
 import { AgentCommand } from "./cli/cmd/agent"
-import { UpgradeCommand } from "./cli/cmd/upgrade"
 import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
@@ -42,6 +41,7 @@ import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "./util/mimo-process"
+import { OpenClankDriverCommand, runOpenClankDriver } from "./cli/cmd/openclank-driver"
 
 const processMetadata = ensureProcessMetadata("main")
 
@@ -59,6 +59,28 @@ process.on("uncaughtException", (e) => {
 
 const args = hideBin(process.argv)
 const CLI_EXIT = Symbol("CLI_EXIT")
+
+// Rust launches this child over one inherited full-duplex descriptor. Keep it
+// out of the normal CLI middleware: no database migration, HTTP server, or
+// provider credential environment is needed before the host activates it.
+if (args[0] === "openclank-driver") {
+  const allowed = new Set(["--protocol-major", "--protocol-minor", "--control-fd"])
+  const values = new Map<string, string>()
+  for (let index = 1; index < args.length; index += 2) {
+    const flag = args[index]
+    const value = args[index + 1]
+    if (!flag || !allowed.has(flag) || !value || value.startsWith("--") || values.has(flag)) {
+      throw new Error("invalid openclank-driver arguments")
+    }
+    values.set(flag, value)
+  }
+  if (values.size !== 3 || values.get("--protocol-major") !== "1" || values.get("--protocol-minor") !== "0") {
+    throw new Error("unsupported direct-driver protocol")
+  }
+  const controlFd = Number(values.get("--control-fd"))
+  runOpenClankDriver(controlFd)
+  process.exit(0)
+}
 
 function show(out: string) {
   const text = out.trimStart()
@@ -183,6 +205,7 @@ const cli = yargs(args)
   .usage("")
   .completion("completion", "generate shell completion script")
   .command(AcpCommand)
+  .command(OpenClankDriverCommand)
   .command(McpCommand)
   .command(TuiThreadCommand)
   .command(AttachCommand)
@@ -192,7 +215,6 @@ const cli = yargs(args)
   .command(ConsoleCommand)
   .command(ProvidersCommand)
   .command(AgentCommand)
-  .command(UpgradeCommand)
   .command(UninstallCommand)
   .command(ServeCommand)
   // Web command temporarily disabled

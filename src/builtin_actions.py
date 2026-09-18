@@ -13,6 +13,7 @@ from typing import Tuple
 
 from src.auth_helpers import owner_filter
 from core.platform_compat import IS_WINDOWS, find_bash
+from core.atomic_io import atomic_write_json
 from core.constants import internal_api_base
 from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
 from src.interactive_gate import wait_for_interactive_quiet
@@ -82,22 +83,18 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     """
     try:
         # Provider path: use the active store, not the legacy JSON file.
-        from src.ai_interaction import _memory_provider
+        from src.ai_interaction import _memory_lifecycle, _memory_provider
         if (
             (owner or "").strip()
             and _memory_provider
             and getattr(_memory_provider, "provider_id", "native") != "native"
         ):
-            from src.task_endpoint import resolve_task_candidates
             from services.memory.memory_extractor import audit_provider_memories
 
-            candidates = resolve_task_candidates(owner=owner or None)
-            if not candidates:
-                raise TaskNoop("no task endpoint configured for provider memory audit")
-            # Pick the first candidate endpoint — audit is a background job.
-            endpoint_url, model, headers = candidates[0]
             result = await audit_provider_memories(
-                _memory_provider, endpoint_url, model, headers, owner=owner,
+                _memory_provider, owner=owner,
+                memory_lifecycle=_memory_lifecycle,
+                root_operation_id=kwargs.get("root_operation_id"),
             )
             if "error" in result:
                 return f"Memory audit failed: {result['error']}", False
@@ -113,7 +110,6 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         import re
         from difflib import SequenceMatcher
         from src.constants import DATA_DIR
-        from src.llm_core import llm_call_async_with_fallback
         from src.memory import MemoryManager
 
         manager = MemoryManager(DATA_DIR)
@@ -210,12 +206,9 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             if len(group_memories) < 2:
                 return False
 
-            from src.task_endpoint import resolve_task_candidates
-            candidates = resolve_task_candidates(owner=group_owner or None)
-            if not candidates:
-                return False
-
             try:
+                from src.openclank.modality_facade import complete_text
+
                 items = [
                     {
                         "id": m.get("id"),
@@ -241,12 +234,13 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                     f"MEMORIES:\n{json.dumps(items, ensure_ascii=False)}"
                 )
                 await wait_for_interactive_quiet("memory consolidation action")
-                raw = await llm_call_async_with_fallback(
-                    candidates,
+                raw = await complete_text(
+                    owner=group_owner or "local-installation",
+                    purpose="memory",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=4096,
-                    timeout=120,
+                    max_output_tokens=4096,
+                    root_operation_id=kwargs.get("root_operation_id"),
                 )
                 from src.text_helpers import strip_think
 
@@ -642,6 +636,7 @@ async def action_summarize_emails(owner: str, **kwargs) -> Tuple[str, bool]:
             do_summary=True,
             do_reply=False,
             account_id=_email_task_account_id(kwargs),
+            owner=owner,
         )
         if _result_is_config_error(result):
             return result, False
@@ -663,6 +658,7 @@ async def action_draft_email_replies(owner: str, **kwargs) -> Tuple[str, bool]:
             account_id=_email_task_account_id(kwargs),
             days_back=7,
             progress_cb=kwargs.get("progress_cb"),
+            owner=owner,
         )
         if _result_is_config_error(result):
             return result, False
@@ -699,7 +695,7 @@ async def action_email_auto_translate(owner: str, **kwargs) -> Tuple[str, bool]:
             email_translation_body_hash,
         )
         from src.settings import load_settings
-        from src.task_endpoint import task_llm_call_async
+        from src.task_endpoint import task_complete_text
 
         settings = load_settings()
         if not settings.get("email_auto_translate", False):
@@ -773,7 +769,7 @@ async def action_email_auto_translate(owner: str, **kwargs) -> Tuple[str, bool]:
                 c.close()
 
         async def _translate(body: str, subject: str, sender: str) -> tuple[str, bool]:
-            content = await task_llm_call_async(
+            content = await task_complete_text(
                 [
                     {
                         "role": "system",
@@ -796,6 +792,7 @@ async def action_email_auto_translate(owner: str, **kwargs) -> Tuple[str, bool]:
                     },
                 ],
                 owner=owner,
+                root_operation_id=kwargs.get("root_operation_id"),
                 temperature=0.2,
                 max_tokens=8192,
                 timeout=180,
@@ -965,18 +962,27 @@ def _classify_event_heuristic(summary: str) -> tuple:
     return etype, None
 
 
-def _memory_context_lines(mems, limit: int = 40) -> list:
+def _memory_context_lines(mems, limit: int = 40, handler_label: str = "Handler") -> list:
     """Render Memory rows into short personal-context bullets for event classify.
 
     Reads the Memory ORM `text` column. The previous inline code read a
     non-existent `content` attribute, so it raised AttributeError on the first
     row, the surrounding except swallowed it, and the classifier ran with no
     personal context at all. getattr keeps it robust to future schema drift.
+
+    Stored claims keep the %USER% token; the bullets are model-facing, so the
+    token is rendered to the owner's Handler label at this read seam.
     """
+    try:
+        from services.memory.principal_context import render_identity_template
+    except Exception:
+        render_identity_template = None
     lines: list = []
     for m in mems:
         c = (getattr(m, "text", "") or "").strip()
         if c:
+            if render_identity_template is not None:
+                c = render_identity_template(c, handler_label=handler_label)
             lines.append(f"- {c[:200]}")
         if len(lines) >= limit:
             break
@@ -990,8 +996,8 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from datetime import timedelta
         from core.database import SessionLocal, CalendarEvent
-        from src.llm_core import llm_call_async_with_fallback
-        import re as _re, json as _json
+        from src.openclank.modality_facade import complete_text, managed_route_summary
+        import asyncio as _asyncio, re as _re, json as _json
 
         db = SessionLocal()
         try:
@@ -1005,9 +1011,15 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
             if not events:
                 return "No upcoming events to classify", True
 
-            from src.task_endpoint import resolve_task_candidates
-            llm_candidates = resolve_task_candidates(owner=owner)
-            llm_available = bool(llm_candidates)
+            requested_model_route_id = kwargs.get("model_route_id")
+            managed_route = None
+            if not requested_model_route_id:
+                managed_route = managed_route_summary(
+                    owner=owner or "local-installation",
+                    purpose="tasks",
+                    operation="chat.complete",
+                )
+            llm_available = bool(requested_model_route_id or managed_route)
 
             # Pull user memories so the LLM has personal context (relationships,
             # job, hobbies). Helps it know e.g. "<name> is your spouse" so their
@@ -1016,7 +1028,12 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
             try:
                 from core.database import Memory as _Mem
                 _mems = db.query(_Mem).filter(_Mem.owner == owner).limit(60).all() if owner else []
-                _lines = _memory_context_lines(_mems)
+                try:
+                    from services.memory.principal_context import resolve_handler_display_label
+                    _handler_label = resolve_handler_display_label(owner)
+                except Exception:
+                    _handler_label = "Handler"
+                _lines = _memory_context_lines(_mems, handler_label=_handler_label)
                 if _lines:
                     _memory_context = "USER CONTEXT (relationships, work, life):\n" + "\n".join(_lines) + "\n\n"
             except Exception as _me:
@@ -1084,10 +1101,17 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
                 )
                 try:
                     await wait_for_interactive_quiet("calendar classification action")
-                    raw = await llm_call_async_with_fallback(
-                        llm_candidates,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=16384,
+                    raw = await _asyncio.wait_for(
+                        complete_text(
+                            owner=owner or "local-installation",
+                            messages=[{"role": "user", "content": prompt}],
+                            purpose="tasks",
+                            model_route_id=requested_model_route_id,
+                            grant_id=kwargs.get("grant_id"),
+                            root_operation_id=kwargs.get("root_operation_id"),
+                            temperature=0.1,
+                            max_output_tokens=16384,
+                        ),
                         timeout=180,
                     )
                     from src.text_helpers import strip_think as _st
@@ -1170,6 +1194,7 @@ async def action_extract_email_events(owner: str, **kwargs) -> Tuple[str, bool]:
                         days_back=days_back,
                         account_id=account_id,
                         max_process=max_process,
+                        owner=owner,
                     ),
                     timeout=timeout,
                 )
@@ -1220,7 +1245,6 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         import asyncio as _aio
         from datetime import datetime as _dt, timedelta as _td
         from routes.email_helpers import _email_cache_owner_clause, _imap_connect, SCHEDULED_DB
-        from src.llm_core import llm_call_async_with_fallback
 
         # 1. Pull recent UIDs + From headers cheaply (header-only fetch).
         def _pull_headers():
@@ -1300,11 +1324,19 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
         if not eligible:
             return "All sender sigs already cached (or no eligible senders)", True
 
-        from src.task_endpoint import resolve_task_candidates
-        candidates = resolve_task_candidates(owner=owner)
-        if not candidates:
-            return "No LLM endpoint available", False
-        model = candidates[0][1]
+        from src.openclank.modality_facade import (
+            complete_text,
+            managed_route_summary,
+        )
+
+        route_summary = managed_route_summary(
+            owner=owner or "local-installation",
+            purpose="utility",
+            operation="chat.complete",
+        )
+        if route_summary is None:
+            return "No managed utility route available", False
+        model = route_summary["model_id"]
 
         analyzed = 0
         no_sig = 0
@@ -1359,12 +1391,14 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
 
             try:
                 await wait_for_interactive_quiet("sender signature action")
-                raw = await llm_call_async_with_fallback(
-                    candidates,
+                raw = await _aio.wait_for(complete_text(
+                    owner=owner or "local-installation",
+                    purpose="utility",
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0, max_tokens=600,
-                    timeout=60,
-                )
+                    temperature=0.0,
+                    max_output_tokens=600,
+                    root_operation_id=kwargs.get("root_operation_id"),
+                ), timeout=60)
                 from src.text_helpers import strip_think as _st
                 sig = _st(raw or "", prose=False, prompt_echo=False).strip()
                 # Strip surrounding code fences if the LLM added them.
@@ -1546,7 +1580,11 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
-        from routes.skills_routes import _run_skill_test_once, _skill_test_task
+        from routes.skills_routes import (
+            _bound_skill_route,
+            _run_skill_test_once,
+            _skill_test_task,
+        )
 
         # #3 SCOPE GUARD: refuse to run on a None/empty owner — otherwise
         # `sm.load(owner=None)` returns every user's skills and we'd cross-
@@ -1561,42 +1599,8 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         if not names:
             raise TaskNoop("no skills to test")
 
-        from src.task_endpoint import resolve_task_candidates
-        candidates = resolve_task_candidates(owner=owner)
-        if not candidates:
-            return "No Default/Utility model configured — set one in Settings.", False
-
-        # #2 NO SILENT MODEL SWAP: if the configured model isn't served by the
-        # endpoint, try a basename match — but fail loudly instead of grabbing
-        # `avail[0]` which could be an embedding-only model and produce 36
-        # garbage transcripts → 36 'unknown' verdicts with no hint why.
-        url, model, headers = candidates[0]
-        try:
-            from src.llm_core import list_model_ids
-            import os as _os
-
-            selected = None
-            mismatch_notes = []
-            for cand_url, cand_model, cand_headers in candidates:
-                avail = list_model_ids(cand_url, headers=cand_headers)
-                if not avail or cand_model in avail:
-                    selected = (cand_url, cand_model, cand_headers)
-                    break
-                base = _os.path.basename((cand_model or "").rstrip("/"))
-                matched = next((a for a in avail if _os.path.basename(a.rstrip("/")) == base), None)
-                if matched:
-                    selected = (cand_url, matched, cand_headers)
-                    break
-                mismatch_notes.append(
-                    f"{cand_model} not served by {cand_url}; available: "
-                    f"{', '.join(avail[:8])}{'...' if len(avail) > 8 else ''}"
-                )
-            if selected:
-                url, model, headers = selected
-            elif mismatch_notes:
-                return "No configured task fallback model is served. " + " | ".join(mismatch_notes[:3]), False
-        except Exception as _e:
-            logger.warning(f"test_skills model resolve check failed (continuing): {_e}")
+        route = _bound_skill_route(owner, "utility")
+        model = route.provider_model_id
 
         logger.info(f"test_skills: starting on {len(names)} skills, model={model}, owner={owner!r}")
 
@@ -1614,7 +1618,13 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
                 continue
             task = _skill_test_task(skill)
             try:
-                transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
+                transcript, verdict = await _run_skill_test_once(
+                    md,
+                    task,
+                    route,
+                    owner,
+                    root_operation_id=kwargs.get("root_operation_id"),
+                )
                 v = (verdict or {}).get("verdict") or "unknown"
                 tally[v] += 1
                 summary = (verdict or {}).get("summary") or ""
@@ -1673,15 +1683,19 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
         from routes.skills_routes import (
-            _resolve_audit_models, _run_audit_all_job, _skill_audit_jobs,
+            _resolve_audit_models,
+            _run_audit_all_job,
+            _skill_audit_handles,
+            _skill_audit_jobs,
+            track_skill_audit_handle,
         )
 
         if not owner:
             return "audit_skills requires an owner — refusing to run without scope.", False
 
         key = (owner or "",)
-        existing = _skill_audit_jobs.get(key)
-        if existing and existing.get("status") == "running":
+        existing_handle = _skill_audit_handles.get(key)
+        if existing_handle is not None and not existing_handle.done():
             raise TaskNoop("skill audit already running")
 
         sm = SkillsManager(DATA_DIR)
@@ -1693,30 +1707,37 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         if not names:
             raise TaskNoop("no unaudited skills")
 
-        url, model, headers, teacher = _resolve_audit_models()
-        try:
-            from src.llm_core import seconds_since_model_activity
-            recent = seconds_since_model_activity(url, model)
-        except Exception:
-            recent = None
-        if recent is not None and recent < (20 * 60):
-            raise TaskDeferred(
-                f"audit model {model} was used {int(recent)}s ago; waiting for quiet window",
-                delay_seconds=20 * 60,
-            )
+        worker_route, teacher_route = _resolve_audit_models(owner)
+        model = worker_route.provider_model_id
 
         import time as _time
         _skill_audit_jobs[key] = {
             "status": "running", "scope": "scheduled-unchecked", "model": model,
-            "teacher": teacher[1] if teacher else None,
+            "teacher": teacher_route.provider_model_id if teacher_route else None,
             "total": len(names), "done": 0, "current": None,
             "results": [], "log": [
                 f"Scheduled audit of {len(names)} unaudited skill(s) with {model}"
-                + (f"; teacher {teacher[1]}" if teacher else "")
+                + (
+                    f"; teacher {teacher_route.provider_model_id}"
+                    if teacher_route else ""
+                )
             ],
             "started": _time.time(), "cancel": False,
         }
-        await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner)
+        import asyncio as _asyncio
+        audit_task = _asyncio.create_task(
+            _run_audit_all_job(
+                key,
+                sm,
+                names,
+                worker_route,
+                teacher_route,
+                owner,
+                root_operation_id=kwargs.get("root_operation_id"),
+            )
+        )
+        track_skill_audit_handle(key, audit_task)
+        await audit_task
         job = _skill_audit_jobs.get(key, {})
         counts = {}
         for r in job.get("results", []):
@@ -1846,12 +1867,20 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 body = "\n\n".join(p for p in body_parts if p) or title
                 try:
                     from routes.note_routes import dispatch_reminder
-                    await dispatch_reminder(
+                    dispatch_result = await dispatch_reminder(
                         title=title, note_body=body, note_id=n.id,
                         owner=n.owner or owner or "",
+                        occurrence_key=f"{n.id}:{n.due_date}",
                     )
-                    cache[n.id] = now.isoformat()
-                    sent.append(title)
+                    # The legacy scanner cache is an occurrence-level
+                    # suppression fence. Leave it open for partial/failed
+                    # endpoint fanout so the next tick can retry only the
+                    # endpoint receipts that are still retryable.
+                    aggregate = dispatch_result.get("aggregate") if isinstance(dispatch_result, dict) else None
+                    if aggregate in (None, "sent"):
+                        cache[n.id] = {"at": now.isoformat(), "channel": "multiple" if aggregate == "sent" else dispatch_result.get("channel")}
+                    if aggregate != "error":
+                        sent.append(title)
                 except Exception as e:
                     logger.warning(f"ping_notes: dispatch failed for {n.id}: {e}")
 
@@ -1860,7 +1889,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 cache.pop(stale, None)
 
             try:
-                STATE.write_text(_json.dumps(cache), encoding="utf-8")
+                atomic_write_json(str(STATE), cache)
             except Exception as e:
                 logger.warning(f"ping_notes: cache write failed: {e}")
 
@@ -1905,7 +1934,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, EmailAccount as _EA
         from routes.email_helpers import _imap_connect, _decode_header
-        from src.llm_core import llm_call_async_with_fallback
+        from src.openclank.modality_facade import complete_text
 
         # Per-owner state file so multi-user runs don't clobber each other's
         # notified_uids / urgency counts. Empty owner falls back to a generic
@@ -1925,13 +1954,6 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
             "newsletter", "marketing", "notification", "finance", "security",
             "shopping", "social", "work", "personal", "legal", "support", "promo",
         }
-
-        # ── 1. Resolve LLM candidates (utility primary + utility fallbacks; fall
-        # through to default chat as a last resort).
-        from src.task_endpoint import resolve_task_candidates
-        candidates = resolve_task_candidates(owner=owner)
-        if not candidates:
-            return "No LLM endpoint available", False
 
         target_account_id = _email_task_account_id(kwargs)
 
@@ -2200,11 +2222,14 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
                 )
                 try:
                     await wait_for_interactive_quiet("email urgency action")
-                    raw = await llm_call_async_with_fallback(
-                        candidates,
-                        [{"role": "user", "content": prompt}],
-                        temperature=0.1, max_tokens=220, timeout=30,
-                    )
+                    raw = await _aio.wait_for(complete_text(
+                        owner=owner or "local-installation",
+                        purpose="utility",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.1,
+                        max_output_tokens=220,
+                        root_operation_id=kwargs.get("root_operation_id"),
+                    ), timeout=30)
                     # Tolerant JSON-parse: strip code fences if present.
                     txt = (raw or "").strip()
                     if txt.startswith("```"):
@@ -2591,7 +2616,7 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-def _save_cookbook_model_defaults(owner: str, endpoint_id: str, model: str) -> None:
+def _save_cookbook_model_defaults(owner: str, connection_id: str, model: str) -> None:
     if owner:
         from routes.prefs_routes import _load_for_user, _save_for_user
         settings = _load_for_user(owner)
@@ -2601,11 +2626,11 @@ def _save_cookbook_model_defaults(owner: str, endpoint_id: str, model: str) -> N
         settings = load_settings()
         save = save_settings
 
-    settings["default_endpoint_id"] = endpoint_id
+    settings["default_endpoint_id"] = connection_id
     settings["default_model"] = model
     for prefix in ("task", "utility"):
         if not (settings.get(f"{prefix}_endpoint_id") or "").strip():
-            settings[f"{prefix}_endpoint_id"] = endpoint_id
+            settings[f"{prefix}_endpoint_id"] = connection_id
             settings[f"{prefix}_model"] = model
     save(settings)
 
@@ -2741,35 +2766,36 @@ async def action_cookbook_serve(
         return f"Launch rejected: {data.get('error') or data.get('detail') or 'unknown'}", False
 
     sid = data.get("session_id") or ""
-    endpoint_id = data.get("endpoint_id") or ""
+    connection_id = data.get("provider_connection_id") or ""
     # Scheduled serves are usually meant to become the active local model for
-    # chat/tools while their time window is open. Persist both endpoint and
+    # chat/tools while their time window is open. Persist the normalized connection and
     # model so task/utility/default resolution does not keep routing to a stale
     # API fallback. Allow explicit opt-out with {"set_default": false}.
-    if endpoint_id and set_default:
+    if connection_id and set_default:
         try:
             selected_model = repo_id
             try:
-                from core.database import SessionLocal as _SL, ModelEndpoint as _ME
-                _db = _SL()
-                try:
-                    _query = _db.query(_ME).filter(_ME.id == endpoint_id)
-                    if owner:
-                        _query = _query.filter(_ME.owner == owner)
-                    else:
-                        _query = _query.filter(_ME.owner.is_(None))
-                    _ep = _query.first()
-                    if _ep and _ep.cached_models:
-                        _models = json.loads(_ep.cached_models or "[]")
-                        if isinstance(_models, list) and _models:
-                            selected_model = str(_models[0])
-                finally:
-                    _db.close()
+                from src.openclank.chat_routing import normalized_provider_owner
+                from src.openclank.provider_store import ProviderStore
+
+                routes = ProviderStore().list_model_routes(
+                    owner=normalized_provider_owner(owner),
+                    connection_id=connection_id,
+                )
+                route = next(
+                    (
+                        item for item in routes
+                        if item.enabled and "chat.complete" in set(item.operations or ())
+                    ),
+                    None,
+                )
+                if route is not None:
+                    selected_model = str(route.provider_model_id)
             except Exception:
                 pass
-            _save_cookbook_model_defaults(owner, endpoint_id, selected_model)
+            _save_cookbook_model_defaults(owner, connection_id, selected_model)
         except Exception as e:
-            logger.warning(f"cookbook_serve: default endpoint update failed: {e}")
+            logger.warning(f"cookbook_serve: default provider update failed: {e}")
     # Register the new task in cookbook_state.json + stamp it with our
     # scheduler-owner markers. /api/model/serve spawns the tmux session
     # but leaves the state-write to the UI — when a scheduled action
@@ -2813,17 +2839,15 @@ async def action_cookbook_serve(
                     "sshPort": ssh_port or "",
                     "platform": platform or "linux",
                     "_serveReady": False,
-                    "_endpointAdded": bool(endpoint_id),
+                    "_providerConnectionId": connection_id,
                 }
                 tasks.append(existing)
             # Stamp ownership + end-at on the task entry.
             existing["_scheduledByTask"] = task_name or ""
             existing["_scheduledByOwner"] = owner or ""
             existing["owner"] = owner or ""
-            if endpoint_id:
-                existing["_endpointId"] = endpoint_id
-                existing["endpointId"] = endpoint_id
-                existing["_endpointAdded"] = True
+            if connection_id:
+                existing["_providerConnectionId"] = connection_id
             if end_after_min > 0:
                 existing["_scheduledStopAtMs"] = int(_time.time() * 1000) + end_after_min * 60 * 1000
             fresh["tasks"] = tasks

@@ -1,0 +1,1846 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>FrankenMemory // Memory, RAG &amp; Code Intelligence</title>
+  <style>
+    @font-face {
+      font-family: "Fira Code Local";
+      src: url("../../static/fonts/FiraCode-Regular.woff2") format("woff2");
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Fredoka Local";
+      src: url("../../static/fonts/Fredoka-Variable.woff2") format("woff2");
+      font-display: swap;
+    }
+
+    :root {
+      --space: #000;
+      --panel: #08080a;
+      --panel-soft: #101014;
+      --text: #f4d8c5;
+      --muted: #b89f98;
+      --line: #40343e;
+      --sand: #c99962;
+      --gold: #f6bd55;
+      --amber: #ff9c08;
+      --orange: #ff7c25;
+      --salmon: #d46c63;
+      --rose: #c96190;
+      --pink: #ec78b7;
+      --lilac: #c49bc8;
+      --violet: #9699ef;
+      --blue: #369cf0;
+      --cyan: #55d6e8;
+      --green: #5adc65;
+      --white: #fff8e8;
+      --danger: #f24e55;
+      --radius: 28px;
+      --label: "Avenir Next Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+      --body: "Fira Code Local", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--space);
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 78% 7%, rgba(150, 153, 239, .08), transparent 28rem),
+        radial-gradient(circle at 18% 42%, rgba(255, 156, 8, .05), transparent 34rem),
+        var(--space);
+      color: var(--text);
+      font-family: var(--body);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    a { color: inherit; }
+
+    button,
+    a {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid var(--white);
+      outline-offset: 3px;
+    }
+
+    ::selection {
+      color: #000;
+      background: var(--gold);
+    }
+
+    .skip-link {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 100;
+      padding: 8px 12px;
+      color: #000;
+      background: var(--white);
+      transform: translateY(-160%);
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .page {
+      width: min(1760px, 100%);
+      margin: 0 auto;
+      padding: 18px 22px 42px;
+    }
+
+    .top-rail {
+      display: grid;
+      grid-template-columns: 34px minmax(160px, 2.3fr) 12px minmax(90px, .7fr) 12px minmax(110px, 1fr) 40px;
+      gap: 7px;
+      height: 38px;
+      margin: 0 0 8px;
+    }
+
+    .top-rail span {
+      display: block;
+      background: var(--gold);
+    }
+
+    .top-rail span:first-child {
+      border-radius: 24px 0 0 24px;
+      background: var(--amber);
+    }
+
+    .top-rail span:nth-child(3) { background: var(--space); }
+    .top-rail span:nth-child(4) { background: var(--violet); }
+    .top-rail span:nth-child(5) { background: var(--space); }
+    .top-rail span:nth-child(6) { background: var(--salmon); }
+    .top-rail span:last-child { border-radius: 0 24px 24px 0; }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(190px, .88fr) minmax(0, 2.2fr);
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .mast-elbow {
+      min-height: 174px;
+      padding: 28px 28px 22px;
+      color: #000;
+      background: var(--sand);
+      border-radius: 70px 0 0 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      align-items: flex-end;
+      text-align: right;
+    }
+
+    .mast-elbow .eyebrow,
+    .mast-elbow .serial {
+      font: 800 17px/1 var(--label);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .mast-elbow .serial {
+      margin-top: 12px;
+      font-size: 30px;
+    }
+
+    .hero {
+      min-height: 174px;
+      padding: 16px 22px 18px 28px;
+      border-top: 12px solid var(--orange);
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      align-content: end;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      top: 18px;
+      right: 0;
+      width: 170px;
+      height: 14px;
+      border-radius: 999px 0 0 999px;
+      background: linear-gradient(90deg, var(--cyan) 0 43%, transparent 43% 47%, var(--violet) 47% 74%, transparent 74% 78%, var(--gold) 78%);
+      opacity: .9;
+    }
+
+    .hero-kicker {
+      margin: 0 0 4px;
+      color: var(--green);
+      font: 800 17px/1 var(--label);
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4,
+    p { margin-top: 0; }
+
+    h1 {
+      max-width: 1100px;
+      margin-bottom: 8px;
+      color: var(--orange);
+      font: 800 clamp(2.8rem, 6.6vw, 6.6rem)/.8 var(--label);
+      letter-spacing: -.035em;
+      text-transform: uppercase;
+    }
+
+    .dek {
+      max-width: 1000px;
+      margin: 0;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 7px;
+      margin-bottom: 8px;
+    }
+
+    .status {
+      min-height: 42px;
+      padding: 8px 13px;
+      color: #000;
+      background: var(--violet);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font: 800 14px/1 var(--label);
+      letter-spacing: .045em;
+      text-transform: uppercase;
+    }
+
+    .status:nth-child(2) { background: var(--gold); }
+    .status:nth-child(3) { background: var(--rose); }
+    .status:nth-child(4) { background: var(--cyan); }
+    .status:nth-child(5) {
+      background: var(--green);
+      border-radius: 0 999px 999px 0;
+    }
+
+    .status strong {
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 186px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .nav-shell {
+      position: sticky;
+      top: 10px;
+      z-index: 8;
+      min-height: calc(100vh - 20px);
+      padding: 12px 8px 102px 0;
+      background:
+        linear-gradient(var(--lilac), var(--lilac)) 0 0 / 100% 62px no-repeat,
+        linear-gradient(var(--violet), var(--violet)) 0 69px / 100% 118px no-repeat,
+        linear-gradient(var(--salmon), var(--salmon)) 0 194px / 100% 74px no-repeat,
+        linear-gradient(var(--gold), var(--gold)) 0 275px / 100% 160px no-repeat,
+        linear-gradient(var(--sand), var(--sand)) 0 442px / 100% calc(100% - 442px) no-repeat;
+      border-radius: 62px 0 0 62px;
+    }
+
+    .nav-shell::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 62%;
+      height: 92px;
+      background: var(--space);
+      border-radius: 58px 0 0 0;
+    }
+
+    nav {
+      position: relative;
+      z-index: 2;
+      margin-left: 16px;
+      padding: 72px 0 0 0;
+    }
+
+    nav a,
+    .print-button {
+      width: 100%;
+      min-height: 37px;
+      margin: 0 0 6px;
+      padding: 8px 13px 7px;
+      border: 0;
+      border-radius: 999px 0 0 999px;
+      color: #000;
+      background: var(--space);
+      font: 800 13px/1 var(--label);
+      letter-spacing: .04em;
+      text-align: right;
+      text-decoration: none;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: transform .16s ease, background .16s ease, color .16s ease;
+    }
+
+    nav a {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      background: var(--lilac);
+    }
+
+    nav a:nth-child(2n) { background: var(--violet); }
+    nav a:nth-child(3n) { background: var(--gold); }
+    nav a:nth-child(5n) { background: var(--salmon); }
+
+    nav a:hover,
+    nav a[aria-current="true"] {
+      color: var(--white);
+      background: var(--space);
+      transform: translateX(5px);
+    }
+
+    .print-button {
+      display: block;
+      margin-top: 16px;
+      color: #000;
+      background: var(--cyan);
+    }
+
+    .content { min-width: 0; }
+
+    section {
+      scroll-margin-top: 14px;
+      margin: 0 0 10px;
+      border: 1px solid var(--line);
+      border-top: 0;
+      background: rgba(7, 7, 9, .88);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(170px, .6fr) minmax(0, 2.4fr) 34px;
+      gap: 7px;
+      min-height: 48px;
+      margin: 0 0 24px;
+    }
+
+    .section-head span {
+      display: block;
+      background: var(--tone, var(--violet));
+    }
+
+    .section-head .section-code {
+      padding: 10px 16px 8px;
+      color: #000;
+      border-radius: 0 0 0 30px;
+      font: 900 17px/1 var(--label);
+      letter-spacing: .06em;
+      text-align: right;
+      text-transform: uppercase;
+    }
+
+    .section-head .section-title {
+      padding: 9px 16px 7px;
+      color: #000;
+      font: 900 clamp(1.5rem, 2.8vw, 2.4rem)/1 var(--label);
+      letter-spacing: .015em;
+      text-transform: uppercase;
+    }
+
+    .section-head span:last-child { border-radius: 0 999px 999px 0; }
+
+    .section-body { padding: 0 28px 30px; }
+
+    .intro-grid,
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+      display: grid;
+      gap: 12px;
+    }
+
+    .intro-grid { grid-template-columns: 1.3fr .7fr; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .lead {
+      max-width: 1000px;
+      color: var(--white);
+      font-size: clamp(15px, 1.3vw, 18px);
+      line-height: 1.7;
+    }
+
+    .big-callout {
+      padding: 20px 22px;
+      border-left: 14px solid var(--tone, var(--gold));
+      border-radius: 0 26px 26px 0;
+      color: var(--white);
+      background: var(--panel-soft);
+    }
+
+    .big-callout strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--tone, var(--gold));
+      font: 900 24px/1 var(--label);
+      letter-spacing: .035em;
+      text-transform: uppercase;
+    }
+
+    .card {
+      min-width: 0;
+      padding: 17px 18px 18px;
+      border: 1px solid var(--line);
+      border-top: 8px solid var(--tone, var(--violet));
+      border-radius: 0 0 22px 22px;
+      background: linear-gradient(145deg, rgba(255, 255, 255, .025), transparent 44%), var(--panel);
+    }
+
+    .card h3,
+    .card h4 {
+      margin: 0 0 8px;
+      color: var(--tone, var(--violet));
+      font: 900 21px/1 var(--label);
+      letter-spacing: .045em;
+      text-transform: uppercase;
+    }
+
+    .card h4 { font-size: 17px; }
+
+    .card p:last-child,
+    .card ul:last-child { margin-bottom: 0; }
+
+    .card ul,
+    .tight-list {
+      margin: 8px 0 0;
+      padding-left: 18px;
+    }
+
+    .card li,
+    .tight-list li { margin: 0 0 7px; }
+
+    .micro-label {
+      color: var(--muted);
+      font: 800 12px/1.2 var(--label);
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    .telemetry {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 13px;
+    }
+
+    .telemetry span {
+      padding: 7px 9px;
+      color: var(--tone, var(--violet));
+      background: #020203;
+      border: 1px solid color-mix(in srgb, var(--tone, var(--violet)) 55%, #222);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .telemetry b { color: var(--white); }
+
+    .stack-flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 18px;
+      margin: 24px 0 6px;
+      overflow-x: auto;
+      padding: 4px 2px 12px;
+    }
+
+    .flow-node {
+      position: relative;
+      min-height: 138px;
+      padding: 14px 14px 18px;
+      color: #000;
+      background: var(--tone, var(--violet));
+      border-radius: 0 0 24px 24px;
+    }
+
+    .flow-node::after {
+      content: "";
+      position: absolute;
+      top: 48%;
+      right: -18px;
+      width: 18px;
+      height: 5px;
+      background: var(--tone, var(--violet));
+    }
+
+    .flow-node:last-child::after { display: none; }
+
+    .flow-node .num {
+      display: block;
+      margin-bottom: 18px;
+      font: 900 30px/.8 var(--label);
+    }
+
+    .flow-node strong {
+      display: block;
+      margin-bottom: 6px;
+      font: 900 17px/1 var(--label);
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .flow-node small {
+      display: block;
+      font: 700 11px/1.35 var(--body);
+    }
+
+    .authority-band {
+      display: grid;
+      grid-template-columns: 1.15fr .95fr .95fr;
+      gap: 8px;
+      margin: 18px 0;
+    }
+
+    .authority-band > div {
+      padding: 19px;
+      color: #000;
+      background: var(--tone, var(--gold));
+    }
+
+    .authority-band > div:first-child { border-radius: 40px 0 0 40px; }
+    .authority-band > div:last-child { border-radius: 0 40px 40px 0; }
+
+    .authority-band strong {
+      display: block;
+      margin-bottom: 7px;
+      font: 900 20px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .authority-band p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .table-wrap {
+      margin: 18px 0;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+    }
+
+    table {
+      width: 100%;
+      min-width: 780px;
+      border-collapse: collapse;
+      background: var(--panel);
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-right: 1px solid #241f25;
+      border-bottom: 1px solid #241f25;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #000;
+      background: var(--tone, var(--violet));
+      font: 900 15px/1 var(--label);
+      letter-spacing: .035em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    th:last-child,
+    td:last-child { border-right: 0; }
+
+    td:first-child {
+      color: var(--tone, var(--violet));
+      font-weight: 700;
+    }
+
+    code,
+    .mono {
+      color: var(--gold);
+      font-family: var(--body);
+      font-size: .94em;
+      overflow-wrap: anywhere;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(110px, 1fr));
+      gap: 6px;
+      margin: 20px 0;
+      overflow-x: auto;
+      padding-bottom: 10px;
+    }
+
+    .pipeline-step {
+      min-height: 166px;
+      padding: 13px 12px;
+      color: #000;
+      background: var(--tone, var(--violet));
+    }
+
+    .pipeline-step:first-child { border-radius: 38px 0 0 38px; }
+    .pipeline-step:last-child { border-radius: 0 38px 38px 0; }
+
+    .pipeline-step b {
+      display: block;
+      margin-bottom: 18px;
+      font: 900 28px/.8 var(--label);
+    }
+
+    .pipeline-step strong {
+      display: block;
+      margin-bottom: 7px;
+      font: 900 15px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .pipeline-step small {
+      display: block;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .manifest {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 7px;
+      margin: 14px 0;
+    }
+
+    .manifest div {
+      padding: 14px;
+      border: 1px solid var(--tone, var(--blue));
+      background: #040407;
+    }
+
+    .manifest strong {
+      display: block;
+      color: var(--tone, var(--blue));
+      font: 900 16px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(125px, 1fr));
+      gap: 7px;
+      margin: 20px 0;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .trust-grid article {
+      min-height: 184px;
+      padding: 14px;
+      color: #000;
+      background: var(--tone, var(--violet));
+    }
+
+    .trust-grid article:first-child { border-radius: 36px 0 0 36px; }
+    .trust-grid article:last-child { border-radius: 0 36px 36px 0; }
+
+    .trust-grid h3 {
+      margin: 0 0 12px;
+      font: 900 17px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .trust-grid p {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1.45;
+    }
+
+    .generation-rail {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 7px;
+      margin: 18px 0;
+    }
+
+    .generation-rail > div {
+      position: relative;
+      padding: 15px;
+      color: #000;
+      background: var(--tone, var(--blue));
+      font: 900 16px/1 var(--label);
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .generation-rail > div::after {
+      content: "";
+      position: absolute;
+      right: -7px;
+      top: 45%;
+      width: 7px;
+      height: 4px;
+      background: var(--space);
+    }
+
+    .generation-rail > div:first-child { border-radius: 999px 0 0 999px; }
+    .generation-rail > div:last-child { border-radius: 0 999px 999px 0; }
+    .generation-rail > div:last-child::after { display: none; }
+
+    .profile-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 8px;
+      margin: 18px 0;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .profile {
+      padding: 17px;
+      color: #000;
+      background: var(--tone, var(--lilac));
+      border-radius: 26px 26px 0 0;
+    }
+
+    .profile b {
+      display: block;
+      margin-bottom: 9px;
+      font: 900 20px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .profile span {
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+
+    .curiosity-layout {
+      display: grid;
+      grid-template-columns: minmax(390px, .9fr) minmax(0, 1.1fr);
+      gap: 22px;
+      align-items: center;
+    }
+
+    .curiosity-display {
+      min-height: 490px;
+      padding: 18px;
+      border: 2px solid var(--violet);
+      border-radius: 72px 72px 22px 22px;
+      background:
+        linear-gradient(rgba(150, 153, 239, .05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(150, 153, 239, .05) 1px, transparent 1px),
+        #020204;
+      background-size: 26px 26px;
+    }
+
+    .curiosity-display svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }
+
+    .orbit {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2;
+    }
+
+    .orbit-dash { stroke-dasharray: 6 8; }
+
+    .curiosity-core {
+      fill: var(--violet);
+      stroke: var(--white);
+      stroke-width: 2;
+    }
+
+    .curiosity-node { stroke: #000; stroke-width: 5; }
+
+    .curiosity-label {
+      fill: #000;
+      font-family: var(--label);
+      font-size: 16px;
+      font-weight: 900;
+      text-anchor: middle;
+      text-transform: uppercase;
+    }
+
+    .curiosity-small {
+      fill: var(--text);
+      font-family: var(--body);
+      font-size: 11px;
+      text-anchor: middle;
+    }
+
+    .question-loop {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      counter-reset: q;
+    }
+
+    .question-loop article {
+      position: relative;
+      min-height: 132px;
+      padding: 18px 16px 16px 62px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      counter-increment: q;
+    }
+
+    .question-loop article::before {
+      content: counter(q, decimal-leading-zero);
+      position: absolute;
+      left: 13px;
+      top: 13px;
+      color: var(--tone, var(--pink));
+      font: 900 32px/1 var(--label);
+    }
+
+    .question-loop strong {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--tone, var(--pink));
+      font: 900 17px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .question-loop p { margin: 0; font-size: 12px; }
+
+    .frontier {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .frontier article {
+      padding: 16px;
+      border-left: 10px solid var(--tone, var(--salmon));
+      background: #08080b;
+    }
+
+    .frontier strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--tone, var(--salmon));
+      font: 900 17px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .output-map {
+      display: grid;
+      grid-template-columns: 1.1fr 42px 1.3fr 42px 1fr;
+      gap: 7px;
+      align-items: stretch;
+      margin: 20px 0;
+    }
+
+    .output-map .map-box {
+      padding: 18px;
+      color: #000;
+      background: var(--tone, var(--cyan));
+      border-radius: 22px;
+    }
+
+    .output-map .map-box strong {
+      display: block;
+      margin-bottom: 10px;
+      font: 900 20px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .output-map .map-box p { margin: 0; font-size: 11px; font-weight: 700; }
+
+    .output-map .map-arrow {
+      display: grid;
+      place-items: center;
+      color: var(--tone, var(--cyan));
+      font: 900 34px/1 var(--label);
+    }
+
+    .red-threads {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin: 18px 0;
+    }
+
+    .thread {
+      min-height: 218px;
+      padding: 18px;
+      color: #000;
+      background: var(--tone, var(--violet));
+    }
+
+    .thread:first-child { border-radius: 46px 0 0 46px; }
+    .thread:last-child { border-radius: 0 46px 46px 0; }
+
+    .thread b {
+      display: block;
+      margin-bottom: 14px;
+      font: 900 24px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .thread p { margin: 0; font-size: 11px; font-weight: 700; }
+
+    details {
+      margin: 8px 0;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    summary {
+      padding: 13px 16px;
+      color: var(--tone, var(--gold));
+      cursor: pointer;
+      font: 900 17px/1 var(--label);
+      text-transform: uppercase;
+    }
+
+    details > div { padding: 0 16px 16px; }
+
+    .sources {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .source-link {
+      display: block;
+      min-height: 68px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-left: 12px solid var(--tone, var(--gold));
+      color: var(--white);
+      background: var(--panel);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+
+    .source-link:hover { background: #151219; }
+
+    .source-link b {
+      display: block;
+      color: var(--tone, var(--gold));
+      font: 900 15px/1.1 var(--label);
+      text-transform: uppercase;
+    }
+
+    .source-link small { color: var(--muted); }
+
+    .footer-rail {
+      display: grid;
+      grid-template-columns: 1.2fr 11px .5fr 11px 1fr 38px;
+      gap: 7px;
+      height: 52px;
+      margin: 12px 0 0 194px;
+    }
+
+    .footer-rail span { background: var(--sand); }
+    .footer-rail span:first-child { border-radius: 0 0 0 42px; }
+    .footer-rail span:nth-child(2),
+    .footer-rail span:nth-child(4) { background: var(--space); }
+    .footer-rail span:nth-child(3) { background: var(--violet); }
+    .footer-rail span:nth-child(5) { background: var(--gold); }
+    .footer-rail span:last-child { border-radius: 0 999px 999px 0; }
+
+    .footer-copy {
+      margin: 10px 0 0 194px;
+      color: var(--muted);
+      font: 800 11px/1.3 var(--label);
+      letter-spacing: .06em;
+      text-align: right;
+      text-transform: uppercase;
+    }
+
+    .tone-gold { --tone: var(--gold); }
+    .tone-amber { --tone: var(--amber); }
+    .tone-orange { --tone: var(--orange); }
+    .tone-salmon { --tone: var(--salmon); }
+    .tone-rose { --tone: var(--rose); }
+    .tone-pink { --tone: var(--pink); }
+    .tone-lilac { --tone: var(--lilac); }
+    .tone-violet { --tone: var(--violet); }
+    .tone-blue { --tone: var(--blue); }
+    .tone-cyan { --tone: var(--cyan); }
+    .tone-green { --tone: var(--green); }
+
+    @media (max-width: 1180px) {
+      .layout { grid-template-columns: 148px minmax(0, 1fr); }
+      .intro-grid,
+      .curiosity-layout { grid-template-columns: 1fr; }
+      .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-3,
+      .frontier { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .authority-band { grid-template-columns: 1fr; }
+      .authority-band > div:first-child,
+      .authority-band > div:last-child { border-radius: 24px; }
+      .red-threads { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .thread:first-child,
+      .thread:last-child { border-radius: 24px; }
+      .footer-rail,
+      .footer-copy { margin-left: 156px; }
+    }
+
+    @media (max-width: 760px) {
+      body { overflow-x: hidden; }
+      .page { padding: 10px 10px 30px; }
+      .top-rail {
+        grid-template-columns: 25px minmax(70px, 2fr) 5px minmax(42px, .7fr) 5px minmax(52px, 1fr) 25px;
+        gap: 4px;
+        height: 32px;
+      }
+      .masthead { grid-template-columns: 78px minmax(0, 1fr); }
+      .mast-elbow {
+        min-height: 210px;
+        padding: 12px 8px;
+        border-radius: 38px 0 0 0;
+      }
+      .mast-elbow .eyebrow { writing-mode: vertical-rl; transform: rotate(180deg); }
+      .mast-elbow .serial { font-size: 18px; }
+      .hero { padding: 14px 10px 16px 16px; }
+      .hero::after { width: 62px; top: 11px; }
+      .hero-kicker { font-size: 12px; }
+      h1 { font-size: clamp(2rem, 9vw, 2.5rem); }
+      .dek { font-size: 11px; line-height: 1.55; }
+      .status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .status { min-height: 42px; padding: 7px 8px; gap: 5px; font-size: 10px; }
+      .status strong { font-size: 15px; }
+      .status:last-child { grid-column: 1 / -1; border-radius: 0 999px 999px 0; }
+      .layout { grid-template-columns: 1fr; }
+      .nav-shell {
+        position: relative;
+        top: auto;
+        min-height: 0;
+        padding: 8px;
+        border-radius: 28px;
+        background: var(--sand);
+      }
+      .nav-shell::after { display: none; }
+      nav {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        margin: 0;
+        padding: 0;
+      }
+      nav a,
+      .print-button {
+        flex: 0 0 auto;
+        width: auto;
+        margin: 0;
+        border-radius: 999px;
+        text-align: center;
+      }
+      .section-head { grid-template-columns: 86px minmax(0, 1fr) 18px; }
+      .section-head .section-code { padding-inline: 8px; font-size: 13px; }
+      .section-head .section-title { font-size: 20px; }
+      .section-body { padding: 0 14px 20px; }
+      .content,
+      section { width: 100%; max-width: calc(100vw - 20px); overflow: hidden; }
+      .grid-2,
+      .grid-3,
+      .grid-4,
+      .frontier,
+      .sources,
+      .question-loop,
+      .manifest,
+      .red-threads { grid-template-columns: 1fr; }
+      .thread:first-child,
+      .thread:last-child { border-radius: 24px; }
+      .curiosity-display { min-height: 0; padding: 8px; }
+      .output-map { grid-template-columns: 1fr; }
+      .output-map .map-arrow { transform: rotate(90deg); min-height: 36px; }
+      .footer-rail,
+      .footer-copy { margin-left: 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      * { transition: none !important; }
+    }
+
+    @media print {
+      :root { color-scheme: dark; }
+      * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      body { background: #000; }
+      .page { width: 100%; padding: 0; }
+      .layout { grid-template-columns: 1fr; }
+      .nav-shell { display: none; }
+      section { break-inside: avoid; }
+      .section-body { padding-bottom: 18px; }
+      .footer-rail,
+      .footer-copy { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to architecture</a>
+
+  <div class="page">
+    <div class="top-rail" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+
+    <header class="masthead">
+      <div class="mast-elbow">
+        <span class="eyebrow">Open Clank<br>Memory Systems</span>
+        <span class="serial">FM//17</span>
+      </div>
+      <div class="hero">
+        <p class="hero-kicker">Systems architecture // online</p>
+        <h1>FrankenMemory</h1>
+        <p class="dek">The complete memory, code intelligence, rich-document RAG, ingest, retrieval, curiosity, review, and erasure stack—one canonical bank with evidence-bound projections.</p>
+      </div>
+    </header>
+
+    <div class="status-strip" aria-label="Architecture status summary">
+      <div class="status"><span>Memory authority</span><strong>01</strong></div>
+      <div class="status"><span>Retrieval profiles</span><strong>05</strong></div>
+      <div class="status"><span>Proof loops</span><strong>04</strong></div>
+      <div class="status"><span>Trust states</span><strong>02</strong></div>
+      <div class="status"><span>System</span><strong>Online</strong></div>
+    </div>
+
+    <div class="layout">
+      <aside class="nav-shell">
+        <nav aria-label="Architecture sections">
+          <a href="#overview">Overview</a>
+          <a href="#topology">Topology</a>
+          <a href="#authority">Authority</a>
+          <a href="#ingest">Ingest</a>
+          <a href="#memory">Memory</a>
+          <a href="#rag">RAG</a>
+          <a href="#code">Code graph</a>
+          <a href="#curiosity">Curiosity</a>
+          <a href="#exgest">Exgest</a>
+          <a href="#resilience">Resilience</a>
+          <a href="#operations">Operations</a>
+          <a href="#sources">Source map</a>
+          <button class="print-button" type="button" onclick="window.print()">Print / PDF</button>
+        </nav>
+      </aside>
+
+      <main class="content" id="main">
+        <section id="overview" class="tone-orange">
+          <div class="section-head">
+            <span class="section-code">SYS 001</span>
+            <span class="section-title">One bank, many ways in</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <div class="intro-grid">
+              <div>
+                <p class="lead">FrankenMemory is Open Clank’s local-first semantic memory plane. It receives ordinary conversation, authored knowledge, documents, repositories, reviews, and work traces; turns them into versioned evidence and knowledge; publishes disposable search and graph projections; and returns bounded, cited, scope-safe context to people and agents.</p>
+                <p>The system is intentionally asymmetric. The host can admit sources, build and publish generations, apply reviewed changes, export, roll back, and forget. Models get bounded read operations and proposal paths. They do not receive raw administrative tools, filesystem roots, policy authority, or the ability to assign Trust.</p>
+              </div>
+              <aside class="big-callout tone-gold">
+                <strong>The governing invariant</strong>
+                Canonical meaning lives in one Rust/SQLite authority. Everything optimized for retrieval—FTS, vectors, graphs, chunks, summaries, findings, caches—is a versioned projection with lineage and a rebuild path.
+              </aside>
+            </div>
+
+            <div class="grid-4" style="margin-top:22px">
+              <article class="card tone-gold">
+                <h3>Remember</h3>
+                <p>Facts, preferences, episodes, decisions, actions, outcomes, corrections, open questions, and authored material become scoped, revisioned knowledge with evidence.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Understand</h3>
+                <p>Typed document IR, code structure, entities, relations, tests, routes, calls, claims, findings, and work traces preserve where an assertion came from.</p>
+              </article>
+              <article class="card tone-violet">
+                <h3>Retrieve</h3>
+                <p>Exact, FTS, vector, structural, entity, and relation lanes fuse deterministically after owner and scope filters have already run.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Forget</h3>
+                <p>One canonical erasure intent fans out through a fenced outbox, clears projections and caches, survives restore, and leaves a content-free receipt.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="topology" class="tone-violet">
+          <div class="section-head">
+            <span class="section-code">NET 014</span>
+            <span class="section-title">End-to-end topology</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">Every path converges on the same authority and leaves through the same scope-first retrieval contract.</p>
+
+            <div class="stack-flow" aria-label="System topology from surfaces to outputs">
+              <div class="flow-node tone-gold">
+                <span class="num">01</span>
+                <strong>Surfaces</strong>
+                <small>Chat · Brain · Settings · Agent · MiMo · imports · repositories · review/SARIF</small>
+              </div>
+              <div class="flow-node tone-salmon">
+                <span class="num">02</span>
+                <strong>Admission</strong>
+                <small>Authentication · owner · workspace · project · location grant · policy generation</small>
+              </div>
+              <div class="flow-node tone-blue">
+                <span class="num">03</span>
+                <strong>Host plane</strong>
+                <small>FastAPI adapters · model routes · LifeTools broker · supervisor-neutral transport</small>
+              </div>
+              <div class="flow-node tone-green">
+                <span class="num">04</span>
+                <strong>Nucleus</strong>
+                <small>fm-mcp · fm-core · SQLite v2 · sources · evidence · revisions · Trust · jobs · outbox</small>
+              </div>
+              <div class="flow-node tone-violet">
+                <span class="num">05</span>
+                <strong>Projections</strong>
+                <small>FTS · vectors · code graph · doc IR/chunks · entity/relation graph · findings · summaries</small>
+              </div>
+              <div class="flow-node tone-cyan">
+                <span class="num">06</span>
+                <strong>Exgest</strong>
+                <small>Cited context · explanations · Brain views · read-only tools · scoped export · receipts</small>
+              </div>
+            </div>
+
+            <div class="authority-band">
+              <div class="tone-green">
+                <strong>Rust/SQLite semantic authority</strong>
+                <p>Sources, evidence, entities, knowledge and candidate revisions, owner Trust assignments, activation, privacy, retention, conflicts, jobs, change sets, outbox, and erasure intent.</p>
+              </div>
+              <div class="tone-blue">
+                <strong>Authenticated host control</strong>
+                <p>Python routes and services bind identity, permission, filesystem resources, model purposes, tool profiles, and supervisor capabilities before a memory operation exists.</p>
+              </div>
+              <div class="tone-pink">
+                <strong>Independent policy authority</strong>
+                <p>Workspace/Location policy, the first-party Open Clank Hexes contract, tool security, grants, and digest-bound plan approval remain outside semantic memory and cannot be changed by recalled evidence.</p>
+              </div>
+            </div>
+
+            <div class="table-wrap tone-violet">
+              <table>
+                <thead>
+                  <tr><th>Layer</th><th>Technology</th><th>Responsibility</th><th>Authority status</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Product surface</td><td>HTML/CSS + browser JavaScript</td><td>Brain, Trust controls, code/RAG views, jobs, citations, Settings Memory pill, safe lifecycle actions</td><td>Presentation only</td></tr>
+                  <tr><td>Application host</td><td>Python · FastAPI · Uvicorn</td><td>Authentication, owner scope, route schemas, import facades, adapters, diagnostics, model and operation routing</td><td>Authenticated adapter</td></tr>
+                  <tr><td>Agent carrier</td><td>LifeTools · MCP · neutral supervisor</td><td>Owner-bound capabilities for Open Clank and MiMo; read tools and prompt-safe context delivery</td><td>Capability carrier</td></tr>
+                  <tr><td>Memory service</td><td>Rust · Tokio · rmcp</td><td><code>fm-mcp</code> tool server, broker boundary, lifecycle operations, canonical repository calls</td><td>Canonical service</td></tr>
+                  <tr><td>Memory core</td><td>Rust · rusqlite · serde · BLAKE2/BLAKE3</td><td>v2 ontology, validation, append-only revisions, CAS, jobs, privacy, curation, retrieval, graph and code services</td><td>Canonical semantics</td></tr>
+                  <tr><td>Parsing</td><td>Tree-sitter + typed parser registry</td><td>Rust/Python/TS/JS code plugins; deterministic document parsers and layout-aware typed IR</td><td>Evidence producer</td></tr>
+                  <tr><td>Storage</td><td>SQLite WAL · FTS5 · immutable generations</td><td>Canonical records plus local, rebuildable retrieval projections and publication pointers</td><td>Single bank</td></tr>
+                  <tr><td>Model plane</td><td>Managed provider routes</td><td>Independent Memory and Embeddings purposes; declared optional rerank operation</td><td>Provider-route authority</td></tr>
+                  <tr><td>Application state</td><td><code>data/app.db</code></td><td>Users, sessions, provider-purpose bindings, approvals, and non-semantic application state</td><td>Separate by design</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="authority" class="tone-green">
+          <div class="section-head">
+            <span class="section-code">CORE 01</span>
+            <span class="section-title">Canonical data and projections</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <div class="grid-3">
+              <article class="card tone-green">
+                <h3>Canonical records</h3>
+                <ul>
+                  <li>Owner/workspace/project/session scope references</li>
+                  <li>Source identities and immutable source revisions</li>
+                  <li>Evidence with typed locators and extraction contracts</li>
+                  <li>Entities and stable knowledge blocks</li>
+                  <li>Append-only knowledge and candidate revisions</li>
+                  <li>Conflicts, change sets, actor/reason/blame, and outbox events</li>
+                </ul>
+              </article>
+              <article class="card tone-violet">
+                <h3>Disposable projections</h3>
+                <ul>
+                  <li>FTS and embedding generations</li>
+                  <li>Code graph and occurrence-level evidence</li>
+                  <li>Document IR, chunks, assets, and locator indexes</li>
+                  <li>Entity/relation RAG lanes</li>
+                  <li>Review findings, work traces, summaries, communities, and caches</li>
+                  <li>Every projection carries a source watermark and rebuild path</li>
+                </ul>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Separate authorities</h3>
+                <ul>
+                  <li>Provider routes own model-purpose bindings</li>
+                  <li>Workspace/Location policy owns filesystem access</li>
+                  <li>Open Clank Hexes owns executable project policy</li>
+                  <li>Tool security and grants own capabilities</li>
+                  <li>Plan approval owns execution authorization</li>
+                  <li>Semantic evidence can advise; it cannot grant</li>
+                </ul>
+              </article>
+            </div>
+
+            <div class="big-callout tone-green" style="margin-top:18px">
+              <strong>Projection identity envelope</strong>
+              <span class="mono">owner + scope + source revision/snapshot + producer kind/version + config hash + model/tool identity + generation/job ID + created/validated state + lineage + privacy state</span>
+            </div>
+
+            <div class="generation-rail tone-green" aria-label="Atomic generation publication">
+              <div class="tone-blue">Stage</div>
+              <div class="tone-gold">Validate</div>
+              <div class="tone-violet">Ready</div>
+              <div class="tone-green">CAS publish</div>
+              <div class="tone-salmon">Retain / rollback</div>
+            </div>
+            <p>A build that fails, cancels, exceeds budget, loses its lease, observes a stale source, violates privacy, or fails integrity never changes the live pointer. The prior ready generation continues serving until a complete replacement wins compare-and-swap publication.</p>
+          </div>
+        </section>
+
+        <section id="ingest" class="tone-gold">
+          <div class="section-head">
+            <span class="section-code">IN 093</span>
+            <span class="section-title">The ingest system</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">All input families share the same admission logic: bind authority first, redact before persistence, freeze source identity, record evidence, and publish only after validation.</p>
+
+            <div class="pipeline" aria-label="Canonical ingest pipeline">
+              <div class="pipeline-step tone-salmon"><b>01</b><strong>Authorize</strong><small>Resolve owner, workspace, project, opaque resource, grant and policy generation.</small></div>
+              <div class="pipeline-step tone-pink"><b>02</b><strong>Redact</strong><small>Remove secrets and disallowed content before raw, canonical, index, cache, export or log writes.</small></div>
+              <div class="pipeline-step tone-gold"><b>03</b><strong>Freeze</strong><small>Hash source bytes, event time, adapter/parser identity, snapshot, privacy policy and request.</small></div>
+              <div class="pipeline-step tone-violet"><b>04</b><strong>Manifest</strong><small>Seal selected/excluded inputs, denominator, budgets, producer, model, tool and config identities.</small></div>
+              <div class="pipeline-step tone-blue"><b>05</b><strong>Normalize</strong><small>Adapt transcript events, parse document IR, scan code or validate review/work records.</small></div>
+              <div class="pipeline-step tone-cyan"><b>06</b><strong>Evidence</strong><small>Write sources, locators, candidates, typed measures, ambiguity and validation results.</small></div>
+              <div class="pipeline-step tone-green"><b>07</b><strong>Activate</strong><small>Review/policy appends the canonical knowledge revision under expected-head CAS.</small></div>
+              <div class="pipeline-step tone-violet"><b>08</b><strong>Project</strong><small>Build FTS, vectors, graphs, chunks, findings and summaries in private generations.</small></div>
+              <div class="pipeline-step tone-orange"><b>09</b><strong>Publish</strong><small>Validate coverage and lineage, atomically move the pointer, retain rollback.</small></div>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-gold">
+                <h3>Conversation &amp; manual</h3>
+                <p>Brain writes and directed <code>manage_memory</code> actions enter immediately with owner intent. Completed Chat/Agent/MiMo turns pass through one transport-blind post-response seam. Incognito, temporary, compare, and policy-excluded turns do not enter memory.</p>
+              </article>
+              <article class="card tone-pink">
+                <h3>Transcript &amp; work</h3>
+                <p>Versioned adapters normalize user, assistant, developer/system, tool call/result, file read/write/edit, command, verification, error, decision, outcome, feedback, and correction records while preserving event time separately from ingest time.</p>
+              </article>
+              <article class="card tone-violet">
+                <h3>Authored knowledge</h3>
+                <p>Supported MEMORY-style sources and memory exports ingest idempotently by source revision and content hash. The authored file remains evidence; checkpoints and unrelated task artifacts do not silently become semantic memory.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Rich documents</h3>
+                <p>Text, Markdown, DOCX, PDF, tables, code blocks, pictures/captions, equations and attachments enter one parser registry and typed document IR before chunk, graph or vector work begins.</p>
+              </article>
+              <article class="card tone-cyan">
+                <h3>Repositories</h3>
+                <p>Authorized opaque repository resources produce sealed VCS/working-tree snapshots, a complete coverage ledger, language-plugin results and private code generations that converge between full and incremental builds.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Review &amp; traces</h3>
+                <p>Diffs, SARIF, findings and agent work traces are sealed against exact code, rule, model, prompt, tool and budget identities. They enter as evidence—never as truth or executable policy.</p>
+              </article>
+            </div>
+
+            <h3 class="micro-label" style="margin-top:24px">Shared derived-job accounting</h3>
+            <div class="manifest tone-blue">
+              <div><strong>Request seal</strong>Discovery rules, privacy, source, model, tool, config and policy identity are immutable.</div>
+              <div><strong>Selection seal</strong>Selected and excluded item sets close under one CAS before producer execution.</div>
+              <div><strong>Outcome seal</strong><code>completed | reused | failed | waived</code> are disjoint and cover the denominator.</div>
+              <div><strong>Resume seal</strong>Matching fingerprints and vouched checkpoints resume; corrupt or orphan work reruns.</div>
+            </div>
+          </div>
+        </section>
+
+        <section id="memory" class="tone-pink">
+          <div class="section-head">
+            <span class="section-code">MEM 418</span>
+            <span class="section-title">Regular memory and Trust</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <div class="grid-2">
+              <article class="card tone-pink">
+                <h3>Versioned knowledge</h3>
+                <p>A stable block identifies <span class="mono">subject + predicate + claim slot + scope</span>. Its value is typed; its history is append-only. Edit, correct, resolve, reopen, retract, supersede, revert, diff and blame operate against explicit revisions. A stale writer records or returns a conflict instead of overwriting the accepted head.</p>
+              </article>
+              <article class="card tone-gold">
+                <h3>Memory semantics</h3>
+                <p>Action, decision, rationale, alternative, outcome, verification, feedback and correction evidence preserve when the event happened and when it was observed. Late imports do not outrank later corrections merely because they arrived last.</p>
+              </article>
+              <article class="card tone-violet">
+                <h3>Activation &amp; origins</h3>
+                <p>Local, imported, personal-working, session-working and shared/group material carry explicit origin and activation policy. Withheld evidence remains out of active recall until the owner or policy admits it. Aggregate diagnostics show withheld and capped counts without leaking bodies.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Reversible working memory</h3>
+                <p>Conversation and work summaries are derived artifacts with source event IDs, hashes, covered range, omissions, prompt/schema/model/config and job lineage. Failure preserves original context. A summary never becomes the only copy, never outranks its sources, and never assigns Trust.</p>
+              </article>
+            </div>
+
+            <div class="big-callout tone-pink" style="margin-top:18px">
+              <strong>Trust asks one question</strong>
+              “How much do I trust this information?” The wire state is either <code>unreviewed</code> with no value or <code>assigned</code> with a finite owner-assigned value from 0 to 1. It is revisioned, attributable, explainable and scope-bound.
+            </div>
+
+            <div class="trust-grid" aria-label="Concepts kept separate from Trust">
+              <article class="tone-pink"><h3>Trust</h3><p>Owner-relative epistemic judgment. Only an authorized owner action assigns or revises it.</p></article>
+              <article class="tone-gold"><h3>Prompt authority</h3><p>Whether recalled material has behavioral force. It consumes endorsement and policy, not a scalar alone.</p></article>
+              <article class="tone-green"><h3>Activation</h3><p>Whether content participates in active memory. Origin, review and policy control it.</p></article>
+              <article class="tone-blue"><h3>Relevance</h3><p>Query-local retrieval rank. It changes per query and is never stored as Trust.</p></article>
+              <article class="tone-violet"><h3>Evidence strength</h3><p>Quality of a parser, resolver or witness path. It can be corrected or down-rated.</p></article>
+              <article class="tone-cyan"><h3>Technical score</h3><p>Precisely named OCR, extraction, consistency, model or rerank measure.</p></article>
+              <article class="tone-salmon"><h3>Executable trust</h3><p>Open Clank Hexes, TLS, tools and grants. This security authority is never derived from memory.</p></article>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-green">
+                <h3>Prompt-stable recall</h3>
+                <p>Stable owner-approved persona, scenario and tool guidance lives in a stable system tail. Dynamic atomic memory lives in a guarded data section. Large source, code and document bodies arrive only on demand.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Safe evolution</h3>
+                <p>Corroboration and contradiction append typed evidence and may produce a Trust proposal. Dedup creates a reversible merge/supersession proposal. Neither silently rewrites Trust or deletes a “lower-scored” record.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Dedicated Memory model</h3>
+                <p>The Settings Memory purpose independently routes extraction, graph enrichment, import interpretation, tidy/audit, conflict help, consolidation and working-summary generation. Utility and Embeddings remain separate; no hidden fallback crosses the boundary.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="rag" class="tone-blue">
+          <div class="section-head">
+            <span class="section-code">RAG 705</span>
+            <span class="section-title">Rich-document and Graph RAG</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">The RAG path is a canonical document lifecycle, not a loose vector collection. Source revision, parser, IR, chunker, locator, graph extraction, embedding, cache and retrieval generation all have independent identity.</p>
+
+            <div class="grid-3">
+              <article class="card tone-blue">
+                <h3>Typed document IR</h3>
+                <p>Stable document, block, segment and asset IDs preserve source/content hashes, page and dimensions, character/byte/line spans, optional bounding boxes, heading trees, ordered children, language, and typed segment kinds.</p>
+                <div class="telemetry tone-blue">
+                  <span>title</span><span>heading</span><span>paragraph</span><span>list</span><span>code</span><span>table</span><span>picture/caption</span><span>equation</span>
+                </div>
+              </article>
+              <article class="card tone-violet">
+                <h3>Parser registry</h3>
+                <p>Lazy versioned parsers declare suffix, MIME, magic, capabilities, dependencies, size limits, security class and IR version. Plain text, Markdown, pypdf, MarkItDown and attachment routes converge here. Parser output is untrusted structured data.</p>
+              </article>
+              <article class="card tone-gold">
+                <h3>Chunker SPI</h3>
+                <p>Deterministic token windows, recursive structural splits, heading/table-aware hierarchy, table row splits with repeated headers, and picture/table/equation-caption adjacency preserve source spans, overlaps and intentional drops.</p>
+              </article>
+            </div>
+
+            <div class="generation-rail tone-blue" aria-label="Document ingestion states">
+              <div class="tone-gold">Parsing</div>
+              <div class="tone-pink">Analyzing</div>
+              <div class="tone-blue">Chunking</div>
+              <div class="tone-violet">Indexing</div>
+              <div class="tone-green">Validating / ready</div>
+            </div>
+
+            <div class="profile-grid" aria-label="RAG query profiles">
+              <div class="profile tone-gold"><b>Focused</b><span>Low-level terms → entity candidates → related relationships → supporting source chunks.</span></div>
+              <div class="profile tone-rose"><b>Relational</b><span>High-level themes → relationship candidates → entities → supporting source chunks.</span></div>
+              <div class="profile tone-violet"><b>Hybrid</b><span>Focused and relational graph evidence interleave under deterministic fusion.</span></div>
+              <div class="profile tone-blue"><b>Mix</b><span>Hybrid graph results join the direct chunk-vector lane for broader context.</span></div>
+              <div class="profile tone-cyan"><b>Naive</b><span>Exact, FTS and vector chunks provide the deterministic baseline and fallback.</span></div>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-green">
+                <h3>Entity/relation projection</h3>
+                <p>Each entity and relationship points back to exact source chunks and supporting spans plus extractor, prompt, schema, route/model and evidence strength. Alias merging preserves ambiguity. Derived rows are independently <code>unreviewed</code>; they reference rather than inherit source Trust.</p>
+              </article>
+              <article class="card tone-cyan">
+                <h3>Stable citations</h3>
+                <p>Every returned unit resolves through an owner/source-revision-scoped typed locator. The facade rechecks access and returns a bounded source view. Raw paths and object keys are not authority and are not exposed as agent capabilities.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>No Chroma dependency</h3>
+                <p>Exact and FTS retrieval work directly from the canonical SQLite bank. Embeddings are optional, fingerprinted immutable generations. Missing vectors or a failed model degrade visibly to valid lexical and graph lanes; they never create a second RAG authority.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="code" class="tone-cyan">
+          <div class="section-head">
+            <span class="section-code">CODE 512</span>
+            <span class="section-title">Code memory, review and Hex</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <div class="grid-3">
+              <article class="card tone-cyan">
+                <h3>Move-stable identity</h3>
+                <p>An opaque owner-bound repository ID joins a full 40-character VCS snapshot descriptor, ref, dirty/staged/unstaged/untracked inputs and content hashes. Absolute checkout roots stay in the authorized host registry, not durable node IDs.</p>
+              </article>
+              <article class="card tone-gold">
+                <h3>Coverage-complete index</h3>
+                <p>Every discovered file closes as indexed, unchanged, deleted, renamed, binary, oversize, unsupported, ignored, outside-root, permission-denied, parse-failed, budget-truncated or cancelled. Full and incremental builds converge before publication.</p>
+              </article>
+              <article class="card tone-violet">
+                <h3>Language plugins</h3>
+                <p>Rust, Python, TypeScript and JavaScript plugins expose definitions, signatures, parents, spans, imports/exports, calls/references, tests and resolver evidence. Missing capability is reported as coverage, never fabricated completeness.</p>
+              </article>
+            </div>
+
+            <div class="table-wrap tone-cyan">
+              <table>
+                <thead><tr><th>Graph family</th><th>Representative types</th><th>Evidence contract</th></tr></thead>
+                <tbody>
+                  <tr><td>Source nodes</td><td>Repository, snapshot, directory, file, module, class, struct, enum, trait, interface, function, method, test, fixture</td><td>Stable qualified identity, file/snapshot, byte and line/column span, signature hash, parser and source fingerprint</td></tr>
+                  <tr><td>System nodes</td><td>Endpoint, route, RPC, GraphQL operation, scheduler, job, event, channel, config, schema, table, queue, topic, service</td><td>Virtual/derived nodes require concrete source witnesses and explicit weaker evidence when inferred</td></tr>
+                  <tr><td>Edges</td><td>Contains, defines, imports, exports, references, calls, constructs, implements, extends, tests, configures, exposes, handles, schedules, publishes, consumes</td><td>Each occurrence retains callsite/span, strategy, resolution strength, candidates and generation; repeated callsites never collapse</td></tr>
+                  <tr><td>Evidence nodes</td><td>Claim, finding, trace, ghost, support, supersession, attention</td><td>Historical or derived evidence stays non-authoritative, snapshot-bound and individually retractable</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-blue">
+                <h3>Code retrieval</h3>
+                <p>Exact/FTS, structural, optional vector and weaker historical lanes return symbol context, references, callers/callees, call hierarchy, impact paths, related tests, service flows, claims, findings and bounded source windows with witnesses and coverage.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Sealed review evidence</h3>
+                <p>Diff selection, rules, model/prompt/schema, tool/runtime, budget and policy are sealed. Findings relocate through deterministic hunk → file → unique cross-file matching, retain SARIF fingerprints and progress through explicit evidence states.</p>
+              </article>
+              <article class="card tone-pink">
+                <h3>Advisory below authority</h3>
+                <p>Review rules compile to a deterministic file→effective-rule projection. Findings can nominate a memory correction, decision, task, skill revision or spell candidate. They cannot alter .hex, the Hexes authority, Trust, activation, grants, routes, plans or tools.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="curiosity" class="tone-pink">
+          <div class="section-head">
+            <span class="section-code">Q 007</span>
+            <span class="section-title">Curiosity and open questions</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">Curiosity is stored as a durable known unknown. A question can travel through recall, research, code and document retrieval, evidence collection, answer proposal, owner policy, same-block resolution, revision history and later correction without becoming a second task or notes system.</p>
+
+            <div class="curiosity-layout">
+              <div class="curiosity-display">
+                <svg viewBox="0 0 520 520" role="img" aria-labelledby="curiosity-title curiosity-desc">
+                  <title id="curiosity-title">Open question lifecycle display</title>
+                  <desc id="curiosity-desc">A central stable question block is surrounded by author, surface, retrieve, evidence, resolve, and revise lifecycle nodes.</desc>
+                  <circle class="orbit" cx="260" cy="260" r="205"></circle>
+                  <circle class="orbit orbit-dash" cx="260" cy="260" r="150"></circle>
+                  <circle class="orbit" cx="260" cy="260" r="92"></circle>
+                  <path class="orbit" d="M260 55V168M260 352V465M55 260H168M352 260H465M115 115L194 194M326 326L405 405M405 115L326 194M194 326L115 405"></path>
+
+                  <circle class="curiosity-core" cx="260" cy="260" r="82"></circle>
+                  <text class="curiosity-label" x="260" y="248">Stable</text>
+                  <text class="curiosity-label" x="260" y="268">question</text>
+                  <text class="curiosity-small" x="260" y="290">same block · CAS head</text>
+
+                  <circle class="curiosity-node" fill="var(--gold)" cx="260" cy="55" r="48"></circle>
+                  <text class="curiosity-label" x="260" y="60">Author</text>
+
+                  <circle class="curiosity-node" fill="var(--pink)" cx="405" cy="115" r="48"></circle>
+                  <text class="curiosity-label" x="405" y="120">Surface</text>
+
+                  <circle class="curiosity-node" fill="var(--blue)" cx="465" cy="260" r="48"></circle>
+                  <text class="curiosity-label" x="465" y="265">Retrieve</text>
+
+                  <circle class="curiosity-node" fill="var(--cyan)" cx="405" cy="405" r="48"></circle>
+                  <text class="curiosity-label" x="405" y="410">Evidence</text>
+
+                  <circle class="curiosity-node" fill="var(--green)" cx="260" cy="465" r="48"></circle>
+                  <text class="curiosity-label" x="260" y="470">Resolve</text>
+
+                  <circle class="curiosity-node" fill="var(--salmon)" cx="115" cy="405" r="48"></circle>
+                  <text class="curiosity-label" x="115" y="410">Revise</text>
+
+                  <circle class="curiosity-node" fill="var(--violet)" cx="55" cy="260" r="48"></circle>
+                  <text class="curiosity-label" x="55" y="265">Scope</text>
+
+                  <circle class="curiosity-node" fill="var(--lilac)" cx="115" cy="115" r="48"></circle>
+                  <text class="curiosity-label" x="115" y="120">Intent</text>
+                </svg>
+              </div>
+
+              <div class="question-loop">
+                <article class="tone-gold"><strong>Human-minted</strong><p>Brain or a directed memory action creates the open question. Automatic extraction cannot mint a user agenda. The subject, predicate, claim slot, scope, source and expected answer type become explicit.</p></article>
+                <article class="tone-pink"><strong>Surfaced naturally</strong><p>The bounded memory digest carries up to five scoped questions. They live in owner-agenda guidance with “weave in when relevant; never interrogate” framing and remain searchable as <code>[open question]</code>.</p></article>
+                <article class="tone-violet"><strong>Scope-aware</strong><p>Workspace and global questions follow the normal effective-scope set. Equivalent questions open in three distinct workspaces promote idempotently to one global known unknown; originals retain merge lineage.</p></article>
+                <article class="tone-blue"><strong>Evidence gathered</strong><p>Conversation, research, code, documents, review and work results can support an answer candidate. Recalled text remains inert data; source Trust and technical evidence stay separate.</p></article>
+                <article class="tone-green"><strong>Same-block resolution</strong><p>An accepted answer appends a typed value to the existing question block under expected-revision CAS, advances status from open to active, links evidence/change set, and emits projection events. No duplicate “answer memory” is required.</p></article>
+                <article class="tone-salmon"><strong>Reopen and correct</strong><p>Reopen restores a typed null value; correct, retract, supersede and revert append later revisions. A stale answer cannot close a question whose head has moved. Full history, actor, reason and blame remain available.</p></article>
+              </div>
+            </div>
+
+            <div class="big-callout tone-pink" style="margin-top:20px">
+              <strong>Intent is not epistemic Trust</strong>
+              Human provenance proves that the owner wants the question carried. It does not automatically mark the eventual answer as trusted. The answer remains <code>unreviewed</code> until an explicit owner Trust assignment exists, and prompt authority remains a separate policy decision.
+            </div>
+
+            <h3 class="micro-label" style="margin-top:26px">Curiosity frontier // deliberately outside the active envelope</h3>
+            <div class="frontier">
+              <article class="tone-gold"><strong>Sync</strong>Custom binary indexes, SSH/team sync, auto-edit and auto-restore remain outside the local authority until auth, conflict and privacy models justify them.</article>
+              <article class="tone-cyan"><strong>Graph expansion</strong>Temporal co-change ranking, arbitrary Cypher, shared graph artifacts, broad runtime trace truth, automated refactors, LLM wikis and 3D graph UI stay excluded.</article>
+              <article class="tone-violet"><strong>Parsing frontier</strong>Semantic-vector chunk grouping, remote MinerU/Docling/multimodal parsing and distributed/multi-database RAG are not part of the operational stack.</article>
+              <article class="tone-pink"><strong>Vision &amp; schema</strong>Vision-layout and schema extraction require explicit model, egress, cost, privacy and capability admission.</article>
+              <article class="tone-salmon"><strong>External engines</strong>Tencent’s external codegraph and managed server integration remain excluded pending license and supply-chain decisions.</article>
+              <article class="tone-blue"><strong>Evaluation models</strong>Blocking RAGAS and broad automatic NLI contradiction detection remain optional research signals, never authority or a prerequisite for deterministic gates.</article>
+            </div>
+          </div>
+        </section>
+
+        <section id="exgest" class="tone-cyan">
+          <div class="section-head">
+            <span class="section-code">OUT 227</span>
+            <span class="section-title">The exgest system</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">Exgest names the whole outbound side: scope-safe candidate retrieval, deterministic fusion, optional reranking, exact context rendering, explanation, read-only delivery, scoped export, and erasure propagation.</p>
+
+            <div class="output-map tone-cyan" aria-label="Exgest flow">
+              <div class="map-box tone-salmon"><strong>Bind before search</strong><p>Owner, workspace, project, repository snapshot, policy generation, model identity, activation and forget watermarks become part of the query before any lane sees a candidate.</p></div>
+              <div class="map-arrow" aria-hidden="true">›</div>
+              <div class="map-box tone-violet"><strong>Retrieve, fuse, rerank</strong><p>Exact · FTS · vector · structural · entity · relation candidates retain lane rank, score, witnesses, coverage and generation. Weighted RRF fuses deterministically. An admitted reranker can only reorder already-scoped candidates.</p></div>
+              <div class="map-arrow" aria-hidden="true">›</div>
+              <div class="map-box tone-cyan"><strong>Render and deliver</strong><p>Complete typed units fit an exact tokenizer budget. Each unit has a resolvable citation and explanation. Output travels to Brain, APIs, context, Agent tools, structured references or scoped export.</p></div>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-gold">
+                <h3>Candidate contract</h3>
+                <p>Every hit preserves exact scope, source/snapshot revision, projection generation, lane ranks, score components, source Trust reference, evidence strength, degradation, coverage and truncation. Cross-tenant candidates never enter a shared scorer, cache, model input or metrics label.</p>
+              </article>
+              <article class="card tone-violet">
+                <h3>Rerank contract</h3>
+                <p>The candidate pool is larger than final <code>k</code>. Route/model, input hashes/order, windows, limits and consent are bound. Invalid indices, duplicate results, non-finite scores, timeout or outage preserve fused order and set <code>degraded=true</code> with a reason.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Exact context</h3>
+                <p>Budgets allocate system, query, history, entities, relationships, chunks, headings, citations and render overhead. Truncation happens only at complete typed-unit boundaries; unresolved citations are excluded and explained.</p>
+              </article>
+              <article class="card tone-green">
+                <h3>Prompt firewall</h3>
+                <p>Recalled transcript, code, review and document text is untrusted data. System-like tags, tool syntax and markup cannot invoke a tool, widen a grant, mutate immutable prompt sections or become owner guidance without prompt-authority policy.</p>
+              </article>
+              <article class="card tone-cyan">
+                <h3>Read-only agent plane</h3>
+                <p>Agents can recall, search, inspect a memory, retrieve a citation, fetch bounded source, explore symbols/references/calls/tests/impact and request explanations. Host identity and scope are supplied outside model arguments.</p>
+              </article>
+              <article class="card tone-salmon">
+                <h3>Operator exgest</h3>
+                <p>Authenticated host flows provide scoped memory export, SARIF import/export, source and citation views, safe rebuild/rollback and broad export. Index, apply, publish, remove and administrative graph operations remain absent from agent profiles.</p>
+              </article>
+            </div>
+
+            <div class="big-callout tone-salmon" style="margin-top:18px">
+              <strong>Forget is a first-class outbound operation</strong>
+              A canonical transaction records erasure intent and an outbox event. Fenced consumers remove dependent evidence, chunks, embeddings, graph cues, findings, traces, summaries, watermarks and caches. Restore replays the content-free erasure ledger before serving, so rebuild and reimport cannot resurrect the forgotten source.
+            </div>
+          </div>
+        </section>
+
+        <section id="resilience" class="tone-salmon">
+          <div class="section-head">
+            <span class="section-code">SAFE 600</span>
+            <span class="section-title">Privacy, failure and degradation</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <div class="grid-3">
+              <article class="card tone-salmon">
+                <h3>Privacy before persistence</h3>
+                <p>Redaction and scope enforcement happen before canonical writes, embeddings, indexes, graph properties, caches, sync/export, telemetry and logs. Credentials, tokens, keys, auth headers and detected secrets are never retained.</p>
+              </article>
+              <article class="card tone-gold">
+                <h3>Filesystem &amp; parser safety</h3>
+                <p>Opaque authorized resources, canonical and post-symlink checks, no-shell reads, TOCTOU detection, archive entry/ratio/nesting limits, page/image/token budgets, cancellation and contained subprocesses guard local ingest.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Network boundary</h3>
+                <p>External URLs are disabled by default. Admitted fetches require scheme/host policy, DNS and rebinding defense, private/loopback/link-local IPv4/IPv6 rejection, redirect revalidation, MIME/magic, deadlines, byte limits and credential stripping.</p>
+              </article>
+            </div>
+
+            <div class="table-wrap tone-salmon">
+              <table>
+                <thead><tr><th>Failure</th><th>Behavior</th><th>What remains live</th><th>Visible evidence</th></tr></thead>
+                <tbody>
+                  <tr><td>Memory model unavailable</td><td>Job fails with a typed repair action; no silent Utility fallback</td><td>Canonical memory and non-model retrieval</td><td>Route/model identity, job state, remediation</td></tr>
+                  <tr><td>Parser/chunker failure</td><td>Checkpoint or fail item; publish nothing partial</td><td>Prior source revision and ready generation</td><td>Phase, item outcome, exact missing coverage</td></tr>
+                  <tr><td>Embedding/vector outage</td><td>Exclude invalid vector lane</td><td>Exact, FTS and valid graph lanes</td><td><code>degraded=true</code>, reason, generation health</td></tr>
+                  <tr><td>Reranker malformed/outage</td><td>Validate and reject response; preserve fused order</td><td>Original deterministic candidate order</td><td>Rerank status, model, validation reason</td></tr>
+                  <tr><td>SQLite BUSY/LOCKED</td><td>Bounded retry/backoff</td><td>Current pointer and canonical transaction integrity</td><td>Attempt, retry budget, terminal classification</td></tr>
+                  <tr><td>Staged corruption/schema mismatch</td><td>Fail validation; never publish</td><td>Prior retained ready generation</td><td>Integrity result, failed generation, recovery action</td></tr>
+                  <tr><td>Authority corruption</td><td>Hard-degrade read-only; never destructive auto-repair</td><td>Last verified backup/generation as available</td><td>Recovery state and exact verified artifacts</td></tr>
+                  <tr><td>Cancellation/budget</td><td>Fence attempt and record honest partial outcome</td><td>Canonical data and current pointer</td><td>Completed/reused/failed/waived denominator</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="operations" class="tone-gold">
+          <div class="section-head">
+            <span class="section-code">OPS 440</span>
+            <span class="section-title">Operations and proof</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p class="lead">The stack is operable as a product, not only as a schema: routes, Brain, Settings, Agent/MiMo, migrations, backup/restore, rollback, diagnostics, accessibility, security and packaged runtimes share one contract.</p>
+
+            <div class="red-threads" aria-label="Four end-to-end acceptance red threads">
+              <article class="thread tone-pink"><b>Memory</b><p>Fresh owner → configure Chat/Utility/Memory/Embeddings → remember manual and extracted facts → import rich document → recall with citations → edit/history/blame → consolidate → restart → forget → rebuild → prove no resurrection.</p></article>
+              <article class="thread tone-cyan"><b>Code</b><p>Authorize repository → full snapshot index → symbols/references/calls/tests/impact → difficult edit/rename/delete sequences → incremental/full parity → finding relocation → restart → prove identity, coverage and read-only access.</p></article>
+              <article class="thread tone-blue"><b>RAG</b><p>Ingest text, Markdown, DOCX, PDF, table and picture/caption fixtures → inject parse/chunk/embed/extract faults → publish → query five lanes → rerank/degrade → exact citations → update/rollback/forget.</p></article>
+              <article class="thread tone-salmon"><b>Policy</b><p>Compile advisory rules → review changed code → dedup/critic/SARIF → propose candidate → prove no policy/Trust/grant mutation → promote through the existing owner path → retain exact lineage.</p></article>
+            </div>
+
+            <div class="grid-3">
+              <article class="card tone-gold">
+                <h3>Quality telemetry</h3>
+                <p>Recall@k, MRR, nDCG, source/citation accuracy, false activation/leakage, code navigation and impact success, lane contribution, coverage, latency and exact token/candidate budgets are measured on deterministic corpora.</p>
+              </article>
+              <article class="card tone-blue">
+                <h3>Operational telemetry</h3>
+                <p>Startup/readiness, capture/recall/forget, job phase latency, queue depth, retries, scan and parse throughput, cache hit, rerank degradation, pointer health, cancellation and retention are metadata-only by default.</p>
+              </article>
+              <article class="card tone-green">
+                <h3>Packaged parity</h3>
+                <p>Current-source Rust, packaged Python, browser discovery, supervisor/engine, migrations and assets carry verifiable identities across admitted macOS, Linux and Windows targets. ACP compatibility and Rust capabilities preserve memory behavior across the supervisor seam.</p>
+              </article>
+            </div>
+
+            <details class="tone-violet" open>
+              <summary>Operational invariants</summary>
+              <div>
+                <ul class="tight-list">
+                  <li>Database, WAL and SHM are owner-only and re-locked across creation, restart, migration and recovery.</li>
+                  <li>Additive owner-scoped migrations provide preflight, dry run, counts, checkpoint/resume, backup and rollback boundaries.</li>
+                  <li>Optional vectors, models and network services never gate canonical/lexical readiness.</li>
+                  <li>Every acceptance row records exact source/artifact identity, command, environment, owner/scope, duration, result and retained redacted evidence.</li>
+                  <li>Brain, Settings, code/RAG views and destructive confirmations meet keyboard, focus, screen-reader, contrast and responsive requirements.</li>
+                  <li>No reference clone, copied Chunkr source, second store, hidden provider fallback or unowned compatibility path ships.</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="sources" class="tone-violet">
+          <div class="section-head">
+            <span class="section-code">REF 117</span>
+            <span class="section-title">Repository source map</span>
+            <span></span>
+          </div>
+          <div class="section-body">
+            <p>The architecture above is grounded in the canonical metaplan, its slices, the FrankenMemory v2 contracts, the current source map, and the operational acceptance definitions.</p>
+            <div class="sources">
+              <a class="source-link tone-orange" href="../../.clanker/futures/OPEN-CLANK-MEMORY-CODE-GRAPH-RAG-ASSIMILATION-2026-08-17.md"><b>Memory, code graph &amp; RAG metaplan</b><small>.clanker/futures/OPEN-CLANK-MEMORY-CODE-GRAPH-RAG-ASSIMILATION-2026-08-17.md</small></a>
+              <a class="source-link tone-gold" href="../../.clanker/futures/OPEN-CLANK-MEMORY-CODE-GRAPH-RAG-ASSIMILATION-2026-08-17/"><b>Implementation slices 0–11</b><small>Runtime, authority, model route, code, review, memory, document RAG and closure</small></a>
+              <a class="source-link tone-green" href="../../mcp_servers/frankenmemory/crates/fm-core/src/ontology.rs"><b>FrankenMemory v2 ontology</b><small>mcp_servers/frankenmemory/crates/fm-core/src/ontology.rs</small></a>
+              <a class="source-link tone-green" href="../../mcp_servers/frankenmemory/crates/fm-core/src/repository.rs"><b>Append-only v2 repository</b><small>mcp_servers/frankenmemory/crates/fm-core/src/repository.rs</small></a>
+              <a class="source-link tone-blue" href="../../src/frankenmemory_rag.py"><b>Canonical RAG projection</b><small>src/frankenmemory_rag.py</small></a>
+              <a class="source-link tone-cyan" href="../../src/frankenmemory_provider.py"><b>Authenticated memory provider adapter</b><small>src/frankenmemory_provider.py</small></a>
+              <a class="source-link tone-pink" href="../../src/memory_versioned.py"><b>Versioned memory lifecycle</b><small>src/memory_versioned.py</small></a>
+              <a class="source-link tone-pink" href="../../mcp_servers/frankenmemory/crates/fm-core/src/curate/questions.rs"><b>Known-unknown lifecycle</b><small>mcp_servers/frankenmemory/crates/fm-core/src/curate/questions.rs</small></a>
+              <a class="source-link tone-violet" href="../../src/memory_digest.py"><b>Memory index and curiosity surfacing</b><small>src/memory_digest.py</small></a>
+              <a class="source-link tone-salmon" href="../../.clankers/robonotes/OPEN-CLANK-MEMORY-ASSIMILATION-S01-CONTRACT-RESEARCH-2026-08-17.md"><b>Authority, Trust and job contracts</b><small>.clankers/robonotes/OPEN-CLANK-MEMORY-ASSIMILATION-S01-CONTRACT-RESEARCH-2026-08-17.md</small></a>
+              <a class="source-link tone-blue" href="../memory-architecture.md"><b>Host and engine memory architecture</b><small>docs/memory-architecture.md</small></a>
+              <a class="source-link tone-gold" href="../../contracts/frankenmemory/v2/schema.json"><b>Cross-language v2 wire schema</b><small>contracts/frankenmemory/v2/schema.json</small></a>
+            </div>
+
+            <details class="tone-gold" style="margin-top:18px">
+              <summary>Glossary</summary>
+              <div>
+                <div class="grid-2">
+                  <p><strong class="mono">Canonical</strong><br>The durable source of semantic truth and lifecycle history.</p>
+                  <p><strong class="mono">Projection</strong><br>A derived, versioned, disposable representation optimized for search, graph traversal, display or evaluation.</p>
+                  <p><strong class="mono">Ingest</strong><br>Authority binding, redaction, source/evidence capture, normalization, review/activation and generation publication.</p>
+                  <p><strong class="mono">Exgest</strong><br>Retrieval, fusion, rerank, exact rendering, explanation, delivery, scoped export and forget propagation.</p>
+                  <p><strong class="mono">Trust</strong><br>An explicit owner-relative epistemic assignment, not relevance, confidence, evidence strength or permission.</p>
+                  <p><strong class="mono">Known unknown</strong><br>A stable typed knowledge block whose current value is null and whose question remains open.</p>
+                  <p><strong class="mono">Generation</strong><br>An immutable derived build validated before a compare-and-swap publication pointer can expose it.</p>
+                  <p><strong class="mono">Prompt authority</strong><br>The separate policy decision that determines whether recalled information can act as behavioral guidance.</p>
+                </div>
+              </div>
+            </details>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="footer-rail" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <p class="footer-copy">Open Clank // FrankenMemory systems architecture // local-first memory network</p>
+  </div>
+
+  <script>
+    (() => {
+      const links = [...document.querySelectorAll('nav a[href^="#"]')];
+      const sections = links
+        .map((link) => document.querySelector(link.getAttribute('href')))
+        .filter(Boolean);
+      if (!('IntersectionObserver' in window)) return;
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        links.forEach((link) => {
+          const active = link.getAttribute('href') === `#${visible.target.id}`;
+          if (active) link.setAttribute('aria-current', 'true');
+          else link.removeAttribute('aria-current');
+        });
+      }, { rootMargin: '-12% 0px -68% 0px', threshold: [0, .2, .5] });
+      sections.forEach((section) => observer.observe(section));
+    })();
+  </script>
+</body>
+</html>

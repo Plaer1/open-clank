@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.local/contracts/engine-provenance-v1.schema.json",
+  "title": "Open Clank managed engine provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product",
+    "artifact_kind",
+    "build_contract_version",
+    "open_clank_version",
+    "engine_version",
+    "target",
+    "support_tier",
+    "bun_version",
+    "binary",
+    "inputs",
+    "protocols",
+    "managed_schema",
+    "source"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "product": { "const": "Open Clank" },
+    "artifact_kind": { "const": "managed-model-engine" },
+    "build_contract_version": { "type": "integer", "minimum": 1 },
+    "open_clank_version": { "type": "string", "minLength": 1 },
+    "engine_version": { "type": "string", "minLength": 1 },
+    "target": {
+      "enum": [
+        "linux-x64",
+        "linux-arm64",
+        "darwin-arm64",
+        "darwin-x64",
+        "windows-x64",
+        "linux-x64-baseline",
+        "linux-x64-musl",
+        "linux-arm64-musl",
+        "windows-arm64"
+      ]
+    },
+    "support_tier": { "enum": ["tier-1", "experimental"] },
+    "bun_version": { "const": "1.3.14" },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256", "size"],
+      "properties": {
+        "name": { "enum": ["openclank-engine", "openclank-engine.exe"] },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vendor_manifest_sha256",
+        "source_sha256",
+        "bun_lock_sha256",
+        "model_catalog_sha256"
+      ],
+      "properties": {
+        "vendor_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "bun_lock_sha256": { "$ref": "#/$defs/sha256" },
+        "model_catalog_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "protocols": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["managed_acp", "provider_store", "operation_router"],
+      "properties": {
+        "managed_acp": { "type": "integer", "minimum": 1 },
+        "provider_store": { "type": "integer", "minimum": 1 },
+        "operation_router": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "managed_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sha256"],
+      "properties": {
+        "id": { "const": "https://openclank.dev/contracts/managed-provider/v1" },
+        "version": { "const": 1 },
+        "sha256": { "const": "f9b9c7eb4dd50fa5d00f65f3662c9e9aa2702de63de94ada1e13321d131d0bbb" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstream_repository",
+        "upstream_commit",
+        "open_clank_import_commit",
+        "open_clank_import_tree",
+        "hash_algorithm"
+      ],
+      "properties": {
+        "upstream_repository": { "type": "string", "format": "uri" },
+        "upstream_commit": { "$ref": "#/$defs/git_sha" },
+        "open_clank_import_commit": { "$ref": "#/$defs/git_sha" },
+        "open_clank_import_tree": { "$ref": "#/$defs/git_sha" },
+        "hash_algorithm": { "const": "openclank-tree-sha256-v1" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "git_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+  }
+}

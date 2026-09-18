@@ -1,0 +1,51 @@
+[package]
+name = "odysseus-files"
+version = "0.1.0"
+edition = "2021"
+description = "Versioned protocol and authorization contracts for the Odysseus filesystem service"
+license = "MIT"
+
+[features]
+default = ["tonic-transport"]
+tonic-transport = [
+    "dep:libc",
+    "dep:notify",
+    "dep:prost",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:tonic",
+    "dep:tonic-prost",
+    "dep:tower",
+]
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+getrandom = "=0.4.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+libc = { version = "=0.2.189", optional = true }
+objc2 = "=0.6.2"
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFData", "CFString", "CFCGTypes", "objc2"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGImage", "objc2"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDate", "NSError", "NSObject", "NSObjCRuntime", "NSRunLoop", "NSString", "NSURL", "NSValue", "block2", "objc2-core-foundation"] }
+objc2-image-io = { version = "=0.3.2", default-features = false, features = ["std", "CGImageDestination", "ImageIOBase", "objc2", "objc2-core-graphics"] }
+objc2-quick-look-thumbnailing = { version = "=0.3.2", default-features = false, features = ["std", "QLThumbnailGenerationRequest", "QLThumbnailGenerator", "QLThumbnailRepresentation", "bitflags", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
+notify = { version = "=8.2.0", optional = true }
+prost = { version = "=0.14.4", optional = true }
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tokio-stream = { version = "=0.1.18", features = ["net"], optional = true }
+tonic = { version = "=0.14.6", optional = true }
+tonic-prost = { version = "=0.14.6", optional = true }
+tower = { version = "=0.5.3", features = ["limit"], optional = true }
+
+[build-dependencies]
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.6"
+
+[dev-dependencies]
+tempfile = "3"

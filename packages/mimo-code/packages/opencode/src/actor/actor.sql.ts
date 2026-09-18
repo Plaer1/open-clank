@@ -22,6 +22,10 @@ export const ActorRegistryTable = sqliteTable(
     context_watermark: text().$type<MessageID>(),
     background: integer({ mode: "boolean" }).notNull(),
     tools: text({ mode: "json" }).$type<readonly string[] | "INHERIT">(),
+    // The requested ref is retained separately from the resolved route so the
+    // UI can explain inheritance/group resolution without guessing from IDs.
+    requested_model: text(),
+    effective_model: text(),
     last_turn_time: integer().notNull(),
     turn_count: integer().notNull().default(0),
     last_error: text(),

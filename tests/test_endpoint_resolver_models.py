@@ -76,6 +76,30 @@ class TestEnabledModels:
         ep.hidden_models = "deepseek-reasoner"
         assert _endpoint_enabled_models(ep) == ["deepseek-chat", "deepseek-coder"]
 
+    def test_pinned_allowlist_drains_cached_models(self):
+        # The ody-* projection serves `_endpoint_enabled_models`; with an
+        # explicit pin list it must match the chat picker's allow-list, or
+        # unpinned models stay dispatchable forever.
+        ep = _Ep(cached=["a", "b", "c"])
+        ep.pinned_models = json.dumps(["a"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
+    def test_explicit_empty_pins_drain_everything(self):
+        # Explicit [] means "show nothing" in the picker; projection agrees.
+        ep = _Ep(cached=["a", "b"])
+        ep.pinned_models = "[]"
+        assert _endpoint_enabled_models(ep) == []
+
+    def test_null_pins_keep_cached_minus_hidden(self):
+        ep = _Ep(cached=["a", "b"], hidden=["b"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
+    def test_hidden_still_applies_to_pins(self):
+        ep = _Ep(cached=["a", "b"])
+        ep.pinned_models = json.dumps(["a", "b"])
+        ep.hidden_models = json.dumps(["b"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
 
 def test_model_list_normalizer_accepts_json_and_legacy_csv():
     assert normalize_model_list('["a", "b", "a"]') == ["a", "b"]

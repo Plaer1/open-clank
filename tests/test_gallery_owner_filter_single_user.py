@@ -1,8 +1,8 @@
-"""_owner_filter must separate single-user mode from anonymous callers.
+"""_owner_filter must use an explicit durable local Gallery principal.
 
 When AUTH_ENABLED=false, get_current_user returns None and gallery routes should
-stay all-visible. When AUTH_ENABLED=true and no current user resolves, the same
-None means an anonymous caller and gallery queries must fail closed.
+see only ``local-installation`` rows. Legacy null and named-account rows remain
+ambiguous. When AUTH_ENABLED=true the same None must fail closed.
 """
 import tempfile
 import uuid
@@ -33,13 +33,13 @@ def _seed(*owners):
         db.close()
 
 
-def test_none_user_returns_all_rows(monkeypatch):
+def test_none_user_returns_only_local_installation_rows(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _seed(None, None, "alice")
+    _seed(None, "local-installation", "alice")
     db = _TS()
     try:
         n = _owner_filter(db.query(GalleryImage), None).count()
-        assert n == 3  # old code returned 0
+        assert n == 1
     finally:
         db.close()
 

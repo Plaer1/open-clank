@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package epic.events;
+
+// TODO(jcohen): This should almost certainly be moved to `urc-server-epic`.
+message ComplianceCheck {
+  string revision = 1;
+  uint64 revision_number = 2;
+  string branch = 3;
+  string user_id = 4;
+  string repository = 5;
+  string ip_addr = 6;
+}

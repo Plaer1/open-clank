@@ -9,6 +9,7 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import * as Tool from "./tool"
 import DESCRIPTION from "./view-image.txt"
+import { fileResult } from "./file-contract"
 
 const parameters = z.object({
   path: z.string().describe("Local filesystem path to an image file."),
@@ -28,6 +29,13 @@ export const ViewImageTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters,
+      resources: (params: z.infer<typeof parameters>, ctx: Tool.Context) => ({
+        reads: [
+          path.isAbsolute(params.path)
+            ? params.path
+            : path.resolve(SessionCwd.get(ctx.sessionID), params.path),
+        ],
+      }),
       execute: (params: z.infer<typeof parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const model = (ctx.extra as { model?: Provider.Model } | undefined)?.model
@@ -72,7 +80,26 @@ export const ViewImageTool = Tool.define(
           return {
             title: path.relative(Instance.worktree, filepath),
             output: `Image viewed successfully (${detail} detail)`,
-            metadata: { detail },
+            metadata: {
+              detail,
+              file: fileResult({
+                operation: "view_image",
+                path: AppFileSystem.resolve(filepath),
+                kind: "image",
+                range: bytes.byteLength ? { unit: "byte", start: 0, end: bytes.byteLength - 1 } : null,
+                page: {
+                  unit: "byte",
+                  cursor: 0,
+                  next_cursor: null,
+                  has_more: false,
+                  returned: bytes.byteLength,
+                  total: bytes.byteLength,
+                },
+                bytes_considered: bytes.byteLength,
+                media_type: mime,
+                fingerprint: AppFileSystem.fingerprintBytes(bytes),
+              }),
+            },
             attachments: [
               {
                 type: "file" as const,

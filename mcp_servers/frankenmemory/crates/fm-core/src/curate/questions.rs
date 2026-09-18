@@ -25,11 +25,10 @@ pub const PROMOTE_WORKSPACES_MIN: usize = 3;
 
 const STOPWORDS: &[&str] = &[
     "a", "an", "the", "am", "is", "are", "was", "were", "be", "been", "do", "does", "did", "have",
-    "has",
-    "had", "what", "whats", "who", "whos", "whom", "where", "when", "which", "how", "why", "of",
-    "for", "to", "in", "on", "at", "by", "with", "about", "your", "yours", "our", "their", "his",
-    "her", "its", "it", "this", "that", "these", "those", "and", "or", "not", "no", "yes", "id",
-    "you", "we", "they", "he", "she", "us", "them", "s", "t", "re", "ll", "ve", "d", "m",
+    "has", "had", "what", "whats", "who", "whos", "whom", "where", "when", "which", "how", "why",
+    "of", "for", "to", "in", "on", "at", "by", "with", "about", "your", "yours", "our", "their",
+    "his", "her", "its", "it", "this", "that", "these", "those", "and", "or", "not", "no", "yes",
+    "id", "you", "we", "they", "he", "she", "us", "them", "s", "t", "re", "ll", "ve", "d", "m",
 ];
 
 /// Questions are phrased ABOUT the user ("user's name?") while the user
@@ -134,6 +133,10 @@ pub async fn run_promote_unknowns(
         records_archived: 0,
         records_merged: 0,
         records_reflected: 0,
+        records_selected: 0,
+        records_changed: 0,
+        records_skipped: 0,
+        records_conflicted: 0,
         alerts: vec![],
     };
     let Some(owner) = owner.filter(|o| !o.trim().is_empty()) else {
@@ -153,6 +156,7 @@ pub async fn run_promote_unknowns(
             return result;
         }
     };
+    result.records_selected = open.len();
 
     // Greedy clustering: earliest-first order makes the first member of
     // each cluster the canonical (oldest) copy.
@@ -214,6 +218,7 @@ pub async fn run_promote_unknowns(
                     }
                     promoted.metadata = metadata;
                     if !store.upsert_curated(&promoted, None).await {
+                        result.records_conflicted += 1;
                         result.alerts.push(format!(
                             "failed to write promoted global for {}",
                             canonical.id
@@ -245,6 +250,12 @@ pub async fn run_promote_unknowns(
     if dry_run {
         result.alerts.push("dry_run: no writes performed".into());
     }
+    // Groom telemetry parity with decay/dedup/reflect: changed counts every
+    // write action (promoted globals + archived workspace copies); skipped
+    // saturates at zero when a promotion writes a new global record that was
+    // not itself part of the scanned open set.
+    result.records_changed = result.records_merged + result.records_archived;
+    result.records_skipped = result.records_selected.saturating_sub(result.records_changed);
     result
 }
 
@@ -380,6 +391,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn promotion_populates_groom_telemetry() {
+        let store = Arc::new(SqliteStore::memory(4).unwrap());
+        store
+            .upsert_curated(&question("deploy cadence", "ws-a"), None)
+            .await;
+        store
+            .upsert_curated(&question("deploy cadence", "ws-b"), None)
+            .await;
+        store
+            .upsert_curated(&question("favorite color", "ws-a"), None)
+            .await;
+
+        // Below the promotion threshold: everything scanned, nothing changed.
+        let below = run_promote_unknowns(store.as_ref(), Some("alice"), false).await;
+        assert_eq!(below.records_selected, 3);
+        assert_eq!(below.records_changed, 0);
+        assert_eq!(below.records_skipped, 3);
+        assert_eq!(below.records_conflicted, 0);
+
+        store
+            .upsert_curated(&question("deploy cadence", "ws-c"), None)
+            .await;
+        let promoted = run_promote_unknowns(store.as_ref(), Some("alice"), false).await;
+        assert_eq!(promoted.records_selected, 4);
+        assert_eq!(promoted.records_merged, 1);
+        assert_eq!(promoted.records_archived, 3);
+        assert_eq!(
+            promoted.records_changed,
+            promoted.records_merged + promoted.records_archived
+        );
+        assert_eq!(promoted.records_skipped, 0);
+        assert_eq!(promoted.records_conflicted, 0);
+    }
+
+    #[tokio::test]
     async fn passive_resolve_closes_in_scope_only() {
         let store = Arc::new(SqliteStore::memory(4).unwrap());
         store
@@ -457,9 +503,16 @@ mod tests {
 
         let embed: Arc<dyn crate::embed::EmbeddingClient> =
             Arc::new(crate::embed::NoopEmbeddingClient::new(4));
-        crate::curate::dedup::run_dedup(store.as_ref(), &embed, false).await;
-        crate::curate::reflect::run_reflect(store.as_ref()).await;
-        crate::curate::decay::run_decay(store.as_ref(), &Default::default(), Some("ws-a")).await;
+        crate::curate::dedup::run_dedup(store.as_ref(), &embed, "alice", "ws-a", false).await;
+        crate::curate::reflect::run_reflect(store.as_ref(), "alice", "ws-a", false).await;
+        crate::curate::decay::run_decay(
+            store.as_ref(),
+            &Default::default(),
+            "alice",
+            "ws-a",
+            false,
+        )
+        .await;
 
         let open = store.list_open_unknowns("alice", None).unwrap();
         assert_eq!(

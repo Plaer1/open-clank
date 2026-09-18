@@ -12,6 +12,7 @@ Pattern under test (multi-tenant deploy):
 """
 
 import os
+import inspect
 import sys
 import types
 import pytest
@@ -239,91 +240,13 @@ class _Predicate:
         return _Predicate(lambda row: self(row) or other(row))
 
 
-class _Column:
-    def __init__(self, name):
-        self.name = name
-
-    def __eq__(self, value):
-        return _Predicate(lambda row: getattr(row, self.name) == value)
-
-    def desc(self):
-        return self
-
-
-class _ModelEndpoint:
-    is_enabled = _Column("is_enabled")
-    owner = _Column("owner")
-    created_at = _Column("created_at")
-
-
-class _Query:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def filter(self, *predicates):
-        self._rows = [r for r in self._rows if all(p(r) for p in predicates)]
-        return self
-
-    def order_by(self, *exprs):
-        return self
-
-    def first(self):
-        return self._rows[0] if self._rows else None
-
-
-class _DB:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def query(self, model):
-        assert model is _ModelEndpoint
-        return _Query(self._rows)
-
-
-def _ep(name, owner, *, is_enabled=True):
-    return SimpleNamespace(name=name, owner=owner, is_enabled=is_enabled)
-
-
-def _select(rows, owner):
+def test_sync_chat_uses_only_normalized_owner_scoped_routes():
+    """The old first-visible ModelEndpoint fallback was removed entirely."""
     wh_mod = _import_webhook_helper()
-    # _select_api_chat_fallback_endpoint uses the module-level ModelEndpoint
-    # (not a local import), so we patch the module attribute directly.
-    wh_mod.ModelEndpoint = _ModelEndpoint
-    return wh_mod._select_api_chat_fallback_endpoint(_DB(rows), owner)
+    source = inspect.getsource(wh_mod.setup_webhook_routes)
 
-
-def test_sync_chat_fallback_never_picks_another_owners_endpoint():
-    # bob's private endpoint is first in the table, but alice must never get it.
-    rows = [_ep("bob-private", "bob"), _ep("alice-private", "alice")]
-    ep = _select(rows, "alice")
-    assert ep is not None and ep.name == "alice-private"
-
-
-def test_sync_chat_fallback_rejects_ownerless_row_for_authenticated_user():
-    rows = [_ep("bob-private", "bob"), _ep("shared", None)]
-    assert _select(rows, "alice") is None
-
-
-def test_sync_chat_fallback_returns_none_when_only_others_endpoints():
-    rows = [_ep("bob-private", "bob"), _ep("carol-private", "carol")]
-    # No owned/shared row → fall through to the 400, never borrow bob's key.
-    assert _select(rows, "alice") is None
-
-
-def test_sync_chat_fallback_skips_disabled_owned_endpoint():
-    rows = [_ep("alice-disabled", "alice", is_enabled=False), _ep("shared", None)]
-    assert _select(rows, "alice") is None
-
-
-def test_sync_chat_fallback_null_owner_uses_shared_rows_only():
-    # When no token owner is known, only null-owner (shared) endpoints are
-    # visible — private endpoints of any user must not be returned.
-    rows = [_ep("bob-private", "bob"), _ep("shared", None)]
-    ep = _select(rows, None)
-    assert ep is not None and ep.name == "shared"
-
-
-def test_sync_chat_fallback_null_owner_returns_none_with_no_shared():
-    # No shared rows → fail closed rather than returning another user's endpoint.
-    rows = [_ep("bob-private", "bob"), _ep("alice-private", "alice")]
-    assert _select(rows, None) is None
+    assert not hasattr(wh_mod, "_select_api_chat_fallback_endpoint")
+    assert "ModelEndpoint" not in source
+    assert "llm_call_async" not in source
+    assert "list_chat_routes(token_owner)" in source
+    assert "complete_text(" in source

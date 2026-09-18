@@ -1,6 +1,7 @@
 # src/document_processor.py
 """Document processing: PDF/OCR extraction, text file handling, image VL analysis, user content building."""
 
+import asyncio
 import os
 import logging
 import mimetypes
@@ -8,8 +9,6 @@ import base64
 import tempfile
 import urllib.parse
 from typing import List, Dict, Any
-
-from src.llm_core import llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -304,92 +303,92 @@ def _load_vl_settings() -> dict:
         return {}
 
 
-def _resolve_vl_model(configured: str, owner: str | None = None) -> tuple:
-    """Resolve the vision model to (url, model_id, headers).
+async def analyze_image_with_vl_result_async(
+    image_path: str,
+    owner: str | None = None,
+    *,
+    root_operation_id: str | None = None,
+    grant_id: str | None = None,
+    model_route_id: str | None = None,
+    prompt: str = "Describe this image in detail",
+) -> dict:
+    """Analyze an image through the owner-bound vision.describe operation."""
 
-    Uses admin-configured model if set, otherwise tries auto-detection
-    of known vision-capable models across configured endpoints.
-    """
-    from src.ai_interaction import _resolve_model
-
-    if configured:
-        return _resolve_model(configured, owner=owner)
-
-    # Auto-detect: try known vision-capable models in priority order
-    candidates = [
-        "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini",
-        "claude-sonnet-4-5-20250929", "claude-opus-4-20250514",
-        "gemini-2.0-flash", "gemini-2.5-pro",
-        "llava", "pixtral", "qwen2-vl",
-    ]
-    for candidate in candidates:
-        try:
-            return _resolve_model(candidate, owner=owner)
-        except (ValueError, Exception):
-            continue
-
-    raise ValueError("No vision model available")
-
-
-def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> dict:
-    """Analyze an image and return both text and the model that produced it."""
-    logger.info(f"Analyzing image with VL model: {image_path}")
+    logger.info("Analyzing image through the managed vision route")
+    settings = _load_vl_settings()
+    if not settings.get("vision_enabled", True):
+        return {
+            "text": "[Vision is disabled — enable it in Settings → Vision]",
+            "model": "",
+        }
+    selected_route = (
+        str(model_route_id or settings.get("vision_model") or "").strip()
+        or None
+    )
     try:
-        settings = _load_vl_settings()
-        if not settings.get("vision_enabled", True):
-            return {"text": "[Vision is disabled — enable it in Settings → Vision]", "model": ""}
-        vl_model = settings.get("vision_model", "")
+        from src.openclank.modality_facade import describe_image_path
 
-        try:
-            url, model_id, headers = _resolve_vl_model(vl_model, owner=owner)
-        except ValueError:
-            return {"text": "[No vision model configured — set one in Settings → Vision]", "model": vl_model or ""}
+        result = await describe_image_path(
+            owner=owner or "",
+            image_path=image_path,
+            prompt=prompt,
+            model_route_id=selected_route,
+            root_operation_id=root_operation_id,
+            grant_id=grant_id,
+        )
+        return {
+            "text": str(result.output.get("text") or ""),
+            "model": result.model_route_id,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Managed vision analysis unavailable (%s)",
+            type(exc).__name__,
+        )
+        return {
+            "text": "[VL model unavailable - image not analyzed]",
+            "model": "",
+        }
 
-        with open(image_path, "rb") as f:
-            img_data = base64.b64encode(f.read()).decode("utf-8")
 
-        ext = os.path.splitext(image_path)[1].lower()
-        mime_map = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".gif": "gif", ".webp": "webp"}
-        img_format = mime_map.get(ext, "jpeg")
+def analyze_image_with_vl_result(
+    image_path: str,
+    owner: str | None = None,
+    *,
+    root_operation_id: str | None = None,
+    grant_id: str | None = None,
+    model_route_id: str | None = None,
+) -> dict:
+    """Synchronous compatibility wrapper for non-async import/OCR workers.
 
-        vl_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/{img_format};base64,{img_data}"}},
-                ],
-            }
-        ]
-        # Vision-specific fallback chain (Settings → Vision → Fallbacks). A
-        # downed vision endpoint can fall through to the next configured model
-        # — same shape as task/chat but its own list (`vision_model_fallbacks`).
-        try:
-            from src.endpoint_resolver import resolve_vision_fallback_candidates
-            _vl_candidates = [(url, model_id, headers)] + resolve_vision_fallback_candidates(owner=owner)
-        except Exception:
-            _vl_candidates = [(url, model_id, headers)]
+    Async request and chat paths must await analyze_image_with_vl_result_async
+    so execution stays on the application supervisor's event loop.
+    """
 
-        last_err = None
-        for i, (_url, _model, _headers) in enumerate([c for c in _vl_candidates if c and c[0] and c[1]]):
-            try:
-                description = llm_call(_url, _model, vl_messages, headers=_headers, timeout=120)
-                logger.info("VL analysis complete with model %s", _model)
-                return {"text": description, "model": _model}
-            except Exception as e:
-                last_err = e
-                tag = "primary" if i == 0 else "candidate"
-                logger.warning(f"[vision fallback] {tag} {_model} failed ({type(e).__name__}); trying next")
-                continue
-        raise last_err if last_err else RuntimeError("No vision model endpoint configured")
-
-    except Exception as e:
-        logger.error(f"VL model unavailable: {e}")
-        return {"text": "[VL model unavailable - image not analyzed]", "model": ""}
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            analyze_image_with_vl_result_async(
+                image_path,
+                owner=owner,
+                root_operation_id=root_operation_id,
+                grant_id=grant_id,
+                model_route_id=model_route_id,
+            )
+        )
+    logger.warning(
+        "Synchronous vision compatibility call refused on an active event loop"
+    )
+    return {
+        "text": "[VL model unavailable - image not analyzed]",
+        "model": "",
+    }
 
 
 def analyze_image_with_vl(image_path: str, owner: str | None = None) -> str:
-    """Analyze an image using the admin-configured Vision-Language model."""
+    """Compatibility wrapper for synchronous document import workers."""
+
     return analyze_image_with_vl_result(image_path, owner=owner).get("text", "")
 
 

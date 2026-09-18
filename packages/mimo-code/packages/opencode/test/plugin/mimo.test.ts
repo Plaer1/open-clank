@@ -245,6 +245,19 @@ describe("MimoAuthPlugin", () => {
         expect(output.headers["X-Mimo-Source"]).toBeUndefined()
       }
     })
+
+    test("recognizes a normalized managed Xiaomi connection", async () => {
+      const hooks = await MimoAuthPlugin(fakeInput)
+      const output = { headers: {} as Record<string, string> }
+      await hooks["chat.headers"]!(
+        {
+          model: { providerID: "connection-123" },
+          provider: { options: { _openclankFamilyID: "xiaomi", _openclankAdapterID: "mimo-native" } },
+        } as any,
+        output as any,
+      )
+      expect(output.headers["X-Mimo-Source"]).toBe("mimocode-cli")
+    })
   })
 
   describe("encryption", () => {

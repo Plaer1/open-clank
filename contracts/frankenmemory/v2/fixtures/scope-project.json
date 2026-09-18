@@ -1,0 +1,10 @@
+{
+  "contract_version": "frankenmemory.v2",
+  "operation": "scope.resolve",
+  "scope": {"owner_id": "owner-e", "workspace_id": "workspace-main", "project_id": "project-open-clank"},
+  "payload": {"exact_scopes": [
+    {"owner_id": "owner-e", "workspace_id": null, "project_id": null},
+    {"owner_id": "owner-e", "workspace_id": "workspace-main", "project_id": null},
+    {"owner_id": "owner-e", "workspace_id": "workspace-main", "project_id": "project-open-clank"}
+  ]}
+}

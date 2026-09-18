@@ -2,14 +2,8 @@
 generation tree but never the active worker's, and must refuse paths outside the
 managed owners root. Guards the fix for the ~637-dir / multi-hundred-MB leak.
 """
-import json
 from pathlib import Path
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-import core.database as database
-from core.database import Base, MimoAuthStore
 from src.openclank.mimo_supervisor import MimoSupervisorPool
 
 
@@ -32,7 +26,7 @@ def test_retired_generation_dir_is_removed(tmp_path):
     gen_dir = owners / "abc" / "generations" / "3-deadbeef"
     gen_dir.mkdir(parents=True)
     (gen_dir / "mimocode").mkdir()
-    (gen_dir / "mimocode" / "auth.json").write_text("{}")
+    (gen_dir / "mimocode" / "state.json").write_text("{}")
 
     pool = _bare_pool(owners)
     pool._reclaim_generation_dir("abc", _FakeWorker(gen_dir))
@@ -71,48 +65,21 @@ def test_missing_runtime_home_is_a_noop(tmp_path):
     pool._reclaim_generation_dir("abc", _FakeWorker(None))  # must not raise
 
 
-def test_startup_recovers_then_reclaims_trusted_share_generation(
+def test_startup_reclaims_every_stopped_generation_without_database_authority(
     tmp_path,
-    monkeypatch,
 ):
-    engine = create_engine(f"sqlite:///{tmp_path / 'shared-recovery.db'}")
-    Base.metadata.create_all(engine)
-    sessions = sessionmaker(bind=engine)
-    monkeypatch.setattr(database, "SessionLocal", sessions)
-    with sessions() as db:
-        db.add(MimoAuthStore(
-            owner="source",
-            payload=json.dumps({
-                "xiaomi": {"type": "api", "key": "before"},
-            }),
-        ))
-        db.commit()
-
-    pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
-    partition = pool._share_partition("recipient", "grant")
-    generation = (
-        pool._runtime_home(partition)
-        / "generations"
-        / "1-stopped"
-    )
-    auth = generation / "mimocode" / "data" / "auth.json"
-    auth.parent.mkdir(parents=True)
-    auth.write_text(json.dumps({
-        "xiaomi": {"type": "api", "key": "after"},
-    }), encoding="utf-8")
-    (generation / "shared-native-auth-sources.json").write_text(
-        json.dumps({"xiaomi": "source"}),
-        encoding="utf-8",
-    )
-
-    pool._recover_generation_auth_caches()
-    with sessions() as db:
-        assert json.loads(db.get(MimoAuthStore, "source").payload) == {
-            "xiaomi": {"type": "api", "key": "after"},
-        }
+    owners = tmp_path / "owners"
+    pool = _bare_pool(owners)
+    generation = owners / "owner-a" / "generations" / "1-stopped"
+    another = owners / "owner-b" / "generations" / "9-stopped"
+    generation.mkdir(parents=True)
+    another.mkdir(parents=True)
+    (generation / "engine-state").write_text("regenerable", encoding="utf-8")
+    (another / "engine-state").write_text("regenerable", encoding="utf-8")
 
     pool._reclaim_retired_generations()
     assert not generation.exists()
+    assert not another.exists()
 
 
 if __name__ == "__main__":

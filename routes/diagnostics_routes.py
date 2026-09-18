@@ -24,8 +24,9 @@ def setup_diagnostics_routes(
 
     @router.get("/api/diagnostics/services")
     async def get_service_health(request: Request) -> Dict[str, Any]:
-        """Consolidated degraded-state report for ChromaDB, SearXNG, email,
-        ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
+        """Consolidated degraded-state report for memory/RAG, SearXNG, email,
+        ntfy, and provider endpoints. Non-intrusive probes — safe to poll.
+        """
         require_admin(request)
         from src.service_health import collect_service_health
         report = await collect_service_health(
@@ -46,6 +47,11 @@ def setup_diagnostics_routes(
                 "name": "memory",
                 "status": "ok" if memory_alive else ("down" if memory_declared else "disabled"),
                 "detail": f"{getattr(memory_provider, 'provider_id', 'none')} provider; owner-scoped facade active" if memory_alive else "Memory provider unavailable",
+            },
+            {
+                "name": "frankenmemory",
+                "status": "ok" if memory_alive and getattr(memory_provider, "provider_id", "") == "frankenmemory" else ("down" if memory_declared else "disabled"),
+                "detail": "Canonical tenant-scoped memory and RAG authority" if memory_alive and getattr(memory_provider, "provider_id", "") == "frankenmemory" else "Frankenmemory provider unavailable",
             },
             {
                 "name": "mimo",

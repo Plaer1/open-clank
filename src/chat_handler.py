@@ -14,8 +14,10 @@ from src.constants import (
     UPLOAD_DIR,
 )
 from core.models import ChatMessage
-from src.chat_helpers import extract_urls, model_supports_vision
-from src.document_processor import build_user_content, analyze_image_with_vl_result
+from src.chat_helpers import extract_urls
+from src.document_processor import build_user_content, analyze_image_with_vl_result_async
+from src.generated_images import gallery_owner_key
+from src.openclank.chat_routing import ChatRouteUnavailable, resolve_chat_route
 from src.youtube_handler import (
     is_youtube_url,
     extract_youtube_id,
@@ -31,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[str], text: str) -> None:
     file_hash = (file_info or {}).get("hash")
-    if not file_hash or not text:
+    owner_key = gallery_owner_key(owner)
+    if not file_hash or not text or owner_key is None:
         return
     try:
         from core.database import GalleryImage, SessionLocal
@@ -40,9 +43,8 @@ def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[st
             q = db.query(GalleryImage).filter(
                 GalleryImage.file_hash == file_hash,
                 GalleryImage.is_active == True,  # noqa: E712
+                GalleryImage.owner == owner_key,
             )
-            if owner:
-                q = q.filter(GalleryImage.owner == owner)
             img = q.first()
             if not img:
                 return
@@ -144,6 +146,8 @@ class ChatHandler:
         auto_opened_docs: Optional[List[Dict[str, Any]]] = None,
         allow_tool_preprocessing: bool = True,
         structured_resources: bool = False,
+        root_operation_id: Optional[str] = None,
+        provider_grant_id: Optional[str] = None,
     ) -> tuple:
         """
         Common preprocessing for both chat endpoints.
@@ -223,11 +227,21 @@ class ChatHandler:
             from src.settings import get_user_setting
             vision_enabled = get_user_setting("vision_enabled", owner or "", True)
             if vision_enabled:
-                main_is_vision = await asyncio.to_thread(
-                    model_supports_vision,
-                    sess.model or "",
-                    getattr(sess, "endpoint_url", "") or "",
-                )
+                try:
+                    selected_route = resolve_chat_route(
+                        owner=owner,
+                        endpoint_id=getattr(sess, "endpoint_id", None),
+                        model_id=getattr(sess, "model", None),
+                        model_route_id=getattr(
+                            sess, "provider_model_route_id", None
+                        ),
+                    )
+                    main_is_vision = bool(
+                        "vision.describe" in selected_route.operations
+                        or selected_route.capabilities.get("vision") is True
+                    )
+                except ChatRouteUnavailable:
+                    main_is_vision = False
 
         if effective_att_ids and vision_enabled:
             meta_by_id = {m["id"]: m for m in attachment_meta}
@@ -278,7 +292,20 @@ class ChatHandler:
                             except Exception:
                                 vl_desc = None
                         if not vl_desc:
-                            vl_result = analyze_image_with_vl_result(file_info["path"], owner=owner)
+                            selected_vl_route = str(vl_model or "").strip() or None
+                            vl_result = await analyze_image_with_vl_result_async(
+                                file_info["path"],
+                                owner=owner,
+                                root_operation_id=root_operation_id,
+                                model_route_id=selected_vl_route,
+                                grant_id=(
+                                    provider_grant_id
+                                    if selected_vl_route
+                                    and selected_vl_route
+                                    == getattr(sess, "provider_model_route_id", None)
+                                    else None
+                                ),
+                            )
                             vl_desc = vl_result.get("text", "")
                             vl_model = vl_result.get("model", "")
                             if vl_desc and not vl_desc.startswith("["):

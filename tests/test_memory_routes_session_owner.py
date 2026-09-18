@@ -8,16 +8,16 @@ credentials, or session title.
 """
 import asyncio
 import io
-import sys
-import types
+import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, UploadFile
 
 import routes.memory_routes as mr
 from src.request_models import MemoryAddRequest
+from src.openclank.modality_facade import ManagedTextCompletionError
 
 
 def _route(router, path, method):
@@ -36,6 +36,7 @@ class _StubProvider:
     def __init__(self, records=None):
         self.records = records or []
         self.remember_calls = []
+        self.review_calls = []
 
     async def list_memories(self, *, owner=None, limit=1000):
         return list(self.records)
@@ -46,6 +47,10 @@ class _StubProvider:
     async def remember(self, text, **kwargs):
         self.remember_calls.append((text, kwargs))
         return SimpleNamespace(id="m_new")
+
+    async def review_candidate(self, candidate_id, **kwargs):
+        self.review_calls.append((candidate_id, kwargs))
+        return {"ok": True, "candidate_id": candidate_id}
 
 
 def _record(**overrides):
@@ -79,6 +84,16 @@ def _request(user):
     )
 
 
+def _json_request(user, body):
+    request = _request(user)
+
+    async def json():
+        return body
+
+    request.json = json
+    return request
+
+
 def _upload(name="memories.json"):
     return UploadFile(
         filename=name,
@@ -88,6 +103,26 @@ def _upload(name="memories.json"):
 
 def _allow_memory_management(monkeypatch):
     monkeypatch.setattr("src.auth_helpers.require_privilege", lambda request, privilege: "alice")
+
+
+def _configure_memory_route(monkeypatch, *, configured=True):
+    operation_router = MagicMock()
+    operation_router.route_preflight.return_value = {
+        "configured": configured,
+        "binding_revision": 1 if configured else 0,
+        "eligible_routes": [
+            {
+                "model_route_id": "memory-route",
+                "display_name": "memory-model",
+                "connection_label": "Memory model",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "src.openclank.modality_facade.managed_route_preflight",
+        operation_router.route_preflight,
+    )
+    return operation_router
 
 
 def test_extract_rejects_other_users_session(monkeypatch):
@@ -147,9 +182,7 @@ def test_provider_memory_list_stays_on_request_event_loop(monkeypatch):
     assert out["memory"][0]["id"] == "m_1"
 
 
-def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch):
-    import src.task_endpoint as task_endpoint
-
+def test_audit_owned_session_uses_managed_utility_route(monkeypatch):
     memory_manager = MagicMock()
     provider = _StubProvider()
     session_headers = {"Authorization": "Bearer session"}
@@ -163,59 +196,78 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
     router = mr.setup_memory_routes(memory_manager, session_manager, memory_provider=provider)
     audit_route = _route(router, "/api/memory/audit", "POST")
 
-    resolver_calls = []
     audit_calls = []
 
-    def fake_resolve_task_endpoint(
-        fallback_url=None,
-        fallback_model=None,
-        fallback_headers=None,
+    async def fake_audit_provider_memories(
+        provider_arg,
         owner=None,
+        memory_lifecycle=None,
     ):
-        resolver_calls.append((fallback_url, fallback_model, fallback_headers, owner))
-        if fallback_url and fallback_model:
-            return fallback_url, fallback_model, fallback_headers
-        return None, None, {}
+        audit_calls.append((
+            provider_arg,
+            owner,
+            memory_lifecycle,
+        ))
+        return {
+            "ok": True,
+            "status": "applied",
+            "before": 2,
+            "after": 1,
+            "removed": 1,
+            "updated": 0,
+            "applied": True,
+            "already_tidy": False,
+        }
 
-    async def fake_audit_provider_memories(provider_arg, endpoint_url, model, headers, owner=None):
-        audit_calls.append((provider_arg, endpoint_url, model, headers, owner))
-        return {"before": 2, "after": 1}
-
-    fake_model_routes = types.ModuleType("routes.model_routes")
-    fake_model_routes._load_settings = lambda: {
-        "default_endpoint_id": "default",
-        "default_model": "default-model",
-    }
-    fake_model_routes._normalize_base = lambda base: base.rstrip("/")
-    fake_model_routes.build_chat_url = lambda base: f"{base}/chat/completions"
-
-    monkeypatch.setattr(mr, "resolve_task_endpoint", fake_resolve_task_endpoint)
-    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
     monkeypatch.setattr(mr, "audit_provider_memories", fake_audit_provider_memories)
-    monkeypatch.setitem(sys.modules, "routes.model_routes", fake_model_routes)
     monkeypatch.setattr(
         mr,
         "SessionLocal",
-        lambda: (_ for _ in ()).throw(AssertionError("manual default branch should not run")),
+        lambda: (_ for _ in ()).throw(AssertionError("legacy provider lookup should not run")),
     )
 
     out = asyncio.run(audit_route(request=_request("alice"), session="session-1"))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
+    session_manager.get_session.assert_called_once_with("session-1")
     assert audit_calls == [(
         provider,
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
         "alice",
+        router.memory_lifecycle,
     )]
     assert out["ok"] is True
     assert out["removed"] == 1
+
+
+def test_audit_failure_is_a_typed_non_success_response(monkeypatch):
+    memory_manager = MagicMock()
+    provider = _StubProvider()
+    session_manager = MagicMock()
+    router = mr.setup_memory_routes(memory_manager, session_manager, memory_provider=provider)
+    audit_route = _route(router, "/api/memory/audit", "POST")
+
+    async def fake_audit_provider_memories(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "status": "failed",
+            "before": 7,
+            "after": 7,
+            "removed": 0,
+            "updated": 0,
+            "applied": False,
+            "already_tidy": False,
+            "error": {
+                "code": "empty_model_output",
+                "message": "The memory model returned no usable Tidy result. No memories were changed.",
+            },
+        }
+
+    monkeypatch.setattr(mr, "audit_provider_memories", fake_audit_provider_memories)
+    response = asyncio.run(audit_route(request=_request("alice"), session=None))
+
+    assert response.status_code == 502
+    payload = json.loads(response.body)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "empty_model_output"
 
 
 def test_add_memory_rejects_other_users_session(monkeypatch):
@@ -284,6 +336,74 @@ def test_add_memory_stages_candidate_in_review_first_mode(monkeypatch):
     assert out["pending_review"] is True
     assert out["candidate_id"] == "m_new"
     assert provider.remember_calls[0][1]["capture_mode"] == "review_only"
+    assert provider.remember_calls[0][1]["workspace_id"] == "global"
+
+
+def test_add_memory_rejects_client_workspace_override(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    provider = _StubProvider()
+    router = _router(monkeypatch, caller="alice", provider=provider)
+    add_memory = _route(router, "/api/memory/add", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            add_memory(
+                request=_request("alice"),
+                memory_data=MemoryAddRequest(
+                    text="must stay in canonical scope",
+                    workspace_id="other-tenant-workspace",
+                ),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert provider.remember_calls == []
+
+
+def test_candidate_review_derives_server_workspace(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    provider = _StubProvider()
+    router = _router(monkeypatch, caller="alice", provider=provider)
+    review = _route(router, "/api/memory/candidate/{candidate_id}/review", "POST")
+
+    result = asyncio.run(
+        review(
+            request=_json_request("alice", {"accept": True}),
+            candidate_id="candidate-1",
+        )
+    )
+
+    assert result["ok"] is True
+    assert provider.review_calls == [(
+        "candidate-1",
+        {
+            "accept": True,
+            "reason": "approved_by_user",
+            "owner": "alice",
+            "workspace_id": "global",
+        },
+    )]
+
+
+def test_candidate_review_rejects_client_workspace_override(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    provider = _StubProvider()
+    router = _router(monkeypatch, caller="alice", provider=provider)
+    review = _route(router, "/api/memory/candidate/{candidate_id}/review", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            review(
+                request=_json_request(
+                    "alice",
+                    {"accept": True, "workspace_id": "other-workspace"},
+                ),
+                candidate_id="candidate-1",
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert provider.review_calls == []
 
 
 def test_add_memory_refuses_off_mode(monkeypatch):
@@ -329,30 +449,173 @@ def test_timeline_does_not_expose_other_users_session_name():
     assert out["timeline"][0]["session_name"] == "Unknown"
 
 
-def test_import_missing_session_uses_utility_fallback(monkeypatch):
+def test_import_missing_session_uses_memory_route(monkeypatch):
     _allow_memory_management(monkeypatch)
+    route_preflight = _configure_memory_route(monkeypatch)
     memory_manager = MagicMock()
     session_manager = MagicMock()
     session_manager.get_session.side_effect = KeyError
-    resolve_endpoint = MagicMock(return_value=("http://utility", "utility-model", {}))
-    resolve_task_endpoint = MagicMock(side_effect=AssertionError("session task endpoint should not be used"))
-    monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
-    monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
+    completion = AsyncMock(
+        return_value='[{"text": "Project Phoenix uses Python", "category": "project"}]'
+    )
+    monkeypatch.setattr(mr, "complete_text", completion)
     router = mr.setup_memory_routes(memory_manager, session_manager)
     import_memories = _route(router, "/api/memory/import", "POST")
 
-    out = asyncio.run(import_memories(request=_request("alice"), session="missing-session", file=_upload()))
+    out = asyncio.run(import_memories(request=_request("alice"), session="missing-session", file=_upload("memories.md")))
 
     assert out == {
         "suggestions": [{"text": "Project Phoenix uses Python", "category": "project"}],
-        "filename": "memories.json",
+        "filename": "memories.md",
     }
     session_manager.get_session.assert_called_once_with("missing-session")
-    resolve_endpoint.assert_called_once_with("utility", owner="alice")
+    completion.assert_awaited_once()
+    assert completion.await_args.kwargs["owner"] == "alice"
+    assert completion.await_args.kwargs["purpose"] == "memory"
+    assert "endpoint_url" not in completion.await_args.kwargs
+    assert "headers" not in completion.await_args.kwargs
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert "use first-person wording" in prompt
+    assert "never a generic label such as 'the AI'" in prompt
+    assert "%USER%" in prompt
+    assert "user interface" in prompt
+    route_preflight.route_preflight.assert_called_once_with(
+        owner="alice",
+        purpose="memory",
+        operation="chat.complete",
+    )
 
 
-def test_import_foreign_session_uses_same_utility_fallback(monkeypatch):
+def test_import_preserves_actionable_managed_model_failure(monkeypatch):
     _allow_memory_management(monkeypatch)
+    _configure_memory_route(monkeypatch)
+    monkeypatch.setattr(
+        "src.frankenmemory_v2.mirror_import_job",
+        MagicMock(),
+    )
+    completion = AsyncMock(
+        side_effect=ManagedTextCompletionError(
+            code="model_not_found",
+            committed=False,
+        )
+    )
+    monkeypatch.setattr(mr, "complete_text", completion)
+    router = mr.setup_memory_routes(MagicMock(), MagicMock())
+    import_memories = _route(router, "/api/memory/import", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            import_memories(
+                request=_request("alice"),
+                session=None,
+                file=_upload("memories.md"),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == {
+        "code": "MEMORY_MODEL_UNAVAILABLE",
+        "message": "The selected model is not available in the managed runtime.",
+        "provider_error_code": "model_not_found",
+        "retryable": False,
+        "phase": "model_execution",
+        "required_purpose": "memory",
+        "required_operation": "chat.complete",
+        "settings_target": "ai",
+    }
+
+
+def test_import_empty_model_output_is_typed_and_uses_large_extraction_budget(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    _configure_memory_route(monkeypatch)
+    mirror_import_job = MagicMock()
+    monkeypatch.setattr(
+        "src.frankenmemory_v2.mirror_import_job",
+        mirror_import_job,
+    )
+    completion = AsyncMock(return_value="")
+    monkeypatch.setattr(mr, "complete_text", completion)
+    router = mr.setup_memory_routes(MagicMock(), MagicMock())
+    import_memories = _route(router, "/api/memory/import", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            import_memories(
+                request=_request("alice"),
+                session=None,
+                file=_upload("memories.md"),
+            )
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "MEMORY_EXTRACTION_EMPTY",
+        "message": (
+            "The selected Memory model finished without returning import "
+            "suggestions. Retry the import or choose a different Memory model."
+        ),
+        "retryable": True,
+        "phase": "extraction",
+        "required_purpose": "memory",
+        "required_operation": "chat.complete",
+        "settings_target": "ai",
+    }
+    assert completion.await_args.kwargs["max_output_tokens"] == 8192
+    assert mirror_import_job.call_args.kwargs["state"] == "failed_terminal"
+
+
+def test_import_pdf_preflights_before_document_processing(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    route_preflight = _configure_memory_route(monkeypatch, configured=False)
+    process_pdf = MagicMock(side_effect=AssertionError("PDF parser must not run"))
+    monkeypatch.setattr("src.document_processor._process_pdf", process_pdf)
+    session_manager = MagicMock()
+    router = mr.setup_memory_routes(MagicMock(), session_manager)
+    import_memories = _route(router, "/api/memory/import", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            import_memories(
+                request=_request("alice"),
+                session="alice-session",
+                file=_upload("memories.pdf"),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == {
+        "code": "MEMORY_ROUTE_UNCONFIGURED",
+        "message": (
+            "Memory import needs a Memory-capable model, but neither Memory "
+            "nor its Utility/Chat inheritance resolves to an available route. "
+            "Choose Memory or Utility under AI Defaults and retry."
+        ),
+        "retryable": True,
+        "phase": "preflight",
+        "required_purpose": "memory",
+        "required_operation": "chat.complete",
+        "settings_target": "ai",
+        "binding_revision": 0,
+        "eligible_routes": [
+            {
+                "model_route_id": "memory-route",
+                "display_name": "memory-model",
+                "connection_label": "Memory model",
+            }
+        ],
+    }
+    process_pdf.assert_not_called()
+    session_manager.get_session.assert_not_called()
+    route_preflight.route_preflight.assert_called_once_with(
+        owner="alice",
+        purpose="memory",
+        operation="chat.complete",
+    )
+
+
+def test_import_foreign_session_uses_same_memory_route(monkeypatch):
+    _allow_memory_management(monkeypatch)
+    route_preflight = _configure_memory_route(monkeypatch)
     memory_manager = MagicMock()
     session_manager = MagicMock()
     session_manager.get_session.return_value = SimpleNamespace(
@@ -361,22 +624,29 @@ def test_import_foreign_session_uses_same_utility_fallback(monkeypatch):
         model="bob-model",
         headers={"Authorization": "Bearer bob-secret"},
     )
-    resolve_endpoint = MagicMock(return_value=("http://utility", "utility-model", {}))
-    resolve_task_endpoint = MagicMock(side_effect=AssertionError("foreign session endpoint should not be used"))
-    monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
-    monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
+    completion = AsyncMock(
+        return_value='[{"text": "Project Phoenix uses Python", "category": "project"}]'
+    )
+    monkeypatch.setattr(mr, "complete_text", completion)
     router = mr.setup_memory_routes(memory_manager, session_manager)
     import_memories = _route(router, "/api/memory/import", "POST")
 
-    out = asyncio.run(import_memories(request=_request("alice"), session="bob-session", file=_upload()))
+    out = asyncio.run(import_memories(request=_request("alice"), session="bob-session", file=_upload("memories.md")))
 
     assert out["suggestions"] == [{"text": "Project Phoenix uses Python", "category": "project"}]
     session_manager.get_session.assert_called_once_with("bob-session")
-    resolve_endpoint.assert_called_once_with("utility", owner="alice")
+    assert completion.await_args.kwargs["owner"] == "alice"
+    assert completion.await_args.kwargs["purpose"] == "memory"
+    route_preflight.route_preflight.assert_called_once_with(
+        owner="alice",
+        purpose="memory",
+        operation="chat.complete",
+    )
 
 
-def test_import_owned_session_uses_session_endpoint(monkeypatch):
+def test_import_owned_session_still_uses_managed_memory_route(monkeypatch):
     _allow_memory_management(monkeypatch)
+    route_preflight = _configure_memory_route(monkeypatch)
     memory_manager = MagicMock()
     session_manager = MagicMock()
     session_manager.get_session.return_value = SimpleNamespace(
@@ -385,21 +655,23 @@ def test_import_owned_session_uses_session_endpoint(monkeypatch):
         model="alice-model",
         headers={"X-Session": "alice"},
     )
-    resolve_endpoint = MagicMock(side_effect=AssertionError("utility fallback should not be used"))
-    resolve_task_endpoint = MagicMock(return_value=("http://alice-task", "alice-task-model", {"X-Task": "alice"}))
-    monkeypatch.setattr(mr, "resolve_endpoint", resolve_endpoint)
-    monkeypatch.setattr(mr, "resolve_task_endpoint", resolve_task_endpoint)
+    completion = AsyncMock(
+        return_value='[{"text": "Project Phoenix uses Python", "category": "project"}]'
+    )
+    monkeypatch.setattr(mr, "complete_text", completion)
     router = mr.setup_memory_routes(memory_manager, session_manager)
     import_memories = _route(router, "/api/memory/import", "POST")
 
-    out = asyncio.run(import_memories(request=_request("alice"), session="alice-session", file=_upload()))
+    out = asyncio.run(import_memories(request=_request("alice"), session="alice-session", file=_upload("memories.md")))
 
     assert out["suggestions"] == [{"text": "Project Phoenix uses Python", "category": "project"}]
     session_manager.get_session.assert_called_once_with("alice-session")
-    resolve_task_endpoint.assert_called_once_with(
-        "http://alice-llm",
-        "alice-model",
-        {"X-Session": "alice"},
+    assert completion.await_args.kwargs["owner"] == "alice"
+    assert completion.await_args.kwargs["purpose"] == "memory"
+    assert "endpoint_url" not in completion.await_args.kwargs
+    assert "headers" not in completion.await_args.kwargs
+    route_preflight.route_preflight.assert_called_once_with(
         owner="alice",
+        purpose="memory",
+        operation="chat.complete",
     )
-    resolve_endpoint.assert_not_called()

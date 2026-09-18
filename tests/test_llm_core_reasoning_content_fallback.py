@@ -1,8 +1,8 @@
-"""Regression tests for reasoning_content fallback in non-streaming paths.
+"""Regression tests for retired-wire parsers and managed agent fallbacks.
 
 Covers the five cases requested during PR review:
-  1. llm_call (sync): content="" + reasoning_content="..." → returns reasoning text
-  2. llm_call_async (async): same
+  1. private sync parser: content="" + reasoning_content="..." → reasoning text
+  2. private async parser: same
   3. Normal content wins over reasoning_content when both present
   4. Streaming agent path: reasoning-only round does NOT emit the generic error
   5. Streaming agent path: reasoning tokens are NOT duplicated as normal answer text
@@ -17,7 +17,7 @@ from src import llm_core
 
 
 # ---------------------------------------------------------------------------
-# Helpers: fake httpx responses for the non-streaming llm_call* paths
+# Helpers: fake responses for the quarantined legacy-wire parser fixtures.
 # ---------------------------------------------------------------------------
 
 def _sync_response(payload: dict) -> httpx.Response:
@@ -36,12 +36,12 @@ def _openai_msg(content, reasoning_content=None):
 # 1. llm_call (sync): empty content → falls back to reasoning_content
 # ---------------------------------------------------------------------------
 
-def test_llm_call_returns_reasoning_content_when_content_empty(monkeypatch):
+def test_private_sync_parser_returns_reasoning_content_when_content_empty(monkeypatch):
     monkeypatch.setattr(
         llm_core.httpx, "post",
         lambda *a, **kw: _sync_response(_openai_msg("", "I reasoned through it")),
     )
-    result = llm_core.llm_call(
+    result = llm_core._legacy_llm_call(
         "http://test/v1", "qwen3-8b",
         [{"role": "user", "content": "think"}],
     )
@@ -52,7 +52,7 @@ def test_llm_call_returns_reasoning_content_when_content_empty(monkeypatch):
 # 2. llm_call_async (async): empty content → falls back to reasoning_content
 # ---------------------------------------------------------------------------
 
-def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch):
+def test_private_async_parser_returns_reasoning_content_when_content_empty(monkeypatch):
     class _FakeAsyncClient:
         async def post(self, *a, **kw):
             req = httpx.Request("POST", "http://test-async/v1/chat/completions")
@@ -62,7 +62,7 @@ def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch
     monkeypatch.setattr(llm_core, "_get_http_client",
                         lambda: _FakeAsyncClient())
 
-    result = asyncio.run(llm_core.llm_call_async(
+    result = asyncio.run(llm_core._legacy_llm_call_async(
         "http://test-async/v1", "qwen3-8b",
         [{"role": "user", "content": "think"}],
     ))
@@ -73,14 +73,14 @@ def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch
 # 3. Normal content takes priority over reasoning_content when both present
 # ---------------------------------------------------------------------------
 
-def test_llm_call_content_wins_over_reasoning_content(monkeypatch):
+def test_private_sync_parser_content_wins_over_reasoning_content(monkeypatch):
     monkeypatch.setattr(
         llm_core.httpx, "post",
         lambda *a, **kw: _sync_response(
             _openai_msg("Normal answer", "some reasoning")
         ),
     )
-    result = llm_core.llm_call(
+    result = llm_core._legacy_llm_call(
         "http://test/v1", "some-model",
         [{"role": "user", "content": "hi"}],
     )
@@ -93,20 +93,6 @@ def test_llm_call_content_wins_over_reasoning_content(monkeypatch):
 # extracted from stream_agent_loop.  If the fallback branch is reverted or
 # changed, these tests will fail.
 # ---------------------------------------------------------------------------
-
-import sys
-from unittest.mock import MagicMock
-
-# Mock heavy DB/tool deps before importing agent_loop
-for _mod in [
-    "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext",
-    "sqlalchemy.ext.declarative", "sqlalchemy.ext.hybrid",
-    "sqlalchemy.sql", "sqlalchemy.sql.expression",
-    "src.database", "src.agent_tools",
-    "core.models", "core.database",
-]:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
 
 from src.agent_loop import _empty_response_fallback  # noqa: E402
 

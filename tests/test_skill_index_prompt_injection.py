@@ -44,6 +44,23 @@ MALICIOUS_INDEX_DESC = (
 )
 
 
+def _publish_index_fixture(data_dir: Path, name: str, owner=None) -> None:
+    from services.memory.skills import SkillsManager
+
+    sm = SkillsManager(str(data_dir))
+    row = next(item for item in sm.load(owner=owner) if item["name"] == name)
+    sm.set_necessity(row["skill_id"], True, owner=owner)
+    sm.set_audit(row["skill_id"], "pass", worker_model="test", owner=owner)
+    ready = sm.publish_readiness(row["skill_id"], owner)
+    assert sm.publish_skill(
+        row["skill_id"],
+        owner,
+        expected_revision=ready["revision"],
+        expected_hash=ready["content_hash"],
+        publisher=f"user:{owner or 'local'}",
+    )
+
+
 def _seed_index_skill(tmp_path: Path) -> Path:
     """Write a skill whose description is malicious, then return the data dir.
 
@@ -73,6 +90,7 @@ def _seed_index_skill(tmp_path: Path) -> Path:
         "# inbox-bomb\n\nA deliberately off-topic skill that should not match.\n",
         encoding="utf-8",
     )
+    _publish_index_fixture(data_dir, "inbox-bomb")
     return data_dir
 
 
@@ -91,6 +109,7 @@ def _write_index_skill(data_dir: Path, name: str, description: str, owner: str) 
         f"# {name}\n",
         encoding="utf-8",
     )
+    _publish_index_fixture(data_dir, name, owner)
 
 
 def _patch_prefs(monkeypatch, data_dir):
@@ -169,6 +188,9 @@ def test_skill_index_lands_in_untrusted_user_message(tmp_path, monkeypatch):
     )
     assert untrusted[0]["role"] == "user"
     assert "Source: skills" in untrusted[0]["content"]
+    assert "trust=verified" in untrusted[0]["content"]
+    assert "source-status=published" in untrusted[0]["content"]
+    assert "audit=pass" in untrusted[0]["content"]
 
 
 def test_skill_index_is_owner_scoped_across_prompt_cache_hits(tmp_path, monkeypatch):

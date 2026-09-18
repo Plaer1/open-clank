@@ -3,6 +3,7 @@
 Regression for the enrichment query at routes/session_routes.py:265 which
 previously fetched rows for all owners on every GET /api/sessions call.
 """
+import asyncio
 import sys
 import tempfile
 import types
@@ -53,6 +54,7 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     try:
         db.query(DbSession).delete()
         db.add(DbSession(id=alice_id, owner="alice", name="alice session",
+                         workspace_id="workspace-alice",
                          endpoint_url="http://localhost", model="gpt-4", archived=False))
         db.add(DbSession(id=bob_id, owner="bob", name="bob session",
                          endpoint_url="http://localhost", model="gpt-4", archived=False))
@@ -74,6 +76,8 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     returned_ids = {s["id"] for s in result}
     assert alice_id in returned_ids
     assert bob_id not in returned_ids
+    returned = next(item for item in result if item["id"] == alice_id)
+    assert returned["workspace_id"] == "workspace-alice"
 
 
 def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(monkeypatch):
@@ -123,7 +127,7 @@ def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(mon
                     if getattr(r, "path", "") == "/api/sessions/auto-sort"
                     and "POST" in getattr(r, "methods", set()))
 
-    result = endpoint(request=MagicMock(), skip_llm=True)
+    result = asyncio.run(endpoint(request=MagicMock(), skip_llm=True))
 
     assert result["deleted_throwaway"] == 1
     db = _TS()

@@ -33,6 +33,14 @@ _AUTH_CAPABILITIES: dict[str, dict[int, str]] = {
     "openai": {0: "device_code", 1: "api_key"},
     "xiaomi": {0: "paste_code"},
     "github-copilot": {0: "device_code"},
+    # xAI's first OAuth method owns a loopback callback server. Its second
+    # method is the remote-safe RFC 8628 device flow Open Clank can supervise.
+    "xai": {1: "device_code"},
+    # These plugins finish in the MiMo worker after their browser callback.
+    # Open Clank polls that background result instead of trying to consume a
+    # code in its own callback route.
+    "gitlab": {0: "browser_callback"},
+    "poe": {0: "browser_callback"},
 }
 
 
@@ -56,6 +64,8 @@ class OAuthFlowAction(_StrictModel):
 
 class ApiKeyCredential(_StrictModel):
     key: str = Field(min_length=1, max_length=131_072)
+    method: int | None = Field(default=None, ge=0, le=50)
+    inputs: dict[str, str] | None = None
 
 
 @dataclass
@@ -358,7 +368,11 @@ def _method_capability(provider_id: str, index: int, method: dict[str, Any]) -> 
     configured = _AUTH_CAPABILITIES.get(provider_id, {}).get(index)
     if configured:
         return configured
-    return "api_key" if method.get("type") == "api" else "redirect"
+    # API credentials can always be stored through the owner-isolated auth
+    # boundary. OAuth methods need an explicitly audited completion mechanism;
+    # advertising a generic redirect for a plugin that actually owns a
+    # loopback callback creates a login button that can never complete.
+    return "api_key" if method.get("type") == "api" else "unsupported"
 
 
 def _sanitize_methods(provider_id: str, value: Any) -> list[dict[str, Any]]:
@@ -374,6 +388,8 @@ def _sanitize_methods(provider_id: str, value: Any) -> list[dict[str, Any]]:
             "label": _bounded(method.get("label") or ("API key" if method["type"] == "api" else "OAuth")),
             "capability": _method_capability(provider_id, index, method),
         }
+        if clean["capability"] == "unsupported":
+            continue
         prompts = []
         for prompt in method.get("prompts") or []:
             if not isinstance(prompt, dict) or prompt.get("type") not in {"text", "select"}:
@@ -414,6 +430,7 @@ def _capability_flags(methods: list[dict[str, Any]]) -> dict[str, bool]:
     return {
         "redirect": "redirect" in enabled,
         "device_code": "device_code" in enabled,
+        "browser_callback": "browser_callback" in enabled,
         "paste_code": "paste_code" in enabled,
         "api_key": "api_key" in enabled,
     }
@@ -485,7 +502,7 @@ def _known_provider(provider_id: str, providers: dict[str, Any], methods: dict[s
 
 
 def _check_method(index: int, provider_methods: list, expected: str) -> None:
-    if index >= len(provider_methods) or not isinstance(provider_methods[index], dict):
+    if index < 0 or index >= len(provider_methods) or not isinstance(provider_methods[index], dict):
         raise HTTPException(400, "Invalid authentication method")
     if provider_methods[index].get("type") != expected:
         raise HTTPException(400, f"Selected method is not {expected}")
@@ -667,12 +684,15 @@ def setup_mimo_provider_routes() -> APIRouter:
                 } if not any((
                     capabilities["redirect"],
                     capabilities["device_code"],
+                    capabilities["browser_callback"],
                     capabilities["paste_code"],
                 )) else {}),
                 "family": state.get("family"),
                 "chat_models": state.get("chat_models", 0),
                 "active": state.get("active", provider_id in connected),
                 "served_by": state.get("served_by"),
+                "hidden_model_ids": state.get("hidden_model_ids") or [],
+                "hidden_count": state.get("hidden_count", 0),
             }
             model_ids = state.get("model_ids")
             if isinstance(model_ids, list) and model_ids:
@@ -726,7 +746,11 @@ def setup_mimo_provider_routes() -> APIRouter:
             raise
         if not isinstance(result, dict) or result.get("method") not in {"auto", "code"}:
             raise HTTPException(502, "Open Clank agent returned an invalid authorization response")
-        expected_method = "auto" if capability == "device_code" else "code"
+        expected_method = (
+            "auto"
+            if capability in {"device_code", "browser_callback"}
+            else "code"
+        )
         if result["method"] != expected_method:
             raise HTTPException(
                 502,
@@ -743,7 +767,7 @@ def setup_mimo_provider_routes() -> APIRouter:
             expires_at=_oauth_flows.now() + _FLOW_TTL_SECONDS,
         )
         _oauth_flows.add(flow)
-        if capability == "device_code":
+        if capability in {"device_code", "browser_callback"}:
             _oauth_flows.start_background(flow_id)
             task = asyncio.create_task(_finish_background_flow(flow, supervisor))
             _oauth_flows.attach_task(flow_id, task)
@@ -872,12 +896,47 @@ def setup_mimo_provider_routes() -> APIRouter:
         supervisor = await _owner_supervisor(request, owner)
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
-        _known_provider(provider_id, providers, methods)
+        _, provider_methods = _known_provider(provider_id, providers, methods)
+        method_index = payload.method
+        if method_index is None:
+            method_index = next(
+                (
+                    index
+                    for index, method in enumerate(provider_methods)
+                    if isinstance(method, dict) and method.get("type") == "api"
+                ),
+                -1,
+            )
+        _check_method(method_index, provider_methods, "api")
+        native_method = provider_methods[method_index]
+        allowed_inputs = {
+            str(prompt.get("key") or "")
+            for prompt in (native_method.get("prompts") or [])
+            if isinstance(prompt, dict) and prompt.get("key")
+        }
+        inputs = dict(payload.inputs or {})
+        if (
+            len(inputs) > 100
+            or any(
+                key not in allowed_inputs
+                or len(key) > 128
+                or not isinstance(value, str)
+                or len(value) > 16_384
+                for key, value in inputs.items()
+            )
+        ):
+            raise HTTPException(400, "Invalid provider credential inputs")
+        native_credential: dict[str, Any] = {
+            "type": "api",
+            "key": payload.key,
+        }
+        if inputs:
+            native_credential["metadata"] = inputs
         result = await _native(
             supervisor,
             "PUT",
             f"/auth/{provider_id}",
-            {"type": "api", "key": payload.key},
+            native_credential,
         )
         if result is not True:
             raise HTTPException(502, "Open Clank agent did not save the credential")
@@ -890,65 +949,69 @@ def setup_mimo_provider_routes() -> APIRouter:
         provider_id = _provider_id(provider_id)
         providers, methods = await _catalog(supervisor)
         _known_provider(provider_id, providers, methods)
+        revoked = 0
+        revoked_workers: list[tuple[str, str, str]] = []
+        try:
+            # The retired ``model_shares`` tables are no longer a serving
+            # authority.  ProviderStore owns current grants and their route
+            # selectors; revoke those grants transactionally before touching
+            # the provider credential.
+            from src.openclank.provider_store import ModelSelector, ProviderStore
+
+            store = ProviderStore()
+            connections = [
+                connection
+                for connection in store.list_connections(owner=owner)
+                if str(getattr(connection, "family_id", "")) == provider_id
+            ]
+            grants = []
+            for connection in connections:
+                grants.extend(
+                    grant
+                    for grant in store.list_share_grants(owner=owner)
+                    if str(getattr(grant, "connection_id", "")) == str(connection.id)
+                )
+            for grant in grants:
+                route_rows = store.list_model_routes(owner=owner, connection_id=grant.connection_id)
+                selector = ModelSelector.parse(grant.model_selector)
+                if selector.mode == "all_live_models":
+                    selected_routes = route_rows
+                else:
+                    selected_ids = set(selector.model_route_ids)
+                    selected_routes = [row for row in route_rows if row.id in selected_ids]
+                model_ids = [str(getattr(row, "provider_model_id", "")) for row in selected_routes]
+                if not model_ids:
+                    model_ids = [provider_id]
+                revoked_workers.extend(
+                    (str(grant.recipient), str(grant.id), model_id)
+                    for model_id in model_ids
+                )
+                store.revoke_share_grant(
+                    owner=owner,
+                    grant_id=grant.id,
+                    expected_revision=int(grant.revision),
+                )
+                revoked += 1
+        except Exception as exc:
+            raise HTTPException(
+                500,
+                "Shared-model cleanup failed; provider was not disconnected",
+            ) from exc
+        if revoked:
+            from routes.model_routes import (
+                invalidate_model_catalogue_revision,
+                notify_shared_model_removals,
+                revoke_shared_model_workers,
+            )
+
+            invalidate_model_catalogue_revision()
+            await revoke_shared_model_workers(request, revoked_workers)
+            notify_shared_model_removals(revoked_workers, shared_by=owner)
         result = await _native(supervisor, "DELETE", f"/auth/{provider_id}")
         if result is not True:
             raise HTTPException(502, "Open Clank agent did not remove the credential")
-        revoked = 0
-        revoked_workers: list[tuple[str, str]] = []
-        try:
-            from core.database import (
-                ModelShare,
-                ModelShareSubscription,
-                SessionLocal,
-            )
-
-            db = SessionLocal()
-            try:
-                share_ids = [
-                    row.id
-                    for row in db.query(ModelShare).filter(
-                        ModelShare.owner == owner,
-                        ModelShare.source_kind == "native",
-                        ModelShare.source_id == f"mimo:{provider_id}",
-                    ).all()
-                ]
-                if share_ids:
-                    revoked_workers = [
-                        (grant.subscriber, grant.share_id)
-                        for grant in db.query(ModelShareSubscription).filter(
-                            ModelShareSubscription.share_id.in_(share_ids),
-                            ModelShareSubscription.enabled == True,  # noqa: E712
-                        ).all()
-                    ]
-                    db.query(ModelShareSubscription).filter(
-                        ModelShareSubscription.share_id.in_(share_ids)
-                    ).delete(synchronize_session=False)
-                    revoked = db.query(ModelShare).filter(
-                        ModelShare.id.in_(share_ids)
-                    ).delete(synchronize_session=False)
-                    db.commit()
-            finally:
-                db.close()
-        except Exception:
-            revoked = 0
         refreshed = await _refresh(supervisor, owner)
         pool = getattr(request.app.state, "mimo_supervisor", None)
-        revoke = getattr(pool, "revoke_shared_access", None)
-        if callable(revoke) and revoked_workers:
-            await asyncio.gather(
-                *(
-                    revoke(recipient, share_id)
-                    for recipient, share_id in revoked_workers
-                ),
-                return_exceptions=True,
-            )
-        if revoked:
-            try:
-                from routes.model_routes import invalidate_model_catalogue_revision
-
-                invalidate_model_catalogue_revision()
-            except Exception:
-                pass
         reproject = getattr(pool, "refresh_endpoint_projection", None)
         if callable(reproject):
             asyncio.create_task(reproject())

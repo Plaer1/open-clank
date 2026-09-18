@@ -25,7 +25,7 @@ export type Status = z.infer<typeof Status>
 export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly status: () => Effect.Effect<Status[]>
-  readonly file: (filepath: string) => Effect.Effect<void>
+  readonly file: (filepath: string) => Effect.Effect<void, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Format") {}
@@ -111,6 +111,9 @@ export const layer = Layer.effect(
                   command: cmd,
                   ...item.environment,
                 })
+                return yield* Effect.fail(
+                  new Error(`formatter ${item.name} failed with exit code ${code} for ${filepath}`),
+                )
               }
             }
           })

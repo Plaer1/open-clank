@@ -66,6 +66,11 @@ async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):
     of the inner try/except scans swallowing the error first."""
     import routes.email_pollers as email_pollers
 
+    # The root app may have installed durable admission callbacks in an
+    # earlier test module; this low-level regression owns its fake account.
+    monkeypatch.setattr(email_pollers, "_OWNER_FENCE_CHECKER", None)
+    monkeypatch.setattr(email_pollers, "_OWNER_KNOWN_CHECKER", None)
+
     captured = {}
 
     class _Conn:

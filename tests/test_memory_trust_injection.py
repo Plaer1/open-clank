@@ -102,6 +102,16 @@ class TestClassifier:
         assert "evil" not in kinds
         assert trust_prefs("garbage") == (False, DEFAULT_KIND_TRUST)
 
+    def test_malformed_boolean_preferences_fail_closed(self):
+        master, kinds = trust_prefs({
+            "memory_trust_auto": "false",
+            "memory_trust_auto_kinds": {"fact": "true", "instruction": 1},
+        })
+        assert master is False
+        assert kinds["fact"] is False
+        assert kinds["instruction"] is False
+        assert trusted(_entry(pinned="true"), {"memory_trust_auto": True}) is False
+
 
 def _digest(*entries, curated=1, raw=0):
     return {

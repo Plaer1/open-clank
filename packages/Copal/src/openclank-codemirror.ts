@@ -1,7 +1,7 @@
-import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from '@codemirror/commands';
+import { addCursorAbove, addCursorBelow, defaultKeymap, history, historyKeymap, indentSelection, indentWithTab, redo, undo } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
-import { bracketMatching, defaultHighlightStyle, foldGutter, indentOnInput, syntaxHighlighting } from '@codemirror/language';
-import { Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from '@codemirror/state';
+import { HighlightStyle, StreamLanguage, bracketMatching, defaultHighlightStyle, foldGutter, forceParsing, indentOnInput, syntaxHighlighting, syntaxTree, syntaxTreeAvailable } from '@codemirror/language';
+import { Compartment, EditorSelection, EditorState, SelectionRange, StateEffect, StateField, Transaction } from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
@@ -18,24 +18,306 @@ import {
   placeholder,
   rectangularSelection,
 } from '@codemirror/view';
+import { tags } from '@lezer/highlight';
 
 type EditorMode = 'live' | 'source';
+
+/** Persisted selection contract shared by Notes, host files, and authoring forms. */
+export interface EditorSelectionRange {
+  anchor: number;
+  head: number;
+}
+
+export interface EditorSelectionSnapshot {
+  version: 1;
+  ranges: EditorSelectionRange[];
+  mainIndex: number;
+  /** Legacy primary-range fields. New callers should use ranges/mainIndex. */
+  anchor: number;
+  head: number;
+  line: number;
+}
+
+type SelectionInput = Partial<EditorSelectionSnapshot> & {
+  ranges?: Array<Partial<EditorSelectionRange>>;
+};
+
+function boundedOffset(value: unknown, length: number, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(length, Math.trunc(number))) : fallback;
+}
+
+// CodeMirror stores line breaks as one logical document position even when
+// the source serializer retains CRLF/CR bytes. Selection offsets therefore
+// must be bounded against the model length, rather than String.length of the
+// source payload. This matters when a save shortens a CRLF document between
+// two editor mounts.
+function logicalDocumentLength(value: string) {
+  return String(value ?? '').replace(/\r\n?|\n/g, '\n').length;
+}
+
+/** Migrate legacy `{anchor, head}` records and discard invalid ranges safely. */
+export function normalizeEditorSelection(value: SelectionInput | null | undefined, length: number): { ranges: EditorSelectionRange[]; mainIndex: number } {
+  const safeLength = Math.max(0, Math.trunc(Number(length) || 0));
+  const source = Array.isArray(value?.ranges) && value.ranges.length
+    ? value.ranges
+    : [{ anchor:value?.anchor, head:value?.head }];
+  const indexed = source.map((range, index) => ({
+    index,
+    anchor:boundedOffset(range?.anchor, safeLength),
+    head:boundedOffset(range?.head, safeLength),
+  })).sort((a, b) => Math.min(a.anchor, a.head) - Math.min(b.anchor, b.head) || Math.max(a.anchor, a.head) - Math.max(b.anchor, b.head) || a.index - b.index);
+  const ranges: EditorSelectionRange[] = [];
+  let mainIndex = 0;
+  const requestedMain = Math.max(0, Math.min(source.length - 1, Math.trunc(Number(value?.mainIndex) || 0)));
+  for (const candidate of indexed) {
+    const previous = ranges.at(-1);
+    // CodeMirror requires sorted, non-overlapping ranges. Persisted state can
+    // be hand-edited or originate from an older release, so retain the first
+    // valid range when records overlap rather than failing editor creation.
+    if (previous && Math.min(candidate.anchor, candidate.head) < Math.max(previous.anchor, previous.head)) continue;
+    if (candidate.index === requestedMain) mainIndex = ranges.length;
+    ranges.push({ anchor:candidate.anchor, head:candidate.head });
+  }
+  if (!ranges.length) ranges.push({ anchor:0, head:0 });
+  if (mainIndex >= ranges.length) mainIndex = Math.min(ranges.length - 1, requestedMain);
+  return { ranges, mainIndex };
+}
+
+function selectionSnapshot(state: EditorState): EditorSelectionSnapshot {
+  const ranges = state.selection.ranges.map((range) => ({ anchor:range.anchor, head:range.head }));
+  const main = ranges[state.selection.mainIndex] || ranges[0] || { anchor:0, head:0 };
+  return { version:1, ranges, mainIndex:state.selection.mainIndex, anchor:main.anchor, head:main.head, line:state.doc.lineAt(main.head).number };
+}
 
 interface MarkdownEditorOptions {
   parent: HTMLElement;
   doc?: string;
   label?: string;
   placeholderText?: string;
-  selection?: { anchor?: number; head?: number } | null;
+  selection?: SelectionInput | null;
   scrollTop?: number;
   mode?: EditorMode;
+  language?: string;
   lineNumbers?: boolean;
   readableLineWidth?: boolean;
+  lineWrapping?: boolean;
   onChange?: (value: string, update: ViewUpdate) => void;
   onFocus?: () => void;
-  onSelection?: (selection: { anchor: number; head: number; line: number }) => void;
+  onSelection?: (selection: EditorSelectionSnapshot) => void;
   onScroll?: (scrollTop: number) => void;
   onCommand?: (command: string) => void;
+  /** Render a resolved Markdown image/embed source without coupling CodeMirror to resource resolution. */
+  renderPreview?: (source: string) => HTMLElement | null;
+  /** Experimental, opt-in source-preserving presentation for parser comments. */
+  richComments?: boolean;
+}
+
+export interface CommentSourceRange {
+  from: number;
+  to: number;
+  contentFrom: number;
+  contentTo: number;
+  language: string;
+  /** Per-line source spans make CRLF, indentation, and Unicode mapping explicit. */
+  contentRanges: Array<{ from:number; to:number }>;
+}
+
+/** Return the original line-ending bytes when the logical document is unchanged. */
+export function serializeEditorSource(value: string, original: string) {
+  const source = String(original);
+  const logical = String(value);
+  if (logical === source.replace(/\r\n?|\n/g, '\n')) return source;
+  const separator = source.includes('\r\n') ? '\r\n' : source.includes('\r') ? '\r' : '';
+  return separator ? logical.replace(/\r?\n/g, separator) : logical;
+}
+
+const commentDelimiters: Record<string, Array<{ open:string; close?:string }>> = {
+  javascript:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], typescript:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
+  javascriptjsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], jsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], typescriptjsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
+  c:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], 'c++':[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], 'c++header':[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], java:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], go:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], rust:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
+  python:[{ open:'# ' }, { open:'#' }], css:[{ open:'/*', close:'*/' }], html:[{ open:'<!--', close:'-->' }], xml:[{ open:'<!--', close:'-->' }], php:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }, { open:'# ' }, { open:'#' }], sql:[{ open:'-- ' }, { open:'--' }, { open:'/*', close:'*/' }], yaml:[{ open:'# ' }, { open:'#' }], shell:[{ open:'# ' }, { open:'#' }], dockerfile:[{ open:'# ' }, { open:'#' }], toml:[{ open:'# ' }, { open:'#' }], mermaid:[{ open:'%% ' }, { open:'%%' }],
+};
+
+// Rich comments are advertised only for grammars whose parser boundaries have
+// a source round-trip fixture. StreamLanguage modes remain available for raw
+// syntax highlighting, but cannot opt into comment presentation by accident.
+const richCommentLanguages = new Set([
+  'javascript', 'javascriptjsx', 'jsx', 'typescript', 'typescriptjsx',
+  'c', 'c++', 'c++header', 'java', 'go', 'rust', 'python',
+  'css', 'html', 'xml', 'php', 'sql', 'yaml',
+]);
+
+function normalizedCommentLanguage(language?: string) {
+  const raw = String(language || '').toLowerCase().trim();
+  if (/^c\s*\/\s*c\+\+\s*header$/.test(raw) || /^c\+\+\s*header$/.test(raw)) return 'c++header';
+  return raw.replace(/[\s_/-]+/g, '');
+}
+
+/** Whether this language has passed the parser-boundary rich-comment gate. */
+export function isRichCommentLanguageQualified(language?: string) {
+  return richCommentLanguages.has(normalizedCommentLanguage(language));
+}
+
+function mapCommentContent(source: string, from: number, to: number, language: string): CommentSourceRange {
+  const raw = source.slice(from, to);
+  const delimiters = commentDelimiters[normalizedCommentLanguage(language)] || [];
+  const delimiter = delimiters.find((item) => raw.startsWith(item.open)) || { open:'', close:undefined };
+  let contentFrom = from + delimiter.open.length;
+  let contentTo = to - (delimiter.close && raw.endsWith(delimiter.close) ? delimiter.close.length : 0);
+  if (contentTo < contentFrom) contentTo = contentFrom;
+  const contentRanges: Array<{ from:number; to:number }> = [];
+  let cursor = contentFrom;
+  while (cursor <= contentTo) {
+    const newline = source.indexOf('\n', cursor);
+    const end = newline < 0 || newline >= contentTo ? contentTo : newline;
+    let lineFrom = cursor;
+    const line = source.slice(lineFrom, end);
+    // Line-comment delimiters were removed from `contentFrom`; preserve a
+    // leading Markdown `#` there. Only strip documentation stars on
+    // subsequent block-comment lines when the star is followed by whitespace.
+    const prefix = delimiter.close ? /^\s+\*[ \t]+/.exec(line) : null;
+    if (prefix) lineFrom += prefix[0].length;
+    if (lineFrom <= end) contentRanges.push({ from:lineFrom, to:end });
+    if (newline < 0 || newline >= contentTo) break;
+    cursor = newline + 1;
+  }
+  return { from, to, contentFrom, contentTo, language:String(language || ''), contentRanges };
+}
+
+/** Return only parser-recognized comment nodes, with exact source offsets. */
+export function parserCommentSourceRanges(state: EditorState, language = ''): CommentSourceRange[] {
+  if (!state || !String(language || '').trim()) return [];
+  const ranges: Array<{ from:number; to:number }> = [];
+  syntaxTree(state).iterate({ enter(node) {
+    const name = String(node.name || node.type?.name || '');
+    if (/comment/i.test(name) && node.from < node.to) ranges.push({ from:node.from, to:node.to });
+  } });
+  ranges.sort((a, b) => a.from - b.from || b.to - a.to);
+  const outer = ranges.filter((range) => !ranges.some((candidate) => candidate !== range && candidate.from <= range.from && candidate.to >= range.to));
+  const source = state.doc.toString();
+  const mapped = outer.map((range) => mapCommentContent(source, range.from, range.to, language));
+  const grouped: CommentSourceRange[] = [];
+  for (const current of mapped) {
+    const previous = grouped.at(-1);
+    const previousSource = previous ? source.slice(previous.from, previous.to) : '';
+    const currentSource = source.slice(current.from, current.to);
+    const previousDelimiter = commentDelimiters[normalizedCommentLanguage(language)]?.find((item) => !item.close && previousSource.startsWith(item.open));
+    const currentDelimiter = commentDelimiters[normalizedCommentLanguage(language)]?.find((item) => !item.close && currentSource.startsWith(item.open));
+    const gap = previous ? source.slice(previous.to, current.from) : '';
+    // Adjacent line comments form one Markdown paragraph. A blank line or
+    // intervening code keeps the parser ranges separate and therefore keeps
+    // source editing/selection boundaries explicit.
+    if (previous && previousDelimiter?.open === currentDelimiter?.open && /^(?:\r?\n)[ \t]*$/.test(gap)) {
+      previous.to = current.to;
+      previous.contentTo = current.contentTo;
+      previous.contentRanges.push(...current.contentRanges);
+    } else grouped.push(current);
+  }
+  return grouped;
+}
+
+/** Build a renderer-ready map; calling this never mutates the source document. */
+export function mapParserComments(state: EditorState, language = '', render?: (markdown:string, range:CommentSourceRange) => unknown) {
+  const source = state?.doc?.toString?.() || '';
+  return parserCommentSourceRanges(state, language).map((range) => {
+    const markdown = range.contentRanges.map((span) => source.slice(span.from, span.to)).join('\n');
+    return { ...range, markdown, rendered:typeof render === 'function' ? render(markdown, range) : null };
+  });
+}
+
+const openClankHighlightStyle = HighlightStyle.define([
+  { tag: tags.meta, color: 'var(--hl-comment)' },
+  { tag: tags.link, color: 'var(--hl-function)', textDecoration: 'underline' },
+  { tag: tags.heading, color: 'var(--hl-function)', fontWeight: 'bold' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strong, fontWeight: 'bold' },
+  { tag: tags.strikethrough, textDecoration: 'line-through' },
+  { tag: tags.keyword, color: 'var(--hl-keyword)' },
+  { tag: [tags.atom, tags.bool, tags.null, tags.contentSeparator, tags.labelName], color: 'var(--hl-builtin)' },
+  { tag: [tags.literal, tags.inserted], color: 'var(--hl-string)' },
+  { tag: [tags.string, tags.deleted], color: 'var(--hl-string)' },
+  { tag: [tags.regexp, tags.escape, tags.special(tags.string)], color: 'var(--hl-number)' },
+  { tag: tags.comment, color: 'var(--hl-comment)', fontStyle: 'italic' },
+  { tag: tags.number, color: 'var(--hl-number)' },
+  { tag: tags.definition(tags.variableName), color: 'var(--hl-function)' },
+  { tag: tags.function(tags.variableName), color: 'var(--hl-function)' },
+  { tag: tags.variableName, color: 'var(--hl-variable)' },
+  { tag: [tags.typeName, tags.namespace, tags.className, tags.macroName], color: 'var(--hl-builtin)' },
+  { tag: tags.propertyName, color: 'var(--hl-variable)' },
+  { tag: tags.tagName, color: 'var(--hl-keyword)' },
+  { tag: tags.attributeName, color: 'var(--hl-variable)' },
+  { tag: tags.operator, color: 'var(--hl-params)' },
+  { tag: tags.punctuation, color: 'var(--hl-fg)' },
+  { tag: tags.invalid, color: 'var(--hl-number)', textDecoration: 'underline' },
+]);
+
+function initialLanguage(language?: string) {
+  const key = String(language || '').toLowerCase();
+  if (key === 'markdown') return markdown();
+  return [];
+}
+
+// Mermaid has no maintained Lezer grammar in the focused bundle. This small
+// StreamLanguage parser colors source vocabulary only; it never renders a
+// diagram or claims semantic validation. Unknown constructs remain editable.
+const mermaidStreamParser: any = {
+  startState: () => ({ lineStart: true }),
+  token(stream: any, state: any) {
+    if (stream.sol()) state.lineStart = true;
+    if (stream.match(/^%%.*$/)) return 'comment';
+    if (stream.match(/^\s*%%\{.*?\}%%/)) return 'meta';
+    if (stream.match(/^(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|gantt|pie|mindmap|timeline|gitGraph|journey|quadrantChart|xychart-beta|block-beta)\b/i)) return 'keyword';
+    if (stream.match(/^(?:subgraph|end|participant|actor|title|section|class|state|Note|direction|todayMarker|dateFormat|axisFormat|accTitle|accDescr)\b/i)) return 'keyword';
+    if (stream.match(/^(?:-->|-.->|==>|-->>|->>|-\.|--|==|\+\+|--)/)) return 'operator';
+    if (stream.match(/^"(?:\\.|[^"\\])*"/)) return 'string';
+    if (stream.match(/^'(?:\\.|[^'\\])*'/)) return 'string';
+    if (stream.match(/^\b\d+(?:\.\d+)?\b/)) return 'number';
+    if (stream.match(/^[A-Za-z_][A-Za-z0-9_-]*(?=\s*[\[({:])/)) return 'variableName';
+    if (stream.match(/^[A-Za-z_][A-Za-z0-9_-]*/)) return state.lineStart ? 'definition(variableName)' : 'variableName';
+    state.lineStart = false;
+    stream.next();
+    return null;
+  },
+};
+
+const sourceLanguageLoads = new Map<string, Promise<any>>();
+
+function loadSourceLanguage(language?: string) {
+  const key = String(language || '').toLowerCase();
+  if (!key || key === 'plain text') return Promise.resolve([]);
+  if (key === 'markdown') return Promise.resolve(markdown());
+  const cached = sourceLanguageLoads.get(key);
+  if (cached) return cached;
+  let pending: Promise<any>;
+  if (['javascript', 'javascript jsx', 'jsx', 'typescript', 'typescript jsx'].includes(key)) {
+    pending = import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ jsx:key.includes('jsx') || key === 'jsx', typescript:key.includes('typescript') }));
+  } else if (key === 'json') pending = import('@codemirror/lang-json').then(({ json }) => json());
+  else if (key === 'html') pending = import('@codemirror/lang-html').then(({ html }) => html());
+  else if (key === 'xml') pending = import('@codemirror/lang-xml').then(({ xml }) => xml());
+  else if (['css', 'scss'].includes(key)) pending = import('@codemirror/lang-css').then(({ css }) => css());
+  else if (['c', 'c++', 'c/c++ header', 'c++ header'].includes(key)) pending = import('@codemirror/lang-cpp').then(({ cpp }) => cpp());
+  else if (key === 'c#') pending = import('@codemirror/legacy-modes/mode/clike').then(({ csharp }) => StreamLanguage.define(csharp));
+  else if (key === 'java') pending = import('@codemirror/lang-java').then(({ java }) => java());
+  else if (key === 'kotlin') pending = import('@codemirror/legacy-modes/mode/clike').then(({ kotlin }) => StreamLanguage.define(kotlin));
+  else if (key === 'go') pending = import('@codemirror/lang-go').then(({ go }) => go());
+  else if (key === 'python') pending = import('@codemirror/lang-python').then(({ python }) => python());
+  else if (key === 'php') pending = import('@codemirror/lang-php').then(({ php }) => php());
+  else if (key === 'rust') pending = import('@codemirror/lang-rust').then(({ rust }) => rust());
+  else if (key === 'ruby') pending = import('@codemirror/legacy-modes/mode/ruby').then(({ ruby }) => StreamLanguage.define(ruby));
+  else if (key === 'swift') pending = import('@codemirror/legacy-modes/mode/swift').then(({ swift }) => StreamLanguage.define(swift));
+  else if (key === 'shell') pending = import('@codemirror/legacy-modes/mode/shell').then(({ shell }) => StreamLanguage.define(shell));
+  else if (key === 'dockerfile') pending = import('@codemirror/legacy-modes/mode/dockerfile').then(({ dockerFile }) => StreamLanguage.define(dockerFile));
+  else if (key === 'yaml') pending = import('@codemirror/lang-yaml').then(({ yaml }) => yaml());
+  else if (key === 'toml') pending = import('@codemirror/legacy-modes/mode/toml').then(({ toml }) => StreamLanguage.define(toml));
+  else if (key === 'sql') pending = import('@codemirror/lang-sql').then(({ sql }) => sql());
+  else if (key === 'mermaid') pending = Promise.resolve(StreamLanguage.define(mermaidStreamParser));
+  else return Promise.resolve([]);
+  // A failed parser load must never make the buffer uneditable or poison later
+  // attempts after an updated static asset is deployed.
+  sourceLanguageLoads.set(key, pending);
+  pending.catch(() => sourceLanguageLoads.delete(key));
+  return pending;
 }
 
 interface DecorationRange {
@@ -114,14 +396,24 @@ class BlockPreviewWidget extends WidgetType {
     private readonly kind: 'table' | 'callout' | 'math' | 'embed' | 'footnote' | 'hr',
     private readonly source: string,
     private readonly from: number,
+    private readonly renderPreview?: (source: string) => HTMLElement | null,
+    private readonly inline = false,
   ) { super(); }
 
-  eq(other: BlockPreviewWidget) { return other.kind === this.kind && other.source === this.source && other.from === this.from; }
+  eq(other: BlockPreviewWidget) { return other.kind === this.kind && other.source === this.source && other.from === this.from && other.inline === this.inline; }
 
   toDOM(view: EditorView) {
-    const root = document.createElement(this.kind === 'embed' ? 'figure' : 'div');
-    root.className = `cm-md-${this.kind}-widget`;
-    if (this.kind === 'hr') {
+    const root = document.createElement(this.inline ? 'span' : (this.kind === 'embed' ? 'figure' : 'div'));
+    root.className = `cm-md-${this.kind}-widget${this.inline ? ' cm-md-inline-preview-widget' : ''}`;
+    if (this.kind === 'embed' && this.renderPreview) {
+      try {
+        const preview = this.renderPreview(this.source);
+        if (preview) root.append(preview);
+        else root.textContent = this.source.trim().replace(/^!/, '');
+      } catch (_) {
+        root.textContent = this.source.trim().replace(/^!/, '');
+      }
+    } else if (this.kind === 'hr') {
       root.append(document.createElement('hr'));
     } else if (this.kind === 'table') {
       const rows = this.source.split('\n').map((line) => line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim()));
@@ -263,12 +555,30 @@ function frontmatterBlock(state: EditorState, active: Set<number>) {
   return { from:state.doc.line(1).from, to:state.doc.line(end).to, rows, endLine:end };
 }
 
+function imageSyntax(text: string) {
+  const markdownImage = /^!\[([^\]\n]*)\]\(([^)\n]+)\)$/.exec(text.trim());
+  if (markdownImage) return { source:text.trim() };
+  const wikiImage = /^!\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]$/.exec(text.trim());
+  if (wikiImage) return { source:text.trim() };
+  return null;
+}
+
+function inlineImageMatches(text: string) {
+  const matches: Array<{ from:number; to:number; source:string }> = [];
+  const pattern = /!\[[^\]\n]*\]\(([^)\n]+)\)|!\[\[[^\]|\n]+(?:\|[^\]\n]+)?\]\]/g;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index == null) continue;
+    matches.push({ from:match.index, to:match.index + match[0].length, source:match[0] });
+  }
+  return matches;
+}
+
 function blockAt(state: EditorState, lineNumber: number, active: Set<number>) {
   const line = state.doc.line(lineNumber);
   const text = line.text;
   if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(text)) return { kind:'hr' as const, from:line.from, to:line.to, source:text, endLine:lineNumber };
   if (/^\s*\[\^[^\]]+\]:/.test(text)) return { kind:'footnote' as const, from:line.from, to:line.to, source:text, endLine:lineNumber };
-  if (/^\s*!?(?:\[\[|\[[^\]]*\]\()/.test(text) && /^\s*!/.test(text)) return { kind:'embed' as const, from:line.from, to:line.to, source:text, endLine:lineNumber };
+  if (/^\s*!/.test(text) && imageSyntax(text)) return { kind:'embed' as const, from:line.from, to:line.to, source:text, endLine:lineNumber };
   if (/^\s*>\s*\[!/.test(text)) {
     let end = lineNumber;
     while (end < state.doc.lines && /^\s*>/.test(state.doc.line(end + 1).text)) end += 1;
@@ -311,7 +621,7 @@ function structuralWindows(state: EditorState, ranges: Array<{ from:number; to:n
   return windows;
 }
 
-function buildStructuralDecorations(state: EditorState, visibleRanges: Array<{ from:number; to:number }>): DecorationSet {
+function buildStructuralDecorations(state: EditorState, visibleRanges: Array<{ from:number; to:number }>, renderPreview?: (source:string) => HTMLElement | null): DecorationSet {
   const ranges: DecorationRange[] = [];
   const active = activeLineNumbers(state);
   const visited = new Set<number>();
@@ -329,7 +639,7 @@ function buildStructuralDecorations(state: EditorState, visibleRanges: Array<{ f
       if (active.has(lineNumber)) continue;
       const block = blockAt(state, lineNumber, active);
       if (block) {
-        ranges.push({ from:block.from, to:block.to, value:Decoration.replace({ widget:new BlockPreviewWidget(block.kind, block.source, block.from), block:true }) });
+        ranges.push({ from:block.from, to:block.to, value:Decoration.replace({ widget:new BlockPreviewWidget(block.kind, block.source, block.from, renderPreview), block:true }) });
         for (let line = lineNumber; line <= block.endLine; line += 1) visited.add(line);
         continue;
       }
@@ -345,21 +655,7 @@ function buildStructuralDecorations(state: EditorState, visibleRanges: Array<{ f
 
 const setStructuralViewport = StateEffect.define<Array<{ from:number; to:number }>>();
 
-const structuralDecorations = StateField.define<StructuralDecorationState>({
-  create:(state) => {
-    const ranges = [{ from:0, to:Math.min(state.doc.length, 8000) }];
-    return { ranges, decorations:buildStructuralDecorations(state, ranges) };
-  },
-  update:(value, transaction) => {
-    const effect = transaction.effects.find((candidate) => candidate.is(setStructuralViewport));
-    const ranges = effect?.value || value.ranges.map((range) => ({ from:transaction.changes.mapPos(range.from), to:transaction.changes.mapPos(range.to) }));
-    if (effect || transaction.docChanged || transaction.selection) return { ranges, decorations:buildStructuralDecorations(transaction.state, ranges) };
-    return value;
-  },
-  provide:(field) => EditorView.decorations.from(field, (value) => value.decorations),
-});
-
-function buildLivePreviewDecorations(view: EditorView): DecorationSet {
+function buildLivePreviewDecorations(view: EditorView, renderPreview?: (source:string) => HTMLElement | null): DecorationSet {
   const ranges: DecorationRange[] = [];
   const active = activeLineNumbers(view.state);
   const visited = new Set<number>();
@@ -391,30 +687,164 @@ function buildLivePreviewDecorations(view: EditorView): DecorationSet {
       if (list) ranges.push({ from:line.from + list[1].length, to:line.from + list[0].length, value:Decoration.mark({ class:'cm-md-list-marker' }) });
       const fence = /^\s*```(?:\S+)?\s*$/.exec(line.text);
       if (fence) ranges.push({ from:line.from, to:line.to, value:Decoration.mark({ class:'cm-md-fence-marker' }) });
-      if (!/^\s*```/.test(line.text)) addInlineDecorations(ranges, line.from, line.text);
+      if (!/^\s*```/.test(line.text)) {
+        addInlineDecorations(ranges, line.from, line.text);
+        for (const image of inlineImageMatches(line.text)) ranges.push({ from:line.from + image.from, to:line.from + image.to, value:Decoration.replace({ widget:new BlockPreviewWidget('embed', image.source, line.from + image.from, renderPreview, true) }) });
+      }
     }
   }
   return Decoration.set(ranges.sort((a, b) => a.from - b.from || a.to - b.to), true);
 }
 
-const livePreviewPlugin = ViewPlugin.fromClass(class {
-  decorations: DecorationSet;
-  viewport = '';
-  constructor(view: EditorView) { this.decorations = buildLivePreviewDecorations(view); this.updateViewport(view); }
-  updateViewport(view: EditorView) {
-    const ranges = view.visibleRanges.map(({ from, to }) => ({ from, to }));
-    const signature = ranges.map(({ from, to }) => `${from}:${to}`).join(',');
-    if (signature === this.viewport) return;
-    this.viewport = signature;
-    queueMicrotask(() => { if (view.dom.isConnected) view.dispatch({ effects:setStructuralViewport.of(ranges) }); });
-  }
-  update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged) {
-      this.decorations = buildLivePreviewDecorations(update.view);
-      this.updateViewport(update.view);
+function createStructuralDecorations(renderPreview?: (source:string) => HTMLElement | null) {
+  return StateField.define<StructuralDecorationState>({
+    create:(state) => {
+      const ranges = [{ from:0, to:Math.min(state.doc.length, 8000) }];
+      return { ranges, decorations:buildStructuralDecorations(state, ranges, renderPreview) };
+    },
+    update:(value, transaction) => {
+      const effect = transaction.effects.find((candidate) => candidate.is(setStructuralViewport));
+      const ranges = effect?.value || value.ranges.map((range) => ({ from:transaction.changes.mapPos(range.from), to:transaction.changes.mapPos(range.to) }));
+      if (effect || transaction.docChanged || transaction.selection) return { ranges, decorations:buildStructuralDecorations(transaction.state, ranges, renderPreview) };
+      return value;
+    },
+    provide:(field) => EditorView.decorations.from(field, (value) => value.decorations),
+  });
+}
+
+function createLivePreviewPlugin(renderPreview?: (source:string) => HTMLElement | null) {
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet;
+    viewport = '';
+    constructor(view: EditorView) { this.decorations = buildLivePreviewDecorations(view, renderPreview); this.updateViewport(view); }
+    updateViewport(view: EditorView) {
+      const ranges = view.visibleRanges.map(({ from, to }) => ({ from, to }));
+      const signature = ranges.map(({ from, to }) => `${from}:${to}`).join(',');
+      if (signature === this.viewport) return;
+      this.viewport = signature;
+      queueMicrotask(() => { if (view.dom.isConnected) view.dispatch({ effects:setStructuralViewport.of(ranges) }); });
     }
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.selectionSet || update.viewportChanged) {
+        this.decorations = buildLivePreviewDecorations(update.view, renderPreview);
+        this.updateViewport(update.view);
+      }
+    }
+  }, { decorations:(value) => value.decorations });
+}
+
+class CommentPreviewWidget extends WidgetType {
+  constructor(
+    private readonly source: string,
+    private readonly markdown: string,
+    private readonly from: number,
+    private readonly to: number,
+    private readonly renderPreview?: (source:string) => HTMLElement | null,
+  ) { super(); }
+
+  eq(other: CommentPreviewWidget) {
+    return other.source === this.source && other.markdown === this.markdown && other.from === this.from && other.to === this.to;
   }
-}, { decorations:(value) => value.decorations });
+
+  toDOM(view: EditorView) {
+    const block = this.source.includes('\n');
+    const root = document.createElement(block ? 'div' : 'span');
+    root.className = `cm-rich-comment-widget${block ? ' cm-rich-comment-block' : ''}`;
+    root.dataset.commentSourceFrom = String(this.from);
+    root.dataset.commentSourceTo = String(this.to);
+    root.setAttribute('aria-label', 'Rendered source comment; press Enter to edit raw comment');
+    let preview: HTMLElement | null = null;
+    try { preview = this.renderPreview?.(this.markdown) || null; } catch (_) { preview = null; }
+    if (preview) root.append(preview);
+    else {
+      const raw = document.createElement('code');
+      raw.textContent = this.source;
+      root.append(raw);
+    }
+    root.tabIndex = 0;
+    const reveal = () => {
+      view.dispatch({ selection:EditorSelection.range(this.from, this.to), scrollIntoView:true });
+      view.focus();
+    };
+    root.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') { event.preventDefault(); reveal(); } });
+    root.addEventListener('dblclick', reveal);
+    return root;
+  }
+
+  ignoreEvent() { return false; }
+}
+
+function buildCommentDecorations(state: EditorState, language: string, renderPreview?: (source:string) => HTMLElement | null, visibleRanges: readonly { from:number; to:number }[] = [], comments = parserCommentSourceRanges(state, language)): DecorationSet {
+  const source = state.doc.toString();
+  const active = state.selection.ranges;
+  const decorations = comments.map((comment) => ({
+    ...comment,
+    markdown:comment.contentRanges.map((span) => source.slice(span.from, span.to)).join('\n'),
+  })).flatMap((comment) => {
+    // Rendering is a viewport concern. The source map API remains available
+    // for callers that need raw offsets, while rich widgets stay bounded on
+    // large files and are rebuilt only for visible comments.
+    if (visibleRanges.length && !visibleRanges.some((visible) => visible.from < comment.to && visible.to > comment.from)) return [];
+    // A cursor or selection inside a comment always exposes its source so
+    // editing and keyboard shortcuts continue to address exact source bytes.
+    if (active.some((selection) => selection.from <= comment.to && selection.to >= comment.from)) return [];
+    const attributes = {
+      'data-comment-source-from':String(comment.from),
+      'data-comment-source-to':String(comment.to),
+    };
+    if (!renderPreview) return [{ from:comment.from, to:comment.to, value:Decoration.mark({ class:'cm-rich-comment-source', attributes }) }];
+    return [{
+      from:comment.from,
+      to:comment.to,
+      value:Decoration.replace({ widget:new CommentPreviewWidget(source.slice(comment.from, comment.to), comment.markdown, comment.from, comment.to, renderPreview), block:source.slice(comment.from, comment.to).includes('\n') }),
+    }];
+  });
+  return Decoration.set(decorations, true);
+}
+
+/** Opt-in parser-backed comment presentation with a safe source fallback. */
+function createRichCommentPlugin(language: string, renderPreview?: (source:string) => HTMLElement | null) {
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet;
+    comments: CommentSourceRange[];
+    rawSelectionActive = false;
+    constructor(view: EditorView) {
+      this.comments = parserCommentSourceRanges(view.state, language);
+      this.rawSelectionActive = view.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
+      this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments);
+    }
+    update(update: ViewUpdate) {
+      let delimiterIntroduced = false;
+      if (update.docChanged) update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+        if (/(?:\/\/|\/\*|\*\/|<!--|-->|^\s*#|^\s*--|^\s*%%)/m.test(inserted.toString())) delimiterIntroduced = true;
+      });
+      const changedComment = update.docChanged && this.comments.some((comment) => update.changes.touchesRange(comment.from, comment.to));
+      const visibleChanged = update.docChanged && update.view.visibleRanges.some((range) => update.changes.touchesRange(range.from, range.to));
+      const reparseChanged = visibleChanged && (changedComment || delimiterIntroduced);
+      if (update.docChanged) {
+        this.comments = this.comments.map((comment) => ({
+          ...comment,
+          from:update.changes.mapPos(comment.from, 1),
+          to:update.changes.mapPos(comment.to, -1),
+          contentFrom:update.changes.mapPos(comment.contentFrom, 1),
+          contentTo:update.changes.mapPos(comment.contentTo, -1),
+          contentRanges:comment.contentRanges.map((range) => ({ from:update.changes.mapPos(range.from, 1), to:update.changes.mapPos(range.to, -1) })),
+        }));
+        if (!reparseChanged) this.decorations = this.decorations.map(update.changes);
+      }
+      let selectionMovedAcrossWidget = false;
+      if (update.selectionSet) {
+        const rawSelection = update.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
+        selectionMovedAcrossWidget = rawSelection !== this.rawSelectionActive;
+        this.rawSelectionActive = rawSelection;
+      }
+      if (selectionMovedAcrossWidget || visibleChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
+        if (reparseChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) this.comments = parserCommentSourceRanges(update.state, language);
+        this.decorations = buildCommentDecorations(update.state, language, renderPreview, update.view.visibleRanges, this.comments);
+      }
+    }
+  }, { decorations:(value) => value.decorations });
+}
 
 const baseTheme = EditorView.theme({
   '&': { height:'100%', color:'var(--fg)', backgroundColor:'transparent', fontSize:'14px' },
@@ -432,80 +862,325 @@ function widthExtension(readable: boolean) {
   return EditorView.theme({ '.cm-content':readable ? { maxWidth:'900px', margin:'0 auto' } : { maxWidth:'none', margin:'0' } });
 }
 
-export function createMarkdownEditor(options: MarkdownEditorOptions) {
+function createOpenClankEditor(options: MarkdownEditorOptions) {
   const {
     parent, doc = '', label = 'Markdown editor', placeholderText = 'Start writing…', selection,
-    onChange, onFocus, onSelection, onScroll, onCommand,
+    onChange, onFocus, onSelection, onScroll, onCommand, renderPreview,
   } = options;
   let silent = false;
   let mode: EditorMode = options.mode === 'source' ? 'source' : 'live';
   let showLineNumbers = options.lineNumbers === true;
   let readableLineWidth = options.readableLineWidth !== false;
+  let lineWrapping = options.lineWrapping !== false;
+  let destroyed = false;
   const modeCompartment = new Compartment();
   const gutterCompartment = new Compartment();
   const widthCompartment = new Compartment();
-  const anchor = Math.max(0, Math.min(String(doc).length, Number(selection?.anchor) || 0));
-  const head = Math.max(0, Math.min(String(doc).length, Number(selection?.head) || anchor));
+  const languageCompartment = new Compartment();
+  const initialSelection = normalizeEditorSelection(selection, logicalDocumentLength(String(doc)));
+  const cmSelection = EditorSelection.create(initialSelection.ranges.map((range) => EditorSelection.range(range.anchor, range.head)), initialSelection.mainIndex);
+  // Keep the source's newline bytes in CodeMirror's document model. Without
+  // this facet CodeMirror normalizes CRLF input to LF, which makes a raw
+  // source round-trip silently rewrite files even when the editor is idle.
+  const lineSeparator = String(doc).includes('\r\n') ? '\r\n' : String(doc).includes('\r') ? '\r' : undefined;
+  let view: EditorView;
+  let runEditorCommand: (name: string) => boolean = () => false;
   const command = (name: string) => { onCommand?.(name); return true; };
+  const originalSource = String(doc);
+  const serializeSource = (value: string) => serializeEditorSource(value, originalSource);
   const state = EditorState.create({
     doc,
-    selection:{ anchor, head },
+    selection:cmSelection,
     extensions:[
       gutterCompartment.of(showLineNumbers ? [lineNumbers()] : []),
       highlightSpecialChars(), history(), foldGutter(), drawSelection(), dropCursor(),
       EditorState.allowMultipleSelections.of(true), indentOnInput(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback:true }), bracketMatching(), rectangularSelection(),
-      highlightActiveLine(), markdown(), EditorView.lineWrapping, placeholder(placeholderText),
-      modeCompartment.of(mode === 'live' ? [structuralDecorations, livePreviewPlugin] : []),
+      ...(lineSeparator ? [EditorState.lineSeparator.of(lineSeparator)] : []),
+      // Open Clank is the owned highlighter. CodeMirror's default remains only as
+      // a true fallback for syntax nodes our semantic palette does not cover; if
+      // both styles are registered as fallbacks, the default can win the facet and
+      // prevent the live --hl-* theme variables from reaching token spans.
+      syntaxHighlighting(openClankHighlightStyle), syntaxHighlighting(defaultHighlightStyle, { fallback:true }), bracketMatching(), rectangularSelection(),
+      highlightActiveLine(), languageCompartment.of(initialLanguage(options.language || 'markdown')), ...(lineWrapping ? [EditorView.lineWrapping] : []), placeholder(placeholderText),
+      modeCompartment.of(mode === 'live' ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)] : options.richComments === true && isRichCommentLanguageQualified(options.language) ? [createRichCommentPlugin(options.language || '', renderPreview)] : []),
       widthCompartment.of(widthExtension(readableLineWidth)),
       keymap.of([
         { key:'Mod-s', run:() => command('save') },
         { key:'Mod-o', run:() => command('quick-open') },
         { key:'Mod-p', run:() => command('palette') },
         { key:'Mod-Shift-f', run:() => command('search') },
+        // Shared platform map: Mod is Cmd on macOS and Ctrl elsewhere.
+        // Mod-d selects the next occurrence, Mod-Shift-l selects all, and
+        // Mod-Alt-arrow adds a cursor vertically. Escape collapses extras.
+        { key:'Mod-d', run:() => runEditorCommand('select-next-match') },
+        { key:'Mod-Shift-l', run:() => runEditorCommand('select-all-matches') },
+        { key:'Mod-Alt-ArrowUp', run:() => runEditorCommand('add-cursor-above') },
+        { key:'Mod-Alt-ArrowDown', run:() => runEditorCommand('add-cursor-below') },
+        { key:'Mod-Alt-\\', run:() => runEditorCommand('indent') },
+        { key:'Mod-Shift-d', run:() => runEditorCommand('duplicate-line') },
+        { key:'Escape', run:() => runEditorCommand('collapse-selections') },
         indentWithTab, ...defaultKeymap, ...historyKeymap,
       ]),
       EditorView.contentAttributes.of({ 'aria-label':label, spellcheck:'true' }),
       EditorView.updateListener.of((update) => {
         if (update.focusChanged && update.view.hasFocus) onFocus?.();
-        if (update.docChanged && !silent) onChange?.(update.state.doc.toString(), update);
+        if (update.docChanged && !silent) onChange?.(serializeSource(update.state.doc.toString()), update);
         if (update.selectionSet || update.docChanged) {
-          const range = update.state.selection.main;
-          onSelection?.({ anchor:range.anchor, head:range.head, line:update.state.doc.lineAt(range.head).number });
+          onSelection?.(selectionSnapshot(update.state));
         }
       }),
       baseTheme,
     ],
   });
   parent.dataset.mode = mode;
-  const view = new EditorView({ state, parent });
+  view = new EditorView({ state, parent });
+  const sourceReadiness = mode === 'source';
+  if (sourceReadiness) {
+    parent.dataset.syntaxReady = 'loading';
+    parent.setAttribute('aria-busy', 'true');
+    parent.style.visibility = 'hidden';
+  }
+  const reveal = (ready: boolean) => {
+    if (destroyed || !sourceReadiness) return;
+    const show = () => {
+      if (destroyed) return;
+      parent.dataset.syntaxReady = ready ? 'ready' : 'plain';
+      parent.setAttribute('aria-busy', 'false');
+      parent.style.visibility = '';
+      // A source view can finish parsing while its host is still hidden. A
+      // direct DOM focus attempt during that window is discarded by the
+      // browser; restore focus only when the user has not moved focus to a
+      // different control in the meantime.
+      if (typeof document !== 'undefined'
+        && (document.activeElement === document.body || parent.contains(document.activeElement))) {
+        view.focus();
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(show);
+    else setTimeout(show, 0);
+  };
+  const languageReady = mode === 'source'
+    ? loadSourceLanguage(options.language).then((language) => {
+      if (destroyed) return false;
+      const hasLanguage = Array.isArray(language) ? language.length > 0 : Boolean(language);
+      if (hasLanguage) {
+        view.dispatch({ effects:languageCompartment.reconfigure(language) });
+        forceParsing(view, view.viewport.to, 120);
+      }
+      const ready = !hasLanguage || syntaxTreeAvailable(view.state, view.viewport.to);
+      reveal(ready);
+      return ready;
+    }).catch(() => {
+      reveal(false);
+      return false;
+    })
+    : Promise.resolve(true);
   if (Number.isFinite(options.scrollTop)) view.scrollDOM.scrollTop = Math.max(0, Number(options.scrollTop));
   const reportScroll = () => onScroll?.(view.scrollDOM.scrollTop);
   view.scrollDOM.addEventListener('scroll', reportScroll, { passive:true });
 
-  function setValue(value: string) {
+  function selectionForLength(length: number) {
+    const current = selectionSnapshot(view.state);
+    return normalizeEditorSelection(current, length);
+  }
+
+  function setSelection(value: SelectionInput | null | undefined) {
+    const normalized = normalizeEditorSelection(value, view.state.doc.length);
+    view.dispatch({ selection:EditorSelection.create(normalized.ranges.map((range) => EditorSelection.range(range.anchor, range.head)), normalized.mainIndex) });
+    view.focus();
+    return true;
+  }
+
+  function setValue(value: string, nextSelection?: SelectionInput | null) {
     const next = String(value ?? '');
-    if (next === view.state.doc.toString()) return;
+    const nextLength = logicalDocumentLength(next);
+    const normalized = normalizeEditorSelection(nextSelection || selectionForLength(nextLength), nextLength);
+    if (next === view.state.doc.toString()) {
+      if (nextSelection) setSelection(normalized);
+      return;
+    }
     silent = true;
-    const cursor = Math.min(next.length, view.state.selection.main.head);
-    view.dispatch({ changes:{ from:0, to:view.state.doc.length, insert:next }, selection:EditorSelection.cursor(cursor), annotations:Transaction.addToHistory.of(false) });
+    view.dispatch({
+      changes:{ from:0, to:view.state.doc.length, insert:next },
+      selection:EditorSelection.create(normalized.ranges.map((range) => EditorSelection.range(range.anchor, range.head)), normalized.mainIndex),
+      annotations:Transaction.addToHistory.of(false),
+    });
     silent = false;
   }
 
-  function applyValue(value: string, selection?: { anchor?:number; head?:number }) {
+  function applyValue(value: string, nextSelection?: SelectionInput | null) {
     const next = String(value ?? '');
-    if (next === view.state.doc.toString()) return;
-    const anchor = Math.max(0, Math.min(next.length, Number(selection?.anchor) || 0));
-    const head = Math.max(0, Math.min(next.length, Number(selection?.head) || anchor));
-    view.dispatch({ changes:{ from:0, to:view.state.doc.length, insert:next }, selection:{ anchor, head } });
+    const nextLength = logicalDocumentLength(next);
+    const normalized = normalizeEditorSelection(nextSelection || selectionForLength(nextLength), nextLength);
+    view.dispatch({
+      changes:{ from:0, to:view.state.doc.length, insert:next },
+      selection:EditorSelection.create(normalized.ranges.map((range) => EditorSelection.range(range.anchor, range.head)), normalized.mainIndex),
+    });
   }
+
+  function replaceSelections(replacement: string | ((text: string, range: SelectionRange, index: number) => string), userEvent = 'input') {
+    let rangeIndex = 0;
+    const result = view.state.changeByRange((range) => {
+      const index = rangeIndex++;
+      const text = view.state.doc.sliceString(range.from, range.to);
+      const insert = typeof replacement === 'function' ? String(replacement(text, range, index) ?? '') : String(replacement ?? '');
+      const anchor = range.anchor <= range.head ? range.from + insert.length : range.from;
+      const head = range.anchor <= range.head ? range.from + insert.length : range.from;
+      return { changes:{ from:range.from, to:range.to, insert }, range:EditorSelection.range(anchor, head) };
+    });
+    if (result.changes.empty) return false;
+    view.dispatch({ ...result, userEvent });
+    view.focus();
+    return true;
+  }
+
+  function insertText(text: string) {
+    return replaceSelections(String(text ?? ''));
+  }
+
+  function formatSelections(prefix: string, suffix = prefix) {
+    const left = String(prefix ?? '');
+    const right = String(suffix ?? '');
+    const result = view.state.changeByRange((range) => {
+      const text = view.state.doc.sliceString(range.from, range.to);
+      const insert = `${left}${text}${right}`;
+      const forward = range.anchor <= range.head;
+      const anchor = forward ? range.from + left.length : range.from + left.length + text.length;
+      const head = forward ? range.from + left.length + text.length : range.from + left.length;
+      return { changes:{ from:range.from, to:range.to, insert }, range:EditorSelection.range(anchor, head) };
+    });
+    if (result.changes.empty) return false;
+    view.dispatch({ ...result, userEvent:'input.format' });
+    view.focus();
+    return true;
+  }
+
+  function selectedTexts() {
+    return view.state.selection.ranges.map((range) => view.state.doc.sliceString(range.from, range.to));
+  }
+
+  function pasteText(text: string) {
+    const value = String(text ?? '');
+    const ranges = view.state.selection.ranges;
+    const pieces = ranges.length > 1 && value.includes('\n') && value.split(/\r?\n/).length === ranges.length
+      ? value.split(/\r?\n/) : ranges.map(() => value);
+    let rangeIndex = 0;
+    const result = view.state.changeByRange((range) => {
+      const index = rangeIndex++;
+      const insert = pieces[index] ?? value;
+      return { changes:{ from:range.from, to:range.to, insert }, range:EditorSelection.cursor(range.from + insert.length) };
+    });
+    if (result.changes.empty) return false;
+    view.dispatch({ ...result, userEvent:'input.paste' });
+    view.focus();
+    return true;
+  }
+
+  function replaceRange(from: number, to: number, text: string) {
+    const start = boundedOffset(from, view.state.doc.length);
+    const end = Math.max(start, boundedOffset(to, view.state.doc.length));
+    const value = String(text ?? '');
+    const changes = { from:start, to:end, insert:value };
+    const changeSet = view.state.changes(changes);
+    const sourceRanges = view.state.selection.ranges;
+    // Locate the edited selection in the pre-change coordinate space. Mapping
+    // first moves a nonempty target to the replacement's new endpoint, so
+    // comparing mapped offsets with `start`/`end` loses that target and leaves
+    // the primary selection pointing at an unrelated cursor.
+    const target = sourceRanges.findIndex((range) => range.from === start && range.to === end);
+    const ranges = sourceRanges.map((range) => EditorSelection.range(range.anchor, range.head).map(changeSet));
+    if (target >= 0) ranges[target] = EditorSelection.cursor(start + value.length);
+    view.dispatch({ changes, selection:EditorSelection.create(ranges, target >= 0 ? target : view.state.selection.mainIndex), userEvent:'input' });
+    view.focus();
+    return true;
+  }
+
+  function selectNextMatch(query?: string) {
+    const needle = String(query ?? selectedTexts()[view.state.selection.mainIndex] ?? '');
+    if (!needle) return false;
+    const text = view.state.doc.toString();
+    const existing = new Set(view.state.selection.ranges.map((range) => `${range.from}:${range.to}`));
+    const main = view.state.selection.main;
+    let index = text.indexOf(needle, Math.max(main.to, main.from + (main.empty ? 1 : 0)));
+    if (index < 0) index = text.indexOf(needle, 0);
+    while (index >= 0 && existing.has(`${index}:${index + needle.length}`)) {
+      index = text.indexOf(needle, index + Math.max(1, needle.length));
+    }
+    if (index < 0) return false;
+    const ranges = view.state.selection.ranges.map((range) => EditorSelection.range(range.anchor, range.head));
+    ranges.push(EditorSelection.range(index, index + needle.length));
+    view.dispatch({ selection:EditorSelection.create(ranges), scrollIntoView:true });
+    view.focus();
+    return true;
+  }
+
+  function selectAllMatches(query?: string) {
+    const needle = String(query ?? selectedTexts()[view.state.selection.mainIndex] ?? '');
+    if (!needle) return false;
+    const text = view.state.doc.toString();
+    const ranges: Array<ReturnType<typeof EditorSelection.range>> = [];
+    for (let index = 0; index <= text.length - needle.length;) {
+      const found = text.indexOf(needle, index);
+      if (found < 0) break;
+      ranges.push(EditorSelection.range(found, found + needle.length));
+      index = found + Math.max(1, needle.length);
+    }
+    if (!ranges.length) return false;
+    const current = view.state.selection.main;
+    const mainIndex = Math.max(0, ranges.findIndex((range) => range.from === current.from && range.to === current.to));
+    view.dispatch({ selection:EditorSelection.create(ranges, mainIndex), scrollIntoView:true });
+    view.focus();
+    return true;
+  }
+
+  function duplicateLines() {
+    const lines = new Set<number>();
+    for (const range of view.state.selection.ranges) {
+      const first = view.state.doc.lineAt(range.from).number;
+      const last = view.state.doc.lineAt(range.to).number;
+      for (let number = first; number <= last; number += 1) lines.add(number);
+    }
+    const changes = [...lines].sort((a, b) => a - b).map((number) => {
+      const line = view.state.doc.line(number);
+      // Insert after the line so its existing terminator remains the first
+      // separator; replacing the text before that terminator creates a blank
+      // line and loses the duplicated content.
+      return { from:line.to, to:line.to, insert:`${view.state.lineBreak}${line.text}` };
+    });
+    if (!changes.length) return false;
+    const changeSet = view.state.changes(changes);
+    const selection = view.state.selection;
+    const mappedRanges = selection.ranges.map((range) => EditorSelection.range(range.anchor, range.head).map(changeSet));
+    view.dispatch({ changes, selection:EditorSelection.create(mappedRanges, selection.mainIndex), userEvent:'input.duplicate' });
+    view.focus();
+    return true;
+  }
+
+  runEditorCommand = (name) => {
+    if (name === 'add-cursor-above') return addCursorAbove(view);
+    if (name === 'add-cursor-below') return addCursorBelow(view);
+    if (name === 'select-next-match') return selectNextMatch();
+    if (name === 'select-all-matches') return selectAllMatches();
+    if (name === 'indent') return indentSelection({ state:view.state, dispatch:(transaction) => view.dispatch(transaction) });
+    if (name === 'duplicate-line') return duplicateLines();
+    if (name === 'collapse-selections') {
+      if (view.state.selection.ranges.length < 2) return false;
+      const main = view.state.selection.main;
+      view.dispatch({ selection:EditorSelection.create([EditorSelection.range(main.anchor, main.head)], 0) });
+      view.focus();
+      return true;
+    }
+    return false;
+  };
 
   function setMode(next: EditorMode) {
     const safe = next === 'source' ? 'source' : 'live';
     if (safe === mode) return;
     mode = safe;
     parent.dataset.mode = mode;
-    view.dispatch({ effects:modeCompartment.reconfigure(mode === 'live' ? [structuralDecorations, livePreviewPlugin] : []) });
+    view.dispatch({ effects:modeCompartment.reconfigure(mode === 'live'
+      ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)]
+      : options.richComments === true && isRichCommentLanguageQualified(options.language) ? [createRichCommentPlugin(options.language || '', renderPreview)] : []) });
   }
 
   function setLineNumbers(next: boolean) {
@@ -538,14 +1213,23 @@ export function createMarkdownEditor(options: MarkdownEditorOptions) {
     if (!needle) return 0;
     const text = view.state.doc.toString();
     if (all) {
-      const count = text.split(needle).length - 1;
-      if (count) view.dispatch({ changes:{ from:0, to:view.state.doc.length, insert:text.split(needle).join(String(replacement ?? '')) } });
+      const changes: Array<{ from:number; to:number; insert:string }> = [];
+      for (let index = text.indexOf(needle); index >= 0; index = text.indexOf(needle, index + Math.max(1, needle.length))) {
+        changes.push({ from:index, to:index + needle.length, insert:String(replacement ?? '') });
+      }
+      const count = changes.length;
+      if (count) view.dispatch({ changes, userEvent:'input.replace' });
       return count;
+    }
+    const ranges = view.state.selection.ranges;
+    if (ranges.length > 1 && ranges.every((range) => text.slice(range.from, range.to) === needle)) {
+      replaceSelections(String(replacement ?? ''), 'input.replace');
+      return ranges.length;
     }
     const selection = view.state.selection.main;
     if (text.slice(selection.from, selection.to) !== needle && !find(needle)) return 0;
     const current = view.state.selection.main;
-    view.dispatch({ changes:{ from:current.from, to:current.to, insert:String(replacement ?? '') } });
+    view.dispatch({ changes:{ from:current.from, to:current.to, insert:String(replacement ?? '') }, userEvent:'input.replace' });
     return 1;
   }
 
@@ -559,14 +1243,35 @@ export function createMarkdownEditor(options: MarkdownEditorOptions) {
 
   return {
     view,
-    getValue:() => view.state.doc.toString(), setValue, applyValue, setMode, setLineNumbers, setReadableLineWidth,
+    getValue:() => serializeSource(view.state.doc.toString()), setValue, applyValue, setSelection, insertText, replaceSelections, formatSelections,
+    pasteText, replaceRange, selectedTexts, getSelectedText:() => selectedTexts().join('\n'), selectNextMatch, selectAllMatches,
+    duplicateLines, runCommand:runEditorCommand, setMode, setLineNumbers, setReadableLineWidth,
     getScrollTop:() => view.scrollDOM.scrollTop,
     focus:() => view.focus(), focusLine,
     undo:() => undo(view), redo:() => redo(view), find, replace,
-    getSelection:() => {
-      const range = view.state.selection.main;
-      return { anchor:range.anchor, head:range.head, line:view.state.doc.lineAt(range.head).number };
-    },
-    destroy:() => view.destroy(),
+    getSelection:() => selectionSnapshot(view.state),
+    getCommentSourceMap:() => mapParserComments(view.state, options.language || ''),
+    languageReady,
+    destroy:() => { destroyed = true; view.destroy(); },
   };
+}
+
+// Compatibility adapter for the existing Copal Notes surface. Keeping this
+// public name lets Notes evolve independently while both products share one
+// CodeMirror runtime and dependency graph.
+export function createMarkdownEditor(options: MarkdownEditorOptions) {
+  return createOpenClankEditor(options);
+}
+
+// Source-specific adapter for Code Editor. Product code still owns buffers,
+// CAS, paths, and permissions; this adapter owns only editor presentation and
+// state. Explicit defaults keep source files unwrapped and free of Markdown's
+// live structural widgets without creating a second CodeMirror copy.
+export function createSourceEditor(options: MarkdownEditorOptions) {
+  return createOpenClankEditor({
+    ...options,
+    mode:'source',
+    readableLineWidth:false,
+    lineWrapping:false,
+  });
 }

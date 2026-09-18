@@ -77,6 +77,25 @@ const makeCtx = () => {
   return { ctx, calls }
 }
 
+const configureFormatter = (
+  directory: string,
+  name: string,
+  extension: string,
+  script: string,
+  args: string[] = [],
+) =>
+  fs.writeFile(
+    path.join(directory, "mimocode.json"),
+    JSON.stringify({
+      formatter: {
+        [name]: {
+          command: [process.execPath, "-e", script, "$FILE", ...args],
+          extensions: [extension],
+        },
+      },
+    }),
+  )
+
 describe("tool.apply_patch freeform", () => {
   test("requires patch_text", async () => {
     const { ctx } = makeCtx()
@@ -172,6 +191,8 @@ describe("tool.apply_patch freeform", () => {
         expect(moveFile.movePath).toBe(path.join(fixture.path, "renamed/dir/name.txt"))
         expect(moveFile.patch).toContain("-old content")
         expect(moveFile.patch).toContain("+new content")
+        expect(permissionCall.patterns).toContain("old/name.txt")
+        expect(permissionCall.patterns).toContain("renamed/dir/name.txt")
       },
     })
   })
@@ -260,7 +281,7 @@ describe("tool.apply_patch freeform", () => {
     })
   })
 
-  test("moves file overwriting existing destination", async () => {
+  test("rejects a move when the destination already exists", async () => {
     await using fixture = await tmpdir()
     const { ctx } = makeCtx()
 
@@ -277,15 +298,14 @@ describe("tool.apply_patch freeform", () => {
         const patchText =
           "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch"
 
-        await execute({ patch_text: patchText }, ctx)
-
-        await expect(fs.readFile(original, "utf-8")).rejects.toThrow()
-        expect(await fs.readFile(destination, "utf-8")).toBe("new\n")
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("already exists")
+        expect(await fs.readFile(original, "utf-8")).toBe("from\n")
+        expect(await fs.readFile(destination, "utf-8")).toBe("existing\n")
       },
     })
   })
 
-  test("adds file overwriting existing file", async () => {
+  test("rejects an add when the target already exists", async () => {
     await using fixture = await tmpdir()
     const { ctx } = makeCtx()
 
@@ -297,8 +317,8 @@ describe("tool.apply_patch freeform", () => {
 
         const patchText = "*** Begin Patch\n*** Add File: duplicate.txt\n+new content\n*** End Patch"
 
-        await execute({ patch_text: patchText }, ctx)
-        expect(await fs.readFile(target, "utf-8")).toBe("new content\n")
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("already exists")
+        expect(await fs.readFile(target, "utf-8")).toBe("old content\n")
       },
     })
   })
@@ -317,6 +337,30 @@ describe("tool.apply_patch freeform", () => {
         )
       },
     })
+  })
+
+  test("rejects model writes to Open Clank control data inside the workspace", async () => {
+    await using fixture = await tmpdir()
+    const { ctx } = makeCtx()
+    const control = path.join(fixture.path, "data")
+    const target = path.join(control, "app.db")
+    await fs.mkdir(control, { recursive: true })
+    await fs.writeFile(target, "original\n", "utf-8")
+    const previous = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    process.env.OPEN_CLANK_CONTROL_DATA_DIR = control
+    try {
+      await Instance.provide({
+        directory: fixture.path,
+        fn: async () => {
+          const patchText = "*** Begin Patch\n*** Update File: data/app.db\n@@\n-original\n+forged\n*** End Patch"
+          await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("control data")
+          expect(await fs.readFile(target, "utf-8")).toBe("original\n")
+        },
+      })
+    } finally {
+      if (previous === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+      else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previous
+    }
   })
 
   test("rejects delete when file is missing", async () => {
@@ -396,6 +440,151 @@ describe("tool.apply_patch freeform", () => {
 
         const createdPath = path.join(fixture.path, "created.txt")
         await expect(fs.readFile(createdPath, "utf-8")).rejects.toThrow()
+      },
+    })
+  })
+
+  test("leaves the live file untouched when a formatter mutates then fails", async () => {
+    await using fixture = await tmpdir()
+    const { ctx } = makeCtx()
+    const target = path.join(fixture.path, "single.atomicfmt")
+    await fs.writeFile(target, "before\n", "utf-8")
+    await configureFormatter(
+      fixture.path,
+      "failing",
+      ".atomicfmt",
+      'require("fs").writeFileSync(process.argv[1], "formatted\\n"); process.exit(9)',
+    )
+
+    await Instance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const patchText =
+          "*** Begin Patch\n*** Update File: single.atomicfmt\n@@\n-before\n+patched\n*** End Patch"
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("formatter failing failed with exit code 9")
+        expect(await fs.readFile(target, "utf-8")).toBe("before\n")
+      },
+    })
+  })
+
+  test("leaves every live file untouched when a later formatter fails", async () => {
+    await using fixture = await tmpdir()
+    const { ctx } = makeCtx()
+    const first = path.join(fixture.path, "first.atomicfmt")
+    const second = path.join(fixture.path, "second.atomicfmt")
+    await fs.writeFile(first, "first-before\n", "utf-8")
+    await fs.writeFile(second, "second-before\n", "utf-8")
+    await configureFormatter(
+      fixture.path,
+      "second-fails",
+      ".atomicfmt",
+      [
+        'const fs = require("fs")',
+        'fs.writeFileSync(process.argv[1], "formatted\\n")',
+        'if (process.argv[1].includes("second.atomicfmt")) process.exit(7)',
+      ].join("; "),
+    )
+
+    await Instance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const patchText = [
+          "*** Begin Patch",
+          "*** Update File: first.atomicfmt",
+          "@@",
+          "-first-before",
+          "+first-patched",
+          "*** Update File: second.atomicfmt",
+          "@@",
+          "-second-before",
+          "+second-patched",
+          "*** End Patch",
+        ].join("\n")
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow(
+          "formatter second-fails failed with exit code 7",
+        )
+        expect(await fs.readFile(first, "utf-8")).toBe("first-before\n")
+        expect(await fs.readFile(second, "utf-8")).toBe("second-before\n")
+      },
+    })
+  })
+
+  test("preserves a concurrent external write made while formatting", async () => {
+    await using fixture = await tmpdir()
+    const { ctx } = makeCtx()
+    const target = path.join(fixture.path, "race.racefmt")
+    await fs.writeFile(target, "before\n", "utf-8")
+    await configureFormatter(
+      fixture.path,
+      "racer",
+      ".racefmt",
+      'require("fs").writeFileSync(process.argv[2], "external\\n")',
+      [target],
+    )
+
+    await Instance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const patchText = "*** Begin Patch\n*** Update File: race.racefmt\n@@\n-before\n+patched\n*** End Patch"
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("target changed during commit")
+        expect(await fs.readFile(target, "utf-8")).toBe("external\n")
+      },
+    })
+  })
+
+  test("preserves a concurrent chmod made while formatting", async () => {
+    if (process.platform === "win32") return
+    await using fixture = await tmpdir()
+    const { ctx } = makeCtx()
+    const target = path.join(fixture.path, "race.modefmt")
+    await fs.writeFile(target, "before\n", { encoding: "utf-8", mode: 0o644 })
+    await configureFormatter(
+      fixture.path,
+      "mode-racer",
+      ".modefmt",
+      'require("fs").chmodSync(process.argv[2], 0o600)',
+      [target],
+    )
+
+    await Instance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const patchText = "*** Begin Patch\n*** Update File: race.modefmt\n@@\n-before\n+patched\n*** End Patch"
+        await expect(execute({ patch_text: patchText }, ctx)).rejects.toThrow("target changed during commit")
+        expect(await fs.readFile(target, "utf-8")).toBe("before\n")
+        expect((await fs.stat(target)).mode & 0o777).toBe(0o600)
+      },
+    })
+  })
+
+  test("permission and result metadata describe the final formatted bytes", async () => {
+    await using fixture = await tmpdir()
+    const { ctx, calls } = makeCtx()
+    const target = path.join(fixture.path, "success.goodfmt")
+    await fs.writeFile(target, "before\n", "utf-8")
+    await configureFormatter(
+      fixture.path,
+      "successful",
+      ".goodfmt",
+      'require("fs").writeFileSync(process.argv[1], "formatted\\n")',
+    )
+
+    await Instance.provide({
+      directory: fixture.path,
+      fn: async () => {
+        const patchText = "*** Begin Patch\n*** Update File: success.goodfmt\n@@\n-before\n+patched\n*** End Patch"
+        const result = await execute({ patch_text: patchText }, ctx)
+        const bytes = await fs.readFile(target)
+        expect(bytes.toString("utf-8")).toBe("formatted\n")
+        expect(result.metadata.files[0]?.fingerprint).toBe(AppFileSystem.fingerprintBytes(bytes))
+        expect(calls).toHaveLength(1)
+        expect(calls[0]?.metadata.diff).toContain("+formatted")
+        expect(calls[0]?.metadata.diff).not.toContain("+patched")
+        expect(calls[0]?.metadata.files[0]?.patch).toBe(result.metadata.files[0]?.patch)
+        expect(calls[0]?.metadata.files[0]?.additions).toBe(result.metadata.files[0]?.additions)
+        expect(calls[0]?.metadata.files[0]?.deletions).toBe(result.metadata.files[0]?.deletions)
+        expect(result.metadata.diff).toContain("+formatted")
+        expect(result.metadata.diff).not.toContain("+patched")
       },
     })
   })

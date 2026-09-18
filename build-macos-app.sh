@@ -16,7 +16,7 @@ set -e
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Odysseus"
 INSTALL_DIR="$REPO_DIR"
-PORT="${ODYSSEUS_PORT:-7860}"
+PORT="${ODYSSEUS_PORT:-7777}"
 DIST="$REPO_DIR/dist"
 APP="$DIST/$APP_NAME.app"
 
@@ -24,8 +24,38 @@ echo "Building $APP_NAME.app"
 echo "  install dir: $INSTALL_DIR"
 echo "  port:        $PORT"
 
+# The Files and history surfaces are Rust-backed in the shipped app as well as
+# in the development checkout. Build the optimized services before packaging
+# so the runtime resolver never falls back to an arbitrary debug artifact.
+if command -v cargo >/dev/null 2>&1 && [ -f "$REPO_DIR/packages/odysseus-files/Cargo.toml" ]; then
+  echo "  Rust services: cargo release build"
+  cargo build --locked --manifest-path "$REPO_DIR/packages/odysseus-files/Cargo.toml" --release \
+    --bin odysseus-files-service --bin odysseus-quicklook-helper
+  cargo build --locked --manifest-path "$REPO_DIR/packages/openclank-history/Cargo.toml" --release \
+    --bin openclank-history-service
+else
+  echo "  Rust services: deferred (cargo unavailable; set packaged service paths at runtime)"
+fi
+
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/libexec/openclank/files" \
+  "$APP/Contents/Resources/libexec/openclank/history"
+
+if [ -x "$REPO_DIR/packages/odysseus-files/target/release/odysseus-files-service" ] && \
+   [ -x "$REPO_DIR/packages/odysseus-files/target/release/odysseus-quicklook-helper" ]; then
+  cp "$REPO_DIR/packages/odysseus-files/target/release/odysseus-files-service" \
+    "$APP/Contents/Resources/libexec/openclank/files/"
+  cp "$REPO_DIR/packages/odysseus-files/target/release/odysseus-quicklook-helper" \
+    "$APP/Contents/Resources/libexec/openclank/files/"
+  chmod 755 "$APP/Contents/Resources/libexec/openclank/files/odysseus-files-service" \
+    "$APP/Contents/Resources/libexec/openclank/files/odysseus-quicklook-helper"
+fi
+
+if [ -x "$REPO_DIR/packages/openclank-history/target/release/openclank-history-service" ]; then
+  cp "$REPO_DIR/packages/openclank-history/target/release/openclank-history-service" \
+    "$APP/Contents/Resources/libexec/openclank/history/"
+  chmod 755 "$APP/Contents/Resources/libexec/openclank/history/openclank-history-service"
+fi
 
 # ── Icon (best effort) — center-crop docs/odysseus.jpg to a square .icns ──
 if [ -f "$REPO_DIR/docs/odysseus.jpg" ] && command -v sips >/dev/null 2>&1; then
@@ -73,9 +103,18 @@ cat > "$APP/Contents/MacOS/$APP_NAME.tmpl" <<'LAUNCHER'
 INSTALL_DIR="__INSTALL_DIR__"
 PORT="__PORT__"
 URL="http://127.0.0.1:${PORT}"
+APP_RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
+export APP_RESOURCES
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+if [ -x "$APP_RESOURCES/libexec/openclank/files/odysseus-files-service" ]; then
+  export ODYSSEUS_FILES_SERVICE_BIN="$APP_RESOURCES/libexec/openclank/files/odysseus-files-service"
+  export ODYSSEUS_QUICKLOOK_HELPER_BIN="$APP_RESOURCES/libexec/openclank/files/odysseus-quicklook-helper"
+fi
+if [ -x "$APP_RESOURCES/libexec/openclank/history/openclank-history-service" ]; then
+  export OPENCLANK_HISTORY_SERVICE_BIN="$APP_RESOURCES/libexec/openclank/history/openclank-history-service"
+fi
 
-UVICORN="$INSTALL_DIR/venv/bin/uvicorn"
+PYTHON="$INSTALL_DIR/venv/bin/python"
 LOG="$INSTALL_DIR/logs/odysseus-app.log"
 
 notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Odysseus\"" >/dev/null 2>&1; }
@@ -84,7 +123,7 @@ die_gui() {
   exit 1
 }
 
-[ -x "$UVICORN" ] || die_gui "Odysseus isn't set up yet. Open Terminal and run:
+[ -x "$PYTHON" ] || die_gui "Odysseus isn't set up yet. Open Terminal and run:
 
 cd $INSTALL_DIR
 python3.11 -m venv venv
@@ -120,9 +159,9 @@ fi
 notify "Starting…"
 cd "$INSTALL_DIR" || die_gui "Install folder not found: $INSTALL_DIR"
 if [ "$(uname -m)" = "arm64" ]; then
-  arch -arm64 "$UVICORN" app:app --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 &
+  arch -arm64 "$PYTHON" scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 &
 else
-  "$UVICORN" app:app --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 &
+  "$PYTHON" scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port "$PORT" >>"$LOG" 2>&1 &
 fi
 SERVER_PID=$!
 

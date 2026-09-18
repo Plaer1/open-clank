@@ -1,0 +1,24 @@
+[package]
+name = "openclank-tonic-admission"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Isolated Tonic/grpc.aio macOS Unix-socket admission harness"
+license = "MIT"
+
+[dependencies]
+libc = "=0.2.189"
+prost = "=0.14.4"
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "=0.1.18"
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+tonic = "=0.14.6"
+tonic-prost = "=0.14.6"
+tower = { version = "=0.5.3", features = ["limit"] }
+
+[build-dependencies]
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.6"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

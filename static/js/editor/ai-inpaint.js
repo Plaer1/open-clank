@@ -17,9 +17,8 @@
  *       contributing mask sub-layer, reveal the post-gen Feather +
  *       Edge Stroke sliders capped at ±padPx.
  *
- *   Remove: detects OpenAI vs SDXL backend and swaps the prompt
- *     (gpt-image-1 follows "remove …" semantically; SDXL has to be
- *     prompted with a fill description + strength 0.99).
+ *   Remove: sends one provider-neutral semantic request. The managed engine
+ *     adapter owns provider-specific normalization.
  *
  *   Outpaint: auto-generates a mask covering empty (transparent)
  *     regions of the flattened composite, dilates it 12px inward
@@ -30,7 +29,7 @@
  *   buildMergedMaskCanvas:  () => HTMLCanvasElement | null,
  *   dilateMask:             (src: HTMLCanvasElement, px: number) => HTMLCanvasElement,
  *   applyInpaintFeather:    (layer: object, featherPx: number, edgeShiftPx: number) => void,
- *   getSelectedAIEndpoint:  (type: string) => { endpoint?: string, model?: string },
+ *   getSelectedAIEndpoint:  (type: string) => { modelRouteId?: string },
  *   ensureActiveMaskLayer:  () => object | null,
  *   saveState:              (label?: string) => void,
  *   createLayer:            (name: string, w: number, h: number) => object,
@@ -145,7 +144,7 @@ export function wireInpaintButtons({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify((() => {
           const sel = getSelectedAIEndpoint('inpaint');
-          return { image: imageB64, mask: maskB64, prompt, width: state.imgWidth, height: state.imgHeight, strength, feather: 0, _endpoint: sel.endpoint, _model: sel.model };
+          return { image: imageB64, mask: maskB64, prompt, width: state.imgWidth, height: state.imgHeight, strength, feather: 0, model_route_id: sel.modelRouteId || undefined };
         })()),
       });
       if (!res.ok) {
@@ -265,29 +264,14 @@ export function wireInpaintButtons({
     });
   });
 
-  // Remove — detects backend type and substitutes a content-aware
-  // fill prompt. gpt-image-1 understands "remove …" semantically;
-  // SDXL inpaint pipelines literally try to draw the prompt, so we
-  // send a generic surroundings-matching prompt and crank strength.
+  // Remove is expressed semantically; provider adapters and registered local
+  // recipes own any backend-specific request normalization.
   document.getElementById('ge-inpaint-remove').addEventListener('click', async () => {
-    const sel = getSelectedAIEndpoint('inpaint');
-    const ep = (sel.endpoint || '').toLowerCase();
-    const isOpenAI = ep.includes('api.openai.com');
-    let prompt, strength;
-    if (isOpenAI) {
-      const userP = document.getElementById('ge-inpaint-prompt')?.value?.trim();
-      prompt = userP
-        ? `Remove ${userP}. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.`
-        : 'Remove the masked area. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.';
-      strength = (parseInt(document.getElementById('ge-strength-slider')?.value || '75')) / 100;
-    } else {
-      // SDXL inpaint: describe the surroundings, not what's there.
-      // Crank strength to ensure the model fully overwrites the
-      // masked region — at low strength it would denoise toward
-      // what was there.
-      prompt = 'seamless natural background, photorealistic, continuation of surrounding scene, empty area, no objects, no people, no text, clean';
-      strength = 0.99;
-    }
+    const userP = document.getElementById('ge-inpaint-prompt')?.value?.trim();
+    const prompt = userP
+      ? `Remove ${userP}. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.`
+      : 'Remove the masked area. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.';
+    const strength = (parseInt(document.getElementById('ge-strength-slider')?.value || '75')) / 100;
     await runInpaint({
       prompt, strength,
       btnId: 'ge-inpaint-remove',

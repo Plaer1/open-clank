@@ -795,16 +795,16 @@ it.live("ask - persisted approval does not override ruleset deny", () =>
   }),
 )
 
-// Forced-ask (bash_delete) tests — irreversible actions must not be
+// Forced-ask shell tests — sensitive actions must not be
 // pre-authorized by allow rules. Only an explicit deny short-circuits, and
 // only the env-var opt-out (checked tool-side) skips the ask entirely.
 
-it.live("ask - bash_delete stays pending even when ruleset has wildcard allow", () =>
+it.live("ask - bash_destructive stays pending even when ruleset has wildcard allow", () =>
   withDir({ git: true }, () =>
     Effect.gen(function* () {
       const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash_delete",
+        permission: "bash_destructive",
         patterns: ["rm foo.txt"],
         metadata: {},
         always: [],
@@ -813,26 +813,26 @@ it.live("ask - bash_delete stays pending even when ruleset has wildcard allow", 
 
       const items = yield* waitForPending(1)
       expect(items).toHaveLength(1)
-      expect(items[0].permission).toBe("bash_delete")
+      expect(items[0].permission).toBe("bash_destructive")
       yield* rejectAll()
       yield* Fiber.await(fiber)
     }),
   ),
 )
 
-it.live("ask - bash_delete stays pending even with explicit bash_delete allow", () =>
+it.live("ask - bash_destructive stays pending even with explicit allow", () =>
   withDir({ git: true }, () =>
     Effect.gen(function* () {
       // Even a named allow rule cannot pre-authorize a forced-ask permission.
-      // The env-var opt-out (MIMOCODE_AUTO_APPROVE_DELETE, tool-side) is the
+      // The env-var opt-out (MIMOCODE_AUTO_APPROVE_DESTRUCTIVE, tool-side) is the
       // only bypass; the permission layer itself refuses to honor allow.
       const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash_delete",
+        permission: "bash_destructive",
         patterns: ["rm foo.txt"],
         metadata: {},
         always: [],
-        ruleset: [{ permission: "bash_delete", pattern: "*", action: "allow" }],
+        ruleset: [{ permission: "bash_destructive", pattern: "*", action: "allow" }],
       }).pipe(Effect.forkScoped)
 
       yield* waitForPending(1)
@@ -842,17 +842,17 @@ it.live("ask - bash_delete stays pending even with explicit bash_delete allow", 
   ),
 )
 
-it.live("ask - bash_delete respects explicit deny", () =>
+it.live("ask - bash_destructive respects explicit deny", () =>
   withDir({ git: true }, () =>
     Effect.gen(function* () {
       const err = yield* fail(
         ask({
           sessionID: SessionID.make("session_test"),
-          permission: "bash_delete",
+          permission: "bash_destructive",
           patterns: ["rm foo.txt"],
           metadata: {},
           always: [],
-          ruleset: [{ permission: "bash_delete", pattern: "*", action: "deny" }],
+          ruleset: [{ permission: "bash_destructive", pattern: "*", action: "deny" }],
         }),
       )
       expect(err).toBeInstanceOf(Permission.DeniedError)
@@ -860,17 +860,17 @@ it.live("ask - bash_delete respects explicit deny", () =>
   ),
 )
 
-it.live("reply - always for bash_delete does not persist a rule", () =>
+it.live("reply - always for bash_destructive does not persist a rule", () =>
   Effect.gen(function* () {
     const dir = yield* tmpdirScoped({ git: true })
     const run = withProvided(dir)
 
-    // Session 1: approve bash_delete "always". Even if the caller passes a
+    // Session 1: approve bash_destructive "always". Even if the caller passes a
     // non-empty `always`, no rule should reach the approved store.
     const fiber = yield* ask({
       id: PermissionID.make("per_forced_ask_persist"),
       sessionID: SessionID.make("session_approve"),
-      permission: "bash_delete",
+      permission: "bash_destructive",
       patterns: ["rm foo.txt"],
       metadata: {},
       always: ["*"],
@@ -881,11 +881,11 @@ it.live("reply - always for bash_delete does not persist a rule", () =>
     yield* reply({ requestID: PermissionID.make("per_forced_ask_persist"), reply: "always" }).pipe(run)
     yield* Fiber.join(fiber)
 
-    // Session 2: a fresh bash_delete ask must still be pending — the previous
+    // Session 2: a fresh bash_destructive ask must still be pending — the previous
     // "always" reply must NOT have been persisted.
     const fiber2 = yield* ask({
       sessionID: SessionID.make("session_next"),
-      permission: "bash_delete",
+      permission: "bash_destructive",
       patterns: ["rm bar.txt"],
       metadata: {},
       always: [],
@@ -896,6 +896,25 @@ it.live("reply - always for bash_delete does not persist a rule", () =>
     yield* rejectAll().pipe(run)
     yield* Fiber.await(fiber2)
   }),
+)
+
+it.live("legacy bash_delete requests remain forced-ask", () =>
+  withDir({ git: true }, () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_legacy_delete"),
+        permission: "bash_delete",
+        patterns: ["rm legacy.txt"],
+        metadata: {},
+        always: [],
+        ruleset: [{ permission: "*", pattern: "*", action: "allow" }],
+      }).pipe(Effect.forkScoped)
+      const items = yield* waitForPending(1)
+      expect(items[0].permission).toBe("bash_delete")
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  ),
 )
 
 it.live("reply - reject cancels all pending for same session", () =>

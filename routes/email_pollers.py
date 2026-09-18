@@ -24,12 +24,15 @@ import re
 import html
 import logging
 import inspect
+import uuid
+import asyncio
+import threading
 from datetime import datetime
 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from src.task_endpoint import resolve_task_candidates, task_llm_call_async
+from src.task_endpoint import task_complete_text
 
 from routes.email_helpers import (
     _strip_think, _extract_reply, _apply_email_style_mechanics, _load_settings, _save_settings, _get_email_config,
@@ -43,6 +46,107 @@ from routes.email_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Lifecycle registry for work which can outlive the request that admitted it.
+# Admission is closed before an owner is retired; late callbacks then cannot
+# create new work after the drain boundary.
+_OWNER_ACTIVITY: dict[str, set[object]] = {}
+_OWNER_ACTIVITY_LOCK = threading.Lock()
+_OWNER_DRAINING: set[str] = set()
+_OWNER_FENCE_CHECKER = None
+_OWNER_KNOWN_CHECKER = None
+
+
+def configure_owner_lifecycle(check_fenced, is_known_owner=None) -> None:
+    """Install the durable auth/lifecycle admission checks from the root app."""
+    global _OWNER_FENCE_CHECKER, _OWNER_KNOWN_CHECKER
+    _OWNER_FENCE_CHECKER = check_fenced
+    _OWNER_KNOWN_CHECKER = is_known_owner
+
+
+def _owner_activity_admit(owner: str, activity) -> bool:
+    key = str(owner or "").strip().lower()
+    if not key:
+        return False
+    try:
+        if _OWNER_FENCE_CHECKER and _OWNER_FENCE_CHECKER(key):
+            return False
+        if _OWNER_KNOWN_CHECKER and not _OWNER_KNOWN_CHECKER(key):
+            return False
+    except Exception:
+        return False
+    with _OWNER_ACTIVITY_LOCK:
+        if key in _OWNER_DRAINING:
+            return False
+        _OWNER_ACTIVITY.setdefault(key, set()).add(activity)
+    return True
+
+
+def _owner_activity_done(owner: str, activity) -> None:
+    key = str(owner or "").strip().lower()
+    with _OWNER_ACTIVITY_LOCK:
+        group = _OWNER_ACTIVITY.get(key)
+        if group is not None:
+            group.discard(activity)
+            if not group:
+                _OWNER_ACTIVITY.pop(key, None)
+
+
+def _owner_activity_pending(owner: str) -> bool:
+    key = str(owner or "").strip().lower()
+    with _OWNER_ACTIVITY_LOCK:
+        return any(not getattr(a, "done", lambda: False)() for a in _OWNER_ACTIVITY.get(key, set()))
+
+
+def begin_owner_drain(owner: str) -> None:
+    """Close admission for an owner before deleting/renaming its data."""
+    key = str(owner or "").strip().lower()
+    if key:
+        with _OWNER_ACTIVITY_LOCK:
+            _OWNER_DRAINING.add(key)
+
+
+def end_owner_drain(owner: str) -> None:
+    key = str(owner or "").strip().lower()
+    with _OWNER_ACTIVITY_LOCK:
+        _OWNER_DRAINING.discard(key)
+
+
+async def drain_owner_activity(owner: str) -> dict[str, object]:
+    """Join all admitted tasks/threads, with no guessed timeout.
+
+    ``asyncio.shield`` means cancellation of this waiter never cancels the
+    underlying ``to_thread`` task; a later drain can still join it safely.
+    """
+    key = str(owner or "").strip().lower()
+    if not key:
+        raise ValueError("email lifecycle owner is required")
+    joined = 0
+    while True:
+        with _OWNER_ACTIVITY_LOCK:
+            pending = [a for a in _OWNER_ACTIVITY.get(key, set()) if not getattr(a, "done", lambda: False)()]
+        if not pending:
+            return {"owner": key, "joined": joined}
+        joined += len(pending)
+        await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
+
+
+def _track_owner_task(coro, owner: str):
+    task = asyncio.create_task(coro)
+    if not _owner_activity_admit(owner, task):
+        task.cancel()
+        return None
+    task.add_done_callback(lambda done: _owner_activity_done(owner, done))
+    return task
+
+
+def _track_owner_thread(fn, owner: str):
+    task = asyncio.create_task(asyncio.to_thread(fn))
+    if not _owner_activity_admit(owner, task):
+        task.cancel()
+        return None
+    task.add_done_callback(lambda done: _owner_activity_done(owner, done))
+    return task
 
 # Recovers a `[{"action": ...}, ...]` JSON array from raw LLM output when the
 # fenced-block strip leaves nothing usable. Runs on model output influenced by
@@ -385,35 +489,26 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
                                    days_back: int = 1,
                                    account_id: str | None = None,
                                    max_process: int | None = None,
-                                   progress_cb=None) -> str:
-    """One iteration of the email scan. Temporarily flips settings flags
-    so the existing background-loop logic runs exactly once for the requested ops."""
-    settings = _load_settings()
-    prev = {k: settings.get(k, False) for k in
-            ("email_auto_summarize", "email_auto_reply", "email_auto_tag",
-             "email_auto_spam", "email_auto_calendar", "_email_auto_reply_draft_only")}
-    settings["email_auto_summarize"] = bool(do_summary)
-    settings["email_auto_reply"] = bool(do_reply)
-    settings["_email_auto_reply_draft_only"] = bool(do_reply)
-    settings["email_auto_tag"] = bool(do_tag)
-    settings["email_auto_spam"] = bool(do_spam)
-    settings["email_auto_calendar"] = bool(do_calendar)
-    _save_settings(settings)
-    try:
-        return await _auto_summarize_pass(
+                                   progress_cb=None,
+                                   root_operation_id: str | None = None,
+                                   owner: str | None = None) -> str:
+    """Run one pass with per-run flags (without mutating global settings)."""
+    overrides = {
+        "email_auto_summarize": bool(do_summary),
+        "email_auto_reply": bool(do_reply),
+        "_email_auto_reply_draft_only": bool(do_reply),
+        "email_auto_tag": bool(do_tag), "email_auto_spam": bool(do_spam),
+        "email_auto_calendar": bool(do_calendar),
+    }
+    return await _auto_summarize_pass(
             days_back=days_back,
             account_id=account_id,
             max_process=max_process,
             progress_cb=progress_cb,
+            root_operation_id=root_operation_id,
+            owner=owner,
+            settings_overrides=overrides,
         )
-    finally:
-        s2 = _load_settings()
-        for k, v in prev.items():
-            if v is None and k.startswith("_"):
-                s2.pop(k, None)
-            else:
-                s2[k] = v
-        _save_settings(s2)
 
 
 def _latest_inbox_fallback_uids(conn, reconnect):
@@ -446,7 +541,16 @@ def _latest_inbox_fallback_uids(conn, reconnect):
         return [], reconnect()
 
 
-async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
+async def _auto_summarize_pass(
+    days_back: int = 1,
+    account_id: str | None = None,
+    max_process: int | None = None,
+    progress_cb=None,
+    away_only: bool = False,
+    root_operation_id: str | None = None,
+    owner: str | None = None,
+    settings_overrides: dict | None = None,
+) -> str:
     """Single pass of the auto-summarize/reply scan.
 
     When account_id is None, iterates over every enabled account in
@@ -464,7 +568,9 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     .order_by(_EA.is_default.desc(), _EA.created_at.asc())
                     .all()
                 )
-                ids = [r.id for r in rows]
+                if owner:
+                    rows = [r for r in rows if str(getattr(r, "owner", "") or "").strip().lower() == str(owner).strip().lower()]
+                ids = [r.id for r in rows if bool(getattr(r, "enabled", True))]
                 names = {r.id: r.name for r in rows}
             finally:
                 db.close()
@@ -479,6 +585,9 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                 max_process=max_process,
                 progress_cb=progress_cb,
                 away_only=away_only,
+                root_operation_id=root_operation_id,
+                owner=owner,
+                settings_overrides=settings_overrides,
             )
         outs = []
         for idx, aid in enumerate(ids, start=1):
@@ -490,6 +599,9 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     max_process=max_process,
                     progress_cb=progress_cb,
                     away_only=away_only,
+                    root_operation_id=root_operation_id,
+                    owner=owner,
+                    settings_overrides=settings_overrides,
                 )
                 outs.append(f"[{names.get(aid, aid[:8])}] {result}")
             except Exception as e:
@@ -502,17 +614,61 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
         max_process=max_process,
         progress_cb=progress_cb,
         away_only=away_only,
+        root_operation_id=root_operation_id,
+        owner=owner,
+        settings_overrides=settings_overrides,
     )
 
 
-async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
+async def _auto_summarize_pass_single(
+    days_back: int = 1,
+    account_id: str | None = None,
+    max_process: int | None = None,
+    progress_cb=None,
+    away_only: bool = False,
+    root_operation_id: str | None = None,
+    owner: str | None = None,
+    settings_overrides: dict | None = None,
+) -> str:
+    """Admit direct callers too, including legacy/manual invocations."""
+    effective_owner = str(owner or "").strip() or _owner_for_email_account(account_id)
+    marker = asyncio.get_running_loop().create_future() if effective_owner else None
+    if marker is not None and not _owner_activity_admit(effective_owner, marker):
+        return "Email owner lifecycle is fenced"
+    try:
+        return await _auto_summarize_pass_single_impl(
+            days_back=days_back, account_id=account_id, max_process=max_process,
+            progress_cb=progress_cb, away_only=away_only,
+            root_operation_id=root_operation_id, owner=owner,
+            settings_overrides=settings_overrides,
+        )
+    finally:
+        if marker is not None:
+            marker.set_result(None)
+            _owner_activity_done(effective_owner, marker)
+
+
+async def _auto_summarize_pass_single_impl(
+    days_back: int = 1,
+    account_id: str | None = None,
+    max_process: int | None = None,
+    progress_cb=None,
+    away_only: bool = False,
+    root_operation_id: str | None = None,
+    owner: str | None = None,
+    settings_overrides: dict | None = None,
+) -> str:
     """Single pass of the auto-summarize/reply scan for ONE account.
     Reads current settings flags."""
     import asyncio
     import sqlite3 as _sql3
-    from src.llm_core import _uses_max_completion_tokens
+    from src.openclank.modality_facade import managed_route_summary
 
+    if owner and account_id and _owner_for_email_account(account_id).strip().lower() != str(owner).strip().lower():
+        return "Email account is not owned by the requested owner"
     settings = _effective_settings_for_email_account(_load_settings(), account_id)
+    if settings_overrides:
+        settings.update(settings_overrides)
     auto_sum = settings.get("email_auto_summarize", False)
     auto_reply = settings.get("email_auto_reply", False)
     auto_reply_draft = bool(auto_reply and settings.get("_email_auto_reply_draft_only", False))
@@ -536,6 +692,8 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     # calendar path (_acct_owner, which expects None rather than "").
     account_owner = _owner_for_email_account(account_id)
     _acct_owner = account_owner or None
+    operation_owner = account_owner or "local-installation"
+    root_operation_id = root_operation_id or f"email-poller:{uuid.uuid4().hex}"
 
     conn = None
     try:
@@ -634,12 +792,18 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
         needs_llm = bool(auto_sum or auto_reply_draft or auto_tag or auto_spam or auto_cal)
         if needs_llm:
-            task_candidates = resolve_task_candidates(owner=account_owner)
-            if not task_candidates:
+            managed_route = await asyncio.to_thread(
+                managed_route_summary,
+                owner=operation_owner,
+                purpose="tasks",
+                operation="chat.complete",
+            )
+            if not managed_route:
                 return "No model configured"
-            url, model, headers = task_candidates[0]
+            model_route_id = managed_route["model_route_id"]
+            model = managed_route["model_id"]
         else:
-            url, model, headers = None, "", None
+            model_route_id, model = None, ""
 
         by_account_styles = settings.get("email_writing_styles_by_account") or {}
         writing_style = ""
@@ -779,19 +943,16 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 if att_text:
                     body_for_llm = (body or "") + "\n\n--- ATTACHMENTS ---\n\n" + att_text
 
-                req_headers = {"Content-Type": "application/json"}
-                if headers:
-                    req_headers.update(headers)
-
                 if need_sum:
                     try:
-                        summary = await task_llm_call_async(
+                        summary = await task_complete_text(
                             messages=[
                                 {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
                                 {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
                             ],
-                            fallback_url=url, fallback_model=model, fallback_headers=headers,
-                            owner=account_owner or None,
+                            owner=operation_owner,
+                            model_route_id=model_route_id,
+                            root_operation_id=root_operation_id,
                             temperature=0.3, max_tokens=16384, timeout=240,
                         )
                         summary = _extract_reply((summary or "").strip())
@@ -828,13 +989,14 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     if context_snippets:
                         sys_prompt += "\n\nRELEVANT CONTEXT FROM PAST EMAILS AND CONTACTS:\n" + "\n\n---\n\n".join(context_snippets[:5])
                     try:
-                        reply = await task_llm_call_async(
+                        reply = await task_complete_text(
                             messages=[
                                 {"role": "system", "content": sys_prompt},
                                 {"role": "user", "content": f"Original email:\nFrom: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\nDraft a reply. Return only the reply body text."},
                             ],
-                            fallback_url=url, fallback_model=model, fallback_headers=headers,
-                            owner=account_owner or None,
+                            owner=operation_owner,
+                            model_route_id=model_route_id,
+                            root_operation_id=root_operation_id,
                             temperature=0.7, max_tokens=1024, timeout=90,
                         )
                         reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
@@ -872,7 +1034,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         _existing_summary = get_upcoming_events(_acct_owner, horizon_days=60, limit=40)
                         existing_json = json.dumps(_existing_summary)
                         is_sent = _folder.lower().startswith("sent") or "sent" in _folder.lower()
-                        cal_extract = await task_llm_call_async(
+                        cal_extract = await task_complete_text(
                             messages=[
                                 {"role": "system", "content": (
                                     "You are a calendar assistant. The user receives emails AND sends replies "
@@ -923,8 +1085,9 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                                     f"{body[:4000]}"
                                 )},
                             ],
-                            fallback_url=url, fallback_model=model, fallback_headers=headers,
-                            owner=account_owner or None,
+                            owner=operation_owner,
+                            model_route_id=model_route_id,
+                            root_operation_id=root_operation_id,
                             temperature=0.1, max_tokens=16384, timeout=75,
                         )
                         _raw_original = cal_extract or ""
@@ -1105,23 +1268,18 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "and phishing-style fake urgency. Real urgency comes from people the user "
                             "actually does business with. Be strict — only mark critical/high when genuinely needed."
                         )
-                        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                        payload = {
-                            "model": model,
-                            "messages": [
+                        urgency_messages = [
                                 {"role": "system", "content": urg_sys},
                                 {"role": "user", "content": (
                                     f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date','')}\n\n"
                                     f"{body[:3000]}"
                                 )},
-                            ],
-                            "temperature": 0,
-                            tok_key: 200,
-                        }
-                        urg_raw = await task_llm_call_async(
-                            messages=payload["messages"],
-                            fallback_url=url, fallback_model=model, fallback_headers=headers,
-                            owner=account_owner or None,
+                            ]
+                        urg_raw = await task_complete_text(
+                            messages=urgency_messages,
+                            owner=operation_owner,
+                            model_route_id=model_route_id,
+                            root_operation_id=root_operation_id,
                             temperature=0, max_tokens=200, timeout=60,
                         )
                         urg_raw = _strip_think(urg_raw or "")
@@ -1246,13 +1404,14 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "If it's a mass-mailed generic update with no personal CTA, mark spam=true even if from a legitimate service. "
                             "Reason should be 5-10 words."
                         )
-                        raw_out = await task_llm_call_async(
+                        raw_out = await task_complete_text(
                             messages=[
                                 {"role": "system", "content": class_sys},
                                 {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:4000]}"},
                             ],
-                            fallback_url=url, fallback_model=model, fallback_headers=headers,
-                            owner=account_owner or None,
+                            owner=operation_owner,
+                            model_route_id=model_route_id,
+                            root_operation_id=root_operation_id,
                             temperature=0.1, max_tokens=512, timeout=120,
                         )
                         raw_out = _strip_think((raw_out or "").strip())
@@ -1366,7 +1525,7 @@ async def _auto_summarize_poller():
             logger.error(f"Auto-summarize poller crash: {e}")
 
 
-def _scheduled_poll_once() -> dict:
+def _scheduled_poll_once(owner: str | None = None) -> dict:
     """One pass of the scheduled-email queue: pick up any rows whose
     `send_at` is past, deliver via SMTP, append to Sent, update status.
     Returns a small summary dict — useful for the CLI wrapper. Safe to
@@ -1391,6 +1550,13 @@ def _scheduled_poll_once() -> dict:
         for r in rows:
             sid = r[0]
             try:
+                row_account_id = r[9] if len(r) > 9 else None
+                odysseus_kind = r[10] if len(r) > 10 else "scheduled"
+                row_owner = (r[11] if len(r) > 11 else "") or _owner_for_email_account(row_account_id)
+                effective_row_owner = str(row_owner or "local-installation").strip().lower()
+                if owner is not None and effective_row_owner != str(owner or "local-installation").strip().lower():
+                    continue
+
                 # Atomically claim this row before doing any work. Two
                 # pollers can race here (the in-process asyncio task and an
                 # externally cron-driven `odysseus-mail poll-scheduled`, or
@@ -1414,9 +1580,6 @@ def _scheduled_poll_once() -> dict:
                     continue
 
                 attachments = json.loads(r[8] or "[]")
-                row_account_id = r[9] if len(r) > 9 else None
-                odysseus_kind = r[10] if len(r) > 10 else "scheduled"
-                row_owner = (r[11] if len(r) > 11 else "") or _owner_for_email_account(row_account_id)
                 cfg = _get_email_config(row_account_id, owner=row_owner)
                 has_atts = bool(attachments)
                 if has_atts:
@@ -1491,13 +1654,35 @@ async def _scheduled_email_poller():
     while True:
         try:
             await asyncio.sleep(30)
-            await asyncio.to_thread(_scheduled_poll_once)
+            # One owner per worker gives lifecycle drains an exact join set;
+            # rows without an owner retain the legacy local-installation key.
+            import sqlite3
+            conn = sqlite3.connect(SCHEDULED_DB)
+            try:
+                pending_rows = conn.execute(
+                    "SELECT owner, account_id FROM scheduled_emails WHERE status='pending'"
+                ).fetchall()
+                owners = sorted({
+                    str(owner_value or _owner_for_email_account(account_id) or "local-installation").strip().lower()
+                    for owner_value, account_id in pending_rows
+                })
+            finally:
+                conn.close()
+            for owner in owners or [""]:
+                key = owner or "local-installation"
+                if not _owner_activity_pending(key):
+                    _track_owner_thread(lambda owner=owner: _scheduled_poll_once(owner), key)
         except Exception as e:
             logger.error(f"Scheduled poller error: {e}")
 
 
 _poller_task = None
 _summarize_task = None
+
+
+def owner_lifecycle_hooks() -> dict[str, object]:
+    """Hooks for the root app's composite owner retirement lifecycle."""
+    return {"begin": begin_owner_drain, "drain": drain_owner_activity, "end": end_owner_drain}
 
 def _inprocess_pollers_enabled() -> bool:
     """Honour `ODYSSEUS_INPROCESS_POLLERS` — set to `0`/`false`/`no`/`off`

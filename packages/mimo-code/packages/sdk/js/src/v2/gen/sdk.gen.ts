@@ -22,6 +22,7 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
+  DeleteProviderProviderIdOauthFlowIdResponses,
   EventSubscribeResponses,
   EventTuiCommandExecute,
   EventTuiInstructionsLoaded,
@@ -149,6 +150,12 @@ import type {
   SessionForkResponses,
   SessionGetErrors,
   SessionGetResponses,
+  SessionGoalGetErrors,
+  SessionGoalGetResponses,
+  SessionGoalJournalErrors,
+  SessionGoalJournalResponses,
+  SessionGoalUpdateErrors,
+  SessionGoalUpdateResponses,
   SessionInitErrors,
   SessionInitResponses,
   SessionListResponses,
@@ -1720,6 +1727,154 @@ export class Worktree extends HeyApiClient {
   }
 }
 
+export class Goal extends HeyApiClient {
+  /**
+   * Inspect session goal
+   *
+   * Read the tenant-scoped durable goal, privacy-safe journal replay, queue, history, and outcome counts.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionGoalGetResponses, SessionGoalGetErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Control session goal
+   *
+   * Create, pause, resume, cancel, edit, clear history, or attach typed evidence.
+   */
+  public update<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      body?:
+        | {
+            action: "create"
+            objective: string
+            budget?: {
+              maxTurns?: number
+              maxTokens?: number
+              maxWallMs?: number
+              maxToolCalls?: number
+              deadline?: number
+              usedTurns?: number
+              usedTokens?: number
+              usedToolCalls?: number
+            }
+            requiredEvidence?: Array<"model" | "command" | "file" | "user">
+          }
+        | {
+            action: "pause"
+          }
+        | {
+            action: "resume"
+          }
+        | {
+            action: "cancel"
+          }
+        | {
+            action: "clear_history"
+          }
+        | {
+            action: "edit"
+            expectedRevision: number
+            objective: string
+          }
+        | {
+            action: "evidence"
+            evidence: {
+              kind: "model" | "command" | "file" | "user"
+              subject: string
+              sourceRef: string
+              observation: string
+              producer: string
+              verifier?: string
+            }
+          }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { key: "body", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionGoalUpdateResponses, SessionGoalUpdateErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * List session goal journal
+   *
+   * Read the append-only tenant-scoped goal lifecycle journal.
+   */
+  public journal<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionGoalJournalResponses, SessionGoalJournalErrors, ThrowOnError>({
+      url: "/session/{sessionID}/goal/journal",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Session2 extends HeyApiClient {
   /**
    * List sessions
@@ -2835,6 +2990,11 @@ export class Session2 extends HeyApiClient {
       ...params,
     })
   }
+
+  private _goal?: Goal
+  get goal(): Goal {
+    return (this._goal ??= new Goal({ client: this.client }))
+  }
 }
 
 export class Part extends HeyApiClient {
@@ -3062,7 +3222,7 @@ export class Permission extends HeyApiClient {
   /**
    * Set skip-all state
    *
-   * Enable or disable runtime auto-allow for permission asks. Applies instance-wide, so subagents inherit it. Explicit deny rules and forced-ask permissions (e.g. bash_delete) still apply.
+   * Enable or disable runtime auto-allow for permission asks. Applies instance-wide, so subagents inherit it. Explicit deny rules and forced-ask permissions (e.g. bash_destructive) still apply.
    */
   public setSkipAll<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -3502,6 +3662,9 @@ export class Oauth extends HeyApiClient {
       inputs?: {
         [key: string]: string
       }
+      flowID?: string
+      redirectURI?: string
+      state?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3515,6 +3678,9 @@ export class Oauth extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "body", key: "method" },
             { in: "body", key: "inputs" },
+            { in: "body", key: "flowID" },
+            { in: "body", key: "redirectURI" },
+            { in: "body", key: "state" },
           ],
         },
       ],
@@ -3547,6 +3713,7 @@ export class Oauth extends HeyApiClient {
       workspace?: string
       method?: number
       code?: string
+      flowID?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3560,6 +3727,7 @@ export class Oauth extends HeyApiClient {
             { in: "query", key: "workspace" },
             { in: "body", key: "method" },
             { in: "body", key: "code" },
+            { in: "body", key: "flowID" },
           ],
         },
       ],
@@ -4970,6 +5138,37 @@ export class OpencodeClient extends HeyApiClient {
   constructor(args?: { client?: Client; key?: string }) {
     super(args)
     OpencodeClient.__registry.set(this, args?.key)
+  }
+
+  public deleteProviderProviderIdOauthFlowId<ThrowOnError extends boolean = false>(
+    parameters: {
+      providerID: string
+      flowID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "providerID" },
+            { in: "path", key: "flowID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<DeleteProviderProviderIdOauthFlowIdResponses, unknown, ThrowOnError>(
+      {
+        url: "/provider/{providerID}/oauth/{flowID}",
+        ...options,
+        ...params,
+      },
+    )
   }
 
   private _global?: Global

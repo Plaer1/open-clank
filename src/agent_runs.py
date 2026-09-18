@@ -23,19 +23,24 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "next_seq")
+    __slots__ = (
+        "buffer", "subscribers", "status", "task", "evict_task", "next_seq",
+        "owner",
+    )
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str = "") -> None:
         self.buffer: list[tuple[int, str]] = []  # monotonic id + SSE frame
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
         self.task: Optional[asyncio.Task] = None
         self.evict_task: Optional[asyncio.Task] = None
         self.next_seq: int = 1
+        self.owner: str = str(owner or "").strip().lower()
 
 
 _RUNS: Dict[str, _Run] = {}
 _DRAIN_TASKS: set[asyncio.Task] = set()
+_DRAIN_TASK_OWNERS: dict[asyncio.Task, str] = {}
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -89,25 +94,18 @@ def get_status(session_id: str) -> Optional[str]:
     return r.status if r else None
 
 
-async def _drain(session_id: str, agen: AsyncGenerator[str, None],
+async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
     each out to live subscribers. Runs to completion regardless of subscribers."""
-    run = _RUNS.get(session_id)
-    if run is None:
-        return
-    # If this run replaced an in-flight one (rapid double-send), wait for that
-    # one to fully finish first. Its CancelledError handler calls aclose(), which
-    # persists its partial response — letting it complete before we start writing
-    # keeps the two runs' session saves sequential instead of interleaved.
-    if prev_task is not None and not prev_task.done():
-        try:
-            await asyncio.wait({prev_task})
-        except asyncio.CancelledError:
-            raise            # our own cancellation — propagate
-        except Exception:
-            pass
     try:
+        # If this run replaced an in-flight one (rapid double-send), wait for
+        # that one to fully finish first. Keep this wait inside the cancellation
+        # boundary: an owner quiesce may cancel the replacement before it ever
+        # starts iterating, and its generator still must be closed before the
+        # lifecycle inventory is taken.
+        if prev_task is not None and not prev_task.done():
+            await asyncio.wait({prev_task})
         async for ev in agen:
             if ev.startswith("event: error"):
                 run.status = "error"
@@ -144,7 +142,12 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(
+    session_id: str,
+    agen: AsyncGenerator[str, None],
+    *,
+    owner: str = "",
+) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
@@ -155,12 +158,54 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    run = _Run(owner)
     _RUNS[session_id] = run
-    run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
+    run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
     _DRAIN_TASKS.add(run.task)
-    run.task.add_done_callback(_DRAIN_TASKS.discard)
+    if run.owner:
+        _DRAIN_TASK_OWNERS[run.task] = run.owner
+
+    def _done(done: asyncio.Task) -> None:
+        _DRAIN_TASKS.discard(done)
+        _DRAIN_TASK_OWNERS.pop(done, None)
+
+    run.task.add_done_callback(_done)
     return run
+
+
+async def quiesce_owner(owner: str) -> dict[str, object]:
+    """Cancel and join all detached generators for one exact owner."""
+
+    owner_key = str(owner or "").strip().lower()
+    drained: set[asyncio.Task] = set()
+    while True:
+        tasks = {
+            task
+            for task, task_owner in list(_DRAIN_TASK_OWNERS.items())
+            if task_owner == owner_key and not task.done()
+        }
+        if not tasks:
+            # Finished runs retain their full SSE replay buffer during the
+            # reconnect grace window.  That buffer is account-owned runtime
+            # state too, so an account rename/delete must not leave it behind
+            # under the retired owner key.
+            for session_id, run in list(_RUNS.items()):
+                if run.owner != owner_key:
+                    continue
+                if run.evict_task and not run.evict_task.done():
+                    run.evict_task.cancel()
+                if _RUNS.get(session_id) is run:
+                    _RUNS.pop(session_id, None)
+            return {"owner": owner_key, "drained": len(drained)}
+        for task in tasks:
+            # A replacement run may already be waiting for a predecessor whose
+            # generator is unwinding.  Re-cancelling that predecessor interrupts
+            # ordinary awaited persistence cleanup and lets this boundary return
+            # too early.  Join every task, but issue at most one cancellation.
+            if not task.cancelling():
+                task.cancel()
+        drained.update(tasks)
+        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
 
 async def subscribe(session_id: str, after_seq: int = 0) -> AsyncGenerator[str, None]:
@@ -244,3 +289,4 @@ async def shutdown() -> None:
     if evictions:
         await asyncio.gather(*evictions, return_exceptions=True)
     _RUNS.clear()
+    _DRAIN_TASK_OWNERS.clear()

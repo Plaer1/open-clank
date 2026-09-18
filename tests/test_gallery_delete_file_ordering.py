@@ -8,13 +8,16 @@ loss). The file is now removed only after the soft-delete commit succeeds, and
 best-effort so a missing/locked file can't fail an otherwise-successful delete.
 """
 import asyncio
+import json
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
-from core.database import Base, GalleryImage
+from core.database import Base, ChatMessage, GalleryImage, Session
 import routes.gallery_routes as gallery_routes
 
 
@@ -83,3 +86,130 @@ def test_file_removed_on_successful_delete(tmp_path, monkeypatch):
     row = check.query(GalleryImage).filter(GalleryImage.id == "img-1").first()
     assert row.is_active is False
     check.close()
+
+
+def test_replacement_restores_previous_bytes_when_metadata_commit_fails(tmp_path, monkeypatch):
+    SessionLocal = _seed(tmp_path)
+    image_dir = tmp_path / "data" / "generated_images"
+    monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", image_dir)
+    session = SessionLocal()
+    image = session.query(GalleryImage).filter_by(id="img-1").first()
+    image.file_size = len(b"replacement")
+
+    def _boom():
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(session, "commit", _boom)
+    with pytest.raises(HTTPException) as caught:
+        gallery_routes._commit_gallery_replacement(
+            session,
+            filename="x.png",
+            content=b"replacement",
+            error_message="Image update failed",
+        )
+
+    assert caught.value.status_code == 500
+    assert (image_dir / "x.png").read_bytes() == b"image-bytes"
+    assert not list(image_dir.glob(".openclank-gallery-stage-*"))
+    session.close()
+
+
+def test_upload_database_failure_never_publishes_routable_bytes(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'gallery.db'}",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    failing = session_factory()
+
+    def _boom():
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(failing, "commit", _boom)
+    image_dir = tmp_path / "generated_images"
+    monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", image_dir)
+    monkeypatch.setattr(gallery_routes, "SessionLocal", lambda: failing)
+    monkeypatch.setattr(gallery_routes, "get_current_user", lambda request: "alice")
+    app = FastAPI()
+    app.include_router(gallery_routes.setup_gallery_routes())
+
+    response = TestClient(app).post(
+        "/api/gallery/upload",
+        files={"file": ("photo.png", b"not-a-real-png", "image/png")},
+    )
+
+    assert response.status_code == 500
+    assert not list(image_dir.glob("*.png"))
+    assert not list(image_dir.glob(".openclank-gallery-stage-*"))
+    with session_factory() as check:
+        assert check.query(GalleryImage).count() == 0
+
+
+def test_delete_chat_cleanup_never_touches_a_foreign_owner_session(tmp_path, monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine)
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    (image_dir / "same.png").write_bytes(b"alice image")
+    matching = {
+        "image_id": "img-alice",
+        "image_url": "/api/generated-image/same.png",
+    }
+    other = {"type": "status", "message": "keep me"}
+    with session_factory() as db:
+        db.add_all(
+            [
+                Session(
+                    id="session-alice",
+                    name="Alice",
+                    endpoint_url="http://local",
+                    model="test",
+                    owner="alice",
+                ),
+                Session(
+                    id="session-bob",
+                    name="Bob",
+                    endpoint_url="http://local",
+                    model="test",
+                    owner="bob",
+                ),
+                GalleryImage(
+                    id="img-alice",
+                    filename="same.png",
+                    owner="alice",
+                    is_active=True,
+                ),
+                ChatMessage(
+                    id="message-alice",
+                    session_id="session-alice",
+                    role="assistant",
+                    content="generated",
+                    meta_data=json.dumps({"tool_events": [matching, other]}),
+                ),
+                ChatMessage(
+                    id="message-bob",
+                    session_id="session-bob",
+                    role="assistant",
+                    content="foreign reference",
+                    meta_data=json.dumps({"tool_events": [matching, other]}),
+                ),
+            ]
+        )
+        db.commit()
+
+    monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", image_dir)
+    monkeypatch.setattr(gallery_routes, "get_current_user", lambda request: "alice")
+    monkeypatch.setattr(gallery_routes, "SessionLocal", session_factory)
+    result = asyncio.run(
+        _delete_endpoint()(Request(scope={"type": "http"}), "img-alice")
+    )
+    assert result["status"] == "deleted"
+
+    with session_factory() as db:
+        alice = json.loads(db.query(ChatMessage).filter_by(id="message-alice").one().meta_data)
+        bob = json.loads(db.query(ChatMessage).filter_by(id="message-bob").one().meta_data)
+    assert alice["tool_events"] == [other]
+    assert bob["tool_events"] == [matching, other]

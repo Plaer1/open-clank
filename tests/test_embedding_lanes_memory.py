@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.skip(reason="legacy Chroma memory embedding lanes are retired")
+
 from src.embedding_lanes import (
     EmbeddingLane,
     LANE_CUSTOM,

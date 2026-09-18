@@ -744,10 +744,23 @@ export type EventBashInteractiveAsked = {
     id: string
     command: string
     cwd: string
+    workspace: string
+    writableRoots: Array<string>
+    shell: string
+    network: "enabled" | "disabled"
+    timeout: number
     env?: {
       [key: string]: string
     }
     description: string
+  }
+}
+
+export type EventBashInteractiveCancelled = {
+  type: "bash.interactive.cancelled"
+  properties: {
+    id: string
+    reason: string
   }
 }
 
@@ -822,6 +835,14 @@ export type EventCommandExecuted = {
   }
 }
 
+export type EventSessionCompacted = {
+  type: "session.compacted"
+  properties: {
+    sessionID: string
+    agentID?: string
+  }
+}
+
 export type EventWorktreeReady = {
   type: "worktree.ready"
   properties: {
@@ -861,8 +882,22 @@ export type EventSessionGoal = {
   properties: {
     sessionID: string
     goal?: {
+      id: string
       condition: string
+      revision: number
+      status:
+        | "queued"
+        | "active"
+        | "awaiting_verification"
+        | "paused"
+        | "blocked"
+        | "verification_degraded"
+        | "completed"
+        | "cancelled"
+        | "expired"
+      react: number
     }
+    queued?: number
     lastVerdict?: {
       ok: boolean
       impossible?: boolean
@@ -870,15 +905,15 @@ export type EventSessionGoal = {
       attempt: number
       messageID?: string
       error?: boolean
+      reasonCode?:
+        | "not_met"
+        | "met"
+        | "impossible"
+        | "judge_timeout"
+        | "judge_provider_failure"
+        | "judge_malformed_verdict"
+        | "evidence_policy_not_satisfied"
     }
-  }
-}
-
-export type EventSessionCompacted = {
-  type: "session.compacted"
-  properties: {
-    sessionID: string
-    agentID?: string
   }
 }
 
@@ -1195,6 +1230,10 @@ export type ToolStateCompleted = {
     [key: string]: unknown
   }
   output: string
+  providerOutput?: Schema0
+  providerMetadata?: {
+    [key: string]: unknown
+  }
   title: string
   metadata: {
     [key: string]: unknown
@@ -1604,6 +1643,7 @@ export type GlobalEvent = {
     | EventQuestionRejected
     | EventSessionCwd
     | EventBashInteractiveAsked
+    | EventBashInteractiveCancelled
     | EventBashInteractiveReplied
     | EventSessionStatus
     | EventSessionIdle
@@ -1611,11 +1651,11 @@ export type GlobalEvent = {
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
+    | EventSessionCompacted
     | EventWorktreeReady
     | EventWorktreeFailed
     | EventTodoUpdated
     | EventSessionGoal
-    | EventSessionCompacted
     | EventPtyCreated
     | EventPtyUpdated
     | EventPtyExited
@@ -2193,6 +2233,15 @@ export type Config = {
      * Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
      */
     reserved?: number
+    /**
+     * Compact earlier than the model window. A token count (300000), a shorthand string ("300K", "1M", "50%"), or a map keyed by "<providerID>/<modelID>" with wildcards ("openai/gpt-5*"). Always clamped to the model's real window — it can only lower the compaction trigger, never raise it. 0 means no budget.
+     */
+    max_context?:
+      | number
+      | string
+      | {
+          [key: string]: number | string
+        }
   }
   checkpoint?: {
     /**
@@ -2286,6 +2335,28 @@ export type Config = {
      * Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.
      */
     cc_index?: boolean
+    /**
+     * Memory search provider. 'native' uses the built-in FTS5 markdown index (default). 'frankenmemory' delegates to the fm-mcp Rust engine over MCP stdio.
+     */
+    provider?: "native" | "frankenmemory"
+    graph?: {
+      /**
+       * Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in frankenmemory. Requires memory.provider = 'frankenmemory'. Default: true.
+       */
+      enabled?: boolean
+      /**
+       * Model for graph extraction as 'provider/model'. Default: the cheapest configured model (by input cost), falling back to the session default.
+       */
+      model?: string
+      /**
+       * Extract from every Nth captured turn per session. Default: 1 (every turn). Raise to trade graph freshness for token spend.
+       */
+      every_n_turns?: number
+      /**
+       * Minimum seconds between extractions per session, applied on top of every_n_turns. Default: 0.
+       */
+      min_interval_seconds?: number
+    }
   }
   /**
    * Trajectory (conversation history) FTS index configuration.
@@ -2298,7 +2369,7 @@ export type Config = {
   }
   dream?: {
     /**
-     * Auto-trigger dream memory consolidation on new session start. Default: true.
+     * Auto-trigger dream memory consolidation on new session start. Default: false.
      */
     auto?: boolean
     /**
@@ -2308,7 +2379,7 @@ export type Config = {
   }
   distill?: {
     /**
-     * Auto-trigger distill workflow packaging on new session start. Default: true.
+     * Auto-trigger distill workflow packaging on new session start. Default: false.
      */
     auto?: boolean
     /**
@@ -2532,12 +2603,11 @@ export type Model = {
   cachePromptTTL?: "5m" | "1h"
 }
 
-export type Provider = {
+export type PublicProvider = {
   id: string
   name: string
   source: "env" | "config" | "custom" | "api"
   env: Array<string>
-  key?: string
   options: {
     [key: string]: unknown
   }
@@ -2825,6 +2895,7 @@ export type Event =
   | EventQuestionRejected
   | EventSessionCwd
   | EventBashInteractiveAsked
+  | EventBashInteractiveCancelled
   | EventBashInteractiveReplied
   | EventSessionStatus
   | EventSessionIdle
@@ -2832,11 +2903,11 @@ export type Event =
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
+  | EventSessionCompacted
   | EventWorktreeReady
   | EventWorktreeFailed
   | EventTodoUpdated
   | EventSessionGoal
-  | EventSessionCompacted
   | EventPtyCreated
   | EventPtyUpdated
   | EventPtyExited
@@ -2957,6 +3028,16 @@ export type FormatterStatus = {
   extensions: Array<string>
   enabled: boolean
 }
+
+export type Schema0 =
+  | string
+  | number
+  | boolean
+  | null
+  | Array<Schema0>
+  | {
+      [key: string]: Schema0
+    }
 
 export type GlobalHealthData = {
   body?: never
@@ -3798,7 +3879,7 @@ export type ConfigProvidersResponses = {
    * List of providers
    */
   200: {
-    providers: Array<Provider>
+    providers: Array<PublicProvider>
     default: {
       [key: string]: string
     }
@@ -4209,6 +4290,1079 @@ export type SessionStatusResponses = {
 }
 
 export type SessionStatusResponse = SessionStatusResponses[keyof SessionStatusResponses]
+
+export type SessionGoalGetData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalGetError = SessionGoalGetErrors[keyof SessionGoalGetErrors]
+
+export type SessionGoalGetResponses = {
+  /**
+   * Goal state
+   */
+  200: {
+    state: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    replay?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    analytics: {
+      [key: string]: number
+    }
+  }
+}
+
+export type SessionGoalGetResponse = SessionGoalGetResponses[keyof SessionGoalGetResponses]
+
+export type SessionGoalUpdateData = {
+  body?:
+    | {
+        action: "create"
+        objective: string
+        budget?: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+      }
+    | {
+        action: "pause"
+      }
+    | {
+        action: "resume"
+      }
+    | {
+        action: "cancel"
+      }
+    | {
+        action: "clear_history"
+      }
+    | {
+        action: "edit"
+        expectedRevision: number
+        objective: string
+      }
+    | {
+        action: "evidence"
+        evidence: {
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          producer: string
+          verifier?: string
+        }
+      }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalUpdateErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+  /**
+   * Conflict — session resource is busy
+   */
+  409: ConflictError
+}
+
+export type SessionGoalUpdateError = SessionGoalUpdateErrors[keyof SessionGoalUpdateErrors]
+
+export type SessionGoalUpdateResponses = {
+  /**
+   * Updated goal state
+   */
+  200: {
+    state: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    replay?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    analytics: {
+      [key: string]: number
+    }
+  }
+}
+
+export type SessionGoalUpdateResponse = SessionGoalUpdateResponses[keyof SessionGoalUpdateResponses]
+
+export type SessionGoalJournalData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal/journal"
+}
+
+export type SessionGoalJournalErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalJournalError = SessionGoalJournalErrors[keyof SessionGoalJournalErrors]
+
+export type SessionGoalJournalResponses = {
+  /**
+   * Goal journal
+   */
+  200: Array<{
+    id: string
+    goalID: string
+    revision: number
+    envelopeRevision?: number
+    actor: "user" | "worker" | "verifier" | "system"
+    type: string
+    reasonCode?: string
+    budgetDelta?: {
+      turns?: number
+      tokens?: number
+      toolCalls?: number
+    }
+    evidenceRefs?: Array<string>
+    stateHash?: string
+    snapshot?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    createdAt: number
+  }>
+}
+
+export type SessionGoalJournalResponse = SessionGoalJournalResponses[keyof SessionGoalJournalResponses]
 
 export type SessionDeleteData = {
   body?: never
@@ -5664,6 +6818,14 @@ export type BashInteractiveListResponses = {
     id: string
     command: string
     cwd: string
+    workspace: string
+    writableRoots: Array<string>
+    shell: string
+    network: "enabled" | "disabled"
+    timeout: number
+    env?: {
+      [key: string]: string
+    }
     description: string
   }>
 }
@@ -5728,7 +6890,7 @@ export type ProviderListResponses = {
    * List of providers
    */
   200: {
-    all: Array<Provider>
+    all: Array<PublicProvider>
     default: {
       [key: string]: string
     }
@@ -5772,6 +6934,18 @@ export type ProviderOauthAuthorizeData = {
     inputs?: {
       [key: string]: string
     }
+    /**
+     * Caller-owned authorization flow ID
+     */
+    flowID?: string
+    /**
+     * Public OAuth callback URI
+     */
+    redirectURI?: string
+    /**
+     * Caller-owned OAuth state
+     */
+    state?: string
   }
   path: {
     /**
@@ -5814,6 +6988,10 @@ export type ProviderOauthCallbackData = {
      * OAuth authorization code
      */
     code?: string
+    /**
+     * Caller-owned authorization flow ID
+     */
+    flowID?: string
   }
   path: {
     /**
@@ -5845,6 +7023,23 @@ export type ProviderOauthCallbackResponses = {
 }
 
 export type ProviderOauthCallbackResponse = ProviderOauthCallbackResponses[keyof ProviderOauthCallbackResponses]
+
+export type DeleteProviderProviderIdOauthFlowIdData = {
+  body?: never
+  path: {
+    providerID: string
+    flowID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/provider/{providerID}/oauth/{flowID}"
+}
+
+export type DeleteProviderProviderIdOauthFlowIdResponses = {
+  200: unknown
+}
 
 export type SyncStartData = {
   body?: never
@@ -6790,6 +7985,18 @@ export type AppSkillsResponses = {
     content: string
     hidden?: boolean
     bundled?: boolean
+    skillID?: string
+    revision?: number
+    contentHash?: string
+    owner?: string
+    status?: string
+    source?: string
+    sourceURI?: string
+    sourceRevision?: string
+    platforms?: Array<string>
+    requiresToolsets?: Array<string>
+    trust?: string
+    lastAudit?: number
   }>
 }
 

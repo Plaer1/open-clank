@@ -17,7 +17,7 @@ MIGRATION_KIND = "copal-migration"
 TRACKS_NAME = ".copal/tracks.json"
 MIGRATION_NAME = ".copal/planning-migration.json"
 EVENT_SCHEMA = 2
-TRACK_SCHEMA = 1
+TRACK_SCHEMA = 2
 
 MAX_RECURRENCE_EXPANSION = 500
 _FREQUENCIES = {"daily", "weekly", "monthly"}
@@ -306,7 +306,7 @@ def merge_event(current: dict[str, Any], patch: dict[str, Any], tracks: Iterable
     return validate_event(merged, tracks)
 
 
-def validate_tracks(tracks: Any) -> list[dict[str, Any]]:
+def _validate_tracks_for_schema(tracks: Any, *, schema_version: int) -> list[dict[str, Any]]:
     if not isinstance(tracks, list):
         raise PlanningValidationError("tracks must be a list")
     result: list[dict[str, Any]] = []
@@ -329,13 +329,133 @@ def validate_tracks(tracks: Any) -> list[dict[str, Any]]:
         current["color"] = color.lower()
         current["icon"] = str(current.get("icon") or "•")[:32]
         current["enabled"] = current.get("enabled") is not False
+        if schema_version == 1:
+            current["parentTrackId"] = None
+        else:
+            parent = current.get("parentTrackId")
+            if parent is None:
+                current["parentTrackId"] = None
+            elif not isinstance(parent, str):
+                raise PlanningValidationError(
+                    f"Track {track_id} parentTrackId must be a string or null"
+                )
+            else:
+                parent = parent.strip()
+                if not parent:
+                    raise PlanningValidationError(f"Track {track_id} parentTrackId cannot be blank")
+                current["parentTrackId"] = parent
         result.append(current)
+
+    by_id = {track["id"]: track for track in result}
+    for track in result:
+        parent = track["parentTrackId"]
+        if parent == track["id"]:
+            raise PlanningValidationError(f"Track {track['id']} cannot parent itself")
+        if parent is not None and parent not in by_id:
+            raise PlanningValidationError(f"Track {track['id']} has unknown parent {parent}")
+
+    settled: set[str] = set()
+    for track in result:
+        current_id: str | None = track["id"]
+        chain: set[str] = set()
+        while current_id is not None and current_id not in settled:
+            if current_id in chain:
+                raise PlanningValidationError("Track hierarchy contains a cycle")
+            chain.add(current_id)
+            current_id = by_id[current_id]["parentTrackId"]
+        settled.update(chain)
     return result
+
+
+def validate_tracks(tracks: Any) -> list[dict[str, Any]]:
+    return _validate_tracks_for_schema(tracks, schema_version=TRACK_SCHEMA)
+
+
+def _preorder_validated_tracks(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    children: dict[str | None, list[dict[str, Any]]] = {None: []}
+    for track in tracks:
+        children.setdefault(track["parentTrackId"], []).append(track)
+
+    ordered: list[dict[str, Any]] = []
+    stack = list(reversed(children[None]))
+    while stack:
+        track = stack.pop()
+        ordered.append(track)
+        stack.extend(reversed(children.get(track["id"], [])))
+    return ordered
+
+
+def track_preorder(tracks: Any) -> list[dict[str, Any]]:
+    """Return normalized tracks in stable, iterative depth-first preorder."""
+    return _preorder_validated_tracks(validate_tracks(tracks))
+
+
+def _subtree_ids(tracks: list[dict[str, Any]], root_id: str) -> list[str]:
+    children: dict[str, list[str]] = {}
+    for track in tracks:
+        parent = track["parentTrackId"]
+        if parent is not None:
+            children.setdefault(parent, []).append(track["id"])
+
+    result: list[str] = []
+    stack = [root_id]
+    while stack:
+        track_id = stack.pop()
+        result.append(track_id)
+        stack.extend(reversed(children.get(track_id, [])))
+    return result
+
+
+def reparent_track(
+    tracks: Any,
+    moved_track_id: str,
+    parent_track_id: str | None,
+) -> list[dict[str, Any]]:
+    """Move one complete track subtree, preserving stable sibling order."""
+    original = deepcopy(tracks)
+    ordered = track_preorder(tracks)
+    moved_id = str(moved_track_id or "").strip()
+    by_id = {track["id"]: track for track in ordered}
+    if moved_id not in by_id:
+        raise PlanningValidationError(f"Unknown moved track: {moved_id}")
+
+    if parent_track_id is None:
+        parent_id = None
+    elif not isinstance(parent_track_id, str):
+        raise PlanningValidationError("Target parentTrackId must be a string or null")
+    else:
+        parent_id = parent_track_id.strip()
+        if not parent_id:
+            raise PlanningValidationError("Target parentTrackId cannot be blank")
+        if parent_id not in by_id:
+            raise PlanningValidationError(f"Unknown target parent: {parent_id}")
+
+    subtree_ids = _subtree_ids(ordered, moved_id)
+    subtree_set = set(subtree_ids)
+    if parent_id == moved_id:
+        raise PlanningValidationError(f"Track {moved_id} cannot parent itself")
+    if parent_id in subtree_set:
+        raise PlanningValidationError(f"Track {moved_id} cannot move beneath its descendant {parent_id}")
+    if by_id[moved_id]["parentTrackId"] == parent_id:
+        return original
+
+    by_id[moved_id]["parentTrackId"] = parent_id
+    subtree = [by_id[track_id] for track_id in subtree_ids]
+    remaining = [track for track in ordered if track["id"] not in subtree_set]
+    if parent_id is None:
+        candidate = [*remaining, *subtree]
+    else:
+        target_subtree = set(_subtree_ids(remaining, parent_id))
+        insert_at = max(
+            index for index, track in enumerate(remaining) if track["id"] in target_subtree
+        ) + 1
+        candidate = [*remaining[:insert_at], *subtree, *remaining[insert_at:]]
+    return track_preorder(candidate)
 
 
 def serialize_track_registry(tracks: list[dict[str, Any]], metadata: dict[str, Any] | None = None) -> str:
     payload = deepcopy(metadata or {})
-    payload.update({"schemaVersion": TRACK_SCHEMA, "tracks": validate_tracks(tracks)})
+    payload.update({"schemaVersion": TRACK_SCHEMA, "tracks": track_preorder(tracks)})
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -349,7 +469,17 @@ def track_registry_from_document(doc: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise PlanningValidationError("Track registry root must be an object")
     payload = deepcopy(payload)
-    payload["tracks"] = validate_tracks(payload.get("tracks") or [])
+    if "schemaVersion" not in payload:
+        schema_version = 1
+    else:
+        schema_version = payload["schemaVersion"]
+        if type(schema_version) is not int or schema_version not in {1, TRACK_SCHEMA}:
+            raise PlanningValidationError("Track registry schemaVersion must be 1 or 2")
+    payload["schemaVersion"] = schema_version
+    raw_tracks = payload["tracks"] if "tracks" in payload else []
+    payload["tracks"] = _preorder_validated_tracks(
+        _validate_tracks_for_schema(raw_tracks, schema_version=schema_version)
+    )
     return payload
 
 
@@ -421,7 +551,7 @@ def legacy_inventory(planning_doc: dict[str, Any]) -> dict[str, Any]:
         raise PlanningValidationError("Legacy planning document is not valid JSON") from exc
     if not isinstance(data, dict):
         raise PlanningValidationError("Legacy planning root must be an object")
-    tracks = validate_tracks(data.get("tracks") or [])
+    tracks = _validate_tracks_for_schema(data.get("tracks") or [], schema_version=1)
     events: list[dict[str, Any]] = []
     diagnostics: list[dict[str, str]] = []
     seen: set[str] = set()

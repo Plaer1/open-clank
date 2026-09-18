@@ -50,9 +50,19 @@ import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, T
 import { applyPatch } from "diff"
 import { InstallationVersion } from "@/installation/version"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { OpenClankManagedProtocol } from "./openclank-protocol"
+import { ManagedProvider } from "./managed-provider"
+import { ManagedProviderControl } from "./provider-control"
+import { ManagedOperations } from "./managed-operations"
 
 type ModeOption = { id: string; name: string; description?: string }
-type ModelOption = { modelId: string; name: string }
+export type ModelOption = {
+  modelId: string
+  name: string
+  baseModelId: string
+  preset?: string
+  variant?: string
+}
 
 const DEFAULT_VARIANT_VALUE = "default"
 
@@ -146,6 +156,8 @@ export class Agent implements ACPAgent {
   private toolStarts = new Set<string>()
   private permissionQueues = new Map<string, Promise<void>>()
   private questionQueues = new Map<string, Promise<void>>()
+  private providerControl = new ManagedProviderControl.ControlPlane()
+  private managedOperations: ManagedOperations.Router
   private actorFeeds = new Map<string, { rootTurnID: string; revision: number; baseline: Set<string> }>()
   private actorRoots = new Map<string, string>()
   private actorRevisions = new Map<string, number>()
@@ -157,6 +169,8 @@ export class Agent implements ACPAgent {
 
   constructor(connection: AgentSideConnection, config: ACPConfig) {
     this.connection = connection
+    ManagedProvider.installHostConnection(connection)
+    this.managedOperations = new ManagedOperations.Router(connection)
     this.config = config
     this.sdk = config.sdk
     this.sessionManager = new ACPSessionManager(this.sdk)
@@ -164,9 +178,16 @@ export class Agent implements ACPAgent {
   }
 
   async extMethod(method: string, params: Record<string, unknown>) {
-    if (method !== "_odysseus/session/release") {
-      throw new Error(`Unsupported ACP extension method: ${method}`)
+    if (OpenClankManagedProtocol.isProviderControlMethod(method)) {
+      return this.providerControl.handle(method, params as never)
     }
+    if (method === "_openclank/operations/v1/execute") {
+      if (!ManagedProvider.enabled()) {
+        throw RequestError.invalidParams("managed operations require Open Clank managed mode")
+      }
+      return this.managedOperations.handle(params)
+    }
+    if (method !== "_odysseus/session/release") throw new Error(`Unsupported ACP extension method: ${method}`)
     const sessionId = String(params.sessionId ?? "")
     if (!sessionId) throw RequestError.invalidParams("sessionId is required")
     await this.sessionManager.release(sessionId)
@@ -667,6 +688,13 @@ export class Agent implements ACPAgent {
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     log.info("initialize", { protocolVersion: params.protocolVersion })
 
+    const managed = ManagedProvider.enabled()
+    if (managed) {
+      OpenClankManagedProtocol.validatePeerCapabilities(
+        params.clientCapabilities?._meta?.openclankManaged,
+      )
+    }
+
     const authMethod: AuthMethod = {
       description: "Run `opencode auth login` in the terminal",
       name: "Login with opencode",
@@ -702,12 +730,13 @@ export class Agent implements ACPAgent {
           resume: {},
         },
       },
-      authMethods: [authMethod],
+      authMethods: managed ? [] : [authMethod],
       agentInfo: {
-        name: "OpenCode",
+        name: managed ? "Open Clank Engine" : "OpenCode",
         version: InstallationVersion,
       },
-    }
+      ...(managed ? { _meta: OpenClankManagedProtocol.initializeMeta } : {}),
+    } as InitializeResponse
   }
 
   async authenticate(_params: AuthenticateRequest) {
@@ -1467,8 +1496,12 @@ export class Agent implements ACPAgent {
           lane?: string
           root_turn_id?: string
         }
+        openclankProvider?: unknown
       }
     })._meta?.odysseus
+    const managedProvider = (params as PromptRequest & {
+      _meta?: { openclankProvider?: unknown }
+    })._meta?.openclankProvider
     const hostSystem = odysseus?.system_prompt?.trim() || undefined
     const sessionID = params.sessionId
     const session = this.sessionManager.get(sessionID)
@@ -1597,6 +1630,14 @@ export class Agent implements ACPAgent {
       cachedWriteTokens: msg.tokens.cache?.write || undefined,
     })
 
+    const runManaged = <A>(run: () => Promise<A>) =>
+      ManagedProvider.withOperation(
+        sessionID,
+        managedProvider,
+        { providerID: model.providerID, modelID: model.modelID },
+        run,
+      )
+
     // The server resolves session.prompt 200 even when the turn died on a
     // provider error (it lands on info.error), and the SDK reports transport
     // rejections (e.g. session busy) via response.error without throwing.
@@ -1626,19 +1667,21 @@ export class Agent implements ACPAgent {
     }
 
     if (!cmd) {
-      const response = await this.sdk.session.prompt({
-        sessionID,
-        model: {
-          providerID: model.providerID,
-          modelID: model.modelID,
-        },
-        variant: this.sessionManager.getVariant(sessionID),
-        parts,
-        agent,
-        directory,
-        tools: odysseus?.tools,
-        system: hostSystem,
-      })
+      const response = await runManaged(() =>
+        this.sdk.session.prompt({
+          sessionID,
+          model: {
+            providerID: model.providerID,
+            modelID: model.modelID,
+          },
+          variant: this.sessionManager.getVariant(sessionID),
+          parts,
+          agent,
+          directory,
+          tools: odysseus?.tools,
+          system: hostSystem,
+        }),
+      )
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1668,14 +1711,16 @@ export class Agent implements ACPAgent {
     if (command) {
       // session.command has no system-override input; command templates keep
       // their own framing. Persona authority applies to ordinary prompts.
-      const response = await this.sdk.session.command({
-        sessionID,
-        command: command.name,
-        arguments: cmd.args,
-        model: model.providerID + "/" + model.modelID,
-        agent,
-        directory,
-      })
+      const response = await runManaged(() =>
+        this.sdk.session.command({
+          sessionID,
+          command: command.name,
+          arguments: cmd.args,
+          model: model.providerID + "/" + model.modelID,
+          agent,
+          directory,
+        }),
+      )
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1701,14 +1746,16 @@ export class Agent implements ACPAgent {
 
     switch (cmd.name) {
       case "compact":
-        await this.config.sdk.session.summarize(
-          {
-            sessionID,
-            directory,
-            providerID: model.providerID,
-            modelID: model.modelID,
-          },
-          { throwOnError: true },
+        await runManaged(() =>
+          this.config.sdk.session.summarize(
+            {
+              sessionID,
+              directory,
+              providerID: model.providerID,
+              modelID: model.modelID,
+            },
+            { throwOnError: true },
+          ),
         )
         break
     }
@@ -1928,24 +1975,36 @@ function modelVariantsFromProviders(
   return Object.keys(modelInfo.variants)
 }
 
-function buildAvailableModels(
-  providers: Array<{ id: string; name: string; models: Record<string, any> }>,
+export function buildAvailableModels(
+  providers: Array<{
+    id: string
+    name: string
+    models: Record<
+      string,
+      { id: string; name: string; baseModelId?: string; preset?: string; variants?: Record<string, unknown> }
+    >
+  }>,
   options: { includeVariants?: boolean } = {},
 ): ModelOption[] {
   const includeVariants = options.includeVariants ?? false
   return providers.flatMap((provider) => {
-    const unsorted: Array<{ id: string; name: string; variants?: Record<string, any> }> = Object.values(provider.models)
+    const unsorted = Object.values(provider.models)
     const models = Provider.sort(unsorted)
     return models.flatMap((model) => {
       const base: ModelOption = {
         modelId: `${provider.id}/${model.id}`,
         name: `${provider.name}/${model.name}`,
+        baseModelId: model.baseModelId ?? `${provider.id}/${model.id}`,
+        ...(model.preset ? { preset: model.preset } : {}),
       }
       if (!includeVariants || !model.variants) return [base]
       const variants = Object.keys(model.variants).filter((variant) => variant !== DEFAULT_VARIANT_VALUE)
       const variantOptions = variants.map((variant) => ({
         modelId: `${provider.id}/${model.id}/${variant}`,
         name: `${provider.name}/${model.name} (${variant})`,
+        baseModelId: base.baseModelId,
+        ...(base.preset ? { preset: base.preset } : {}),
+        variant,
       }))
       return [base, ...variantOptions]
     })

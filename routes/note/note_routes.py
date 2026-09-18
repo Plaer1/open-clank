@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from core.database import SessionLocal, Note
+from core.atomic_io import atomic_write_json
 from core.middleware import INTERNAL_TOOL_USER
 from src.auth_helpers import require_user
 from src.constants import DATA_DIR
@@ -144,6 +145,8 @@ async def dispatch_reminder(
     owner: str = "",
     queue_browser: bool = True,
     settings_override: dict | None = None,
+    occurrence_key: str | None = None,
+    retry_unknown: bool = False,
 ) -> dict:
     """Fire a reminder via the configured channel (browser/email/ntfy/webhook).
 
@@ -158,16 +161,132 @@ async def dispatch_reminder(
     the in-memory notification queue picked up by the frontend poller, so
     nothing is "sent" synchronously for it — the channel just routes there.
     """
-    from src.settings import load_settings
-    settings = {**load_settings(), **(settings_override or {})}
+    from src.settings import load_settings, PER_USER_MODEL_SETTING_KEYS
+    settings = {**load_settings()}
+    # Reminder preferences are scoped to the note owner.  Keep the legacy
+    # settings.json defaults as the base, then overlay that user's saved
+    # values before applying a one-call override (used by tests and the
+    # multi-endpoint fan-out below).
+    if owner:
+        try:
+            from routes.prefs_routes import _load_for_user
+            owner_prefs = _load_for_user(owner) or {}
+            settings.update({
+                key: owner_prefs[key]
+                for key in PER_USER_MODEL_SETTING_KEYS
+                if key in owner_prefs
+            })
+        except Exception as _prefs_error:
+            logger.debug("dispatch_reminder: user preference load failed: %s", _prefs_error)
+    settings.update(settings_override or {})
+
+    # A user may configure several delivery targets.  Fan out once per
+    # enabled target while retaining the existing channel-specific dispatch
+    # implementation below.  The private marker prevents nested fan-out when
+    # an endpoint object happens to contain its own reminder_endpoints field.
+    from src.reminder_endpoints import claim_receipt, endpoint_rows, finish_receipt
+    _override = settings_override or {}
+    endpoint_list = endpoint_rows(settings.get("reminder_endpoints"))
+    is_test_occurrence = str(note_id).startswith("test-")
+    if endpoint_list and not is_test_occurrence and not _override.get("_dispatch_endpoint") and not _override.get("_skip_endpoint_fanout"):
+        # Disabled or invalid rows do not consume the first-delivery slot.
+        # The first active endpoint owns synthesis and the single queued
+        # browser notification; counting skipped rows here could otherwise
+        # suppress both when the first saved row is disabled.
+        active_endpoints = [
+            endpoint for endpoint in endpoint_list
+            if isinstance(endpoint, dict)
+            and not endpoint.get("invalid")
+            and endpoint.get("enabled", True) is not False
+        ]
+        results = []
+        for endpoint_index, endpoint in enumerate(active_endpoints):
+            endpoint_override = {
+                "_dispatch_endpoint": True,
+                "_endpoint_id": endpoint["id"],
+                "_occurrence_key": occurrence_key or str(note_id),
+                "_retry_unknown": retry_unknown,
+                "_skip_synthesis": endpoint_index > 0,
+            }
+            for source_key, target_key in (
+                ("channel", "reminder_channel"),
+                ("reminder_channel", "reminder_channel"),
+                ("email_to", "reminder_email_to"),
+                ("reminder_email_to", "reminder_email_to"),
+                ("email_account_id", "reminder_email_account_id"),
+                ("reminder_email_account_id", "reminder_email_account_id"),
+                ("ntfy_topic", "reminder_ntfy_topic"),
+                ("reminder_ntfy_topic", "reminder_ntfy_topic"),
+                ("ntfy_integration_id", "reminder_ntfy_integration_id"),
+                ("reminder_ntfy_integration_id", "reminder_ntfy_integration_id"),
+                ("webhook_integration_id", "reminder_webhook_integration_id"),
+                ("reminder_webhook_integration_id", "reminder_webhook_integration_id"),
+                ("webhook_payload_template", "reminder_webhook_payload_template"),
+                ("reminder_webhook_payload_template", "reminder_webhook_payload_template"),
+            ):
+                if source_key in endpoint:
+                    endpoint_override[target_key] = endpoint[source_key]
+            results.append(await dispatch_reminder(
+                title,
+                note_body,
+                note_id,
+                owner=owner,
+                queue_browser=queue_browser and endpoint_index == 0,
+                settings_override=endpoint_override,
+            ))
+        if results:
+            def _joined_error(key):
+                return "; ".join(str(item.get(key) or "") for item in results if item.get(key))
+            endpoint_statuses = [item.get("endpoint_status") for item in results]
+            return {
+                "channel": "multiple",
+                "channels": [item.get("channel") for item in results],
+                "synthesis": next((item.get("synthesis") for item in results if item.get("synthesis")), None),
+                "email_sent": any(item.get("email_sent") for item in results),
+                "email_error": _joined_error("email_error"),
+                "ntfy_sent": any(item.get("ntfy_sent") for item in results),
+                "ntfy_error": _joined_error("ntfy_error"),
+                "webhook_sent": any(item.get("webhook_sent") for item in results),
+                "webhook_error": _joined_error("webhook_error"),
+                "browser_sent": any(item.get("browser_sent") for item in results),
+                "endpoints": [
+                    {"id": item.get("endpoint_id"), "channel": item.get("channel"),
+                     "status": item.get("endpoint_status", "error"),
+                     "error": item.get("endpoint_error", "")}
+                    for item in results
+                ],
+                "aggregate": (
+                    "unknown" if any(item.get("endpoint_status") == "unknown" for item in results)
+                    else "sent" if all(status in {"sent", "skipped"} for status in endpoint_statuses) and any(status == "sent" for status in endpoint_statuses)
+                    else "skipped" if all(status == "skipped" for status in endpoint_statuses)
+                    else "partial" if any(status == "sent" for status in endpoint_statuses)
+                    else "error"
+                ),
+            }
+        return {"channel": "multiple", "endpoints": [], "aggregate": "disabled"}
     channel = settings.get("reminder_channel", "browser")
-    llm_on = bool(settings.get("reminder_llm_synthesis", False))
+    _endpoint_id = str(_override.get("_endpoint_id") or f"legacy:{channel}")
+    _claim = None
+    if _override.get("_dispatch_endpoint"):
+        _claim = claim_receipt(
+            owner or "", str(_override.get("_occurrence_key") or note_id),
+            _endpoint_id, retry_unknown=bool(_override.get("_retry_unknown")),
+        )
+        if not _claim.get("claimed"):
+            status = "unknown" if _claim.get("unknown") else "skipped" if _claim.get("status") == "sent" else str(_claim.get("status") or "skipped")
+            return {
+                "channel": channel, "endpoint_id": _endpoint_id,
+                "endpoint_status": status, "endpoint_error": _claim.get("error", ""),
+                "email_sent": False, "ntfy_sent": False, "webhook_sent": False,
+                "browser_sent": False, "skipped": status == "skipped",
+            }
+    llm_on = bool(settings.get("reminder_llm_synthesis", False)) and not _override.get("_skip_synthesis")
     title = (title or "").strip()
     note_body = (note_body or "").strip()
     cache_key = str(note_id) if note_id else ""
     cache = {}
     cache_path = None
-    if cache_key:
+    if cache_key and not _override.get("_dispatch_endpoint"):
         try:
             import json as _json
             from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -208,83 +327,87 @@ async def dispatch_reminder(
     _SYNTH_FAILED_TAG = "[utility model unavailable — no summary generated]"
     if llm_on:
         try:
-            from src.endpoint_resolver import resolve_endpoint
-            from src.llm_core import llm_call_async
+            from src.openclank.modality_facade import complete_text
             from src.reminder_personas import synthesis_system_prompt
-            url, model, headers = resolve_endpoint("utility", owner=owner or None)
-            if not url:
-                url, model, headers = resolve_endpoint("default", owner=owner or None)
-            if url and model:
-                persona_id = (settings.get("reminder_llm_persona") or "").strip()
-                sys_prompt = synthesis_system_prompt(persona_id, owner=owner or "")
-                raw = await llm_call_async(
-                    url=url, model=model,
-                    messages=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": f"Title: {title}\n\n{note_body}".strip()},
-                    ],
-                    temperature=0.7, max_tokens=200, headers=headers, timeout=30,
-                    owner=owner or None,
+            import hashlib
+
+            persona_id = (settings.get("reminder_llm_persona") or "").strip()
+            sys_prompt = synthesis_system_prompt(persona_id, owner=owner or "")
+            raw = await complete_text(
+                owner=owner or "local-installation",
+                purpose="utility",
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": f"Title: {title}\n\n{note_body}".strip()},
+                ],
+                temperature=0.7,
+                max_output_tokens=200,
+                idempotency_key=(
+                    "note-reminder-"
+                    + hashlib.sha256(
+                        f"{title}\0{note_body}".encode("utf-8")
+                    ).hexdigest()[:32]
+                ),
+            )
+            from src.text_helpers import strip_think as _strip_think
+            # prose=True strips untagged "The user wants me to…" chain-of-thought.
+            # prompt_echo=True strips Qwen-style "Thinking Process:" / leaked
+            # prompt prefixes. Both are safe here because this is a
+            # one-sentence LLM-only output, not user-pasted content.
+            synthesis = _strip_think(raw or "", prose=True, prompt_echo=True)
+            # Reminder synthesis is supposed to be ONE sentence. Strip-think's
+            # paragraph-based heuristic misses cases where the model puts
+            # reasoning + answer on consecutive lines inside one paragraph
+            # (e.g. "I should write... [\n] You have one task waiting...").
+            # Walk lines, drop reasoning/prompt-echo lines, then keep the
+            # last surviving line — that's the actual warm sentence.
+            if synthesis:
+                import re as _re
+                # Tightened: target ACTUAL self-talk (model narrating what
+                # it'll do) rather than any first-person sentence. The old
+                # pattern killed legit warm sentences like "I'll see you
+                # tomorrow" or "I should be done by then". New rules:
+                #  • "I (need|should|have|'ll|will) (write|draft|reply|…)"
+                #    only matches when followed by a TASK verb taking an
+                #    OBJECT (so first-person + intransitive verb passes).
+                #  • Self-instructional patterns the model emits verbatim:
+                #    "I should write something that reminds them…",
+                #    "I need to draft…", "Let me think…".
+                #  • Explicit instructions echoed back from the prompt:
+                #    "Keep it under 25 words", "No greetings".
+                _reasoning = _re.compile(
+                    r"^\s*(?:"
+                    # "I should write/draft/compose…" with a task-object follow
+                    r"i (?:need|should|have|'ll|will|am going|am)\s+to\s+"
+                    r"(?:write|draft|compose|craft|generate|produce|create|"
+                    r"summarize|answer|provide|note|address|remind|output)"
+                    r"\s+(?:a |an |the |something|this|that|here|them|him|her|"
+                    r"you|user|reply|response|sentence|message|line|warm)|"
+                    # The model literally narrating about the user
+                    r"the user (?:wants|is asking|asks|needs|wrote|said|requested) (?:me )?(?:to|for|that|about|something)|"
+                    # "Let me [think/write/draft/…] (about/for/the …)"
+                    r"let me (?:think|write|draft|consider|note|see|check)\b\s+(?:about|for|the|this|that|if|whether)|"
+                    # "Looking at the/this/that …"
+                    r"looking at (?:the|this|that)\b|"
+                    # "Based on the/this/what …"
+                    r"based on (?:the|this|what|context|that)\b|"
+                    # Prompt-echo of length / style instructions
+                    r"keep it under \d+ words\b|"
+                    r"(?:no greetings|no preamble|no hashtags|just output the)\b"
+                    r").*",
+                    _re.IGNORECASE,
                 )
-                from src.text_helpers import strip_think as _strip_think
-                # prose=True strips untagged "The user wants me to…" chain-of-thought.
-                # prompt_echo=True strips Qwen-style "Thinking Process:" / leaked
-                # prompt prefixes. Both are safe here because this is a
-                # one-sentence LLM-only output, not user-pasted content.
-                synthesis = _strip_think(raw or "", prose=True, prompt_echo=True)
-                # Reminder synthesis is supposed to be ONE sentence. Strip-think's
-                # paragraph-based heuristic misses cases where the model puts
-                # reasoning + answer on consecutive lines inside one paragraph
-                # (e.g. "I should write... [\n] You have one task waiting...").
-                # Walk lines, drop reasoning/prompt-echo lines, then keep the
-                # last surviving line — that's the actual warm sentence.
-                if synthesis:
-                    import re as _re
-                    # Tightened: target ACTUAL self-talk (model narrating what
-                    # it'll do) rather than any first-person sentence. The old
-                    # pattern killed legit warm sentences like "I'll see you
-                    # tomorrow" or "I should be done by then". New rules:
-                    #  • "I (need|should|have|'ll|will) (write|draft|reply|…)"
-                    #    only matches when followed by a TASK verb taking an
-                    #    OBJECT (so first-person + intransitive verb passes).
-                    #  • Self-instructional patterns the model emits verbatim:
-                    #    "I should write something that reminds them…",
-                    #    "I need to draft…", "Let me think…".
-                    #  • Explicit instructions echoed back from the prompt:
-                    #    "Keep it under 25 words", "No greetings".
-                    _reasoning = _re.compile(
-                        r"^\s*(?:"
-                        # "I should write/draft/compose…" with a task-object follow
-                        r"i (?:need|should|have|'ll|will|am going|am)\s+to\s+"
-                        r"(?:write|draft|compose|craft|generate|produce|create|"
-                        r"summarize|answer|provide|note|address|remind|output)"
-                        r"\s+(?:a |an |the |something|this|that|here|them|him|her|"
-                        r"you|user|reply|response|sentence|message|line|warm)|"
-                        # The model literally narrating about the user
-                        r"the user (?:wants|is asking|asks|needs|wrote|said|requested) (?:me )?(?:to|for|that|about|something)|"
-                        # "Let me [think/write/draft/…] (about/for/the …)"
-                        r"let me (?:think|write|draft|consider|note|see|check)\b\s+(?:about|for|the|this|that|if|whether)|"
-                        # "Looking at the/this/that …"
-                        r"looking at (?:the|this|that)\b|"
-                        # "Based on the/this/what …"
-                        r"based on (?:the|this|what|context|that)\b|"
-                        # Prompt-echo of length / style instructions
-                        r"keep it under \d+ words\b|"
-                        r"(?:no greetings|no preamble|no hashtags|just output the)\b"
-                        r").*",
-                        _re.IGNORECASE,
-                    )
-                    # Echo of the prompt's "Pending:" / "<N> pending" tail.
-                    _echo = _re.compile(
-                        r"^\s*(?:pending\s*[:.]|(?:\d+|one|two|three|four|five)\s+pending\b)",
-                        _re.IGNORECASE,
-                    )
-                    lines = [ln for ln in synthesis.splitlines() if ln.strip()]
-                    cleaned = [ln for ln in lines if not _reasoning.match(ln) and not _echo.match(ln)]
-                    if cleaned:
-                        # The model's actual answer is normally the LAST surviving
-                        # line — reasoning leads, answer trails.
-                        synthesis = cleaned[-1].strip()
+                # Echo of the prompt's "Pending:" / "<N> pending" tail.
+                _echo = _re.compile(
+                    r"^\s*(?:pending\s*[:.]|(?:\d+|one|two|three|four|five)\s+pending\b)",
+                    _re.IGNORECASE,
+                )
+                lines = [ln for ln in synthesis.splitlines() if ln.strip()]
+                cleaned = [ln for ln in lines if not _reasoning.match(ln) and not _echo.match(ln)]
+                if cleaned:
+                    # The model's actual answer is normally the LAST surviving
+                    # line — reasoning leads, answer trails.
+                    synthesis = cleaned[-1].strip()
             else:
                 synthesis = _SYNTH_FAILED_TAG
         except Exception as e:
@@ -472,11 +595,16 @@ async def dispatch_reminder(
         try:
             from src.integrations import load_integrations
             import httpx
-            intg = next(
-                (i for i in load_integrations()
-                 if i.get("preset") == "ntfy" and i.get("enabled", True) and i.get("base_url")),
-                None,
-            )
+            intg_id = str(settings.get("reminder_ntfy_integration_id") or "").strip()
+            ntfy_integrations = [
+                i for i in load_integrations()
+                if i.get("preset") == "ntfy" and i.get("enabled", True) and i.get("base_url")
+            ]
+            intg = next((i for i in ntfy_integrations if i.get("id") == intg_id), None) if intg_id else None
+            if intg is None and not intg_id:
+                intg = ntfy_integrations[0] if ntfy_integrations else None
+            if intg_id and intg is None:
+                ntfy_error = "Selected ntfy integration is unavailable"
             if intg:
                 base = intg["base_url"].rstrip("/")
                 topic = settings.get("reminder_ntfy_topic") or "reminders"
@@ -503,7 +631,7 @@ async def dispatch_reminder(
                         ntfy_sent = resp.is_success
                         if not ntfy_sent:
                             ntfy_error = f"ntfy returned HTTP {resp.status_code}"
-            else:
+            elif not intg_id:
                 ntfy_error = "No enabled ntfy integration"
         except Exception as e:
             ntfy_error = str(e) or e.__class__.__name__
@@ -555,10 +683,14 @@ async def dispatch_reminder(
                 "at": _dt.now(_tz.utc).isoformat(),
                 "channel": sent_channel,
             }
-            _STATE.write_text(_json.dumps(_cache), encoding="utf-8")
+            atomic_write_json(str(_STATE), _cache)
         except Exception as _e:
             logger.debug(f"dispatch_reminder: cache write failed: {_e}")
 
+    endpoint_status = "sent" if (email_sent or ntfy_sent or webhook_sent or browser_sent or local_browser_sent) else "error"
+    endpoint_error = "; ".join(x for x in (email_error, ntfy_error, webhook_error) if x)
+    if _claim is not None:
+        finish_receipt(_claim, endpoint_status, error=endpoint_error)
     return {
         "channel": channel,
         "synthesis": synthesis,
@@ -569,6 +701,9 @@ async def dispatch_reminder(
         "webhook_sent": webhook_sent,
         "webhook_error": webhook_error,
         "browser_sent": browser_sent or local_browser_sent,
+        "endpoint_id": _endpoint_id if _override.get("_dispatch_endpoint") else None,
+        "endpoint_status": endpoint_status if _override.get("_dispatch_endpoint") else None,
+        "endpoint_error": endpoint_error if _override.get("_dispatch_endpoint") else "",
     }
 
 
@@ -869,10 +1004,21 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             # current UI values directly so it never races a pending save.
             if body.get("channel"):
                 _override["reminder_channel"] = body["channel"]
-            if body.get("webhook_integration_id"):
-                _override["reminder_webhook_integration_id"] = body["webhook_integration_id"]
-            if body.get("webhook_payload_template"):
-                _override["reminder_webhook_payload_template"] = body["webhook_payload_template"]
+            for source_key, target_key in (
+                ("email_to", "reminder_email_to"),
+                ("email_account_id", "reminder_email_account_id"),
+                ("ntfy_topic", "reminder_ntfy_topic"),
+                ("ntfy_integration_id", "reminder_ntfy_integration_id"),
+            ):
+                if body.get(source_key) is not None:
+                    _override[target_key] = str(body.get(source_key) or "")
+            # Preserve an explicitly empty draft value too.  A per-row Test
+            # must use the visible draft and may not fall back to an older
+            # saved integration or payload while a debounced save is pending.
+            if "webhook_integration_id" in body:
+                _override["reminder_webhook_integration_id"] = str(body.get("webhook_integration_id") or "")
+            if "webhook_payload_template" in body:
+                _override["reminder_webhook_payload_template"] = str(body.get("webhook_payload_template") or "")
             # Mirror the in-UI AI Synthesis toggle + persona so the test
             # actually exercises the synthesis path before/without a Save.
             if "llm_synthesis" in body:
@@ -891,11 +1037,17 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             finally:
                 db.close()
 
+        dispatch_kwargs = {}
+        if body.get("occurrence_key"):
+            dispatch_kwargs["occurrence_key"] = str(body["occurrence_key"])
+        if body.get("retry_unknown"):
+            dispatch_kwargs["retry_unknown"] = True
         return await dispatch_reminder(
             title=title, note_body=note_body, note_id=note_id,
             owner=caller or "",
             queue_browser=False,
             settings_override=_override or None,
+            **dispatch_kwargs,
         )
 
     # --- REORDER NOTES ---

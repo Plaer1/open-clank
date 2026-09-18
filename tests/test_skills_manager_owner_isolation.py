@@ -22,8 +22,11 @@ silently mutates a file owned by a different user AND overwrites the
 """
 
 import os
+import json
 import sys
 import textwrap
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -299,8 +302,220 @@ def test_usage_sidecar_is_owner_scoped(tmp_path):
     assert alice["necessity"] is None
     assert bob["uses"] == 0
     assert bob["audit_verdict"] == "pass"
-    assert bob["necessity"] == {
-        "necessary": False,
-        "redundant_with": ["other-flow"],
-        "reason": "redundant",
+    assert bob["necessity"]["necessary"] is False
+    assert bob["necessity"]["redundant_with"] == ["other-flow"]
+    assert bob["necessity"]["reason"] == "redundant"
+    assert bob["necessity"]["revision"] == 1
+    assert bob["necessity"]["content_hash"] == bob["content_hash"]
+
+
+def test_activation_requires_explicit_publish_and_content_edits_restage(tmp_path):
+    sm = SkillsManager(str(tmp_path))
+    created = sm.add_skill(
+        name="activation-gate",
+        description="original",
+        when_to_use="test",
+        procedure=["step"],
+        owner="alice",
+        status="published",
+    )
+
+    assert created["status"] == "draft"
+    assert sm.update_skill(
+        "activation-gate",
+        {"status": "published"},
+        owner="alice",
+    ) is False
+    assert sm.index_for(owner="alice") == []
+
+    sm.set_necessity("activation-gate", True, owner="alice")
+    sm.set_audit("activation-gate", "pass", worker_model="judge", owner="alice")
+    ready = sm.publish_readiness(created["skill_id"], "alice")
+    assert sm.publish_skill(
+        created["skill_id"],
+        owner="alice",
+        expected_revision=ready["revision"],
+        expected_hash=ready["content_hash"],
+        publisher="user:alice",
+    ) is True
+    assert sm.index_for(owner="alice")[0]["status"] == "published"
+
+    assert sm.update_skill(
+        "activation-gate",
+        {"description": "revised"},
+        owner="alice",
+    ) is True
+    revised = sm.load(owner="alice")[0]
+    assert revised["description"] == "revised"
+    assert revised["status"] == "draft"
+    # Editing stages a new head without destroying the last audited revision.
+    assert sm.index_for(owner="alice")[0]["description"] == "original"
+    assert sm.get_relevant_skills("revised", sm.load(owner="alice")) == []
+
+
+def test_bundle_import_cannot_activate_published_frontmatter(tmp_path):
+    sm = SkillsManager(str(tmp_path))
+    entry = sm.import_bundle_from_files(
+        {
+            "SKILL.md": textwrap.dedent("""\
+                ---
+                name: imported-active
+                description: imported
+                status: published
+                ---
+
+                # Procedure
+                - imported step
+                """),
+        },
+        owner="alice",
+        source_url="https://github.com/example/skills",
+    )
+
+    assert entry["owner"] == "alice"
+    assert entry["status"] == "draft"
+    assert entry["source_status"] == "published"
+    assert sm.index_for(owner="alice") == []
+
+
+def test_bundle_import_failure_never_publishes_a_partial_directory(
+    tmp_path,
+    monkeypatch,
+):
+    import core.atomic_io as atomic_io
+
+    sm = SkillsManager(str(tmp_path))
+    original = atomic_io.atomic_write_text
+
+    def fail_on_reference(path, text, *args, **kwargs):
+        if str(path).endswith("references/guide.txt"):
+            raise OSError("injected staging failure")
+        return original(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_io, "atomic_write_text", fail_on_reference)
+    with pytest.raises(OSError, match="injected staging failure"):
+        sm.import_bundle_from_files(
+            {
+                "SKILL.md": textwrap.dedent("""\
+                    ---
+                    name: atomic-import
+                    description: must remain hidden until complete
+                    status: published
+                    ---
+
+                    # Procedure
+                    - verify
+                    """),
+                "references/guide.txt": "guide",
+            },
+            owner="alice",
+            source_url="https://github.com/o/r/tree/" + ("a" * 40) + "/atomic",
+            source_revision="a" * 40,
+        )
+
+    assert not (tmp_path / "skills" / "imported" / "atomic-import").exists()
+    assert list(tmp_path.glob(".skill-import-*")) == []
+    assert sm.load(owner="alice") == []
+
+
+def test_bundle_import_is_invisible_to_concurrent_readers_until_atomic_publish(
+    tmp_path,
+    monkeypatch,
+):
+    import core.atomic_io as atomic_io
+
+    sm = SkillsManager(str(tmp_path))
+    original = atomic_io.atomic_write_text
+    staging_reached = threading.Event()
+    release_staging = threading.Event()
+
+    def pause_on_reference(path, text, *args, **kwargs):
+        if str(path).endswith("references/guide.txt"):
+            staging_reached.set()
+            assert release_staging.wait(timeout=5)
+        return original(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_io, "atomic_write_text", pause_on_reference)
+    files = {
+        "SKILL.md": textwrap.dedent("""\
+            ---
+            name: concurrent-import
+            description: appears as one complete draft
+            status: published
+            ---
+
+            # Procedure
+            - verify
+            """),
+        "references/guide.txt": "complete guide",
     }
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            sm.import_bundle_from_files,
+            files,
+            owner="alice",
+            source_url="https://github.com/o/r/tree/" + ("b" * 40) + "/concurrent",
+            source_revision="b" * 40,
+        )
+        try:
+            assert staging_reached.wait(timeout=5)
+            assert sm.load(owner="alice") == []
+            assert not (
+                tmp_path / "skills" / "imported" / "concurrent-import"
+            ).exists()
+        finally:
+            release_staging.set()
+        result = future.result(timeout=5)
+
+    skill_dir = tmp_path / "skills" / "imported" / "concurrent-import"
+    assert result["status"] == "draft"
+    assert (skill_dir / "references" / "guide.txt").read_text() == "complete guide"
+    assert "status: draft" in (skill_dir / "SKILL.md").read_text()
+    assert list(tmp_path.glob(".skill-import-*")) == []
+
+
+@pytest.mark.asyncio
+async def test_model_skill_tool_cannot_publish_and_edits_restage(tmp_path, monkeypatch):
+    from src import constants
+    from src.tools.system import do_manage_skills
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+    result = await do_manage_skills(json.dumps({
+        "action": "add",
+        "name": "model-draft",
+        "description": "model generated",
+        "when_to_use": "test",
+        "procedure": ["step"],
+        "status": "published",
+    }), owner="alice")
+    assert "Created skill `model-draft`" in result["results"]
+
+    sm = SkillsManager(str(tmp_path))
+    assert sm.load(owner="alice")[0]["status"] == "draft"
+
+    denied = await do_manage_skills(json.dumps({
+        "action": "publish",
+        "name": "model-draft",
+    }), owner="alice")
+    assert denied["exit_code"] == 1
+    assert "Skills UI" in denied["error"]
+
+    current = sm.load(owner="alice")[0]
+    sm.set_necessity("model-draft", True, owner="alice")
+    sm.set_audit("model-draft", "pass", worker_model="judge", owner="alice")
+    assert sm.publish_skill(
+        current["skill_id"],
+        owner="alice",
+        expected_revision=current["revision"],
+        expected_hash=current["content_hash"],
+        publisher="user:alice",
+    )
+    patched = await do_manage_skills(json.dumps({
+        "action": "patch",
+        "name": "model-draft",
+        "old_string": "model generated",
+        "new_string": "model revised",
+    }), owner="alice")
+    assert "Patched skill" in patched["results"]
+    assert sm.load(owner="alice")[0]["status"] == "draft"

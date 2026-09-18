@@ -19,20 +19,16 @@ from src.tool_security import BUILTIN_EMAIL_TOOLS
 logger = logging.getLogger(__name__)
 
 # ── openthesius MCP bridge exclusion list ──
-# These 9 coding-overlap tools are OWNED by mimo natively and must NOT be
-# exposed over the odysseus→mimo MCP bridge (Phase 3). mimo's own bash,
-# read, write, edit, glob, grep, ls tools replace them. The bridge carries
-# only odysseus life-tools (web_search, web_fetch, manage_calendar, etc.).
+# Direct process tools and unbrokered patch/workspace controls remain owned by
+# mimo and must NOT cross the odysseus→mimo MCP bridge. File read/write/edit/
+# list/search are intentionally *not* excluded: their private lifetools forms
+# are Rust-AgentScope adapters, while mimo's native aliases are forced off by
+# ``_mimo_tool_policy``.
 OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS = {
     "bash",         # mimo: bash tool
     "python",       # mimo: bash tool (python invocation)
-    "read_file",    # mimo: read tool
-    "write_file",   # mimo: write tool
-    "edit_file",    # mimo: edit tool
-    "ls",           # mimo: glob / bash ls
-    "glob",         # mimo: glob tool
-    "grep",         # mimo: grep tool
     "get_workspace", # mimo: cwd via config
+    "apply_patch",  # mimo: apply_patch tool
 }
 
 _REQUIRED_NATIVE_TOOL_ARGS = {
@@ -43,15 +39,15 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "edit_file": ("path",),
     "publish_file": ("path",),
     "apply_patch": ("patch_text", "patchText", "patch"),
+    "manage_files": ("action",),
 }
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible function tool schemas
 # ---------------------------------------------------------------------------
-# NOTE: Under openthesius, the 9 coding-overlap tools listed in
-# OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS above must NOT be carried over the
-# MCP bridge — mimo owns them natively. The schemas remain here for
-# odysseus's standalone agent loop (non-openthesius mode).
+# NOTE: native mimo aliases are a distinct, denied execution lane. The same
+# public schema names may be exposed through the private Rust-backed lifetools
+# namespace when the server projects a current AgentScope.
 FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -121,7 +117,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"},
                     "offset": {"type": "integer", "description": "1-based line to start reading from (optional)"},
-                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"}
+                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Character cursor returned by a truncated read; use without offset/limit"}
                 },
                 "required": ["path"]
             }
@@ -155,7 +152,10 @@ FUNCTION_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "Directory or file to search (optional; defaults to the project root)"},
                     "glob": {"type": "string", "description": "Only search files matching this glob, e.g. '*.py' (optional)"},
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive match (optional)"},
-                    "max_results": {"type": "integer", "description": "Max matches to return (optional)"}
+                    "mode": {"type": "string", "enum": ["regex", "literal"], "description": "Treat pattern as a regular expression (default) or exact literal text"},
+                    "max_results": {"type": "integer", "description": "Backward-compatible alias for limit"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Result cursor from a previous page"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Matches per page"}
                 },
                 "required": ["pattern"]
             }
@@ -170,7 +170,9 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.ts' or 'src/**/test_*.py'"},
-                    "path": {"type": "string", "description": "Base directory (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Base directory (optional; defaults to the project root)"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Result cursor from a previous page"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Paths per page"}
                 },
                 "required": ["pattern"]
             }
@@ -184,7 +186,9 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Entry cursor from a previous page"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Entries per page"}
                 },
                 "required": []
             }
@@ -194,8 +198,28 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_workspace",
-            "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
+            "description": "Return the absolute path of the active workspace folder. File tools are confined to it; shell invocations are workspace-write-contained with bubblewrap when available. Takes no arguments.",
             "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_files",
+            "description": "Move a regular file without overwriting, move it to recoverable trash, restore it, or list recoverable trash. Delete is always recoverable; use the returned trash_id to restore. Pass expected_fingerprint from read_file to reject stale source data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["move", "delete", "restore", "list_trash"]},
+                    "path": {"type": "string", "description": "Source path, or optional restore destination"},
+                    "destination": {"type": "string", "description": "Destination for move; must not already exist"},
+                    "trash_id": {"type": "string", "description": "Recovery id returned by delete/list_trash"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Trash listing cursor"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Trash entries per page"}
+                },
+                "required": ["action"]
+            }
         }
     },
     {
@@ -207,7 +231,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to write to"},
-                    "content": {"type": "string", "description": "File content to write"}
+                    "content": {"type": "string", "description": "File content to write"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale overwrite"}
                 },
                 "required": ["path", "content"]
             }
@@ -224,7 +249,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "File path to edit"},
                     "old_string": {"type": "string", "description": "Exact text to replace (must match the file, including indentation)"},
                     "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"}
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale edit"}
                 },
                 "required": ["path", "old_string", "new_string"]
             }
@@ -241,6 +267,11 @@ FUNCTION_TOOL_SCHEMAS = [
                     "patch_text": {
                         "type": "string",
                         "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
+                    },
+                    "expected_fingerprints": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional path-to-fingerprint map returned by read_file; rejects stale files"
                     }
                 },
                 "required": ["patch_text"]
@@ -473,7 +504,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_memory",
-            "description": "Manage the user's persistent memory system: list, add, edit, delete, search, or resolve an open question. To close a question after finding its answer, add the answering memory first, then resolve the question with answer_memory_id.",
+            "description": "Manage typed persistent knowledge: list, add, edit, delete, search, or answer an open question in its existing block.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -481,7 +512,8 @@ FUNCTION_TOOL_SCHEMAS = [
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
                     "memory_id": {"type": "string", "description": "Memory ID (for edit/delete), or the open-question ID (for resolve)"},
-                    "answer_memory_id": {"type": "string", "description": "Memory ID that answers the question (optional for resolve, but preferred for provenance)"},
+                    "answer": {"type": "string", "description": "The answer used to resolve the existing open-question block"},
+                    "answer_memory_id": {"type": "string", "description": "Legacy optional source-memory ID used as answer provenance"},
                     "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "unknown", "question"],
                                  "description": "Memory category (for add/list filter). unknown/question creates an open question."}
                 },
@@ -737,15 +769,16 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Use progressive disclosure: 'list' to see what exists, 'view' to "
                 "load full content for a single skill, 'view_ref' for sub-files. "
                 "Use 'patch' for surgical text edits and 'edit' for full rewrites. "
-                "'publish' once you've verified the procedure works. For add, "
-                "always provide an explicit name slug and only tell the user the "
-                "exact name returned by the tool."
+                "Agent-created and edited skills stay staged as drafts until the "
+                "user publishes them in the Skills UI or an audit passes them. "
+                "For add, always provide an explicit name slug and only tell the "
+                "user the exact name returned by the tool."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "publish", "delete", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create; edit = full rewrite (content); patch = old_string→new_string; publish = flip status; delete; search = relevance match on published skills."},
-                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view/view_ref/edit/patch/publish/delete. For add, choose the exact kebab-case name the user should see and report only the returned name."},
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "delete", "search"], "description": "list = published name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create a draft; edit = full staged rewrite (content); patch = staged old_string→new_string; delete; search = relevance match on published skills."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view/view_ref/edit/patch/delete. For add, choose the exact kebab-case name the user should see and report only the returned name."},
                     "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
                     "description": {"type": "string", "description": "One-line summary surfaced in the skills index (for add)."},
                     "category": {"type": "string", "description": "Organizational grouping like 'dev', 'email', 'system' (for add)."},
@@ -757,9 +790,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "platforms": {"type": "array", "items": {"type": "string"}, "description": "Restrict to OSes (for add)."},
                     "requires_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide unless these toolsets are active (for add)."},
                     "fallback_for_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide when these toolsets are active (for add)."},
-                    "status": {"type": "string", "enum": ["draft", "published"], "description": "Defaults to 'draft' on add."},
                     "version": {"type": "string", "description": "Semver-ish, e.g. '1.0.0' (for add)."},
-                    "confidence": {"type": "number", "description": "0-1 (for add/publish)."},
+                    "confidence": {"type": "number", "description": "0-1 (for add)."},
                     "content": {"type": "string", "description": "Full SKILL.md text (for edit)."},
                     "old_string": {"type": "string", "description": "Exact substring to replace (for patch). Must appear exactly once."},
                     "new_string": {"type": "string", "description": "Replacement text (for patch)."},
@@ -773,15 +805,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_endpoints",
-            "description": "Manage model API endpoints: list configured endpoints, add new ones, delete, enable or disable them.",
+            "description": "List the caller's managed provider connections and stable model routes. Provider mutations require the Providers interface.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "add", "delete", "enable", "disable"]},
-                    "endpoint_id": {"type": "string", "description": "Endpoint ID (for delete/enable/disable)"},
-                    "name": {"type": "string", "description": "Display name (for add)"},
-                    "base_url": {"type": "string", "description": "API base URL e.g. https://api.openai.com/v1 (for add)"},
-                    "api_key": {"type": "string", "description": "API key (for add)"}
+                    "action": {"type": "string", "enum": ["list"]}
                 },
                 "required": ["action"]
             }
@@ -1079,7 +1107,9 @@ FUNCTION_TOOL_SCHEMAS = [
                     "image_id": {"type": "string", "description": "Gallery image ID"},
                     "action": {"type": "string", "enum": ["upscale", "rembg", "inpaint", "harmonize"], "description": "Edit action"},
                     "prompt": {"type": "string", "description": "For inpaint: what to fill the masked area with"},
+                    "mask": {"type": "string", "description": "For inpaint: base64 PNG mask (white pixels are edited)"},
                     "scale": {"type": "number", "description": "For upscale: scale factor (default 2)"},
+                    "model_route_id": {"type": "string", "description": "Stable managed image model-route ID (optional)"},
                 },
                 "required": ["image_id", "action"]
             }
@@ -1320,18 +1350,152 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_bg_jobs",
-            "description": "Inspect and control detached background `bash` jobs (started with the `#!bg` marker). action='list' shows this chat's jobs with id/status/age/command; action='output' returns a job's captured output so far (use for a still-running job, or to re-read a finished one); action='kill' terminates a runaway job's process tree instead of waiting out its max-runtime. output and kill need job_id from list.",
+            "description": "Start and control durable, workspace-contained shell sessions scoped to this owner/chat/workspace. Use list, poll, tail, write, wait, or terminate with a session id; tail is cursor-based and bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "output", "kill"], "description": "list | output | kill (default: list)"},
-                    "job_id": {"type": "string", "description": "Background job id (required for output/kill; from action='list')"},
+                    "action": {"type": "string", "enum": ["start", "poll", "write", "wait", "terminate", "list", "tail"]},
+                    "job_id": {"type": "string", "description": "Shell session id from list/start"},
+                    "command": {"type": "string", "description": "Command for start"},
+                    "data": {"type": "string", "description": "Input bytes for write"},
+                    "timeout_s": {"type": "number", "minimum": 0, "maximum": 30, "description": "Bounded wait duration"},
+                    "max_runtime_s": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Maximum session runtime"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Byte cursor for tail/list"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 65536, "description": "Maximum rows or output bytes"}
                 },
                 "required": ["action"]
             }
         }
     },
 ]
+
+# Copal is intentionally a single native read tool with an action-discriminated
+# request. Runtime validation in ``copal_tools`` rejects fields not valid for
+# the selected action as an additional fail-closed boundary.
+_COPAL_READ_ACTION_FIELDS = {
+    "notes.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "notes.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "notes.history": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "trash.list": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "wiki.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "wiki.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "wiki.history": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "timeline.get": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "timeline.event.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "timeline.track.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "galaxy.get": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "graph.get": {"query": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "mind.get_outline": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "bases.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "bases.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "bases.query": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}, "section": {"type": "string", "maxLength": 64}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "treehouse.get": {"section": {"type": "string", "enum": ["overview", "courses", "course", "skills", "assignments", "submissions", "evidence", "badges", "quests", "progress", "analytics"]}},
+    "treehouse.integrity": {},
+    "todo.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "maintenance.status": {},
+    "maintenance.operations": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+}
+_COPAL_BASE_PROPERTIES = {
+    "action": {"type": "string", "enum": sorted(_COPAL_READ_ACTION_FIELDS)},
+    "workspace": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "default": "default"},
+}
+FUNCTION_TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "read_copal",
+        "description": "Read Copal resources through a bounded owner-scoped pure-read contract. Use explicit Copal/view intent or a validated active Copal resource. No owner argument is accepted; workspace is logical and defaults to default.",
+        "parameters": {
+            "type": "object",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        **_COPAL_BASE_PROPERTIES,
+                        "action": {"const": action},
+                        **fields,
+                    },
+                    "required": ["action"],
+                }
+                for action, fields in _COPAL_READ_ACTION_FIELDS.items()
+            ]
+        },
+    },
+})
+
+_COPAL_MANAGE_ACTIONS = (
+    "notes.create", "notes.edit", "notes.patch_metadata", "notes.rename", "notes.checkpoint", "notes.restore_version.preview", "notes.restore_version.apply", "notes.trash", "notes.restore_trash",
+    "wiki.create", "wiki.edit", "wiki.patch_metadata", "wiki.rename", "wiki.checkpoint", "wiki.restore_version.preview", "wiki.restore_version.apply", "wiki.trash", "wiki.restore_trash",
+    "timeline.event.create", "timeline.event.update", "timeline.event.trash", "timeline.event.restore_trash",
+    "timeline.track.create", "timeline.track.update", "timeline.track.reparent",
+    "galaxy.link_event_track", "galaxy.unlink_event_track", "graph.link", "graph.unlink",
+    "mind.heading.add", "mind.heading.rename", "mind.heading.move", "mind.heading.reparent", "mind.heading.delete",
+    "todo.create", "todo.update", "todo.complete", "todo.trash",
+    "bases.migrate.preview", "bases.migrate.apply", "bases.row.update",
+    "treehouse.command", "treehouse.migrate.preview", "treehouse.migrate.apply",
+    "maintenance.bulk_trash.preview", "maintenance.bulk_trash.apply",
+    "maintenance.bulk_restore.preview", "maintenance.bulk_restore.apply", "maintenance.calendar_reconcile",
+    "maintenance.import.preview", "maintenance.import.apply", "maintenance.export.preview", "maintenance.export.apply",
+)
+_S = lambda **fields: fields
+_COPAL_MANAGE_FIELDS = {
+    "notes.create": _S(name={"type": "string", "maxLength": 512}, content={"type": "string", "maxLength": 8388608}, properties={"type": "object"}, relations={"type": "array"}),
+    "notes.edit": _S(id={"type": "string"}, content={"type": "string", "maxLength": 8388608}),
+    "notes.patch_metadata": _S(id={"type": "string"}, patch={"type": "object"}),
+    "notes.rename": _S(id={"type": "string"}, name={"type": "string", "maxLength": 512}),
+    "notes.checkpoint": _S(id={"type": "string"}, patch={"type": "object"}),
+    "notes.restore_version.preview": _S(id={"type": "string"}, commitId={"type": "string"}),
+    "notes.restore_version.apply": _S(id={"type": "string"}, commitId={"type": "string"}, previewToken={"type": "string"}),
+    "notes.trash": _S(id={"type": "string"}), "notes.restore_trash": _S(id={"type": "string"}),
+    "wiki.create": _S(name={"type": "string", "maxLength": 512}, content={"type": "string", "maxLength": 8388608}, properties={"type": "object"}, relations={"type": "array"}),
+    "wiki.edit": _S(id={"type": "string"}, content={"type": "string", "maxLength": 8388608}),
+    "wiki.patch_metadata": _S(id={"type": "string"}, patch={"type": "object"}),
+    "wiki.rename": _S(id={"type": "string"}, name={"type": "string"}),
+    "wiki.checkpoint": _S(id={"type": "string"}, patch={"type": "object"}),
+    "wiki.restore_version.preview": _S(id={"type": "string"}, commitId={"type": "string"}),
+    "wiki.restore_version.apply": _S(id={"type": "string"}, commitId={"type": "string"}, previewToken={"type": "string"}),
+    "wiki.trash": _S(id={"type": "string"}), "wiki.restore_trash": _S(id={"type": "string"}),
+    "timeline.event.create": _S(event={"type": "object"}), "timeline.event.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "timeline.event.trash": _S(id={"type": "string"}), "timeline.event.restore_trash": _S(id={"type": "string"}),
+    "timeline.track.create": _S(track={"type": "object"}), "timeline.track.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "timeline.track.reparent": _S(id={"type": "string"}, parentTrackId={"type": ["string", "null"]}),
+    "galaxy.link_event_track": _S(id={"type": "string"}, trackId={"type": "string"}), "galaxy.unlink_event_track": _S(id={"type": "string"}, trackId={"type": "string"}),
+    "mind.heading.add": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.rename": _S(id={"type": "string"}, patch={"type": "object"}),
+    "mind.heading.move": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.reparent": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.delete": _S(id={"type": "string"}, patch={"type": "object"}),
+    "graph.link": _S(id={"type": "string"}, patch={"type": "object"}), "graph.unlink": _S(id={"type": "string"}, patch={"type": "object"}),
+    "todo.create": _S(event={"type": "object"}), "todo.update": _S(id={"type": "string"}, patch={"type": "object"}), "todo.complete": _S(id={"type": "string"}), "todo.trash": _S(id={"type": "string"}),
+    "bases.migrate.preview": _S(id={"type": "string"}), "bases.migrate.apply": _S(id={"type": "string"}, previewToken={"type": "string"}),
+    "bases.row.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "treehouse.command": _S(command={"type": "object", "properties": {"type": {"type": "string", "enum": [
+        "profile.create", "profile.update", "course.create", "course.update", "course.publish", "course.archive", "course.author.add", "course.reorder_modules", "course.delete",
+        "module.create", "module.update", "module.reorder_items", "module.delete", "activity.create", "activity.update", "activity.complete", "activity.delete",
+        "enrollment.enroll", "enrollment.unenroll", "assignment.create", "assignment.update", "assignment.publish", "assignment.delete", "submission.submit", "submission.grade",
+        "skill.create", "skill.update", "skill.delete", "evidence.submit", "evidence.review", "badge.create", "badge.update", "badge.delete", "quest.create", "quest.update", "quest.delete",
+    ]}}, "required": ["type"]}, commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}),
+    "treehouse.migrate.preview": _S(commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}),
+    "treehouse.migrate.apply": _S(commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}, previewToken={"type": "string"}),
+    "maintenance.bulk_trash.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_trash.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
+    "maintenance.bulk_restore.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_restore.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
+    "maintenance.import.preview": _S(attachmentId={"type": "string", "maxLength": 256}, corpus={"type": "string", "enum": ["notes", "wiki"]}),
+    "maintenance.import.apply": _S(attachmentId={"type": "string", "maxLength": 256}, corpus={"type": "string", "enum": ["notes", "wiki"]}, previewToken={"type": "string"}),
+    "maintenance.export.preview": _S(options={"type": "object", "properties": {"includeWiki": {"type": "boolean"}, "includeAssets": {"type": "boolean"}}, "additionalProperties": False}),
+    "maintenance.export.apply": _S(options={"type": "object", "properties": {"includeWiki": {"type": "boolean"}, "includeAssets": {"type": "boolean"}}, "additionalProperties": False}, previewToken={"type": "string"}),
+    "maintenance.calendar_reconcile": _S(),
+}
+FUNCTION_TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "manage_copal",
+        "description": "Create, edit, organize, and maintain owner-scoped Copal resources. Use exact IDs and semantic actions; conflicts are terminal and high-impact actions require a server preview token. No owner, route, path, or auth token is accepted.",
+        "parameters": {
+            "type": "object",
+            "oneOf": [
+                {"type": "object", "additionalProperties": False, "properties": {"action": {"const": action}, "workspace": {"type": "string", "default": "default"}, **_COPAL_MANAGE_FIELDS.get(action, {})}, "required": ["action"]}
+                for action in _COPAL_MANAGE_ACTIONS
+            ],
+        },
+    },
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1571,9 +1735,12 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         elif action == "resolve":
             memory_id = args.get("memory_id") or args.get("question_memory_id") or ""
             content = "resolve\n" + str(memory_id)
+            answer = args.get("answer") or ""
             answer_memory_id = args.get("answer_memory_id") or args.get("resolved_by") or ""
-            if answer_memory_id:
-                content += "\n" + str(answer_memory_id)
+            if answer:
+                content += "\n" + str(answer)
+            elif answer_memory_id:
+                content += "\nmemory_id:" + str(answer_memory_id)
         else:
             content = action
     elif tool_type == "list_models":

@@ -3,16 +3,18 @@ index_documents.py
 
 A standalone script to index documents from the personal_docs directory
 into the vector database using RAGManager. This script scans for text files,
-processes them with proper chunking, and adds them to the vector database
+processes them with proper chunking, and adds them to the canonical
+Frankenmemory RAG database
 with progress reporting and final statistics.
 
 Features:
-1. Imports RAGManager from rag_manager
+1. Imports the canonical Frankenmemory RAG singleton
 2. Scans personal_docs directory for .txt, .md, .json files
 3. Reads each file, chunks it (1000 chars with 200 overlap), and adds to vector database
 4. Shows progress during processing and final statistics
 """
 
+import argparse
 import os
 import logging
 import sys
@@ -32,30 +34,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def main():
+def main(argv=None) -> int:
     """Main function to index documents from personal_docs directory."""
+    parser = argparse.ArgumentParser(description="Index documents into Frankenmemory RAG")
+    parser.add_argument("--owner", required=True, help="Open Clank owner to receive the index")
+    parser.add_argument("--workspace-id", help="Optional workspace scope")
+    parser.add_argument("--project-id", help="Optional project scope (requires --workspace-id)")
+    parser.add_argument("--directory", default=PERSONAL_DIR, help="Directory to index")
+    args = parser.parse_args(argv)
+    owner = args.owner.strip()
+    if not owner:
+        parser.error("--owner cannot be blank")
+    if args.project_id and not args.workspace_id:
+        parser.error("--project-id requires --workspace-id")
     
-    # Import RAGManager
+    # Import the canonical RAG singleton
     try:
-        from src.rag_manager import RAGManager
-        logger.info("Successfully imported RAGManager")
+        from src.rag_singleton import get_rag_manager
+        logger.info("Successfully imported Frankenmemory RAG")
     except ImportError as e:
-        logger.error(f"Failed to import RAGManager: {e}")
-        logger.error("Make sure rag_manager.py is in the same directory and accessible")
-        return
+        logger.error(f"Failed to import Frankenmemory RAG: {e}")
+        return 1
     
-    # Initialize RAGManager
-    rag_manager = RAGManager()
+    rag_manager = get_rag_manager()
+    if rag_manager is None:
+        logger.error("Frankenmemory RAG is unavailable")
+        return 1
     
     # Directory to scan
-    docs_directory = PERSONAL_DIR
+    docs_directory = args.directory
     directory_path = Path(docs_directory)
     
     # Check if directory exists
     if not directory_path.exists():
         logger.error(f"Directory '{docs_directory}' not found!")
         logger.info(f"Please create the directory and add your documents: mkdir {docs_directory}")
-        return
+        return 1
     
     # Supported file extensions
     supported_extensions = {'.txt', '.md', '.json'}
@@ -72,7 +86,7 @@ def main():
     if not files_to_index:
         logger.warning(f"No supported files found in '{docs_directory}' directory.")
         logger.info("Add .txt, .md, or .json files to the directory and run this script again.")
-        return
+        return 0
     
     logger.info(f"Found {len(files_to_index)} files to index:")
     for file_path in files_to_index:
@@ -82,7 +96,12 @@ def main():
     logger.info("\nStarting document indexing process...")
     
     try:
-        result = rag_manager.index_personal_documents(docs_directory)
+        result = rag_manager.index_personal_documents(
+            docs_directory,
+            owner=owner,
+            workspace_id=args.workspace_id,
+            project_id=args.project_id,
+        )
         
         # Display results
         logger.info("\n" + "="*50)
@@ -95,6 +114,7 @@ def main():
             logger.error("❌ Document indexing failed!")
             if "message" in result:
                 logger.error(f"   Error: {result['message']}")
+            return 1
         
         # Show final statistics
         logger.info("\n" + "-"*30)
@@ -111,7 +131,8 @@ def main():
         
     except Exception as e:
         logger.error(f"Failed to index documents: {e}")
-        return
+        return 1
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

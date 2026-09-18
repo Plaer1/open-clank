@@ -154,6 +154,15 @@ export interface Interface {
       providerID: ProviderID
     } & AuthorizeInput,
   ) => Effect.Effect<Authorization | undefined, Error>
+  /**
+   * Complete one provider flow and return the normalized credential without
+   * persisting it.  Open Clank managed workers use this path so the host can
+   * encrypt and CAS the credential in its owner-scoped database before any
+   * browser callback is acknowledged.
+   */
+  readonly exchange: (
+    input: { providerID: ProviderID } & CallbackInput,
+  ) => Effect.Effect<Auth.Info | undefined, Error>
   readonly callback: (input: { providerID: ProviderID } & CallbackInput) => Effect.Effect<void, Error>
   readonly cancel: (input: { providerID: ProviderID; flowID: string }) => Effect.Effect<void>
 }
@@ -261,7 +270,10 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       }
     })
 
-    const callback = Effect.fn("ProviderAuth.callback")(function* (input: { providerID: ProviderID } & CallbackInput) {
+    const complete = Effect.fn("ProviderAuth.complete")(function* (
+      input: { providerID: ProviderID } & CallbackInput,
+      persist: boolean,
+    ) {
       const pending = (yield* InstanceState.get(state)).pending
       const pendingKey = input.flowID || input.providerID
       const entry = pending.get(pendingKey)
@@ -311,18 +323,31 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
         }
       }
       if (nextAuth) {
-        const committed = yield* commitFlowAuth(
-          auth,
-          input.providerID,
-          nextAuth,
-          () => entry.cancelled || entry.expiresAt <= Date.now(),
-        )
-        if (!committed) {
-          pending.delete(pendingKey)
-          return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+        if (persist) {
+          const committed = yield* commitFlowAuth(
+            auth,
+            input.providerID,
+            nextAuth,
+            () => entry.cancelled || entry.expiresAt <= Date.now(),
+          )
+          if (!committed) {
+            pending.delete(pendingKey)
+            return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+          }
         }
+        pending.delete(pendingKey)
+        return nextAuth
       }
       pending.delete(pendingKey)
+      return undefined
+    })
+
+    const exchange = Effect.fn("ProviderAuth.exchange")(function* (input: { providerID: ProviderID } & CallbackInput) {
+      return yield* complete(input, false)
+    })
+
+    const callback = Effect.fn("ProviderAuth.callback")(function* (input: { providerID: ProviderID } & CallbackInput) {
+      yield* complete(input, true)
     })
 
     const cancel = Effect.fn("ProviderAuth.cancel")(function* (input: { providerID: ProviderID; flowID: string }) {
@@ -334,7 +359,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       }
     })
 
-    return Service.of({ methods, authorize, callback, cancel })
+    return Service.of({ methods, authorize, exchange, callback, cancel })
   }),
 )
 

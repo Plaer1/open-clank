@@ -13,6 +13,58 @@ import { applyEdgeDock, clearDockSide } from './modalSnap.js';
 import { topToolWindowZ, topPortalZ } from './toolWindowZOrder.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
+let _sharedNoteEditorPromise = null;
+async function _loadSharedNoteEditor() {
+  if (!_sharedNoteEditorPromise) _sharedNoteEditorPromise = import('./copal/codemirror.js');
+  return _sharedNoteEditorPromise;
+}
+
+function _wireExpandedNoteEditor(textarea, label = 'note content') {
+  if (!textarea || textarea.dataset.multiEditReady === 'true') return;
+  textarea.dataset.multiEditReady = 'true';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'note-form-expanded-editor';
+  button.textContent = 'Open multi-edit';
+  button.title = 'Open the shared editor with multiple cursors';
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const returnFocus = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'copal-dialog copal-notes-expanded-editor';
+    const heading = document.createElement('h2'); heading.textContent = `Edit ${label}`;
+    const help = document.createElement('p'); help.className = 'copal-dialog-help'; help.textContent = 'Use Mod-d for the next match, Mod-Shift-L for all matches, and Mod-Alt-arrow for vertical cursors.';
+    const host = document.createElement('div'); host.className = 'copal-codemirror-host copal-notes-expanded-host';
+    const feedback = document.createElement('p'); feedback.className = 'copal-notes-expanded-feedback'; feedback.setAttribute('role', 'status');
+    const actions = document.createElement('div'); actions.className = 'copal-dialog-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'copal-btn'; cancel.textContent = 'Cancel';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'copal-btn primary'; apply.textContent = 'Apply'; apply.disabled = true;
+    actions.append(cancel, apply); dialog.append(heading, help, host, feedback, actions); document.body.append(dialog);
+    let editor = null;
+    const close = () => dialog.close();
+    cancel.addEventListener('click', close);
+    apply.addEventListener('click', () => {
+      if (!editor) return;
+      textarea.value = editor.getValue();
+      textarea.dispatchEvent(new Event('input', { bubbles:true }));
+      close();
+    });
+    dialog.addEventListener('close', () => { editor?.destroy?.(); dialog.remove(); returnFocus?.focus?.(); });
+    dialog.showModal();
+    try {
+      const module = await _loadSharedNoteEditor();
+      const factory = module.createSourceEditor || module.createMarkdownEditor;
+      editor = factory({ parent:host, doc:String(textarea.value || ''), mode:'source', language:'Markdown' });
+      await editor.languageReady;
+      apply.disabled = false; editor.focus();
+    } catch (error) {
+      feedback.textContent = `Expanded editor unavailable: ${error.message}`;
+      feedback.classList.add('error');
+    }
+  });
+  textarea.insertAdjacentElement('afterend', button);
+}
+
 const API_BASE = window.location.origin;
 let _open = false;
 let _notes = [];
@@ -1196,7 +1248,7 @@ export function openPanel() {
       <button id="notes-minimize-btn" class="modal-minimize-btn" title="Minimize" aria-label="Minimize notes" style="position:relative;left:2px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="18" x2="18" y2="18"/></svg></button>
     </div>
     <div class="notes-search-bar">
-      <input type="text" id="notes-search" class="memory-search-input" placeholder="Search notes…" autocomplete="off" />
+      <input type="text" id="notes-search" class="memory-search-input" placeholder="Search documents…" autocomplete="off" />
       <button id="notes-select-btn" class="notes-select-trigger" type="button">Select</button>
     </div>
     <div id="notes-bulk-bar" class="memory-bulk-bar hidden">
@@ -3070,6 +3122,7 @@ function _buildForm(note = null) {
           || (_stashedTodoItems || _stashedGoalItems || []).map(i => i.text).join('\n');
         bodyEl.innerHTML = `<textarea class="note-form-content" placeholder="Take a note..." rows="4">${_esc(text)}</textarea>`;
         _wireHashtag(bodyEl.querySelector('.note-form-content'));
+        _wireExpandedNoteEditor(bodyEl.querySelector('.note-form-content'));
       }
       const focusEl = newType === 'note'
         ? bodyEl.querySelector('.note-form-content')
@@ -3165,6 +3218,7 @@ function _buildForm(note = null) {
   // staying a cramped 4-row box. The user can still drag-resize too.
   const _contentTa = form.querySelector('.note-form-content');
   if (_contentTa) {
+    _wireExpandedNoteEditor(_contentTa);
     const _grow = () => {
       _contentTa.style.height = 'auto';
       // Inline form: cap at ~50vh so a huge note doesn't push the action
@@ -3798,6 +3852,7 @@ function _wireGoalForm(form, container) {
   // the same behavior (type "#foo " in the description → tag added to the
   // form's label input) so editing a goal note doesn't ReferenceError.
   const desc = container.querySelector('.note-form-goal-desc');
+  _wireExpandedNoteEditor(desc, 'goal description');
   const labelInput = form?.querySelector('.note-form-label');
   if (desc && labelInput) {
     const tagRe = /(^|\s)#([A-Za-z0-9][\w-]*)\s$/;

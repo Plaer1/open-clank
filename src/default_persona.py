@@ -101,6 +101,16 @@ def set_default_persona(
     presets[_STORE_KEY] = store
     manager.save(presets)
 
+    if record["name"] != current["name"]:
+        # The principal bootstrap memo keys on the resolved label; drop the
+        # owner's entry so the next read re-syncs the assistant entity.
+        try:
+            from services.memory.principal_context import invalidate_principal_cache
+
+            invalidate_principal_cache(owner)
+        except Exception:
+            logger.debug("principal cache invalidation unavailable", exc_info=True)
+
     if sync_assistant:
         _push_to_assistant(owner, record)
     return {**record, "is_factory": False}
@@ -114,6 +124,89 @@ def reset_default_persona(owner: str, *, preset_manager=None) -> Dict[str, Any]:
         system_prompt=FACTORY_PROMPT,
         preset_manager=preset_manager,
     )
+
+
+def rename_default_persona_owner(
+    old_owner: str,
+    new_owner: str,
+    *,
+    preset_manager=None,
+) -> bool:
+    """Move one persisted persona record without merging owner identities."""
+
+    old_owner = str(old_owner or "").strip().lower()
+    new_owner = str(new_owner or "").strip().lower()
+    if not old_owner or not new_owner:
+        raise ValueError("old and new persona owners are required")
+    if old_owner == new_owner:
+        return False
+    manager = _manager(preset_manager)
+    records = manager.presets.get(_STORE_KEY)
+    if not isinstance(records, dict):
+        return False
+    source_keys = [
+        key for key in records if str(key or "").strip().lower() == old_owner
+    ]
+    destination_keys = [
+        key for key in records if str(key or "").strip().lower() == new_owner
+    ]
+    if destination_keys:
+        raise ValueError("target persona owner already has durable state")
+    if not source_keys:
+        return False
+    if len(source_keys) != 1:
+        raise ValueError("source persona owner has ambiguous durable state")
+
+    updated_records = dict(records)
+    record = updated_records.pop(source_keys[0])
+    updated_records[new_owner] = record
+    updated_presets = dict(manager.presets)
+    updated_presets[_STORE_KEY] = updated_records
+    if manager.save(updated_presets) is not True:
+        raise RuntimeError("default persona owner rename could not be persisted")
+    try:
+        from services.memory.principal_context import invalidate_principal_cache
+
+        invalidate_principal_cache(old_owner)
+        invalidate_principal_cache(new_owner)
+    except Exception:
+        logger.debug("principal cache invalidation unavailable", exc_info=True)
+    return True
+
+
+def purge_default_persona_owner(
+    owner: str,
+    *,
+    preset_manager=None,
+) -> bool:
+    """Delete exactly one account identity's persisted persona record."""
+
+    owner = str(owner or "").strip().lower()
+    if not owner:
+        raise ValueError("persona owner is required")
+    manager = _manager(preset_manager)
+    records = manager.presets.get(_STORE_KEY)
+    if not isinstance(records, dict):
+        return False
+    source_keys = [
+        key for key in records if str(key or "").strip().lower() == owner
+    ]
+    if not source_keys:
+        return False
+    updated_records = dict(records)
+    for key in source_keys:
+        updated_records.pop(key, None)
+    updated_presets = dict(manager.presets)
+    updated_presets[_STORE_KEY] = updated_records
+    if manager.save(updated_presets) is not True:
+        raise RuntimeError("default persona owner purge could not be persisted")
+    try:
+        from services.memory.principal_context import invalidate_principal_cache
+
+        invalidate_principal_cache(owner)
+    except Exception:
+        logger.debug("principal cache invalidation unavailable", exc_info=True)
+    return True
 
 
 def sync_from_assistant(

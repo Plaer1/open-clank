@@ -8,9 +8,12 @@ if needed.
 Includes a task registry so research survives page refreshes and can be cancelled.
 """
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Dict
@@ -50,6 +53,33 @@ def _format_probe_failure(model: str, exc: Exception) -> str:
     return f"Cannot reach model '{model}' — check that the endpoint is running and accessible."
 
 
+async def _complete_research_text(
+    *,
+    owner: str,
+    messages: list[dict],
+    temperature: float,
+    max_output_tokens: int,
+    timeout: int,
+    root_operation_id: str | None = None,
+    model_route_id: str | None = None,
+    grant_id: str | None = None,
+) -> str:
+    """Execute one research completion without accepting provider authority."""
+    from src.openclank.modality_facade import complete_text
+
+    completion = complete_text(
+        owner=owner,
+        messages=messages,
+        purpose="research",
+        model_route_id=model_route_id,
+        grant_id=grant_id,
+        root_operation_id=root_operation_id,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )
+    return await asyncio.wait_for(completion, timeout=timeout)
+
+
 def _research_json_path(session_id: str) -> Optional[Path]:
     if not isinstance(session_id, str) or not _RESEARCH_SESSION_ID_RE.fullmatch(session_id):
         return None
@@ -65,9 +95,14 @@ def _research_json_path(session_id: str) -> Optional[Path]:
 class ResearchHandler:
     """Handles research service operations with iterative deep research."""
 
-    def __init__(self):
+    def __init__(self, *, lifecycle_fence_root: Optional[Path] = None):
         self._legacy_engine = None
         self._active_tasks: Dict[str, dict] = {}
+        self._owner_lifecycle_fences: set[str] = set()
+        self._owner_lifecycle_lock = threading.RLock()
+        self._owner_lifecycle_fence_root = Path(
+            lifecycle_fence_root or (RESEARCH_DATA_DIR / ".owner-fences")
+        )
         self._initialize_legacy_engine()
         RESEARCH_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -91,7 +126,7 @@ class ResearchHandler:
 
     async def synthesize_query(
         self, sess, latest_message: str,
-        llm_endpoint: str, llm_model: str, llm_headers: dict = None,
+        llm_endpoint: str = "", llm_model: str = "", llm_headers: dict = None,
     ) -> str:
         """Synthesize the conversation into a single focused research query.
 
@@ -99,6 +134,7 @@ class ResearchHandler:
         specific research question that captures the user's full intent.
         Falls back to the latest message if synthesis fails.
         """
+        del llm_endpoint, llm_model, llm_headers
         # Build conversation context from history
         history = getattr(sess, 'history', [])
 
@@ -145,11 +181,8 @@ class ResearchHandler:
         convo += f"\nUser: {latest_message}"
 
         try:
-            from src.llm_core import llm_call_async
-
-            response = await llm_call_async(
-                url=llm_endpoint,
-                model=llm_model,
+            response = await _complete_research_text(
+                owner=getattr(sess, "owner", None) or "",
                 messages=[{"role": "user", "content":
                     "Read this conversation and write a single, specific research query that captures "
                     "what the user wants to know. Include all relevant context, constraints, and preferences "
@@ -157,12 +190,9 @@ class ResearchHandler:
                     f"Conversation:\n{convo}"
                 }],
                 temperature=0.1,
-                max_tokens=200,
-                headers=llm_headers,
+                max_output_tokens=200,
                 timeout=15,
-                max_retries=1,
-                owner=getattr(sess, "owner", None),
-                session_id=getattr(sess, "id", None),
+                root_operation_id=getattr(sess, "id", None),
             )
             query = strip_thinking(response).strip().strip('"\'')
             if query and len(query) > 5:
@@ -173,26 +203,22 @@ class ResearchHandler:
         return _fallback()
 
     async def generate_plan(
-        self, query: str, llm_endpoint: str, llm_model: str, llm_headers: dict = None,
+        self, query: str, llm_endpoint: str = "", llm_model: str = "", llm_headers: dict = None,
         owner: str = "", session_id: str | None = None,
     ) -> Optional[dict]:
         """Generate a research plan for user review before starting research."""
+        del llm_endpoint, llm_model, llm_headers
         try:
             from src.deep_research import RESEARCH_PLAN_PROMPT, current_date_context
-            from src.llm_core import llm_call_async
 
             prompt = current_date_context() + RESEARCH_PLAN_PROMPT.format(question=query)
-            response = await llm_call_async(
-                url=llm_endpoint,
-                model=llm_model,
+            response = await _complete_research_text(
+                owner=owner,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=1024,
-                headers=llm_headers,
+                max_output_tokens=1024,
                 timeout=30,
-                max_retries=1,
-                owner=owner or None,
-                session_id=session_id,
+                root_operation_id=session_id,
             )
             response = strip_thinking(response)
 
@@ -226,28 +252,279 @@ class ResearchHandler:
     # Task registry — background research with persistence
     # ------------------------------------------------------------------
 
+    def _lifecycle_state(self) -> tuple[set[str], threading.RLock]:
+        fences = getattr(self, "_owner_lifecycle_fences", None)
+        if fences is None:
+            fences = set()
+            self._owner_lifecycle_fences = fences
+        lock = getattr(self, "_owner_lifecycle_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._owner_lifecycle_lock = lock
+        return fences, lock
+
+    def _owner_fence_path(self, owner: str) -> Optional[Path]:
+        root = getattr(self, "_owner_lifecycle_fence_root", None)
+        if root is None:
+            return None
+        digest = hashlib.sha256(self._research_owner(owner).encode("utf-8")).hexdigest()
+        return Path(root) / f"{digest}.fence"
+
+    def _persist_owner_fence(self, owner: str) -> None:
+        path = self._owner_fence_path(owner)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except FileExistsError:
+            return
+        try:
+            os.write(descriptor, b"fenced\n")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _owner_is_fenced(self, owner: str, fences: Optional[set[str]] = None) -> bool:
+        owner_key = self._research_owner(owner)
+        if fences is None:
+            fences, _lock = self._lifecycle_state()
+        if owner_key in fences:
+            return True
+        path = self._owner_fence_path(owner_key)
+        return bool(path and path.is_file() and not path.is_symlink())
+
+    @staticmethod
+    def _research_owner(owner: str) -> str:
+        key = str(owner or "").strip().lower()
+        if not key or "\x00" in key:
+            raise ValueError("research lifecycle owner is required")
+        return key
+
+    def owner_inventory(self, owner: str) -> dict:
+        """Return content-free identities for active tasks owned by *owner*."""
+        owner_key = self._research_owner(owner)
+        _fences, lock = self._lifecycle_state()
+        with lock:
+            session_ids = sorted(
+                str(session_id)
+                for session_id, entry in self._active_tasks.items()
+                if isinstance(entry, dict)
+                and str(entry.get("owner") or "").strip().lower() == owner_key
+            )
+        return {
+            "count": len(session_ids),
+            "digest": hashlib.sha256("\n".join(session_ids).encode("utf-8")).hexdigest(),
+        }
+
+    def preview_owner_rename(self, old_owner: str, new_owner: str) -> dict:
+        """Freeze a content-free active-task owner move without side effects."""
+        old_key = self._research_owner(old_owner)
+        new_key = self._research_owner(new_owner)
+        if old_key == new_key:
+            raise ValueError("distinct research lifecycle owners are required")
+        source = self.owner_inventory(old_key)
+        target = self.owner_inventory(new_key)
+        if source["count"] and target["count"]:
+            raise RuntimeError(
+                "source and target research owners both contain active tasks"
+            )
+        return {"schema_version": 1, "source": source, "target": target}
+
+    @staticmethod
+    def _research_inventory_matches(actual: dict, expected: dict) -> bool:
+        return all(actual.get(key) == expected.get(key) for key in ("count", "digest"))
+
+    def reconcile_owner_rename(
+        self,
+        old_owner: str,
+        new_owner: str,
+        manifest: dict,
+    ) -> dict:
+        """Converge an interrupted active-task move against its frozen preview."""
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+            raise RuntimeError("invalid research lifecycle manifest")
+        expected = dict(manifest.get("source") or {})
+        old_key = self._research_owner(old_owner)
+        new_key = self._research_owner(new_owner)
+        source = self.owner_inventory(old_key)
+        target = self.owner_inventory(new_key)
+        if self._research_inventory_matches(source, expected) and not target["count"]:
+            changed = self.rename_owner(old_key, new_key)
+        elif not source["count"] and self._research_inventory_matches(target, expected):
+            changed = 0
+        else:
+            raise RuntimeError("research owner state changed after preflight")
+        source = self.owner_inventory(old_key)
+        target = self.owner_inventory(new_key)
+        if source["count"] or not self._research_inventory_matches(target, expected):
+            raise RuntimeError("research owner lifecycle did not converge")
+        return {"state": "staged", "changed": changed, "source": source, "target": target}
+
+    def fence_owner(self, owner: str) -> dict:
+        """Stop new work and synchronously cancel all active owner tasks."""
+        owner_key = self._research_owner(owner)
+        fences, lock = self._lifecycle_state()
+        with lock:
+            fences.add(owner_key)
+            self._persist_owner_fence(owner_key)
+            before = self.owner_inventory(owner_key)
+            cancelled = 0
+            for session_id, entry in list(self._active_tasks.items()):
+                if not isinstance(entry, dict) or str(entry.get("owner") or "").strip().lower() != owner_key:
+                    continue
+                researcher = entry.get("researcher")
+                if (
+                    researcher is not None
+                    and callable(getattr(researcher, "cancel", None))
+                    and not bool(getattr(researcher, "cancelling", lambda: False)())
+                ):
+                    researcher.cancel()
+                task = entry.get("task")
+                if (
+                    task is not None
+                    and not task.done()
+                    and not bool(getattr(task, "cancelling", lambda: False)())
+                ):
+                    task.cancel()
+                if entry.get("status") == "running":
+                    entry["status"] = "cancelled"
+                    cancelled += 1
+            return {"state": "fenced", "before": before, "cancelled": cancelled}
+
+    async def quiesce_owner(self, owner: str) -> dict:
+        """Fence, cancel, and join detached research before account inventory."""
+
+        owner_key = self._research_owner(owner)
+        receipt = self.fence_owner(owner_key)
+        _fences, lock = self._lifecycle_state()
+        with lock:
+            tasks = {
+                entry.get("task")
+                for entry in self._active_tasks.values()
+                if isinstance(entry, dict)
+                and str(entry.get("owner") or "").strip().lower() == owner_key
+                and entry.get("task") is not None
+                and not entry.get("task").done()
+            }
+        current = asyncio.current_task()
+        tasks.discard(current)
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+        # Cancellation finalizers have now finished.  Remove the terminal
+        # process-local entries so the subsequent frozen inventory describes
+        # only state that can still write.
+        with lock:
+            removed = 0
+            for session_id, entry in list(self._active_tasks.items()):
+                if (
+                    isinstance(entry, dict)
+                    and str(entry.get("owner") or "").strip().lower() == owner_key
+                ):
+                    self._active_tasks.pop(session_id, None)
+                    removed += 1
+        return {
+            **receipt,
+            "joined": len(tasks),
+            "removed": removed,
+            "after": self.owner_inventory(owner_key),
+        }
+
+    def release_owner_fence(self, owner: str) -> None:
+        fences, lock = self._lifecycle_state()
+        with lock:
+            owner_key = self._research_owner(owner)
+            fences.discard(owner_key)
+            path = self._owner_fence_path(owner_key)
+            if path is not None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
     def rename_owner(self, old_owner: str, new_owner: str) -> int:
-        """Move in-flight research tasks from one owner key to another."""
+        """Move in-flight research tasks from one owner key to another.
+
+        The transition is idempotent and fails closed if both owners already
+        have task state.  The source remains fenced so a racing coroutine
+        cannot recreate research under the obsolete principal.
+        """
         old_key = str(old_owner or "").strip().lower()
         new_key = str(new_owner or "").strip().lower()
         if not old_key or not new_key:
             return 0
-
-        changed = 0
-        for entry in list(self._active_tasks.values()):
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("owner", "")).strip().lower() == old_key:
+        if old_key == new_key:
+            return 0
+        fences, lock = self._lifecycle_state()
+        with lock:
+            old_entries = [
+                entry for entry in self._active_tasks.values()
+                if isinstance(entry, dict)
+                and str(entry.get("owner") or "").strip().lower() == old_key
+            ]
+            new_entries = [
+                entry for entry in self._active_tasks.values()
+                if isinstance(entry, dict)
+                and str(entry.get("owner") or "").strip().lower() == new_key
+            ]
+            if old_entries and new_entries:
+                raise RuntimeError("source and target research owners both contain active tasks")
+            fences.add(old_key)
+            self._persist_owner_fence(old_key)
+            if not old_entries:
+                return 0
+            for entry in old_entries:
                 entry["owner"] = new_key
-                changed += 1
+            return len(old_entries)
+
+    def compensate_owner_rename(self, old_owner: str, new_owner: str) -> int:
+        """Idempotently move staged tasks back to the source owner."""
+        old_key = self._research_owner(old_owner)
+        new_key = self._research_owner(new_owner)
+        if self.owner_inventory(old_key)["count"]:
+            if self.owner_inventory(new_key)["count"]:
+                raise RuntimeError("source and target research owners both contain active tasks")
+            return 0
+        changed = self.rename_owner(new_key, old_key)
+        self.release_owner_fence(old_key)
         return changed
+
+    def purge_owner(self, owner: str, *, expected: dict | None = None) -> dict:
+        """Fence, cancel, and forget all process-local research for one owner."""
+        owner_key = self._research_owner(owner)
+        before = self.owner_inventory(owner_key)
+        if expected is not None and not self._research_inventory_matches(
+            before,
+            expected,
+        ):
+            raise RuntimeError("research owner state changed before purge")
+        receipt = self.fence_owner(owner_key)
+        _fences, lock = self._lifecycle_state()
+        with lock:
+            removed = 0
+            for session_id, entry in list(self._active_tasks.items()):
+                if isinstance(entry, dict) and str(entry.get("owner") or "").strip().lower() == owner_key:
+                    self._active_tasks.pop(session_id, None)
+                    removed += 1
+        after = self.owner_inventory(owner_key)
+        return {"state": "purged", "before": receipt["before"], "after": after, "removed": removed}
+
+    def verify_owner_empty(self, owner: str) -> dict:
+        inventory = self.owner_inventory(owner)
+        if inventory["count"]:
+            raise RuntimeError("research owner lifecycle did not reach an empty state")
+        return {"state": "empty", "inventory": inventory}
 
     def start_research(
         self,
         session_id: str,
         query: str,
-        llm_endpoint: str,
-        llm_model: str,
+        llm_endpoint: str = "",
+        llm_model: str = "",
         max_time: int = 300,
         hard_timeout: int = None,
         llm_headers: dict = None,
@@ -261,14 +538,23 @@ class ResearchHandler:
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
         owner: str = "",
+        model_route_id: str | None = None,
+        grant_id: str | None = None,
+        root_operation_id: str | None = None,
     ) -> dict:
         """Start research as a background task. Returns task info dict.
 
         max_rounds is the safety cap; the AI's _should_stop decision (after
         min_rounds) terminates the loop earlier in normal operation.
         """
+        del llm_endpoint, llm_headers
         if _research_json_path(session_id) is None:
             raise ValueError("Invalid research session_id")
+        owner_key = str(owner or "").strip().lower()
+        fences, lifecycle_lock = self._lifecycle_state()
+        with lifecycle_lock:
+            if owner_key and self._owner_is_fenced(owner_key, fences):
+                raise RuntimeError("research owner is undergoing an account lifecycle operation")
 
         # Resolve the hard wall-clock timeout from settings when the caller
         # didn't pin one. Local / edge models routinely need more than the
@@ -310,7 +596,10 @@ class ResearchHandler:
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
-        self._active_tasks[session_id] = entry
+        with lifecycle_lock:
+            if owner_key and self._owner_is_fenced(owner_key, fences):
+                raise RuntimeError("research owner is undergoing an account lifecycle operation")
+            self._active_tasks[session_id] = entry
 
         def on_progress(event):
             entry["progress"] = event
@@ -331,11 +620,11 @@ class ResearchHandler:
             try:
                 result = await asyncio.wait_for(
                     self.call_research_service(
-                        query, llm_endpoint, llm_model,
+                        query,
+                        llm_model=llm_model,
                         max_time=max_time,
                         progress_callback=on_progress,
                         _task_entry=entry,
-                        llm_headers=llm_headers,
                         prior_report=prior_report,
                         prior_findings=prior_findings,
                         prior_urls=prior_urls,
@@ -346,6 +635,9 @@ class ResearchHandler:
                         extraction_concurrency=extraction_concurrency,
                         owner=owner,
                         session_id=session_id,
+                        model_route_id=model_route_id,
+                        grant_id=grant_id,
+                        root_operation_id=root_operation_id or session_id,
                     ),
                     timeout=hard_timeout,
                 )
@@ -608,6 +900,12 @@ class ResearchHandler:
     def _save_result(self, session_id: str, entry: dict):
         """Persist completed research result to disk."""
         try:
+            owner_key = str(entry.get("owner") or "").strip().lower()
+            fences, lifecycle_lock = self._lifecycle_state()
+            with lifecycle_lock:
+                if owner_key and self._owner_is_fenced(owner_key, fences):
+                    logger.info("Discarding research result for fenced owner: %s", session_id)
+                    return
             path = _research_json_path(session_id)
             if path is None:
                 logger.error("Refusing to save research result for invalid session_id: %r", session_id)
@@ -635,7 +933,11 @@ class ResearchHandler:
                 # SECURITY: stamp owner so route handlers can filter by user.
                 "owner": entry.get("owner", ""),
             }
-            path.write_text(json.dumps(data), encoding="utf-8")
+            with lifecycle_lock:
+                if owner_key and self._owner_is_fenced(owner_key, fences):
+                    logger.info("Discarding research result for fenced owner: %s", session_id)
+                    return
+                path.write_text(json.dumps(data), encoding="utf-8")
             logger.info(f"Research result saved to {path}")
             try:
                 from src.event_bus import fire_event
@@ -725,38 +1027,40 @@ class ResearchHandler:
 
     @staticmethod
     async def _probe_endpoint(
-        endpoint: str,
-        model: str,
+        endpoint: str = "",
+        model: str = "",
         headers: dict = None,
         owner: str = "",
         session_id: str | None = None,
+        model_route_id: str | None = None,
+        grant_id: str | None = None,
+        root_operation_id: str | None = None,
     ):
-        """Quick probe to verify the LLM endpoint/model responds before research."""
-        from src.llm_core import llm_call_async
+        """Quick probe to verify the managed research route responds."""
+        del endpoint, headers
         try:
-            logger.info(f"Probing {model} at {endpoint} (has_auth={bool(headers and 'Authorization' in (headers or {}))})")
-            await llm_call_async(
-                url=endpoint,
-                model=model,
+            model_label = model or "managed research route"
+            logger.info("Probing managed research route: %s", model_label)
+            await _complete_research_text(
+                owner=owner,
                 messages=[{"role": "user", "content": "hi"}],
                 temperature=0,
-                max_tokens=5,
-                headers=headers,
+                max_output_tokens=5,
                 timeout=15,
-                max_retries=1,
-                owner=owner or None,
-                session_id=session_id,
+                root_operation_id=root_operation_id or session_id,
+                model_route_id=model_route_id,
+                grant_id=grant_id,
             )
-            logger.info(f"Endpoint probe OK: {model}")
+            logger.info("Managed research probe OK: %s", model_label)
         except Exception as e:
-            logger.error(f"Probe failed for {model}: {e}")
-            raise RuntimeError(_format_probe_failure(model, e)) from e
+            logger.error("Managed research probe failed for %s: %s", model_label, e)
+            raise RuntimeError(_format_probe_failure(model_label, e)) from e
 
     async def call_research_service(
         self,
         query: str,
-        llm_endpoint: str,
-        llm_model: str,
+        llm_endpoint: str = "",
+        llm_model: str = "",
         max_time: int = 300,
         progress_callback=None,
         _task_entry: dict = None,
@@ -771,14 +1075,17 @@ class ResearchHandler:
         extraction_concurrency: int = None,
         owner: str = "",
         session_id: str | None = None,
+        model_route_id: str | None = None,
+        grant_id: str | None = None,
+        root_operation_id: str | None = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
 
         Args:
             query: Research question
-            llm_endpoint: LLM endpoint URL for chat completions
-            llm_model: Model name/ID
+            llm_endpoint: Deprecated compatibility argument; never executed
+            llm_model: Safe display label for the selected managed model
             max_time: Maximum research time in seconds (default 5 minutes)
             _task_entry: Internal - registry entry to store researcher ref
             prior_report: Previous report to continue from.
@@ -788,10 +1095,11 @@ class ResearchHandler:
         Returns:
             Formatted research report with expandable section and summary
         """
+        del llm_endpoint, llm_headers
         is_continuation = bool(prior_report)
         logger.info(f"{'Continuing' if is_continuation else 'Starting'} IterResearch Deep Research")
         logger.info(f"Query: {query}")
-        logger.info(f"LLM: {llm_endpoint} / {llm_model}")
+        logger.info("LLM: %s", llm_model or "managed research route")
         logger.info(f"Max time: {max_time}s")
         if is_continuation:
             logger.info(f"Prior: {len(prior_findings or [])} findings, {len(prior_urls or set())} URLs")
@@ -800,11 +1108,12 @@ class ResearchHandler:
         if progress_callback:
             progress_callback({"phase": "probing", "model": llm_model})
         await self._probe_endpoint(
-            llm_endpoint,
-            llm_model,
-            llm_headers,
+            model=llm_model,
             owner=owner,
             session_id=session_id,
+            model_route_id=model_route_id,
+            grant_id=grant_id,
+            root_operation_id=root_operation_id,
         )
 
         try:
@@ -838,9 +1147,7 @@ class ResearchHandler:
             )
 
             researcher = DeepResearcher(
-                llm_endpoint=llm_endpoint,
                 llm_model=llm_model,
-                llm_headers=llm_headers,
                 max_rounds=max_rounds,
                 min_rounds=max(2, max_rounds - 2),
                 max_time=max_time,
@@ -854,6 +1161,10 @@ class ResearchHandler:
                 category=category,
                 owner=owner or None,
                 session_id=session_id,
+                model_route_id=model_route_id,
+                grant_id=grant_id,
+                root_operation_id=root_operation_id or session_id,
+                purpose="research",
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher
@@ -881,11 +1192,10 @@ class ResearchHandler:
 
         except Exception as e:
             logger.error(f"DeepResearcher failed: {e}", exc_info=True)
-            return await self._fallback_research(query, llm_endpoint, llm_model, max_time, str(e))
+            return await self._fallback_research(query, max_time, str(e))
 
     async def _fallback_research(
-        self, query: str, llm_endpoint: str, llm_model: str,
-        max_time: int, primary_error: str,
+        self, query: str, max_time: int, primary_error: str,
     ) -> str:
         """Fall back to legacy engine, then to basic web search."""
         # Try legacy orchestrator

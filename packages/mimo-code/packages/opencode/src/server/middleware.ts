@@ -2,6 +2,7 @@ import { Provider } from "../provider"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { NotFoundError } from "../storage"
 import { Session } from "../session"
+import * as GoalState from "../session/goal-state"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
 import type { ErrorHandler, MiddlewareHandler } from "hono"
 import { HTTPException } from "hono/http-exception"
@@ -28,6 +29,9 @@ export const ErrorMiddleware: ErrorHandler = (err, c) => {
     return c.json(err.toObject(), { status })
   }
   if (err instanceof Session.BusyError) {
+    return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 409 })
+  }
+  if (err instanceof GoalState.ConflictError) {
     return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 409 })
   }
   if (err instanceof HTTPException) return err.getResponse()

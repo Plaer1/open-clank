@@ -1,16 +1,19 @@
 """Background scheduler for ScheduledTask execution."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from core.auth import RESERVED_USERNAMES
 from src.task_action_policy import (
+    ADMIN_ONLY_TASK_ACTIONS,
     is_admin_only_task_action,
     owner_has_admin_task_privileges,
 )
@@ -34,6 +37,30 @@ TASK_DEFAULT_SHELL_TOOLS = frozenset({
     "bash", "python", "read_file", "write_file", "edit_file",
     "grep", "glob", "ls", "get_workspace",
 })
+
+# The exact pre-Copal personal-assistant seed.  Default migrations are allowed
+# to append native Copal tools only when this list is unchanged; any user edit
+# (including order) remains authoritative.
+HISTORICAL_DEFAULT_ASSISTANT_TOOLS = (
+    "manage_calendar", "manage_notes", "manage_tasks", "manage_memory",
+    "list_email_accounts", "list_emails", "read_email", "send_email",
+    "reply_to_email", "archive_email", "mark_email_read", "delete_email",
+    "resolve_contact", "search_chats", "web_search", "web_fetch",
+    "read_file", "create_document", "update_document", "edit_document",
+    "generate_image", "trigger_research", "download_model", "serve_model",
+    "list_served_models", "stop_served_model", "edit_image",
+)
+COPAL_DEFAULT_ASSISTANT_TOOLS = ("read_copal", "manage_copal")
+
+
+def migrate_copal_default_tools(current_tools: object) -> object:
+    """Append Copal tools only to the untouched historical default seed."""
+    if (
+        isinstance(current_tools, list)
+        and current_tools == list(HISTORICAL_DEFAULT_ASSISTANT_TOOLS)
+    ):
+        return [*current_tools, *COPAL_DEFAULT_ASSISTANT_TOOLS]
+    return current_tools
 
 
 # Mechanical operating rules for the personal assistant's scheduled work.
@@ -136,7 +163,34 @@ _shared_cache_pending: Dict[Tuple, asyncio.Future] = {}
 _shared_cache_lock = asyncio.Lock()
 
 
-async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -> Any:
+def _owner_shared_cache_key(owner: object, *parts: object) -> Tuple:
+    """Return the canonical, owner-addressable scheduler cache key."""
+    return ("owner", str(owner or "").strip().lower(), *parts)
+
+
+def _shared_cache_key_owner(key: object) -> str | None:
+    if not isinstance(key, tuple) or len(key) < 2 or key[0] != "owner":
+        return None
+    owner = str(key[1] or "").strip().lower()
+    return owner or None
+
+
+def _cache_admitted(admit: Callable[[], bool] | None) -> bool:
+    if admit is None:
+        return True
+    try:
+        return bool(admit())
+    except Exception:
+        return False
+
+
+async def _cached(
+    key: Tuple,
+    ttl: float,
+    fetch: Callable[[], Awaitable[Any]],
+    *,
+    admit: Callable[[], bool] | None = None,
+) -> Any:
     """Return a cached result for `key` if fresh, else call `fetch()` and store.
 
     Concurrent callers for the same missing key share one `fetch()` call.
@@ -146,6 +200,8 @@ async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -
     async with _shared_cache_lock:
         entry = _shared_cache.get(key)
         if entry and entry[0] > now:
+            if not _cache_admitted(admit):
+                raise RuntimeError("scheduler cache owner is fenced")
             return entry[1]
         fut = _shared_cache_pending.get(key)
         if fut is not None:
@@ -158,18 +214,34 @@ async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -
             pending = fut
             owner = True
     if not owner:
-        return await pending
+        value = await pending
+        if not _cache_admitted(admit):
+            raise RuntimeError("scheduler cache owner is fenced")
+        return value
     try:
         val = await fetch()
+        if not _cache_admitted(admit):
+            raise RuntimeError("scheduler cache owner is fenced")
         async with _shared_cache_lock:
+            # The lifecycle fence can appear while this coroutine is waiting
+            # to publish under the lock.  Recheck at the exact write boundary
+            # so a late singleflight result cannot resurrect an old owner key.
+            if not _cache_admitted(admit):
+                raise RuntimeError("scheduler cache owner is fenced")
             _shared_cache[key] = (time.monotonic() + ttl, val)
             _shared_cache_pending.pop(key, None)
-        pending.set_result(val)
+        if not pending.done():
+            pending.set_result(val)
         return val
-    except Exception as e:
+    except BaseException as e:
         async with _shared_cache_lock:
-            _shared_cache_pending.pop(key, None)
-        pending.set_exception(e)
+            if _shared_cache_pending.get(key) is pending:
+                _shared_cache_pending.pop(key, None)
+        if not pending.done():
+            if isinstance(e, asyncio.CancelledError):
+                pending.cancel()
+            else:
+                pending.set_exception(e)
         raise
 
 
@@ -369,49 +441,189 @@ def _checkin_calendar_events(db, owner, start, end):
     )
 
 
-def _normalize_chat_endpoint(url: str) -> str:
-    """Repair a resolved task endpoint to a full chat-completions URL.
+@dataclass(frozen=True)
+class _ManagedTaskRoute:
+    """Secret-free route identity for one scheduled managed-model run."""
 
-    Unlike the chat path — which stores ``build_chat_url(normalize_base(base))``
-    on the session — the task executor passes ``task.endpoint_url`` verbatim to
-    the model HTTP call. A bare OpenAI-compatible base such as
-    ``http://host:11434/v1`` therefore POSTs to a 404 ("page not found") and the
-    model silently appears to "return an empty response".
+    model_route_id: str
+    connection_id: str
+    provider_model_id: str
+    public_endpoint_id: str
+    capabilities: dict[str, Any]
+    grant_id: str | None = None
 
-    Repair only bare OpenAI-compatible bases. Native-Ollama URLs (``/api...``)
-    and URLs that already point at a concrete endpoint are returned untouched, so
-    their own downstream normalizers keep working. Idempotent: a URL already
-    ending in ``/chat/completions`` is left as-is.
+    @property
+    def runtime_model(self) -> str:
+        return f"{self.connection_id}/{self.provider_model_id}"
+
+
+def _resolve_managed_task_route(
+    task,
+    *,
+    crew=None,
+    session=None,
+    operation: str = "chat.stream",
+) -> _ManagedTaskRoute:
+    """Resolve an exact task route or the owner's ordered ``tasks`` default.
+
+    Legacy URLs, headers, endpoint rows, and model strings are deliberately
+    excluded.  A migrated task/crew/session route remains pinned; otherwise
+    the first enabled owner-scoped ``tasks`` binding supporting ``operation``
+    is used.
     """
-    if not url:
-        return url
-    # Imports kept function-local (endpoint_resolver pulls in heavy deps) but
-    # OUTSIDE the try: an import failure is a real bug that should surface, not
-    # be silently swallowed into the un-normalized URL this function exists to
-    # repair.
-    from urllib.parse import urlparse
-    from src.endpoint_resolver import normalize_base, build_chat_url
-    parsed = urlparse(url)
-    if parsed.scheme.lower() == "mimo":
-        return url
-    path = (parsed.path or "").rstrip("/")
-    if path == "/api" or path.startswith("/api/"):
-        return url  # native Ollama — handled by the native path downstream
-    if path.endswith(("/chat/completions", "/messages", "/responses", "/completions")):
-        return url  # already a concrete endpoint
+
+    from src.openclank.chat_routing import (
+        ChatRouteUnavailable,
+        normalized_provider_owner,
+        resolve_chat_route,
+        share_id_from_endpoint,
+    )
+    from src.openclank.provider_store import ProviderStore, ProviderStoreError
+
+    owner = normalized_provider_owner(getattr(task, "owner", None))
+    route_id = next(
+        (
+            str(value).strip()
+            for value in (
+                getattr(task, "provider_model_route_id", None),
+                getattr(crew, "provider_model_route_id", None),
+                getattr(session, "provider_model_route_id", None),
+            )
+            if str(value or "").strip()
+        ),
+        "",
+    )
+    endpoint_id = next(
+        (
+            str(value).strip()
+            for value in (
+                getattr(task, "endpoint_id", None),
+                getattr(crew, "endpoint_id", None),
+                getattr(session, "endpoint_id", None),
+            )
+            if str(value or "").strip()
+        ),
+        "",
+    )
+    store = ProviderStore()
+
+    if route_id:
+        # Received shares need the recipient's accepted grant identity.  Own
+        # routes are read directly so a deliberately hidden but still-pinned
+        # automation remains executable after migration.
+        grant_id = share_id_from_endpoint(endpoint_id)
+        if grant_id:
+            try:
+                route = resolve_chat_route(
+                    owner=owner,
+                    endpoint_id=endpoint_id,
+                    model_route_id=route_id,
+                    provider_store=store,
+                )
+            except ChatRouteUnavailable as exc:
+                raise RuntimeError(f"Managed task model route is unavailable: {exc}") from exc
+            if operation not in set(route.operations or ()):
+                raise RuntimeError(
+                    f"Managed task model route does not support {operation}"
+                )
+            return _ManagedTaskRoute(
+                model_route_id=route.model_route_id,
+                connection_id=route.connection_id,
+                provider_model_id=route.provider_model_id,
+                public_endpoint_id=route.public_endpoint_id,
+                capabilities=dict(route.capabilities or {}),
+                grant_id=route.provider_grant_id,
+            )
+        try:
+            route = store.get_model_route(owner=owner, model_route_id=route_id)
+            connection = store.get_connection(
+                owner=owner,
+                connection_id=route.connection_id,
+            )
+        except ProviderStoreError:
+            # A migrated shared route can recover its unique accepted grant
+            # from the stable route ID even if old endpoint metadata was empty.
+            try:
+                shared = resolve_chat_route(
+                    owner=owner,
+                    model_route_id=route_id,
+                    provider_store=store,
+                )
+            except ChatRouteUnavailable as exc:
+                raise RuntimeError(f"Managed task model route is unavailable: {exc}") from exc
+            if operation not in set(shared.operations or ()):
+                raise RuntimeError(
+                    f"Managed task model route does not support {operation}"
+                )
+            return _ManagedTaskRoute(
+                model_route_id=shared.model_route_id,
+                connection_id=shared.connection_id,
+                provider_model_id=shared.provider_model_id,
+                public_endpoint_id=shared.public_endpoint_id,
+                capabilities=dict(shared.capabilities or {}),
+                grant_id=shared.provider_grant_id,
+            )
+        if (
+            not route.enabled
+            or route.deleted_at is not None
+            or not connection.enabled
+            or connection.deleted_at is not None
+            or operation not in set(route.operations or ())
+        ):
+            raise RuntimeError(
+                f"Managed task model route does not support {operation}"
+            )
+        return _ManagedTaskRoute(
+            model_route_id=route.id,
+            connection_id=connection.id,
+            provider_model_id=route.provider_model_id,
+            public_endpoint_id=connection.id,
+            capabilities=dict(route.capabilities or {}),
+        )
+
     try:
-        return build_chat_url(normalize_base(url))
-    except Exception:
-        # Guard only the actual normalization. Returning the URL un-normalized
-        # reverts to the 404 this fixes, so make the silent revert visible.
-        logger.debug("task endpoint normalization failed for %r; using as-is", url, exc_info=True)
-        return url
+        bindings = store.get_route_bindings_for_purpose(
+            owner=owner,
+            purpose="tasks",
+        )
+    except ProviderStoreError as exc:
+        raise RuntimeError("No managed tasks model route is configured") from exc
+    for binding in bindings:
+        if not binding.enabled:
+            continue
+        try:
+            route = store.get_model_route(
+                owner=owner,
+                model_route_id=binding.model_route_id,
+            )
+            connection = store.get_connection(
+                owner=owner,
+                connection_id=route.connection_id,
+            )
+        except ProviderStoreError:
+            continue
+        if (
+            route.enabled
+            and route.deleted_at is None
+            and connection.enabled
+            and connection.deleted_at is None
+            and operation in set(route.operations or ())
+        ):
+            return _ManagedTaskRoute(
+                model_route_id=route.id,
+                connection_id=connection.id,
+                provider_model_id=route.provider_model_id,
+                public_endpoint_id=connection.id,
+                capabilities=dict(route.capabilities or {}),
+            )
+    raise RuntimeError(f"No managed tasks model route supports {operation}")
 
 
 class TaskScheduler:
-    def __init__(self, session_manager, mimo_supervisor=None):
+    def __init__(self, session_manager, mimo_supervisor=None, auth_manager=None):
         self._session_manager = session_manager
         self._mimo_supervisor = mimo_supervisor
+        self._auth_manager = auth_manager
         self._running = False
         self._task = None
         self._executing = set()  # task IDs currently running OR queued behind the semaphore
@@ -429,10 +641,606 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        # Preserve the historical latest-handle map for UI/stop callers while
+        # retaining every forced/queued execution for permission-reset
+        # cancellation. A forced run can coexist with an older same-task run
+        # while it waits on the per-task lock.
+        self._task_handle_sets: dict[str, set[asyncio.Task]] = {}
+        # ``force`` bypasses the global background-model slot so an operator
+        # can run a task while unrelated work is active. It must not allow two
+        # copies of the *same* durable task to race its session_id/transcript
+        # claim, though. Keep a per-task fence across the full execution.
+        self._task_run_locks: dict[str, asyncio.Lock] = {}
+        self._owner_aux_handles: dict[str, set[asyncio.Task]] = {}
+        self._runtime_instance_id = uuid.uuid4().hex
+
+    def _owner_lifecycle_fenced(self, owner: object) -> bool:
+        """Fail closed when the account coordinator has fenced ``owner``."""
+        normalized = str(owner or "").strip().lower()
+        if not normalized:
+            return False
+        checker = getattr(
+            getattr(self, "_auth_manager", None),
+            "is_account_lifecycle_fenced",
+            None,
+        )
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(normalized))
+        except Exception:
+            return True
+
+    def _task_owner_lifecycle_fenced(self, task_id: str) -> bool:
+        from core.database import SessionLocal, ScheduledTask
+
+        db = SessionLocal()
+        try:
+            row = db.query(ScheduledTask.owner).filter(
+                ScheduledTask.id == task_id,
+            ).first()
+            return bool(row and self._owner_lifecycle_fenced(row[0]))
+        finally:
+            db.close()
+
+    @staticmethod
+    def _runtime_fingerprint(identities: list[str]) -> str:
+        material = json.dumps(sorted(identities), separators=(",", ":"))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _same_runtime_inventory(observed: object, expected: object) -> bool:
+        if not isinstance(expected, dict):
+            return True
+        return (
+            int(getattr(observed, "get", lambda *_: 0)("count") or 0)
+            == int(expected.get("count") or 0)
+            and str(getattr(observed, "get", lambda *_: "")("fingerprint") or "")
+            == str(expected.get("fingerprint") or "")
+        )
+
+    def owner_runtime_inventory(self, owner: str) -> dict[str, object]:
+        """Content-silent inventory of owner-keyed process-local task state.
+
+        Identities are hashed independently of global container positions so a
+        lifecycle operation for owner A cannot change owner B's fingerprint.
+        """
+        normalized = str(owner or "").strip().lower()
+        notifications = []
+        for item in self._pending_notifications:
+            if str(item.get("owner") or "").strip().lower() != normalized:
+                continue
+            # Notification prose is user content.  Only stable operational
+            # identity participates in lifecycle evidence.
+            identity = {
+                key: item.get(key)
+                for key in ("task_id", "kind", "status", "timestamp")
+            }
+            canonical = json.dumps(
+                identity,
+                default=str,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            notifications.append(
+                hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            )
+
+        session_manager = getattr(self, "_session_manager", None)
+        session_inventory = None
+        inventory_sessions = getattr(session_manager, "owner_cache_inventory", None)
+        if callable(inventory_sessions):
+            session_inventory = inventory_sessions(normalized)
+        if session_inventory is None:
+            sessions = []
+            session_cache = getattr(session_manager, "sessions", {})
+            for session_id, cached in getattr(session_cache, "items", lambda: ())():
+                cached_owner = (
+                    cached.get("owner")
+                    if isinstance(cached, dict)
+                    else getattr(cached, "owner", None)
+                )
+                if str(cached_owner or "").strip().lower() == normalized:
+                    sessions.append(str(session_id))
+            session_inventory = {
+                "count": len(sessions),
+                "fingerprint": self._runtime_fingerprint(sessions),
+            }
+
+        completed_cache = []
+        pending_cache = []
+        for key in _shared_cache:
+            if _shared_cache_key_owner(key) == normalized:
+                completed_cache.append(
+                    hashlib.sha256(repr(key[2:]).encode("utf-8")).hexdigest()
+                )
+        for key in _shared_cache_pending:
+            if _shared_cache_key_owner(key) == normalized:
+                pending_cache.append(
+                    hashlib.sha256(repr(key[2:]).encode("utf-8")).hexdigest()
+                )
+
+        aux_handles = [
+            "active"
+            for handle in self._owner_aux_handles.get(normalized, set())
+            if not handle.done()
+        ]
+
+        domains = {
+            "notifications": len(notifications),
+            "sessions": int(session_inventory.get("count") or 0),
+            "shared_cache": len(completed_cache),
+            "shared_cache_pending": len(pending_cache),
+            "aux_handles": len(aux_handles),
+        }
+        domain_fingerprints = {
+            "notifications": self._runtime_fingerprint(notifications),
+            "sessions": str(session_inventory.get("fingerprint") or ""),
+            "shared_cache": self._runtime_fingerprint(completed_cache),
+            "shared_cache_pending": self._runtime_fingerprint(pending_cache),
+            "aux_handles": self._runtime_fingerprint(aux_handles),
+        }
+        material = json.dumps(
+            {"domains": domains, "fingerprints": domain_fingerprints},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return {
+            "schema_version": 1,
+            "count": sum(domains.values()),
+            "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest(),
+            "domains": domains,
+            "domain_fingerprints": domain_fingerprints,
+        }
+
+    def preview_owner_runtime_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+    ) -> dict[str, object]:
+        """Freeze exact process-local state and reject target inheritance."""
+        source = self.owner_runtime_inventory(source_owner)
+        target = self.owner_runtime_inventory(target_owner)
+        if int(target["count"]):
+            raise RuntimeError("target scheduler runtime already contains state")
+        return {
+            "source": source, "target": target,
+            "runtime_instance_id": self._runtime_instance_id,
+        }
+
+    def reconcile_owner_runtime(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Move owner-tagged notification buffers during account rename/staging."""
+        source = str(source_owner or "").strip().lower()
+        target = str(target_owner or "").strip().lower()
+        if not source or not target or source == target:
+            raise ValueError("task runtime lifecycle requires distinct owners")
+        source_before = self.owner_runtime_inventory(source)
+        target_before = self.owner_runtime_inventory(target)
+        if (
+            (manifest or {}).get("runtime_instance_id")
+            and manifest["runtime_instance_id"] != self._runtime_instance_id
+        ):
+            # These buffers are explicitly process-local. A restart drops them;
+            # a frozen inventory must not require resurrecting lost cache data.
+            if source_before["count"] or target_before["count"]:
+                raise RuntimeError("unexpected scheduler runtime after restart")
+            return {
+                "state": "expired_on_restart", "moved": 0,
+                "source": source_before, "target": target_before,
+            }
+        expected_source = (manifest or {}).get("source")
+        expected_target = (manifest or {}).get("target")
+        if source_before["count"] and target_before["count"]:
+            raise RuntimeError("source and target task runtime both contain state")
+        if source_before["count"] and not self._same_runtime_inventory(
+            source_before,
+            expected_source,
+        ):
+            raise RuntimeError("source scheduler runtime inventory changed")
+        if source_before["count"] and not self._same_runtime_inventory(
+            target_before,
+            expected_target,
+        ):
+            raise RuntimeError("target scheduler runtime inventory changed")
+        if source_before["domains"]["shared_cache_pending"]:
+            raise RuntimeError("source scheduler cache is still active")
+        if source_before["count"]:
+            session_manager = getattr(self, "_session_manager", None)
+            rename_sessions = getattr(session_manager, "rename_owner_cache", None)
+            if callable(rename_sessions):
+                expected_sessions = None
+                expected_target_sessions = None
+                if isinstance(expected_source, dict):
+                    expected_sessions = {
+                        "count": (expected_source.get("domains") or {}).get("sessions", 0),
+                        "fingerprint": (expected_source.get("domain_fingerprints") or {}).get("sessions", ""),
+                    }
+                if isinstance(expected_target, dict):
+                    expected_target_sessions = {
+                        "count": (expected_target.get("domains") or {}).get("sessions", 0),
+                        "fingerprint": (expected_target.get("domain_fingerprints") or {}).get("sessions", ""),
+                    }
+                rename_sessions(
+                    source,
+                    target,
+                    expected_source=expected_sessions,
+                    expected_target=expected_target_sessions,
+                )
+            else:
+                session_cache = getattr(session_manager, "sessions", {})
+                for cached in getattr(session_cache, "values", lambda: ())():
+                    cached_owner = (
+                        cached.get("owner")
+                        if isinstance(cached, dict)
+                        else getattr(cached, "owner", None)
+                    )
+                    if str(cached_owner or "").strip().lower() != source:
+                        continue
+                    if isinstance(cached, dict):
+                        cached["owner"] = target
+                    else:
+                        cached.owner = target
+            for item in self._pending_notifications:
+                if str(item.get("owner") or "").strip().lower() == source:
+                    item["owner"] = target
+            for key in list(_shared_cache):
+                if _shared_cache_key_owner(key) != source:
+                    continue
+                target_key = (key[0], target, *key[2:])
+                _shared_cache[target_key] = _shared_cache.pop(key)
+        elif target_before["count"]:
+            if expected_source is None or not self._same_runtime_inventory(
+                target_before,
+                expected_source,
+            ):
+                raise RuntimeError("unexpected target scheduler runtime state")
+        elif isinstance(expected_source, dict) and int(expected_source.get("count") or 0):
+            raise RuntimeError("expected scheduler runtime state is missing")
+        source_after = self.owner_runtime_inventory(source)
+        target_after = self.owner_runtime_inventory(target)
+        if source_after["count"]:
+            raise RuntimeError("source scheduler runtime remains after reconcile")
+        if expected_source is not None and not self._same_runtime_inventory(
+            target_after,
+            expected_source,
+        ):
+            raise RuntimeError("reconciled scheduler runtime inventory changed")
+        return {
+            "state": "staged" if source_before["count"] else "already_applied",
+            "moved": int(source_before["count"]),
+            "source": source_after,
+            "target": target_after,
+        }
+
+    def compensate_owner_runtime(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        receipt = self.reconcile_owner_runtime(
+            target_owner,
+            source_owner,
+            manifest,
+        )
+        return {**receipt, "state": "restored"}
+
+    def purge_owner_runtime(
+        self,
+        owner: str,
+        expected: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized = str(owner or "").strip().lower()
+        before = self.owner_runtime_inventory(normalized)
+        expected_inventory = (
+            expected.get("source")
+            if isinstance(expected, dict) and isinstance(expected.get("source"), dict)
+            else expected
+        )
+        if before["count"] and not self._same_runtime_inventory(
+            before,
+            expected_inventory,
+        ):
+            raise RuntimeError("scheduler runtime purge inventory changed")
+        self._pending_notifications[:] = [
+            item
+            for item in self._pending_notifications
+            if str(item.get("owner") or "").strip().lower() != normalized
+        ]
+        session_manager = getattr(self, "_session_manager", None)
+        purge_sessions = getattr(session_manager, "purge_owner_cache", None)
+        if callable(purge_sessions):
+            expected_sessions = None
+            if isinstance(expected_inventory, dict):
+                expected_sessions = {
+                    "count": (expected_inventory.get("domains") or {}).get("sessions", 0),
+                    "fingerprint": (expected_inventory.get("domain_fingerprints") or {}).get("sessions", ""),
+                }
+            purge_sessions(normalized, expected=expected_sessions)
+        else:
+            session_cache = getattr(session_manager, "sessions", {})
+            for session_id, cached in list(
+                getattr(session_cache, "items", lambda: ())()
+            ):
+                cached_owner = (
+                    cached.get("owner")
+                    if isinstance(cached, dict)
+                    else getattr(cached, "owner", None)
+                )
+                if str(cached_owner or "").strip().lower() == normalized:
+                    session_cache.pop(session_id, None)
+        for key in list(_shared_cache):
+            if _shared_cache_key_owner(key) == normalized:
+                _shared_cache.pop(key, None)
+        for key, pending in list(_shared_cache_pending.items()):
+            if _shared_cache_key_owner(key) == normalized:
+                _shared_cache_pending.pop(key, None)
+                if not pending.done():
+                    pending.cancel()
+        aux = self._owner_aux_handles.pop(normalized, set())
+        for handle in aux:
+            if not handle.done():
+                handle.cancel()
+        return {
+            "state": "purged",
+            "removed": int(before["count"]),
+            "after": self.owner_runtime_inventory(normalized),
+        }
+
+    async def quiesce_owner_lifecycle(self, owner: str) -> dict[str, int]:
+        """Cancel and join every queued/running scheduled task for one owner.
+
+        The account operation is already durable (and therefore an admission
+        fence) before this runs.  DB rows are marked aborted both before and
+        after joining because cancellation cleanup may otherwise overwrite the
+        authoritative terminal state with a stale ORM object.
+        """
+        from sqlalchemy import func
+
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+
+        normalized = str(owner or "").strip().lower()
+        if not normalized:
+            raise ValueError("task lifecycle owner is required")
+        db = SessionLocal()
+        try:
+            task_ids = [
+                str(row[0])
+                for row in db.query(ScheduledTask.id).filter(
+                    func.lower(func.trim(ScheduledTask.owner)) == normalized,
+                ).all()
+            ]
+        finally:
+            db.close()
+
+        message = "Aborted because an account lifecycle operation began"
+
+        def abort_active_runs(authoritative_ids: set[str] | None = None) -> set[str]:
+            if not task_ids:
+                return set()
+            session = SessionLocal()
+            try:
+                query = session.query(TaskRun).filter(TaskRun.task_id.in_(task_ids))
+                if authoritative_ids:
+                    runs = query.filter(
+                        (TaskRun.id.in_(authoritative_ids))
+                        | (TaskRun.status.in_(("queued", "running")))
+                    ).all()
+                else:
+                    runs = query.filter(
+                        TaskRun.status.in_(("queued", "running"))
+                    ).all()
+                now = _utcnow()
+                for run in runs:
+                    run.status = "aborted"
+                    run.error = message
+                    run.result = message
+                    run.finished_at = now
+                session.commit()
+                return {str(run.id) for run in runs}
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+        aborted_ids = abort_active_runs()
+        handles: set[asyncio.Task] = set()
+        for task_id in task_ids:
+            handles.update(self._execution_handles_for_task(task_id))
+        aux_handles = {
+            handle
+            for handle in self._owner_aux_handles.get(normalized, set())
+            if not handle.done()
+        }
+        handles.update(aux_handles)
+        current = asyncio.current_task()
+        cancelled = {
+            handle
+            for handle in handles
+            if handle is not current and not handle.done()
+        }
+        for handle in cancelled:
+            if not handle.cancelling():
+                handle.cancel()
+        if cancelled:
+            await asyncio.shield(asyncio.gather(*cancelled, return_exceptions=True))
+        # Let cancellation finalizers unregister their handles and clean any
+        # owner-keyed singleflight future before inventory is frozen.
+        await asyncio.sleep(0)
+        async with self._executing_lock:
+            cleared = sum(task_id in self._executing for task_id in task_ids)
+            self._executing.difference_update(task_ids)
+        aborted_ids.update(abort_active_runs(aborted_ids))
+        for task_id in task_ids:
+            self._task_handles.pop(task_id, None)
+            self._task_handle_sets.pop(task_id, None)
+            self._task_defer_counts.pop(task_id, None)
+            lock = self._task_run_locks.get(task_id)
+            if lock is None or not lock.locked():
+                self._task_run_locks.pop(task_id, None)
+        self._owner_aux_handles.pop(normalized, None)
+        if any(
+            _shared_cache_key_owner(key) == normalized
+            for key in _shared_cache_pending
+        ):
+            raise RuntimeError("owner scheduler cache did not quiesce")
+        return {
+            "tasks": len(task_ids),
+            "runs_aborted": len(aborted_ids),
+            "executions_cancelled": len(cancelled),
+            "aux_executions_cancelled": len(aux_handles),
+            "executing_cleared": cleared,
+            "notifications_fenced": int(
+                self.owner_runtime_inventory(normalized)["domains"]["notifications"]
+            ),
+        }
+
+    def _register_task_handle(self, task_id: str, handle: asyncio.Task) -> None:
+        handle_sets = getattr(self, "_task_handle_sets", None)
+        if handle_sets is None:
+            handle_sets = self._task_handle_sets = {}
+        handle_sets.setdefault(task_id, set()).add(handle)
+        self._task_handles[task_id] = handle
+
+    def _unregister_task_handle(self, task_id: str, handle: asyncio.Task) -> None:
+        handle_sets = getattr(self, "_task_handle_sets", None)
+        group = handle_sets.get(task_id) if handle_sets is not None else None
+        if group is not None:
+            group.discard(handle)
+            if not group:
+                handle_sets.pop(task_id, None)
+                if self._task_handles.get(task_id) is handle:
+                    self._task_handles.pop(task_id, None)
+                return
+            if self._task_handles.get(task_id) in {None, handle}:
+                self._task_handles[task_id] = next(iter(group))
+            return
+        if self._task_handles.get(task_id) is handle:
+            self._task_handles.pop(task_id, None)
+
+    def _execution_handles_for_task(self, task_id: str) -> set[asyncio.Task]:
+        handles = set(
+            getattr(self, "_task_handle_sets", {}).get(task_id, set())
+        )
+        compatibility = self._task_handles.get(task_id)
+        if compatibility is not None:
+            handles.add(compatibility)
+        return {handle for handle in handles if not handle.done()}
+
+    def _all_execution_handles(self) -> set[asyncio.Task]:
+        handles = {
+            handle
+            for group in getattr(self, "_task_handle_sets", {}).values()
+            for handle in group
+        }
+        handles.update(self._task_handles.values())
+        return {handle for handle in handles if not handle.done()}
 
     async def _mint_session_id(self) -> str:
         """Return a scheduler-local ID; ACP creates and cleans its own session."""
         return str(uuid.uuid4())
+
+    def _cache_task_session(self, db_session) -> bool:
+        """Mirror an already-inserted task Session without inserting it again."""
+        if not self._session_manager or db_session is None:
+            return False
+        if self._owner_lifecycle_fenced(getattr(db_session, "owner", None)):
+            return False
+        try:
+            cached = self._session_manager._db_to_session_meta(db_session)
+            if cached is not None:
+                self._session_manager.sessions[db_session.id] = cached
+                return True
+        except Exception:
+            logger.debug(
+                "Could not mirror task output session %s",
+                getattr(db_session, "id", ""),
+                exc_info=True,
+            )
+        return False
+
+    def _sync_cached_task_workspace(self, session_id: str, workspace_id: str | None) -> None:
+        if not self._session_manager:
+            return
+        cached = getattr(self._session_manager, "sessions", {}).get(session_id)
+        if cached is not None:
+            cached_owner = (
+                cached.get("owner")
+                if isinstance(cached, dict)
+                else getattr(cached, "owner", None)
+            )
+            if self._owner_lifecycle_fenced(cached_owner):
+                return
+            if isinstance(cached, dict):
+                cached["workspace_id"] = workspace_id or None
+            else:
+                cached.workspace_id = workspace_id or None
+
+    @staticmethod
+    def _task_workspace_path(task) -> str | None:
+        """Return the per-run resolved path without treating it as durable."""
+        return (
+            str(getattr(task, "_resolved_workspace_path", None) or "").strip()
+            or str(getattr(task, "workspace", None) or "").strip()
+            or None
+        )
+
+    def _resolve_task_workspace(self, task) -> str | None:
+        """Re-resolve task filesystem authority from current server policy.
+
+        Stable IDs are the normal lane. A raw path remains only as an
+        administrator compatibility field for existing tasks. The physical
+        path is held on a non-mapped transient attribute so later ORM commits
+        never turn derived authority back into durable path state.
+        """
+        task._resolved_workspace_path = None
+        workspace_id = str(getattr(task, "workspace_id", None) or "").strip()
+        if workspace_id:
+            from core.auth import AuthManager
+            from src.openclank.file_policy import FilePolicyRepository
+            from src.openclank.workspace_policy_service import (
+                WorkspacePolicyServiceError,
+                resolve_owned_workspace,
+            )
+
+            auth_manager = self._auth_manager or AuthManager()
+            try:
+                binding = resolve_owned_workspace(
+                    FilePolicyRepository(),
+                    workspace_id=workspace_id,
+                    owner_username=str(getattr(task, "owner", None) or ""),
+                    auth_manager=auth_manager,
+                    purpose="agent_workspace",
+                )
+            except WorkspacePolicyServiceError as error:
+                raise RuntimeError(
+                    "TASK_WORKSPACE_UNAVAILABLE: Workspace authority is no longer available"
+                ) from error
+            task._resolved_workspace_path = binding.path
+            return binding.path
+
+        raw_workspace = str(getattr(task, "workspace", None) or "").strip()
+        if not raw_workspace:
+            return None
+        if not owner_has_admin_task_privileges(getattr(task, "owner", None)):
+            raise RuntimeError(
+                "TASK_WORKSPACE_UNAVAILABLE: Legacy task workspace requires administrator privileges"
+            )
+        from src.tool_execution import vet_workspace
+
+        resolved = vet_workspace(raw_workspace)
+        if not resolved:
+            raise RuntimeError(
+                "TASK_WORKSPACE_UNAVAILABLE: Legacy task workspace is no longer available"
+            )
+        task._resolved_workspace_path = resolved
+        return resolved
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -480,23 +1288,36 @@ class TaskScheduler:
             logger.debug("Task abort marker failed for %s", task_id, exc_info=True)
             return False
 
-    def add_notification(self, task_name: str, status: str, task_id: str = None, owner: str = None, body: str = None):
+    def add_notification(
+        self,
+        task_name: str,
+        status: str,
+        task_id: str = None,
+        owner: str = None,
+        body: str = None,
+        kind: str = "task",
+    ) -> bool:
         """Store a notification about a completed task run. Tagged with the
         task's owner so `pop_notifications` can return only that user's
         notifications and prevent cross-tenant drain. `body` is the result
         text — populated when output_target='notification' so the client can
         show a rich browser Notification, not just a toast."""
+        normalized_owner = str(owner or "").strip().lower()
+        if normalized_owner and self._owner_lifecycle_fenced(normalized_owner):
+            return False
         self._pending_notifications.append({
             "task_name": task_name,
             "status": status,
             "task_id": task_id,
-            "owner": owner,
+            "owner": normalized_owner or owner,
             "body": (body[:500] + "…") if body and len(body) > 500 else body,
+            "kind": kind,
             "timestamp": _utcnow().isoformat() + "Z",
         })
         # Cap at 50 to avoid unbounded growth
         if len(self._pending_notifications) > 50:
             self._pending_notifications = self._pending_notifications[-50:]
+        return True
 
     def pop_notifications(self, owner: str = None) -> list:
         """Return and clear pending notifications.
@@ -508,15 +1329,24 @@ class TaskScheduler:
         for the legacy single-user deploy.
         """
         if owner is None:
-            notes = self._pending_notifications[:]
-            self._pending_notifications.clear()
-            return notes
+            keep, take = [], []
+            for note in self._pending_notifications:
+                note_owner = note.get("owner")
+                if note_owner and self._owner_lifecycle_fenced(note_owner):
+                    keep.append(note)
+                else:
+                    take.append(note)
+            self._pending_notifications = keep
+            return take
         # Strict owner scope — used to OR-in null-owner notifications for
         # "legacy single-user" compat but that leaked notification bodies to
         # any authenticated user once a second account existed.
+        normalized_owner = str(owner or "").strip().lower()
+        if self._owner_lifecycle_fenced(normalized_owner):
+            return []
         keep, take = [], []
         for n in self._pending_notifications:
-            if n.get("owner") == owner:
+            if str(n.get("owner") or "").strip().lower() == normalized_owner:
                 take.append(n)
             else:
                 keep.append(n)
@@ -670,7 +1500,7 @@ class TaskScheduler:
                 t.cancel()
                 try: await t
                 except asyncio.CancelledError: pass
-        handles = [handle for handle in set(self._task_handles.values()) if not handle.done()]
+        handles = list(self._all_execution_handles())
         for handle in handles:
             handle.cancel()
         if handles:
@@ -689,10 +1519,15 @@ class TaskScheduler:
         while self._running:
             owners = self._known_task_owners()
             for ow in (owners or [""]):
+                if ow and self._owner_lifecycle_fenced(ow):
+                    continue
                 try:
-                    await action_ping_notes(owner=ow)
+                    await self._run_owner_aux_action(ow, action_ping_notes)
                 except TaskNoop:
                     pass
+                except asyncio.CancelledError:
+                    if not self._running:
+                        raise
                 except Exception as e:
                     logger.warning(f"ping_notes background scanner errored for owner={ow!r}: {e}")
             await asyncio.sleep(60)  # 1 min
@@ -709,13 +1544,38 @@ class TaskScheduler:
         while self._running:
             owners = self._known_task_owners()
             for ow in (owners or [""]):
+                if ow and self._owner_lifecycle_fenced(ow):
+                    continue
                 try:
-                    await action_ping_events(owner=ow)
+                    await self._run_owner_aux_action(ow, action_ping_events)
                 except TaskNoop:
                     pass
+                except asyncio.CancelledError:
+                    if not self._running:
+                        raise
                 except Exception as e:
                     logger.warning(f"ping_events background scanner errored for owner={ow!r}: {e}")
             await asyncio.sleep(600)  # 10 min
+
+    async def _run_owner_aux_action(self, owner: str, action) -> object:
+        """Track one owner-scoped scanner action so lifecycle can join it."""
+        normalized = str(owner or "").strip().lower()
+        if normalized and self._owner_lifecycle_fenced(normalized):
+            return None
+        handle = asyncio.create_task(action(owner=owner))
+        if normalized:
+            self._owner_aux_handles.setdefault(normalized, set()).add(handle)
+            if self._owner_lifecycle_fenced(normalized):
+                handle.cancel()
+        try:
+            return await handle
+        finally:
+            if normalized:
+                group = self._owner_aux_handles.get(normalized)
+                if group is not None:
+                    group.discard(handle)
+                    if not group:
+                        self._owner_aux_handles.pop(normalized, None)
 
     def _known_task_owners(self) -> list:
         """Distinct non-empty owners that background scanners should visit.
@@ -798,6 +1658,8 @@ class TaskScheduler:
                 for task in due:
                     if task.id in self._executing:
                         continue
+                    if self._owner_lifecycle_fenced(task.owner):
+                        continue
                     if foreground_active:
                         task.next_run = now + timedelta(minutes=15)
                         continue
@@ -816,9 +1678,19 @@ class TaskScheduler:
         # line behind another. Once we acquire the slot, flip to "running"
         # and hand off to _execute_task_locked.
         from core.database import SessionLocal, TaskRun
+        if self._task_owner_lifecycle_fenced(task_id):
+            if release_executing:
+                async with self._executing_lock:
+                    self._executing.discard(task_id)
+            return
         current = asyncio.current_task()
         if current:
-            self._task_handles[task_id] = current
+            # There is no await between the fence check and registration.  A
+            # lifecycle claim therefore either precedes the check (and returns
+            # above) or follows registration (and quiesce can see this handle).
+            # Never self-cancel from the registration helper: that bypassed the
+            # orderly early-return path and leaked CancelledError to callers.
+            self._register_task_handle(task_id, current)
         run_id = str(uuid.uuid4())
         _q_db = SessionLocal()
         try:
@@ -837,22 +1709,32 @@ class TaskScheduler:
             _q_db.close()
 
         try:
-            if bypass_model_slot or not self._task_needs_model_slot(task_id):
-                await self._execute_task_locked(
-                    task_id,
-                    run_id,
-                    release_executing=release_executing,
-                    gate_foreground=not bypass_model_slot,
-                )
-                return
+            # Lazy fallback keeps restart/test harnesses that construct the
+            # scheduler without ``__init__`` compatible with the new fence.
+            task_run_locks = getattr(self, "_task_run_locks", None)
+            if task_run_locks is None:
+                task_run_locks = self._task_run_locks = {}
+            task_run_lock = task_run_locks.setdefault(
+                task_id,
+                asyncio.Lock(),
+            )
+            async with task_run_lock:
+                if bypass_model_slot or not self._task_needs_model_slot(task_id):
+                    await self._execute_task_locked(
+                        task_id,
+                        run_id,
+                        release_executing=release_executing,
+                        gate_foreground=not bypass_model_slot,
+                    )
+                    return
 
-            async with self._run_semaphore:
-                await self._execute_task_locked(
-                    task_id,
-                    run_id,
-                    release_executing=release_executing,
-                    gate_foreground=True,
-                )
+                async with self._run_semaphore:
+                    await self._execute_task_locked(
+                        task_id,
+                        run_id,
+                        release_executing=release_executing,
+                        gate_foreground=True,
+                    )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
@@ -860,9 +1742,8 @@ class TaskScheduler:
             self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
             raise
         finally:
-            handle = self._task_handles.get(task_id)
-            if handle is current:
-                self._task_handles.pop(task_id, None)
+            if current:
+                self._unregister_task_handle(task_id, current)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -910,6 +1791,16 @@ class TaskScheduler:
                     stale.status = "skipped"
                     stale.finished_at = _utcnow()
                     stale.error = f"Task no longer active (status={task.status if task else 'deleted'})"
+                    db.commit()
+                return
+
+            if self._owner_lifecycle_fenced(task.owner):
+                blocked = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if blocked and blocked.status in ("queued", "running"):
+                    blocked.status = "aborted"
+                    blocked.result = "Account lifecycle operation in progress"
+                    blocked.error = "Account lifecycle operation in progress"
+                    blocked.finished_at = _utcnow()
                     db.commit()
                 return
 
@@ -965,6 +1856,12 @@ class TaskScheduler:
                 db.add(run)
                 db.commit()
 
+            # A durable task may outlive, or race with, a policy reset. Resolve
+            # its opaque Workspace through the current People + Agent/read
+            # policy after it leaves the queue but before any action, research
+            # worker, tool selection, or managed Agent spawn can begin.
+            self._resolve_task_workspace(task)
+
             task_type = task.task_type or "llm"
 
             from src.builtin_actions import TaskDeferred, TaskNoop
@@ -1002,12 +1899,20 @@ class TaskScheduler:
                     if not success:
                         run.error = result
                 elif task_type == "research":
-                    result = await self._execute_research_task(task, db)
+                    result = await self._execute_research_task(
+                        task,
+                        db,
+                        root_operation_id=f"turn-task-run:{run_id}",
+                    )
                     run.status = "success"
                     run.result = result
                 else:
                     # LLM task — use agent loop for tool access
-                    result = await self._execute_llm_task(task, db)
+                    result = await self._execute_llm_task(
+                        task,
+                        db,
+                        root_operation_id=f"turn-task-run:{run_id}",
+                    )
                     run.status = "success"
                     run.result = result
                 # Record which model actually ran (resolved inside the executor).
@@ -1329,7 +2234,30 @@ class TaskScheduler:
             def _progress(message: str):
                 self._set_run_progress(run_id, message)
 
-            kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            kwargs = {
+                "owner": task.owner,
+                "task_name": task.name,
+                "progress_cb": _progress,
+                "root_operation_id": (
+                    f"turn-task-run:{run_id}"
+                    if run_id
+                    else f"task-action:{uuid.uuid4().hex}"
+                ),
+            }
+            if task.action == "classify_events":
+                from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
+
+                managed_route = _resolve_managed_task_route(
+                    task,
+                    operation="chat.complete",
+                )
+                task.provider_model_route_id = managed_route.model_route_id
+                task.endpoint_id = managed_route.public_endpoint_id
+                task.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+                task.model = managed_route.provider_model_id
+                self._last_run_model = managed_route.provider_model_id
+                kwargs["model_route_id"] = managed_route.model_route_id
+                kwargs["grant_id"] = managed_route.grant_id
             if task.prompt:
                 kwargs["prompt"] = task.prompt
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
@@ -1404,8 +2332,18 @@ class TaskScheduler:
             return "No unread emails"
         return "\n".join(lines[:10])
 
-    async def _execute_checkin(self, task, crew, db, session_id: str,
-                               endpoint_url: str, model: str) -> str:
+    async def _execute_checkin(
+        self,
+        task,
+        crew,
+        db,
+        session_id: str,
+        endpoint_url: str,
+        model: str,
+        *,
+        managed_route: _ManagedTaskRoute,
+        root_operation_id: str,
+    ) -> str:
         """Gather raw data from all integrations, hand it to the LLM to write the check-in."""
         from src.tool_implementations import do_manage_notes
         from src.tool_utils import get_mcp_manager
@@ -1512,7 +2450,16 @@ class TaskScheduler:
                                 lines.append(f"- [{feed}] {title} — {url}")
                             return "\n".join(lines)
                     try:
-                        val = await _cached(("miniflux_unread", base_url), 180, _fetch_miniflux)
+                        val = await _cached(
+                            _owner_shared_cache_key(
+                                task.owner,
+                                "miniflux_unread",
+                                base_url,
+                            ),
+                            180,
+                            _fetch_miniflux,
+                            admit=lambda: not self._owner_lifecycle_fenced(task.owner),
+                        )
                         if val:
                             raw["rss_miniflux_unread"] = val
                     except Exception as e:
@@ -1548,8 +2495,18 @@ class TaskScheduler:
                         # same minute share the same MCP snapshot.
                         async def _call_mcp(_q=qualified, _args=args):
                             return await mcp.call_tool(_q, _args)
-                        cache_key = ("mcp_snapshot", qualified, json.dumps(args, sort_keys=True))
-                        result = await _cached(cache_key, 180, _call_mcp)
+                        cache_key = _owner_shared_cache_key(
+                            task.owner,
+                            "mcp_snapshot",
+                            qualified,
+                            json.dumps(args, sort_keys=True),
+                        )
+                        result = await _cached(
+                            cache_key,
+                            180,
+                            _call_mcp,
+                            admit=lambda: not self._owner_lifecycle_fenced(task.owner),
+                        )
                         if result.get("exit_code", 0) != 0:
                             continue
                         content = result.get("stdout") or result.get("output") or ""
@@ -1581,11 +2538,20 @@ class TaskScheduler:
             system_prompt=_compose_assistant_prompt(crew.personality) if crew else None,
             disabled_tools=None, relevant_tools=None,
             override_user_message=context,
+            managed_route=managed_route,
+            root_operation_id=root_operation_id,
         )
 
-    async def _execute_llm_task(self, task, db) -> str:
+    async def _execute_llm_task(
+        self,
+        task,
+        db,
+        *,
+        root_operation_id: str | None = None,
+    ) -> str:
         """Execute an LLM task with full tool access via the agent loop."""
         from core.database import Session as DbSession, ChatMessage, CrewMember
+        from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
         # If this task is wired to a CrewMember (personal assistant, custom
         # crew), prefer the crew member's persona/model/endpoint as overrides.
@@ -1596,32 +2562,32 @@ class TaskScheduler:
             except Exception:
                 crew = None
 
-        # Determine endpoint + model
-        endpoint_id = getattr(task, "endpoint_id", None)
-        endpoint_url = task.endpoint_url
-        model = task.model
-        if (not endpoint_url or not model) and crew:
-            endpoint_id = endpoint_id or getattr(crew, "endpoint_id", None)
-            endpoint_url = endpoint_url or crew.endpoint_url
-            model = model or crew.model
-        if not endpoint_id or not endpoint_url or not model:
-            default_id, default_url, default_model = self._resolve_defaults(db, task.owner)
-            endpoint_id = endpoint_id or default_id
-            endpoint_url = endpoint_url or default_url
-            model = model or default_model
-        if not endpoint_id or not endpoint_url or not model:
-            raise RuntimeError("No registered model endpoint configured")
+        root_operation_id = root_operation_id or f"turn-task-run:{uuid.uuid4().hex}"
+        session_id = task.session_id
+        existing_session = None
+        if session_id:
+            existing_session = db.query(DbSession).filter(
+                DbSession.id == session_id,
+            ).first()
+        managed_route = _resolve_managed_task_route(
+            task,
+            crew=crew,
+            session=existing_session,
+            operation="chat.stream",
+        )
+        endpoint_id = managed_route.public_endpoint_id
+        endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+        model = managed_route.provider_model_id
         task.endpoint_id = endpoint_id
         task.endpoint_url = endpoint_url
         task.model = model
-        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+        task.provider_model_route_id = managed_route.model_route_id
         # Record the resolved model so _execute_task_locked can persist it on
         # the run (tasks rarely pin a model, so this is the only record of
         # which model actually produced the output).
         self._last_run_model = model
 
         # Ensure a session exists for output
-        session_id = task.session_id
         if not session_id:
             session_id = await self._mint_session_id()
             sess = DbSession(
@@ -1629,8 +2595,10 @@ class TaskScheduler:
                 name=f"[Task] {task.name}",
                 endpoint_url=endpoint_url,
                 endpoint_id=endpoint_id,
+                provider_model_route_id=managed_route.model_route_id,
                 model=model,
                 owner=task.owner,
+                workspace_id=getattr(task, "workspace_id", None) or None,
                 folder="Tasks",
                 created_at=_utcnow(),
                 updated_at=_utcnow(),
@@ -1638,27 +2606,38 @@ class TaskScheduler:
             db.add(sess)
             task.session_id = session_id
             db.commit()
-            if self._session_manager:
-                try:
-                    self._session_manager.ensure_task_session(
-                        session_id, f"[Task] {task.name}", endpoint_url, model,
-                        owner=task.owner, task=task, endpoint_id=endpoint_id,
-                    )
-                except Exception:
-                    pass
+            # The ORM row already exists; cache it directly instead of calling
+            # create_session/ensure_task_session and attempting a duplicate ID.
+            self._cache_task_session(sess)
         else:
-            existing_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if existing_session:
                 existing_session.endpoint_id = endpoint_id
                 existing_session.endpoint_url = endpoint_url
                 existing_session.model = model
+                existing_session.provider_model_route_id = managed_route.model_route_id
+                existing_session.workspace_id = (
+                    getattr(task, "workspace_id", None) or None
+                )
                 db.commit()
+                self._sync_cached_task_workspace(
+                    session_id,
+                    getattr(task, "workspace_id", None),
+                )
 
         # For assistant check-ins: call each tool directly and post results
         # as separate messages. More reliable than hoping the model calls tools.
         is_checkin = crew and crew.is_default_assistant and "check-in" in (task.name or "").lower()
         if is_checkin:
-            return await self._execute_checkin(task, crew, db, session_id, endpoint_url, model)
+            return await self._execute_checkin(
+                task,
+                crew,
+                db,
+                session_id,
+                endpoint_url,
+                model,
+                managed_route=managed_route,
+                root_operation_id=root_operation_id,
+            )
 
         # Build system prompt: crew member persona overrides the default.
         # Built-in character_id (Socrates, Razor, etc.) further biases the
@@ -1752,6 +2731,8 @@ class TaskScheduler:
             system_prompt=system_prompt, disabled_tools=disabled_tools or None,
             relevant_tools=relevant_tools,
             datetime_context_msg=_dt_msg,
+            managed_route=managed_route,
+            root_operation_id=root_operation_id,
         )
 
         # Strip the model's chain-of-thought before saving/delivering. Task
@@ -1795,7 +2776,8 @@ class TaskScheduler:
             return
 
         endpoint_id = getattr(task, "endpoint_id", None)
-        endpoint_url = task.endpoint_url
+        route_id = getattr(task, "provider_model_route_id", None)
+        endpoint_url = ""
         model_name = model or task.model
         crew = None
         if getattr(task, "crew_member_id", None):
@@ -1803,20 +2785,16 @@ class TaskScheduler:
                 crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
             except Exception:
                 crew = None
-        if (not endpoint_url or not model_name) and crew:
-            endpoint_id = endpoint_id or getattr(crew, "endpoint_id", None)
-            endpoint_url = endpoint_url or crew.endpoint_url
+        if crew:
+            route_id = route_id or getattr(crew, "provider_model_route_id", None)
             model_name = model_name or crew.model
-        if not endpoint_id or not endpoint_url or not model_name:
-            try:
-                resolved_id, resolved_url, resolved_model = self._resolve_defaults(db, task.owner)
-                endpoint_id = endpoint_id or resolved_id
-                endpoint_url = endpoint_url or resolved_url
-                model_name = model_name or resolved_model
-            except Exception:
-                pass
-
-        endpoint_url = _normalize_chat_endpoint(endpoint_url)
+        if route_id:
+            from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
+            endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+        else:
+            # Action-only tasks can still write a result transcript without a
+            # model.  They must not resurrect a legacy endpoint as authority.
+            endpoint_id = None
 
         session_id = task.session_id
         if not session_id:
@@ -1826,8 +2804,10 @@ class TaskScheduler:
                 name=f"[Task] {task.name}",
                 endpoint_url=endpoint_url or "",
                 endpoint_id=endpoint_id,
+                provider_model_route_id=route_id,
                 model=model_name or "",
                 owner=task.owner,
+                workspace_id=getattr(task, "workspace_id", None) or None,
                 folder="Tasks",
                 created_at=_utcnow(),
                 updated_at=_utcnow(),
@@ -1835,14 +2815,19 @@ class TaskScheduler:
             db.add(sess)
             task.session_id = session_id
             db.commit()
-            if self._session_manager:
-                try:
-                    self._session_manager.ensure_task_session(
-                        session_id, f"[Task] {task.name}", endpoint_url, model_name,
-                        owner=task.owner, task=task, endpoint_id=endpoint_id,
-                    )
-                except Exception:
-                    pass
+            self._cache_task_session(sess)
+        else:
+            # LLM/research tasks usually stamped this row during setup. Action
+            # tasks reach delivery without that setup, so stamp directly here
+            # as the single output-session authority seam.
+            sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if sess is not None:
+                sess.workspace_id = getattr(task, "workspace_id", None) or None
+                db.commit()
+                self._sync_cached_task_workspace(
+                    session_id,
+                    getattr(task, "workspace_id", None),
+                )
 
         meta = {}
         if model_name:
@@ -1950,15 +2935,39 @@ class TaskScheduler:
             logger.error("Task %s email delivery failed: %s", task.id, e, exc_info=True)
             raise
 
-    async def _run_agent_loop(self, endpoint_url: str, model: str, task, session_id: str,
-                              system_prompt: str | None = None,
-                              disabled_tools: set | None = None,
-                              relevant_tools: set | None = None,
-                              override_user_message: str | None = None,
-                              datetime_context_msg: dict | None = None) -> str:
+    async def _run_agent_loop(
+        self,
+        endpoint_url: str,
+        model: str,
+        task,
+        session_id: str,
+        system_prompt: str | None = None,
+        disabled_tools: set | None = None,
+        relevant_tools: set | None = None,
+        override_user_message: str | None = None,
+        datetime_context_msg: dict | None = None,
+        managed_route: _ManagedTaskRoute | None = None,
+        root_operation_id: str | None = None,
+    ) -> str:
         """Run the full agent loop with tool access, collecting the final text."""
-        from src.endpoint_resolver import resolve_model_target
+        from src.endpoint_resolver import ResolvedModelTarget
         from src.model_dispatch import stream_agent_target
+        from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
+
+        # Resolve once for setup-time tool projection. This is deliberately
+        # repeated after the final async quiet gate below; only that second
+        # result is allowed into the worker cwd/envelope.
+        workspace_path = self._resolve_task_workspace(task)
+        del endpoint_url, model  # compatibility-only provenance, never authority
+        root_operation_id = root_operation_id or f"turn-task-run:{uuid.uuid4().hex}"
+        managed_route = managed_route or _resolve_managed_task_route(
+            task,
+            operation="chat.stream",
+        )
+        task.provider_model_route_id = managed_route.model_route_id
+        task.endpoint_id = managed_route.public_endpoint_id
+        task.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+        task.model = managed_route.provider_model_id
 
         system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         user_content = override_user_message or task.prompt
@@ -1968,40 +2977,11 @@ class TaskScheduler:
         messages: list = [{"role": "system", "content": system_content}]
         if datetime_context_msg:
             messages.append(datetime_context_msg)
-        messages.append({"role": "user", "content": user_content})
-
-        endpoint_id = str(getattr(task, "endpoint_id", "") or "").strip()
-        if not endpoint_id:
-            raise RuntimeError("UNREGISTERED_ENDPOINT: scheduled task has no endpoint_id")
-        from routes.model_routes import is_mimo_connection_id
-        from src.model_shares import share_id_from_endpoint
-
-        native_connection = is_mimo_connection_id(endpoint_id)
-        shared_connection = share_id_from_endpoint(endpoint_id) is not None
-        headers = {}
-        if not native_connection and not shared_connection:
-            from core.database import SessionLocal, ModelEndpoint
-            from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_chat_url, build_headers, resolve_endpoint_runtime
-
-            db2 = SessionLocal()
-            try:
-                query = db2.query(ModelEndpoint).filter(
-                    ModelEndpoint.id == endpoint_id,
-                    ModelEndpoint.is_enabled == True,  # noqa: E712
-                )
-                endpoint = owner_filter(
-                    query, ModelEndpoint, task.owner or "", include_shared=False
-                ).first()
-                if endpoint is None:
-                    raise RuntimeError("ENDPOINT_NOT_PROJECTABLE: task endpoint is unavailable")
-                runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)
-                endpoint_url = build_chat_url(runtime_base)
-                headers = build_headers(api_key, runtime_base)
-            finally:
-                db2.close()
-        else:
-            endpoint_url = "mimo://acp"
+        messages.append({
+            "role": "user",
+            "content": user_content,
+            "metadata": {"root_operation_id": root_operation_id},
+        })
 
         try:
             stored_allowed = json.loads(getattr(task, "allowed_tools", None) or "[]")
@@ -2010,6 +2990,19 @@ class TaskScheduler:
         if not isinstance(stored_allowed, list):
             raise RuntimeError("INVALID_TOOL_POLICY: task allowed_tools must be a JSON list")
         allowed_tools = {str(name) for name in stored_allowed if str(name)}
+        # Durable task rows can outlive a policy change (or be edited by an
+        # older deployment). Re-check the strict worker's host-tool boundary
+        # immediately before spawn; route-time validation alone is not enough.
+        from src.tool_security import unavailable_strict_agent_tools
+        unavailable = allowed_tools & unavailable_strict_agent_tools(
+            task.owner, workspace_path
+        )
+        if unavailable:
+            raise RuntimeError(
+                "INVALID_TOOL_POLICY: requested filesystem/process tools are "
+                "outside the task's current brokered AgentScope: "
+                + ", ".join(sorted(unavailable))
+            )
         if relevant_tools is not None:
             allowed_tools.intersection_update(map(str, relevant_tools))
         if disabled_tools:
@@ -2024,20 +3017,50 @@ class TaskScheduler:
         _task_max_rounds = task.max_steps if task.max_steps and task.max_steps > 0 else 20
         from src.interactive_gate import wait_for_interactive_quiet
         await wait_for_interactive_quiet(f"agent task {task.name}")
-        target = resolve_model_target(
-            endpoint_url,
-            model,
-            headers,
-            endpoint_id=endpoint_id,
-            provider_id=(
-                "mimo"
-                if native_connection
-                else "shared"
-                if shared_connection
-                else f"ody-{endpoint_id}"
-            ),
+        # Structural Agent door: a policy reset/revoke/archive that lands while
+        # the task waits for foreground activity must win before worker spawn.
+        # There are no awaits between this resolution and stream invocation.
+        workspace_path = self._resolve_task_workspace(task)
+        unavailable = allowed_tools & unavailable_strict_agent_tools(
+            task.owner, workspace_path
+        )
+        if unavailable:
+            raise RuntimeError(
+                "INVALID_TOOL_POLICY: requested filesystem/process tools are "
+                "outside the task's current brokered AgentScope: "
+                + ", ".join(sorted(unavailable))
+            )
+        capabilities = dict(managed_route.capabilities or {})
+        capabilities.setdefault("chat", True)
+        capabilities.setdefault("tools", True)
+        capabilities.setdefault("stream", True)
+        target = ResolvedModelTarget(
+            transport="acp",
+            endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+            model_id=managed_route.runtime_model,
+            endpoint_id=managed_route.connection_id,
+            provider_id=managed_route.connection_id,
+            headers={},
+            capabilities=capabilities,
             lifecycle="ephemeral",
         )
+        turn_envelope = {
+            "durable_id": f"task:{task.id}",
+            "root_operation_id": root_operation_id,
+            "interaction_policy": "fail_on_interaction",
+            "allowed_tools": sorted(allowed_tools),
+            # ``workspace`` is a server-derived physical cwd retained for the
+            # current worker contract. ``authority_workspace_id`` is the
+            # collision-free stable file-policy identity used by approval
+            # scopes; it is not the Copal or Frankenmemory workspace axis.
+            "workspace": workspace_path or "",
+            "authority_workspace_id": str(
+                getattr(task, "workspace_id", None) or ""
+            ).strip(),
+            "copal_workspace": getattr(task, "copal_workspace", None) or "default",
+        }
+        if managed_route.grant_id:
+            turn_envelope["provider_grant_id"] = managed_route.grant_id
         async for event_str in stream_agent_target(
             target,
             messages=messages,
@@ -2046,15 +3069,10 @@ class TaskScheduler:
             max_tool_calls=int(getattr(task, "max_tool_calls", None) or 20),
             session_id=session_id,
             owner=task.owner,
-            cwd=getattr(task, "workspace", None),
+            cwd=workspace_path,
             disabled_tools=disabled_tools,
             relevant_tools=allowed_tools,
-            turn_envelope={
-                "durable_id": f"task:{task.id}",
-                "interaction_policy": "fail_on_interaction",
-                "allowed_tools": sorted(allowed_tools),
-                "workspace": getattr(task, "workspace", None) or "",
-            },
+            turn_envelope=turn_envelope,
             workload="background",
         ):
             event_name = "message"
@@ -2103,76 +3121,69 @@ class TaskScheduler:
         if not full_text.strip():
             if not tool_results:
                 raise RuntimeError("AGENT_NO_OUTPUT: completed without answer text or tool results")
-            from src.model_dispatch import AuxiliaryRequest, run_auxiliary_inference
-            full_text = await run_auxiliary_inference(AuxiliaryRequest(
-                purpose="scheduled_task_grace_summary",
-                target=target,
+            from src.openclank.modality_facade import complete_text
+            full_text = await complete_text(
+                owner=task.owner or "local-installation",
                 messages=[
                     {"role": "system", "content": "Summarize only the supplied completed tool results. Do not claim any unlisted action."},
                     {"role": "user", "content": "\n".join(tool_results[-5:])},
                 ],
-                owner=task.owner,
-                timeout=30,
-            ))
+                purpose="tasks",
+                model_route_id=managed_route.model_route_id,
+                grant_id=managed_route.grant_id,
+                root_operation_id=root_operation_id,
+                idempotency_key=f"task-summary:{root_operation_id}",
+                max_output_tokens=512,
+            )
             full_text = (full_text or "").strip()
             if not full_text:
                 raise RuntimeError("AUXILIARY_NO_OUTPUT: tool-result summary was empty")
 
         return full_text
 
-    async def _execute_research_task(self, task, db) -> str:
+    async def _execute_research_task(
+        self,
+        task,
+        db,
+        *,
+        root_operation_id: str | None = None,
+    ) -> str:
         """Execute a deep research task using DeepResearcher."""
         from core.database import Session as DbSession, ChatMessage
         from src.deep_research import DeepResearcher
+        from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
         from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
         from src.research_utils import strip_thinking
         from src.settings import get_setting
 
-        # Resolve endpoint/model: research settings > task settings > session defaults
-        endpoint_id = getattr(task, "endpoint_id", None)
-        endpoint_url = task.endpoint_url
-        model = task.model
-        headers = {}
-
-        if not endpoint_id or not endpoint_url or not model:
-            default_id, default_url, default_model = self._resolve_defaults(db, task.owner)
-            endpoint_id = endpoint_id or default_id
-            endpoint_url = endpoint_url or default_url
-            model = model or default_model
-        if not endpoint_id or not endpoint_url or not model:
-            raise RuntimeError("No registered model endpoint configured for research")
+        root_operation_id = root_operation_id or f"turn-task-run:{uuid.uuid4().hex}"
+        session_id = task.session_id
+        existing_session = None
+        if session_id:
+            existing_session = db.query(DbSession).filter(
+                DbSession.id == session_id,
+            ).first()
+        managed_route = _resolve_managed_task_route(
+            task,
+            session=existing_session,
+            operation="chat.complete",
+        )
+        endpoint_id = managed_route.public_endpoint_id
+        endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+        model = managed_route.provider_model_id
+        task.endpoint_id = endpoint_id
+        task.endpoint_url = endpoint_url
+        task.model = model
+        task.provider_model_route_id = managed_route.model_route_id
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
-
-        from routes.model_routes import is_mimo_connection_id
-        if is_mimo_connection_id(endpoint_id):
-            endpoint_url = "mimo://acp"
-        else:
-            from core.database import ModelEndpoint
-            from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_chat_url, build_headers, resolve_endpoint_runtime
-
-            query = db.query(ModelEndpoint).filter(
-                ModelEndpoint.id == endpoint_id,
-                ModelEndpoint.is_enabled == True,  # noqa: E712
-            )
-            endpoint = owner_filter(
-                query, ModelEndpoint, task.owner or "", include_shared=False
-            ).first()
-            if endpoint is None:
-                raise RuntimeError("Scheduled research endpoint is unavailable")
-            runtime_base, api_key = resolve_endpoint_runtime(endpoint, owner=task.owner or None)
-            endpoint_url = build_chat_url(runtime_base)
-            headers = build_headers(api_key, runtime_base)
 
         max_tokens = int(get_setting("research_max_tokens", 8192))
         extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
         extraction_concurrency = int(get_setting("research_extraction_concurrency", 3) or 3)
 
         researcher = DeepResearcher(
-            llm_endpoint=endpoint_url,
             llm_model=model,
-            llm_headers=headers,
             max_rounds=8,
             max_time=600,  # 10 min for scheduled research
             max_report_tokens=max_tokens,
@@ -2180,6 +3191,10 @@ class TaskScheduler:
             extraction_concurrency=extraction_concurrency,
             owner=task.owner or None,
             session_id=task.session_id or f"task-research-{task.id}",
+            model_route_id=managed_route.model_route_id,
+            grant_id=managed_route.grant_id,
+            root_operation_id=root_operation_id,
+            purpose="tasks",
         )
 
         started_ts = time.time()
@@ -2191,7 +3206,6 @@ class TaskScheduler:
             stats = {}
 
         # Ensure a session exists for output
-        session_id = task.session_id
         if not session_id:
             session_id = await self._mint_session_id()
             sess = DbSession(
@@ -2199,8 +3213,10 @@ class TaskScheduler:
                 name=f"[Research] {task.name}",
                 endpoint_url=endpoint_url,
                 endpoint_id=endpoint_id,
+                provider_model_route_id=managed_route.model_route_id,
                 model=model,
                 owner=task.owner,
+                workspace_id=getattr(task, "workspace_id", None) or None,
                 folder="Tasks",
                 created_at=_utcnow(),
                 updated_at=_utcnow(),
@@ -2208,11 +3224,20 @@ class TaskScheduler:
             db.add(sess)
             task.session_id = session_id
             db.commit()
-            if self._session_manager:
-                try:
-                    self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
-                except Exception:
-                    pass
+            self._cache_task_session(sess)
+        elif existing_session:
+            existing_session.endpoint_url = endpoint_url
+            existing_session.endpoint_id = endpoint_id
+            existing_session.provider_model_route_id = managed_route.model_route_id
+            existing_session.model = model
+            existing_session.workspace_id = (
+                getattr(task, "workspace_id", None) or None
+            )
+            db.commit()
+            self._sync_cached_task_workspace(
+                session_id,
+                getattr(task, "workspace_id", None),
+            )
 
         # Persist scheduled research in the same on-disk shape used by the
         # Research panel. Without this, task research had Markdown output but
@@ -2364,6 +3389,8 @@ class TaskScheduler:
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""
+        if self._task_owner_lifecycle_fenced(task_id):
+            return False
         if force:
             asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
             return True
@@ -2376,13 +3403,17 @@ class TaskScheduler:
 
     async def stop_task(self, task_id: str) -> bool:
         """Cancel and join a task before reporting its durable aborted state."""
-        handle = self._task_handles.get(task_id)
+        handles = self._execution_handles_for_task(task_id)
         stopped = False
-        if handle and not handle.done():
+        current = asyncio.current_task()
+        wait_for = []
+        for handle in handles:
             handle.cancel()
             stopped = True
-            if handle is not asyncio.current_task():
-                await asyncio.gather(handle, return_exceptions=True)
+            if handle is not current:
+                wait_for.append(handle)
+        if wait_for:
+            await asyncio.gather(*wait_for, return_exceptions=True)
         async with self._executing_lock:
             if task_id in self._executing:
                 self._executing.discard(task_id)
@@ -2390,6 +3421,182 @@ class TaskScheduler:
 
         stopped = self._mark_run_aborted(task_id) or stopped
         return stopped
+
+    async def reset_file_authority(
+        self,
+        owner: str,
+        *,
+        scope: str,
+        chat_id: str | None = None,
+        workspace_id: str | None = None,
+        location_workspace_ids: tuple[str, ...] | list[str] = (),
+    ) -> dict[str, int]:
+        """Pause and cancel tasks narrowed by a canonical file-policy reset.
+
+        The route supplies only authenticated owner identity and opaque IDs it
+        derived from canonical policy state. No raw client path participates.
+        Durable rows are paused and active TaskRuns are aborted *before*
+        in-process handles are cancelled; a final DB fence wins against stale
+        ORM state in a cancellation handler. Resuming is therefore always an
+        explicit later action whose run re-resolves current Workspace policy.
+        """
+        from core.database import (
+            Session as DbSession,
+            SessionLocal,
+            ScheduledTask,
+            TaskRun,
+        )
+
+        normalized_owner = str(owner or "").strip().lower()
+        normalized_scope = str(scope or "").strip()
+        normalized_chat = str(chat_id or "").strip()
+        normalized_workspace = str(workspace_id or "").strip()
+        normalized_location_workspaces = frozenset(
+            str(identifier or "").strip()
+            for identifier in location_workspace_ids
+            if str(identifier or "").strip()
+        )
+        if not normalized_owner:
+            raise ValueError("Task reset requires an authenticated owner")
+        if normalized_scope not in {"chat", "workspace", "location", "all_agent"}:
+            raise ValueError("Invalid task file-authority reset scope")
+        if normalized_scope == "chat" and not normalized_chat:
+            raise ValueError("Chat task reset requires a chat ID")
+        if normalized_scope == "workspace" and not normalized_workspace:
+            raise ValueError("Workspace task reset requires a Workspace ID")
+
+        selected_ids: list[str] = []
+        paused_ids: set[str] = set()
+        aborted_run_ids: set[str] = set()
+        chat_mapped = 0
+        reset_message = "Paused because Agent filesystem permissions were reset"
+
+        def _matches(task) -> bool:
+            stable_id = str(getattr(task, "workspace_id", None) or "").strip()
+            if normalized_scope == "workspace":
+                return stable_id == normalized_workspace
+            if normalized_scope == "location":
+                return bool(stable_id) and stable_id in normalized_location_workspaces
+            if normalized_scope == "chat":
+                return bool(chat_mapped) and str(
+                    getattr(task, "session_id", None) or ""
+                ).strip() == normalized_chat
+
+            task_type = str(getattr(task, "task_type", None) or "llm").strip()
+            action = str(getattr(task, "action", None) or "").strip()
+            return (
+                task_type in {"llm", "research"}
+                or bool(stable_id)
+                or (
+                    task_type == "action"
+                    and action in ADMIN_ONLY_TASK_ACTIONS
+                )
+            )
+
+        # First transaction is the authority boundary. If it cannot commit, no
+        # process-local cancellation is presented as a successful durable reset.
+        db = SessionLocal()
+        try:
+            if normalized_scope == "chat":
+                chat_mapped = int(
+                    db.query(DbSession.id).filter(
+                        DbSession.id == normalized_chat,
+                        DbSession.owner == normalized_owner,
+                    ).first()
+                    is not None
+                )
+            candidates = db.query(ScheduledTask).filter(
+                ScheduledTask.owner == normalized_owner,
+            ).all()
+            selected = [task for task in candidates if _matches(task)]
+            selected_ids = [str(task.id) for task in selected]
+            for task in selected:
+                if str(getattr(task, "status", "") or "") == "active":
+                    task.status = "paused"
+                    paused_ids.add(str(task.id))
+                if str(getattr(task, "status", "") or "") == "paused":
+                    task.next_run = None
+            if selected_ids:
+                runs = db.query(TaskRun).filter(
+                    TaskRun.task_id.in_(selected_ids),
+                    TaskRun.status.in_(("queued", "running")),
+                ).all()
+                now = _utcnow()
+                for run in runs:
+                    run.status = "aborted"
+                    run.error = reset_message
+                    run.result = run.result or reset_message
+                    run.finished_at = now
+                    aborted_run_ids.add(str(run.id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        handles: set[asyncio.Task] = set()
+        for task_id in selected_ids:
+            handles.update(self._execution_handles_for_task(task_id))
+        current = asyncio.current_task()
+        cancelled = {
+            handle for handle in handles
+            if handle is not current and not handle.done()
+        }
+        for handle in cancelled:
+            handle.cancel()
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+
+        executing_cleared = 0
+        async with self._executing_lock:
+            for task_id in selected_ids:
+                if task_id in self._executing:
+                    self._executing.discard(task_id)
+                    executing_cleared += 1
+
+        # A running executor loaded its task before the DB-first pause and may
+        # have written a computed next_run while handling cancellation. Reassert
+        # the durable pause after every handle has joined.
+        if selected_ids:
+            db = SessionLocal()
+            try:
+                selected = db.query(ScheduledTask).filter(
+                    ScheduledTask.id.in_(selected_ids),
+                    ScheduledTask.owner == normalized_owner,
+                ).all()
+                for task in selected:
+                    if str(getattr(task, "status", "") or "") == "active":
+                        task.status = "paused"
+                        paused_ids.add(str(task.id))
+                    if str(getattr(task, "status", "") or "") == "paused":
+                        task.next_run = None
+                runs = db.query(TaskRun).filter(
+                    TaskRun.task_id.in_(selected_ids),
+                    TaskRun.status.in_(("queued", "running")),
+                ).all()
+                now = _utcnow()
+                for run in runs:
+                    run.status = "aborted"
+                    run.error = reset_message
+                    run.result = run.result or reset_message
+                    run.finished_at = now
+                    aborted_run_ids.add(str(run.id))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        return {
+            "selected": len(selected_ids),
+            "paused": len(paused_ids),
+            "runs_aborted": len(aborted_run_ids),
+            "executions_cancelled": len(cancelled),
+            "executing_cleared": executing_cleared,
+            "chat_mapped": chat_mapped,
+        }
 
     async def stop_background_tasks_for_foreground(self, *, reason: str = "Open Clank became active") -> int:
         """Cancel all in-process scheduler tasks because the user is active.
@@ -2404,8 +3611,7 @@ class TaskScheduler:
         stopped = 0
         handles = []
         for task_id in task_ids:
-            handle = self._task_handles.get(task_id)
-            if handle and not handle.done():
+            for handle in self._execution_handles_for_task(task_id):
                 handle.cancel()
                 handles.append(handle)
                 stopped += 1
@@ -2653,6 +3859,19 @@ class TaskScheduler:
                 CrewMember.is_default_assistant == True,  # noqa: E712
             ).first()
             if existing:
+                # Guarded v1 default-tool migration: only the exact historical
+                # product seed is eligible; customized tool order/content is
+                # never overwritten. The marker is encoded in the resulting
+                # list so reruns are naturally idempotent.
+                try:
+                    current_tools = json.loads(existing.enabled_tools or "[]")
+                    migrated_tools = migrate_copal_default_tools(current_tools)
+                    if migrated_tools != current_tools:
+                        existing.enabled_tools = json.dumps(migrated_tools)
+                        db.commit()
+                        logger.info("Migrated Copal default tools for owner=%s", owner)
+                except (TypeError, ValueError):
+                    db.rollback()
                 return  # already seeded
 
             # Resolve a default model/endpoint from any existing session so the
@@ -2707,7 +3926,7 @@ class TaskScheduler:
                 endpoint_id=endpoint_id,
                 greeting=None,
                 enabled_tools=json.dumps([
-                    "manage_calendar", "manage_notes", "manage_tasks", "manage_memory",
+                    "manage_calendar", "manage_notes", "manage_tasks", "read_copal", "manage_copal", "manage_memory",
                     "list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "archive_email",
                     "mark_email_read", "delete_email", "resolve_contact",
                     "search_chats", "web_search", "web_fetch", "read_file",

@@ -118,8 +118,8 @@ def test_secret_storage_key_created_with_safe_mode(tmp_path, monkeypatch):
 
 def test_docker_compose_binds_web_ui_to_loopback_by_default():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
-    assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000" in compose
-    assert '"${APP_PORT:-7000}:7000"' not in compose
+    assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7777}:7777" in compose
+    assert '"${APP_PORT:-7777}:7777"' not in compose
 
 
 def test_readme_native_quickstart_uses_loopback():
@@ -127,7 +127,7 @@ def test_readme_native_quickstart_uses_loopback():
     # so accept the loopback guidance from either the README or the setup guide.
     docs = Path("README.md").read_text(encoding="utf-8")
     docs += "\n" + Path("docs/setup.md").read_text(encoding="utf-8")
-    assert "python -m uvicorn app:app --host 127.0.0.1 --port 7000" in docs
+    assert "python -m uvicorn app:app --host 127.0.0.1 --port 7777" in docs
     assert "0.0.0.0` only when you intentionally want" in docs
 
 

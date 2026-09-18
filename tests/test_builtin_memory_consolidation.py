@@ -29,8 +29,7 @@ def _read_memories(data_dir):
 @pytest.mark.asyncio
 async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monkeypatch, tmp_path):
     from src import constants
-    from src import llm_core
-    from src import task_endpoint
+    from src.openclank import modality_facade
     action_consolidate_memory = _import_consolidate_action()
 
     long_alice_text = "Alice private project context. " + ("A" * 2200)
@@ -44,15 +43,9 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
         ],
     )
     monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
-    monkeypatch.setattr(
-        task_endpoint,
-        "resolve_task_candidates",
-        lambda *args, **kwargs: [("http://llm", "model", {})],
-    )
-
     prompts = []
 
-    async def fake_llm_call_async(_candidates, **kwargs):
+    async def fake_complete_text(**kwargs):
         prompt = kwargs["messages"][0]["content"]
         prompts.append(prompt)
         if "alice-long" in prompt:
@@ -75,7 +68,7 @@ async def test_consolidate_memory_empty_owner_treats_each_owner_separately(monke
             }
         )
 
-    monkeypatch.setattr(llm_core, "llm_call_async_with_fallback", fake_llm_call_async)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
 
     message, ok = await action_consolidate_memory("")
 
@@ -122,8 +115,7 @@ async def test_consolidate_memory_specific_owner_does_not_absorb_ownerless_rows(
 async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch, tmp_path):
     from src import ai_interaction
     from src import constants
-    from src import llm_core
-    from src import task_endpoint
+    from src.openclank import modality_facade
     action_consolidate_memory = _import_consolidate_action()
     monkeypatch.setattr(ai_interaction, "_memory_provider", None)
 
@@ -136,13 +128,7 @@ async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch,
         ],
     )
     monkeypatch.setattr(constants, "DATA_DIR", str(data_dir))
-    monkeypatch.setattr(
-        task_endpoint,
-        "resolve_task_candidates",
-        lambda *args, **kwargs: [("http://llm", "model", {})],
-    )
-
-    async def fake_llm_call_async(_candidates, **kwargs):
+    async def fake_complete_text(**kwargs):
         items = json.loads(kwargs["messages"][0]["content"].split("MEMORIES:\n", 1)[1])
         return json.dumps({
             "keep": [
@@ -152,7 +138,7 @@ async def test_consolidate_memory_removes_near_duplicates_before_ai(monkeypatch,
             "drop": [],
         })
 
-    monkeypatch.setattr(llm_core, "llm_call_async_with_fallback", fake_llm_call_async)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
 
     message, ok = await action_consolidate_memory("alice")
 

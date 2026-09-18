@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PORT="${APP_PORT:-7000}"
+PORT="${APP_PORT:-7777}"
 URL="http://127.0.0.1:${PORT}"
 
 if fuser -s "${PORT}/tcp"; then

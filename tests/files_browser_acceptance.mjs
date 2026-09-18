@@ -7,7 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7000').replace(/\/$/, '');
+const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
 const port = await new Promise((resolve, reject) => {
   const server = net.createServer();
   server.once('error', reject);

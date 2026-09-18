@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'open-clank-v349-upstream-sync';
+const CACHE_NAME = 'open-clank-v354-contextual-help';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -17,6 +17,8 @@ const PRECACHE = [
   '/static/style.css',
   '/static/app.js',
   '/static/js/i18n.js',
+  '/static/js/custom-context-menu.js',
+  '/static/js/contextualHelp.js',
   '/static/i18n/registry.json',
   '/static/i18n/en.json',
   '/static/i18n/zh-Hans.json',
@@ -33,6 +35,28 @@ const PRECACHE = [
   '/static/i18n/sw.json',
   '/static/i18n/ur.json',
   '/static/i18n/fa.json',
+  '/static/i18n/bg.json',
+  '/static/i18n/cs.json',
+  '/static/i18n/da.json',
+  '/static/i18n/de.json',
+  '/static/i18n/el.json',
+  '/static/i18n/es-419.json',
+  '/static/i18n/fi.json',
+  '/static/i18n/fr.json',
+  '/static/i18n/hu.json',
+  '/static/i18n/it.json',
+  '/static/i18n/ms.json',
+  '/static/i18n/nl.json',
+  '/static/i18n/no.json',
+  '/static/i18n/pl.json',
+  '/static/i18n/pt-BR.json',
+  '/static/i18n/ro.json',
+  '/static/i18n/sv.json',
+  '/static/i18n/th.json',
+  '/static/i18n/tr.json',
+  '/static/i18n/uk.json',
+  '/static/i18n/vi.json',
+  '/static/i18n/zh-Hant.json',
   '/static/manifest.en.json',
   '/static/manifest.zh-Hans.json',
   '/static/manifest.ja.json',
@@ -90,9 +114,13 @@ const PRECACHE = [
   '/static/js/calendar/reminders.js',
   '/static/js/group.js',
   '/static/js/keyboard-shortcuts.js',
+  '/static/js/permission-mode.js',
+  '/static/js/interaction-mode.js',
   '/static/js/sidebar-layout.js',
   '/static/js/section-management.js',
-  '/static/lib/highlight.min.js',
+  '/static/lib/shiki.bundle.js',
+  '/static/js/highlighter.js',
+  '/static/lib/mermaid.min.js',
 ];
 
 self.addEventListener('install', (e) => {

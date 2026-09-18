@@ -42,8 +42,8 @@ def test_collect_service_health_shape(monkeypatch):
     out = asyncio.run(sh.collect_service_health(_Store(True), _Store(True)))
     assert set(out) == {"overall", "services", "timestamp"}
     names = {s["name"] for s in out["services"]}
-    assert names == {"chromadb", "searxng", "ntfy", "email", "providers"}
-    # Chroma healthy, everything else disabled → overall ok.
+    assert names == {"frankenmemory_rag", "searxng", "ntfy", "email", "providers"}
+    # Canonical RAG healthy, everything else disabled → overall ok.
     assert out["overall"] == sh.OK
 
 
@@ -105,7 +105,7 @@ def test_collect_runs_subsystems_concurrently(monkeypatch):
     elapsed = time.monotonic() - t0
     assert elapsed < 1.5, f"subsystems not concurrent: took {elapsed:.1f}s"
     assert {s["name"] for s in out["services"]} == {
-        "chromadb", "searxng", "ntfy", "email", "providers"}
+        "frankenmemory_rag", "searxng", "ntfy", "email", "providers"}
 
 
 def test_collect_aggregate_deadline_yields_controlled_result(monkeypatch):
@@ -134,6 +134,6 @@ def test_collect_aggregate_deadline_yields_controlled_result(monkeypatch):
     elapsed = time.monotonic() - t0
     assert elapsed < 2, f"aggregate deadline did not bound: {elapsed:.1f}s"
     assert set(out) == {"overall", "services", "timestamp"}
-    net = [s for s in out["services"] if s["name"] != "chromadb"]
+    net = [s for s in out["services"] if s["name"] != "frankenmemory_rag"]
     assert all(s["status"] == sh.DOWN and s["meta"].get("error") == "timeout"
                for s in net)

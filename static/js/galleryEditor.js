@@ -95,6 +95,7 @@ import { wireSliderUx } from './editor/slider-ux.js';
 import { createShortcutsPopover } from './editor/shortcuts-popover.js';
 import { wireKeyboardShortcuts } from './editor/keyboard-shortcuts.js';
 import { wireClipboardAndDrop } from './editor/clipboard-and-drop.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
 import { wireAIModelSelectors } from './editor/ai-models.js';
 import { wireInpaintButtons } from './editor/ai-inpaint.js?v=20260708match1';
 import { wireAIToolsMisc } from './editor/ai-tools-misc.js';
@@ -224,9 +225,9 @@ function _registerDocClickAway(handler) {
 // Undo/Redo
 const MAX_HISTORY = 20;
 
-/** Get the selected AI endpoint+model. Returns { endpoint, model }.
- * Dropdown values are encoded as "<base_url>::<model_id>" so users can pick
- * a specific model on a multi-model endpoint (e.g. dall-e-2 vs gpt-image-1). */
+/** Get the selected normalized image model route.
+ * Provider URLs and provider model aliases are not browser execution
+ * authority; dropdown values are stable `/api/v1/providers/models` IDs. */
 function _getSelectedAIEndpoint(type) {
   let raw = '';
   if (type === 'inpaint') {
@@ -237,11 +238,8 @@ function _getSelectedAIEndpoint(type) {
     const sel = document.querySelector(`select[data-ge-tool-model="${type}"]`);
     raw = sel?.value || '';
   }
-  if (!raw) raw = document.getElementById('ge-ai-model')?.value || '';
-  if (!raw) return { endpoint: '', model: '' };
-  const idx = raw.indexOf('::');
-  if (idx < 0) return { endpoint: raw, model: '' };
-  return { endpoint: raw.slice(0, idx), model: raw.slice(idx + 2) };
+  if (!raw && !type) raw = document.getElementById('ge-ai-model')?.value || '';
+  return { modelRouteId: raw };
 }
 
 /** Shared helper: flatten layers → POST to API → add result as new layer. */
@@ -3544,6 +3542,8 @@ function _buildEditor(container) {
     composite,
     handleImportedImage: (img) => _handleImportedImage(img),
     uiModule,
+    filesClient: filesFacadeClient,
+    getContext: () => window.__openClankFilesTransferContext?.() || null,
   });
 }
 

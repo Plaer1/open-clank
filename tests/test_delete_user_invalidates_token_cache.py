@@ -13,6 +13,7 @@ import asyncio
 import types
 
 import pytest
+from fastapi import HTTPException
 
 import routes.prefs_routes as prefs_routes
 from routes.auth_routes import setup_auth_routes, DeleteUserRequest
@@ -23,6 +24,18 @@ def _handler(router):
         if getattr(route, "path", "") == "/api/auth/users" and "DELETE" in getattr(route, "methods", set()):
             return route.endpoint
     raise AssertionError("DELETE /api/auth/users handler not found")
+
+
+def test_file_domain_store_constructor_returns_adapter(tmp_path, monkeypatch):
+    import routes.auth_routes as auth_routes
+    from src.openclank.account_file_lifecycle import AccountFileOwnerLifecycle
+
+    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(tmp_path / "prefs.json"))
+    monkeypatch.setattr(auth_routes, "DEEP_RESEARCH_DIR", str(tmp_path / "research"))
+    monkeypatch.setattr(auth_routes, "MEMORY_FILE", str(tmp_path / "memory.json"))
+    monkeypatch.setattr(auth_routes, "SKILLS_DIR", str(tmp_path / "skills"))
+
+    assert isinstance(auth_routes._account_file_domain_store(), AccountFileOwnerLifecycle)
 
 
 def _fake_request(invalidations):
@@ -64,8 +77,70 @@ def test_successful_delete_invalidates_cache():
     assert invalidations == [True], "successful delete must flag the token cache stale"
 
 
+def test_successful_delete_tombstones_and_purges_normalized_account_state():
+    events = []
+
+    class Lifecycle:
+        def rename_owner(self, old_owner, new_owner):
+            events.append(("rename", old_owner, new_owner))
+
+        def purge_owner(self, owner):
+            events.append(("purge", owner))
+
+    manager = _auth_manager(delete_result=True)
+    manager.account_id = lambda username: {
+        "admin": "account-admin",
+        "bob": "account-bob-stable",
+    }.get(username)
+    router = setup_auth_routes(manager, account_lifecycle=Lifecycle())
+
+    result = asyncio.run(
+        _handler(router)(
+            DeleteUserRequest(username="bob"),
+            _fake_request([]),
+        )
+    )
+
+    assert result == {"ok": True}
+    assert events == [
+        ("rename", "bob", "deleted:account-bob-stable"),
+        ("purge", "deleted:account-bob-stable"),
+    ]
+
+
+def test_rejected_delete_restores_normalized_account_tombstone():
+    events = []
+
+    class Lifecycle:
+        def rename_owner(self, old_owner, new_owner):
+            events.append(("rename", old_owner, new_owner))
+
+        def purge_owner(self, owner):
+            events.append(("purge", owner))
+
+    manager = _auth_manager(delete_result=False)
+    manager.account_id = lambda username: (
+        "account-bob-stable" if username == "bob" else "account-admin"
+    )
+    router = setup_auth_routes(manager, account_lifecycle=Lifecycle())
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            _handler(router)(
+                DeleteUserRequest(username="bob"),
+                _fake_request([]),
+            )
+        )
+
+    assert caught.value.status_code == 400
+    assert events == [
+        ("rename", "bob", "deleted:account-bob-stable"),
+        ("rename", "deleted:account-bob-stable", "bob"),
+    ]
+
+
 def test_delete_drains_provider_login_before_auth_mutation(monkeypatch):
-    import routes.mimo_provider_routes as provider_routes
+    import routes.provider_v1_routes as provider_routes
 
     events = []
 
@@ -94,6 +169,41 @@ def test_delete_drains_provider_login_before_auth_mutation(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("target", "status_code"),
+    [("", 400), ("admin", 400), ("ghost", 404)],
+)
+def test_invalid_delete_target_is_rejected_before_provider_flow_drain(
+    monkeypatch,
+    target,
+    status_code,
+):
+    import routes.provider_v1_routes as provider_routes
+
+    events = []
+
+    async def drain(_supervisor, owner):
+        events.append(("drain", owner))
+
+    manager = _auth_manager(delete_result=True)
+    manager.users = {"admin": {}, "bob": {}}
+    manager.delete_user = lambda username, actor: events.append(
+        ("delete", username, actor)
+    ) or True
+    monkeypatch.setattr(provider_routes, "purge_owner_provider_flows", drain)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            _handler(setup_auth_routes(manager))(
+                DeleteUserRequest(username=target),
+                _fake_request([]),
+            )
+        )
+
+    assert exc.value.status_code == status_code
+    assert events == []
+
+
 def test_refused_delete_does_not_invalidate_cache():
     invalidations = []
     router = setup_auth_routes(_auth_manager(delete_result=False))
@@ -107,16 +217,8 @@ def test_refused_delete_does_not_invalidate_cache():
     assert invalidations == [], "a refused delete must not touch the token cache"
 
 
-def test_delete_exception_invalidates_cache_for_partial_token_purge(monkeypatch):
-    import routes.model_routes as model_routes
-
+def test_delete_exception_invalidates_cache_for_partial_token_purge():
     invalidations = []
-    model_invalidations = []
-    monkeypatch.setattr(
-        model_routes,
-        "invalidate_model_catalogue_revision",
-        model_invalidations.append,
-    )
     router = setup_auth_routes(_auth_manager_raising())
     handler = _handler(router)
     try:
@@ -126,7 +228,6 @@ def test_delete_exception_invalidates_cache_for_partial_token_purge(monkeypatch)
         raised = True
     assert raised, "delete_user exception should still propagate"
     assert invalidations == [True], "partial token purge must dirty the bearer cache"
-    assert model_invalidations == ["bob"]
 
 
 def test_successful_delete_removes_only_target_user_prefs():

@@ -13,7 +13,7 @@ services:
   odysseus:
     build: .
     ports:
-      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7777}:7777"
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
@@ -32,16 +32,9 @@ services:
       # Ollama at http://host.docker.internal:11434.
       - "host.docker.internal:host-gateway"
     environment:
-      - LLM_HOST=${LLM_HOST:-localhost}
-      - LLM_HOSTS=${LLM_HOSTS:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
-      - RESEARCH_LLM_ENDPOINT=${RESEARCH_LLM_ENDPOINT:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - SEARXNG_INSTANCE=http://searxng:8080
-      - CHROMADB_HOST=chromadb
-      - CHROMADB_PORT=8000
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
@@ -49,11 +42,6 @@ services:
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
       - SECURE_COOKIES=${SECURE_COOKIES:-false}
-      - EMBEDDING_URL=${EMBEDDING_URL:-}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
-      - FASTEMBED_MODEL=${FASTEMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
       - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}
@@ -91,8 +79,6 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
-      chromadb:
-        condition: service_started
     restart: unless-stopped
     # NVIDIA overlay (from docker/gpu.nvidia.yml).
     deploy:
@@ -103,15 +89,6 @@ services:
               count: all
               capabilities: [gpu]
 
-  chromadb:
-    image: docker.io/chromadb/chroma:latest
-    ports:
-      - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
-    volumes:
-      - chromadb-data:/chroma/chroma
-    environment:
-      - ANONYMIZED_TELEMETRY=FALSE
-    restart: unless-stopped
 
   searxng:
     # Pinned, not :latest — odysseus waits on searxng's healthcheck
@@ -176,5 +153,4 @@ services:
 
 volumes:
   searxng-data:
-  chromadb-data:
   ntfy-cache:

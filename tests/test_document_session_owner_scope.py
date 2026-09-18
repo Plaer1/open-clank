@@ -144,6 +144,23 @@ async def test_list_documents_filters_foreign_docs_in_visible_session():
         droutes.SessionLocal = previous_session_local
 
 
+@pytest.mark.asyncio
+async def test_download_document_is_owner_scoped_and_streams_logical_body():
+    previous_session_local = _bind_test_db()
+    try:
+        download = _endpoint("GET", "/api/document/{doc_id}/download")
+        _alice_session, _bob_session, alice_doc, bob_doc, _legacy_doc = _seed()
+        response = await download(_req("alice"), alice_doc)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        assert body == b"alice body"
+        assert response.headers["content-disposition"].startswith("attachment;")
+        with pytest.raises(HTTPException) as exc:
+            await download(_req("alice"), bob_doc)
+        assert exc.value.status_code == 404
+    finally:
+        droutes.SessionLocal = previous_session_local
+
+
 def test_owner_session_filter_noops_for_auth_disabled_single_user(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     previous_session_local = _bind_test_db()

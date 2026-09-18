@@ -1,0 +1,523 @@
+syntax = "proto3";
+
+package urc.model;
+
+// In the case of a partial put, only the address and metadata (flags and sizes)
+// are required.
+message Fragment {
+  uint32 flags = 1;
+  uint32 size_payload = 2;
+  uint64 size_content = 3;
+}
+
+message Address {
+  bytes hash = 1;
+  bytes context = 2;
+}
+
+enum FragmentState {
+  FOUND_IN_CONTEXT = 0;
+  FOUND = 1;
+  NOT_FOUND = 2;
+  UNKNOWN = 3;
+}
+
+message Repository {
+  bytes id = 1;
+  string name = 2;
+  bytes metadata = 3;
+}
+
+message BranchPoint {
+  option deprecated = true;
+  bytes branch = 1;
+  bytes revision = 2;
+}
+
+message Branch {
+  option deprecated = true;
+  bytes id = 1;
+  string name = 2;
+  // Deprecated, use stack field instead
+  optional bytes parent_deprecated = 3;
+  bytes latest = 4;
+  // Deprecated, use stack field instead
+  optional bytes branch_point_deprecated = 5;
+  string creator = 6;
+  uint64 created = 7;
+  string category = 8;
+  repeated BranchPoint stack = 9;
+}
+
+enum MetadataType {
+  option deprecated = true;
+  ADDRESS = 0;
+  BOOLEAN = 1;
+  BINARY = 2;
+  CONTEXT = 3;
+  HASH = 4;
+  NUMERIC = 5;
+  STRING = 6;
+}
+
+message Metadata {
+  option deprecated = true;
+  string key = 1;
+  string value = 2;
+  MetadataType metadata_type = 3;
+}
+
+message Revision {
+  option deprecated = true;
+  bytes id = 1;
+  string commit_message = 2;
+  uint64 timestamp = 3;
+  string created_by = 4;
+  string committed_by = 5;
+  reserved 6; // deprecated reviewed_by
+  reserved 7; // deprecated merged_by
+  reserved 8; // deprecated p4_changelist
+  reserved 9; // deprecated change_request
+  repeated Metadata metadata = 10;
+  optional bytes parent_self = 11;
+  optional bytes parent_other = 12;
+  uint64 number = 13;
+  optional uint64 parent_self_number = 14;
+  optional uint64 parent_other_number = 15;
+}
+
+message RevisionItem {
+  option deprecated = true;
+  uint64 number = 1;
+  bytes signature = 2;
+  bytes metadata = 3;
+}
+
+enum PathType {
+  option deprecated = true;
+  DIRECTORY = 0;
+  FILE = 1;
+  LINK = 2;
+}
+
+message Path {
+  option deprecated = true;
+  string path = 1;
+  bytes address = 2;
+  PathType type = 3;
+  // True when a link node tracks its parent's branch; false for pinned
+  // links and non-link nodes.
+  bool tracking = 4;
+}
+
+message PathDiff {
+  option deprecated = true;
+  Path from = 1;
+  Path to = 2;
+  bool automerged = 3;
+  // Repository the changed content resolves under; empty when it is the
+  // request's own repository. A link pin update is reported as one LINK-typed
+  // entry for the mount path plus the linked repository's per-file changes
+  // remapped under it, and every one of those entries carries the linked
+  // repository here. A consumer fetching content for such an entry MUST
+  // target this repository, not the request's repository id.
+  bytes link_partition = 4;
+  // True when a link change tracks its parent's branch; false for pinned
+  // links and non-link changes. Only meaningful on a LINK-typed entry; read
+  // it from the entry for the mount path itself.
+  bool tracking = 5;
+}
+
+////////////////////////////////////////////
+// API objects
+//
+message BranchCreateRequest {
+  option deprecated = true;
+  bytes branch = 1;
+  // Deprecated, use stack field instead
+  optional bytes revision_deprecated = 2;
+  // Deprecated, use stack field instead
+  optional bytes parent_deprecated = 3;
+  string name = 4;
+  string creator = 5;
+  uint64 created = 6;
+  string category = 7;
+  repeated BranchPoint stack = 8;
+}
+
+message BranchCreateResponse {
+  option deprecated = true;
+  bytes revision = 1;
+}
+
+message BranchDeleteRequest {
+  option deprecated = true;
+  bytes branch = 1;
+}
+
+message BranchDeleteResponse {
+  option deprecated = true;
+}
+
+message BranchProtectRequest {bytes branch = 1;}
+
+message BranchProtectResponse {}
+
+message BranchUnprotectRequest {bytes branch = 1;}
+
+message BranchUnprotectResponse {}
+
+message BranchQueryRequest {
+  option deprecated = true;
+  oneof query {
+    bytes id = 1;
+    string name = 2;
+  }
+}
+
+message BranchQueryResponse {
+  option deprecated = true;
+  bytes revision = 1;
+  bytes metadata = 2;
+  bytes id = 3;
+  bool deleted = 4;
+}
+
+message BranchGetRequest {
+  option deprecated = true;
+  bytes branch = 1;
+}
+
+message BranchGetResponse {
+  option deprecated = true;
+  Branch branch = 1;
+}
+
+message BranchListRequest {
+  option deprecated = true;
+}
+
+message BranchListResponse {
+  option deprecated = true;
+  repeated Branch branches = 1;
+}
+
+message BranchPushRequest {
+  option deprecated = true;
+  bytes branch = 1;
+  bytes revision = 2;
+  bool force = 3;
+  bool fast_forward_merge = 4;
+}
+
+message BranchPushResponse {
+  option deprecated = true;
+  bool success = 1;
+  bool fast_forward_merged = 2;
+  bytes revision = 3;
+  uint64 revision_number = 4;
+  optional string message = 5;
+}
+
+message BranchDiffRequest {
+  option deprecated = true;
+  bytes branch_target = 1;
+  bytes branch_source = 2;
+  optional bytes revision_target = 3;
+  optional bytes revision_source = 4;
+  bool autoresolve = 5;
+}
+
+message Conflict {
+  option deprecated = true;
+  PathDiff diff_base = 1;
+  PathDiff diff_compare = 2;
+}
+
+message BranchDiffResponse {
+  option deprecated = true;
+  repeated PathDiff diffs = 1;
+  repeated Conflict conflicts = 2;
+  Branch branch_target = 3;
+  Branch branch_source = 4;
+  bytes revision_target = 5;
+  bytes revision_source = 6;
+  bytes revision_base = 7;
+}
+
+message BranchRevisionListRequest {
+  optional bytes branch = 1;
+  optional uint32 limit = 2;
+  optional bytes source = 3;
+  optional bytes target = 4;
+}
+
+message BranchRevisionListResponse {
+  repeated Revision revisions = 1;
+  bool has_more = 2;
+}
+
+message RevisionIdentifer {
+  option deprecated = true;
+  bytes branch = 1;
+  uint64 number = 2;
+}
+
+message RevisionListRequest {
+  option deprecated = true;
+  oneof start {
+    RevisionIdentifer identifier = 1;
+    bytes signature = 2;
+  }
+}
+
+message RevisionListResponse {
+  option deprecated = true;
+  bytes next_revision = 1;
+  repeated RevisionItem items = 2;
+  bytes previous_revision = 3;
+}
+
+message GetResponse {
+  Address address = 1;
+  Fragment fragment = 2;
+  bytes payload = 3;
+}
+
+message PutRequest {
+  Address address = 1;
+  Fragment fragment = 2;
+  optional bytes payload = 3;
+}
+
+message ReplicationPutRequest {
+  bytes repository_id = 1;
+  PutRequest put_request = 2;
+}
+
+message PutResponse {Address address = 1;}
+
+message QueryRequest {repeated Address addresses = 1;}
+
+message QueryResponse {repeated FragmentState results = 1;}
+
+message PingRequest {uint64 timestamp = 1;}
+
+message PingResponse {uint64 timestamp = 1;}
+
+message RepositoryCreateRequest {
+  bytes id = 1;
+  string name = 2;
+  string description = 3;
+  bytes default_branch_id = 4;
+  string default_branch_name = 5;
+  string creator = 6;
+  uint64 created = 7;
+}
+
+message RepositoryCreateResponse {
+  Repository repository = 1;
+}
+
+message RepositoryDeleteRequest {
+  bytes id = 1;
+}
+
+message RepositoryDeleteResponse {}
+
+message RepositoryQueryRequest {
+  oneof query {
+    bytes id = 1;
+    string name = 2;
+  }
+}
+
+message RepositoryQueryResponse {
+  Repository repository = 1;
+}
+
+message RepositoryListRequest {
+}
+
+message RepositoryListResponse {
+  repeated Repository repositories = 1;
+}
+
+message RepositoryMetadataGetRequest {
+  bytes repository_id = 1;
+}
+
+message RepositoryMetadataGetResponse {
+  bytes metadata_hash = 1;
+}
+
+message RepositoryMetadataSetRequest {
+  bytes repository_id = 1;
+  bytes expected_hash = 2;
+  bytes new_hash = 3;
+}
+
+message RepositoryMetadataSetResponse {
+  bool success = 1;
+  bytes current_hash = 2;
+}
+
+message BranchMetadataGetRequest {
+  option deprecated = true;
+  bytes branch_id = 1;
+}
+
+message BranchMetadataGetResponse {
+  option deprecated = true;
+  bytes metadata_hash = 1;
+}
+
+message BranchMetadataSetRequest {
+  option deprecated = true;
+  bytes branch_id = 1;
+  bytes expected_hash = 2;
+  bytes new_hash = 3;
+}
+
+message BranchMetadataSetResponse {
+  option deprecated = true;
+  bool success = 1;
+  bytes current_hash = 2;
+}
+
+message RevisionDescribeRequest {
+  option deprecated = true;
+  bytes id = 1;
+}
+
+message RevisionDescribeResponse {
+  option deprecated = true;
+  Revision revision = 1;
+}
+
+message RevisionDiffRequest {
+  option deprecated = true;
+  bytes revision_from = 1;
+  bytes revision_to = 2;
+}
+
+message RevisionDiffResponse {
+  option deprecated = true;
+  repeated PathDiff diffs = 1;
+}
+
+message RevisionStateHistoryRequest {
+  bytes revision = 1;
+  uint32 depth = 2;
+  bool with_metadata = 3;
+  bool follow_merge = 4;
+}
+
+message RevisionStateHistoryResponse {
+  repeated bytes signature = 1;
+  repeated bytes metadata = 2;
+}
+
+message RevisionTreeRequest {
+  option deprecated = true;
+  bytes revision = 1;
+  string path = 2;
+  uint32 max_depth = 3;
+}
+
+message RevisionTreeResponse {
+  option deprecated = true;
+  repeated Path paths = 1;
+}
+
+message ObliterateRequest {Address address = 1;}
+
+message ObliterateResponse {}
+
+message EnvironmentEndpoint {
+  string auth_url = 1;
+  string repository_url = 2;
+  string storage_url = 3;
+  string revision_url = 4;
+  string lock_url = 5;
+  string notification_url = 6;
+}
+
+enum CompressionMode {
+  NotSpecified = 0;
+  NoCompression = 1;
+  Lz4 = 2;
+  Oodle = 3;
+  Zstd = 4;
+}
+
+message EnvironmentConfig {
+  uint32 max_query_batch = 1;
+  optional CompressionMode compression_mode = 2;
+}
+
+message Environment {
+  EnvironmentEndpoint endpoint = 1;
+  EnvironmentConfig config = 2;
+}
+
+message EnvironmentGetRequest {}
+
+message EnvironmentGetResponse {Environment environment = 1;}
+
+message VerifyRequest {
+  Address address = 1;
+  bool heal = 2;
+}
+
+enum HealResult {
+  NOT_ATTEMPTED = 0;
+  SUCCESS = 1;
+  FAILED = 2;
+}
+
+message VerifyResponse {
+  HealResult healed = 1;
+  bool corrupted = 2;
+}
+
+message CopyRequest {
+  bytes source_repository_id = 1;
+  Address source_address = 2;
+  // Destination context. The destination address is
+  // (target_repository, source_address.hash, target_context). When omitted (zero bytes), the
+  // server treats the destination context as the source's, preserving the legacy semantics.
+  bytes target_context = 3;
+}
+
+message CopyResponse {
+  Address source_address = 1;
+}
+
+message MutableLoadRequest {
+  bytes key = 1;
+  uint32 key_type = 2;
+}
+
+message MutableLoadResponse {
+  bytes value = 1;
+}
+
+message MutableStoreRequest {
+  bytes key = 1;
+  bytes value = 2;
+  uint32 key_type = 3;
+}
+
+message MutableStoreResponse {}
+
+message MutableCompareAndSwapRequest {
+  bytes key = 1;
+  bytes expected = 2;
+  bytes value = 3;
+  uint32 key_type = 4;
+}
+
+message MutableCompareAndSwapResponse {
+  bytes current_value = 1;
+}

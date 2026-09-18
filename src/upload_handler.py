@@ -9,11 +9,13 @@ import mimetypes
 import shutil
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Mapping, Optional
 from fastapi import HTTPException, UploadFile
 
 from src.upload_limits import format_byte_limit, get_chat_upload_max_bytes
+from services.memory.skill_lifecycle import locked
 
 
 def secure_filename(filename: str) -> str:
@@ -38,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 class UploadCleanupSafetyError(RuntimeError):
     """Raised when cleanup cannot prove that destructive work is safe."""
+
+
+class UploadOwnerLifecycleError(RuntimeError):
+    """Raised when an owner lifecycle transition cannot be proven safe."""
 
 # The extension is optional: save_upload builds the id as `{uuid.hex}{ext}`,
 # and a file with no extension (Dockerfile, README, ...) yields a bare 32-hex
@@ -221,13 +227,10 @@ class UploadHandler:
         self._upload_rate_lock = threading.Lock()
         self._upload_rate_counter = 0
         self._upload_rate_max_entries = 1000
-        # Serialise the read-modify-write of uploads.json within one
-        # Python process. Scope: single FastAPI worker (the default
-        # uvicorn deployment). Cross-process / multi-worker deployments
-        # need an additional file-level lock (flock) or a database;
-        # the atomic-rename write below keeps on-disk state consistent
-        # on its own but does not serialise writers across processes.
-        self._index_lock = threading.Lock()
+        # Pair a process-local re-entrant lock with the repository's portable
+        # file lock. Atomic replacement prevents torn JSON; the guard also
+        # prevents multi-worker lost updates and lifecycle/upload races.
+        self._index_lock = threading.RLock()
         
         # Create upload directory
         os.makedirs(self.upload_dir, exist_ok=True)
@@ -243,6 +246,356 @@ class UploadHandler:
         # In-memory index cache to avoid O(N) disk I/O on every request
         self._index_cache: Optional[Dict[str, Any]] = None
         self._index_mtime: float = 0.0
+        self._index_signature: Optional[tuple[int, int, int, int]] = None
+
+    def _live_index_signature(self) -> Optional[tuple[int, int, int, int]]:
+        try:
+            stat_result = os.stat(os.path.join(self.upload_dir, "uploads.json"))
+        except FileNotFoundError:
+            return None
+        return (
+            int(stat_result.st_dev),
+            int(stat_result.st_ino),
+            int(stat_result.st_size),
+            int(stat_result.st_mtime_ns),
+        )
+
+    @contextmanager
+    def _index_guard(self):
+        lock_target = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_lock:
+            with locked(lock_target):
+                signature = self._live_index_signature()
+                if signature != self._index_signature:
+                    self._index_cache = None
+                    self._index_mtime = 0.0
+                    self._index_signature = signature
+                yield
+
+    @staticmethod
+    def _owner_key(owner: Any) -> str:
+        key = str(owner or "").strip().lower()
+        if not key or "\x00" in key:
+            raise UploadOwnerLifecycleError("upload lifecycle owner is required")
+        return key
+
+    @staticmethod
+    def _inventory_for_rows(rows: list[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Return a content- and path-free identity inventory."""
+        identities = sorted(
+            f"{row.get('id', '')}\0{row.get('hash') or row.get('checksum_sha256') or ''}"
+            for row in rows
+        )
+        digest = hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
+        return {"count": len(rows), "digest": digest}
+
+    def owner_inventory(self, owner: str) -> Dict[str, Any]:
+        """Inventory upload metadata for one owner without leaking paths/content."""
+        key = self._owner_key(owner)
+        with self._index_guard():
+            index_path = os.path.join(self.upload_dir, "uploads.json")
+            index = self._load_upload_index(fail_on_error=True) if os.path.exists(index_path) else {}
+            rows = [
+                dict(row)
+                for row in index.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == key
+            ]
+        return self._inventory_for_rows(rows)
+
+    def preview_owner_rename(self, source_owner: str, target_owner: str) -> Dict[str, Any]:
+        """Freeze the evidence needed for a strict, replayable owner rename."""
+        source = self._owner_key(source_owner)
+        target = self._owner_key(target_owner)
+        if source == target:
+            raise UploadOwnerLifecycleError("source and target owners must differ")
+        source_inventory = self.owner_inventory(source)
+        target_inventory = self.owner_inventory(target)
+        if target_inventory["count"]:
+            raise UploadOwnerLifecycleError("target owner already has upload metadata")
+        return {"version": 1, "source": source_inventory, "target": target_inventory}
+
+    preview_rename = preview_owner_rename
+
+    @staticmethod
+    def _same_inventory(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return (
+            int(left.get("count", -1)) == int(right.get("count", -2))
+            and str(left.get("digest") or "") == str(right.get("digest") or "!")
+        )
+
+    def reconcile_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Complete or accept an atomic upload-owner rename after a crash.
+
+        Upload bytes are globally ID-addressed, so owner rename changes only the
+        atomic metadata index.  A split source+target state is never merged.
+        """
+        source = self._owner_key(source_owner)
+        target = self._owner_key(target_owner)
+        expected_source = dict(manifest.get("source") or {})
+        expected_target = dict(manifest.get("target") or {})
+        if int(expected_target.get("count", -1)) != 0:
+            raise UploadOwnerLifecycleError("rename manifest target is not empty")
+        empty = self._inventory_for_rows([])
+        uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_guard():
+            current = dict(self._load_upload_index(fail_on_error=True)) if os.path.exists(uploads_db_path) else {}
+            source_rows = [
+                row for row in current.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == source
+            ]
+            target_rows = [
+                row for row in current.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == target
+            ]
+            source_now = self._inventory_for_rows(source_rows)
+            target_now = self._inventory_for_rows(target_rows)
+            if self._same_inventory(source_now, empty) and self._same_inventory(target_now, expected_source):
+                return {"state": "staged", "source": source_now, "target": target_now}
+            if not self._same_inventory(source_now, expected_source) or not self._same_inventory(target_now, expected_target):
+                raise UploadOwnerLifecycleError("upload owner state conflicts with rename manifest")
+
+            updated: Dict[str, Any] = {}
+            original_keys = set(current)
+            for storage_key, raw in current.items():
+                row = dict(raw) if isinstance(raw, dict) else raw
+                next_key = storage_key
+                if isinstance(row, dict) and str(row.get("owner") or "").strip().lower() == source:
+                    row["owner"] = target
+                    base_key = self._renamed_upload_index_key(storage_key, row, source, target)
+                    next_key = self._unique_upload_index_key(
+                        base_key, set(updated), original_keys - {storage_key}, row
+                    )
+                if next_key in updated:
+                    raise UploadOwnerLifecycleError("upload rename produced an ambiguous index key")
+                updated[next_key] = row
+            self._atomic_write_json(uploads_db_path, updated, sync_backup=True)
+
+        after_source = self.owner_inventory(source)
+        after_target = self.owner_inventory(target)
+        if not self._same_inventory(after_source, empty) or not self._same_inventory(after_target, expected_source):
+            raise UploadOwnerLifecycleError("upload owner rename verification failed")
+        return {"state": "staged", "source": after_source, "target": after_target}
+
+    reconcile_rename = reconcile_owner_rename
+
+    def stage_owner_to_tombstone(
+        self,
+        source_owner: str,
+        tombstone_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        return self.reconcile_owner_rename(source_owner, tombstone_owner, manifest)
+
+    stage_to_tombstone = stage_owner_to_tombstone
+
+    def compensate_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        reverse = {
+            "version": 1,
+            "source": dict(manifest.get("source") or {}),
+            "target": dict(manifest.get("target") or {}),
+        }
+        # Accept an already-restored state, otherwise reverse the staged state.
+        if self._same_inventory(self.owner_inventory(source_owner), reverse["source"]):
+            if self.owner_inventory(target_owner)["count"]:
+                raise UploadOwnerLifecycleError("source and target upload owners both contain state")
+            return {
+                "state": "restored",
+                "source": self.owner_inventory(source_owner),
+                "target": self.owner_inventory(target_owner),
+            }
+        staged_manifest = {"version": 1, "source": reverse["source"], "target": reverse["target"]}
+        receipt = self.reconcile_owner_rename(target_owner, source_owner, {
+            "version": 1,
+            "source": staged_manifest["source"],
+            "target": staged_manifest["target"],
+        })
+        return {"state": "restored", "source": receipt["target"], "target": receipt["source"]}
+
+    compensate = compensate_owner_rename
+
+    def verify_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+        *,
+        expected: str = "staged",
+    ) -> Dict[str, Any]:
+        source = self.owner_inventory(source_owner)
+        target = self.owner_inventory(target_owner)
+        empty = self._inventory_for_rows([])
+        closure = dict(manifest.get("source") or {})
+        valid = (
+            self._same_inventory(source, empty)
+            and self._same_inventory(target, closure)
+            if expected == "staged"
+            else self._same_inventory(source, closure)
+            and self._same_inventory(target, empty)
+            if expected == "restored"
+            else False
+        )
+        if not valid:
+            raise UploadOwnerLifecycleError(f"upload owner lifecycle did not reach {expected}")
+        return {"state": expected, "source": source, "target": target}
+
+    verify = verify_owner_rename
+
+    def preview_owner_purge(self, owner: str) -> Dict[str, Any]:
+        return self.owner_inventory(owner)
+
+    def _lifecycle_journal_path(self) -> str:
+        return os.path.join(self.upload_dir, ".owner-lifecycle.json")
+
+    def _load_lifecycle_journal(self) -> Dict[str, Any]:
+        path = self._lifecycle_journal_path()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return {"version": 1, "operations": {}}
+        except Exception as exc:
+            raise UploadOwnerLifecycleError("upload lifecycle journal is unreadable") from exc
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("operations"), dict):
+            raise UploadOwnerLifecycleError("upload lifecycle journal is malformed")
+        return data
+
+    def _save_lifecycle_journal(self, journal: Mapping[str, Any]) -> None:
+        self._atomic_write_json(self._lifecycle_journal_path(), dict(journal), sync_backup=True)
+
+    def purge_owner_lifecycle(
+        self,
+        owner: str,
+        *,
+        expected: Optional[Mapping[str, Any]] = None,
+        operation_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Purge one owner's rows and exclusively-owned bytes, replayably.
+
+        A private journal retains byte locations across the metadata commit.
+        Public receipts expose only an opaque token, counts, and digests.
+        """
+        owner_key = self._owner_key(owner)
+        token = str(operation_token or uuid.uuid4().hex)
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise UploadOwnerLifecycleError("invalid upload lifecycle token")
+        index_path = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_guard():
+            journal = self._load_lifecycle_journal()
+            operations = journal["operations"]
+            operation = operations.get(token)
+            current = dict(self._load_upload_index(fail_on_error=True)) if os.path.exists(index_path) else {}
+            owner_items = [
+                (key, dict(row)) for key, row in current.items()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == owner_key
+            ]
+            current_inventory = self._inventory_for_rows([row for _, row in owner_items])
+            if operation is None:
+                if expected is not None and not self._same_inventory(current_inventory, expected):
+                    raise UploadOwnerLifecycleError("upload purge inventory changed after preview")
+                exclusive: list[dict[str, str]] = []
+                other_rows = [row for key, row in current.items() if key not in {item[0] for item in owner_items} and isinstance(row, dict)]
+                referenced = {
+                    os.path.normcase(os.path.realpath(str(row.get("path"))))
+                    for row in other_rows if row.get("path")
+                }
+                referenced_ids = {str(row.get("id") or "") for row in other_rows}
+                referenced_hashes = {
+                    str(row.get("hash") or row.get("checksum_sha256") or "")
+                    for row in other_rows
+                }
+                staged_reals: set[str] = set()
+                quarantine = os.path.join(self.upload_dir, ".owner-lifecycle", token)
+                for _key, row in owner_items:
+                    source = str(row.get("path") or "")
+                    if not source:
+                        continue
+                    if os.path.islink(source) or not self._inside_upload_dir(source):
+                        raise UploadOwnerLifecycleError("upload purge refused an unsafe path")
+                    real = os.path.normcase(os.path.realpath(source))
+                    identity_shared = (
+                        str(row.get("id") or "") in referenced_ids
+                        or str(row.get("hash") or row.get("checksum_sha256") or "") in referenced_hashes
+                    )
+                    if real in referenced or identity_shared or real in staged_reals or not os.path.exists(source):
+                        continue
+                    target = os.path.join(quarantine, os.path.basename(source))
+                    if os.path.lexists(target):
+                        raise UploadOwnerLifecycleError("upload purge quarantine target already exists")
+                    exclusive.append({"source": source, "target": target})
+                    staged_reals.add(real)
+                operation = {
+                    "owner": owner_key,
+                    "state": "prepared",
+                    "inventory": current_inventory,
+                    "row_keys": [key for key, _ in owner_items],
+                    "files": exclusive,
+                }
+                operations[token] = operation
+                self._save_lifecycle_journal(journal)
+            elif operation.get("owner") != owner_key:
+                raise UploadOwnerLifecycleError("upload lifecycle token belongs to another owner")
+
+            for item in operation.get("files", []):
+                source = str(item.get("source") or "")
+                target = str(item.get("target") or "")
+                if not self._inside_upload_dir(source) or not self._inside_upload_dir(target):
+                    raise UploadOwnerLifecycleError("upload lifecycle journal contains an unsafe path")
+                if os.path.islink(source) or os.path.islink(target):
+                    raise UploadOwnerLifecycleError("upload purge refused a symlink")
+                if os.path.exists(source) and os.path.exists(target):
+                    raise UploadOwnerLifecycleError("upload purge source and target both exist")
+                if os.path.exists(source):
+                    os.makedirs(os.path.dirname(target), exist_ok=True, mode=0o700)
+                    os.replace(source, target)
+                elif not os.path.exists(target) and operation.get("state") == "prepared":
+                    raise UploadOwnerLifecycleError("upload purge lost staged bytes")
+            operation["state"] = "bytes_staged"
+            self._save_lifecycle_journal(journal)
+
+            reduced = {key: row for key, row in current.items() if key not in set(operation.get("row_keys", []))}
+            self._atomic_write_json(index_path, reduced, sync_backup=True)
+            operation["state"] = "metadata_removed"
+            self._save_lifecycle_journal(journal)
+
+            deleted = 0
+            for item in operation.get("files", []):
+                target = str(item.get("target") or "")
+                if os.path.isfile(target):
+                    os.remove(target)
+                    deleted += 1
+            operation["state"] = "complete"
+            operation["exclusive_file_count"] = len(operation.get("files", []))
+            operation.pop("files", None)
+            operation.pop("row_keys", None)
+            self._save_lifecycle_journal(journal)
+
+        after = self.owner_inventory(owner_key)
+        if after["count"]:
+            raise UploadOwnerLifecycleError("upload owner purge verification failed")
+        return {
+            "state": "purged",
+            "operation_token": token,
+            "before": dict(operation.get("inventory") or {}),
+            "after": after,
+            "metadata_rows_removed": int((operation.get("inventory") or {}).get("count", 0)),
+            "exclusive_files_removed": int(operation.get("exclusive_file_count", 0)),
+        }
+
+    purge_owner = purge_owner_lifecycle
     
     def inside_base_dir(self, path: str) -> bool:
         """Check if path is inside base directory"""
@@ -515,7 +868,7 @@ class UploadHandler:
             # Keep index mutation and file removal serialized with upload writes.
             # Each row removal is atomically persisted before the bytes are
             # deleted; if deletion fails, the previous index is restored.
-            with self._index_lock:
+            with self._index_guard():
                 current_index = dict(self._load_upload_index(fail_on_error=True))
 
                 for root, dirs, files in os.walk(self.upload_dir, followlinks=False):
@@ -731,6 +1084,7 @@ class UploadHandler:
                 self._index_mtime = os.path.getmtime(path)
             except OSError:
                 self._index_mtime = time.time()
+            self._index_signature = self._live_index_signature()
 
     def _load_upload_index(self, *, fail_on_error: bool = False) -> Dict[str, Any]:
         """Load the upload index from disk/cache. Uses mtime-based validation
@@ -775,6 +1129,7 @@ class UploadHandler:
                 if isinstance(data, dict):
                     self._index_cache = data
                     self._index_mtime = mtime
+                    self._index_signature = self._live_index_signature()
                     return data
             except Exception as e:
                 logger.warning(f"Failed to read uploads database ({candidate}): {e}")
@@ -789,9 +1144,10 @@ class UploadHandler:
         """Return the uploads.json metadata row for an upload ID, if present."""
         if not self.validate_upload_id(upload_id):
             return None
-        for info in self._load_upload_index().values():
-            if isinstance(info, dict) and info.get("id") == upload_id:
-                return dict(info)
+        with self._index_guard():
+            for info in self._load_upload_index().values():
+                if isinstance(info, dict) and info.get("id") == upload_id:
+                    return dict(info)
         return None
 
     def reserve_upload(
@@ -816,7 +1172,7 @@ class UploadHandler:
             return None
 
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
-        with self._index_lock:
+        with self._index_guard():
             try:
                 current = dict(self._load_upload_index(fail_on_error=True))
             except Exception:
@@ -984,7 +1340,7 @@ class UploadHandler:
             return 0
 
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
-        with self._index_lock:
+        with self._index_guard():
             current = self._load_upload_index()
             if not current:
                 return 0
@@ -1036,7 +1392,8 @@ class UploadHandler:
             dirs[:] = [
                 directory
                 for directory in dirs
-                if not os.path.islink(os.path.join(root, directory))
+                if directory != ".owner-lifecycle"
+                and not os.path.islink(os.path.join(root, directory))
                 and not is_junction(os.path.join(root, directory))
             ]
             if upload_id in files:
@@ -1116,7 +1473,8 @@ class UploadHandler:
             total_size = 0
             file_types = {}
             
-            files = self._load_upload_index()
+            with self._index_guard():
+                files = dict(self._load_upload_index())
             if files:
                 total_files = len(files)
                 for file_info in files.values():
@@ -1200,7 +1558,7 @@ class UploadHandler:
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
         existing_file = None
         existing_key = None
-        with self._index_lock:
+        with self._index_guard():
             existing_files = self._load_upload_index()
             stale_keys = []
             for key, info in existing_files.items():
@@ -1223,7 +1581,7 @@ class UploadHandler:
             logger.info(f"Duplicate file upload detected: {original_filename} -> {existing_file['id']}")
 
             existing_file["last_accessed"] = datetime.now().isoformat()
-            with self._index_lock:
+            with self._index_guard():
                 try:
                     current = self._load_upload_index()
                     # Re-resolve the key inside the lock: a concurrent
@@ -1313,7 +1671,7 @@ class UploadHandler:
                 logger.warning(f"Failed to read image dimensions for {file_id}: {e}")
         
         # Update uploads database
-        with self._index_lock:
+        with self._index_guard():
             try:
                 current = self._load_upload_index() if os.path.exists(uploads_db_path) else {}
                 storage_key = f"{owner}:{file_hash}" if owner else file_hash

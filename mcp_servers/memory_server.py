@@ -2,7 +2,7 @@
 memory_server.py
 
 MCP server exposing memory management (list, add, edit, delete, search).
-Imports MemoryManager and MemoryVectorStore from the Odysseus codebase.
+The runtime has one backend: the canonical Frankenmemory provider.
 """
 
 import asyncio
@@ -11,7 +11,6 @@ import sys
 import time
 from pathlib import Path
 
-from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
@@ -19,13 +18,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.memory_scope import CHAT_WORKSPACE  # noqa: E402
 
-server = Server("memory")
+from src.openclank.mcp_tool_server import ToolServer
+
+
+server = ToolServer("memory")
 
 # Late-initialized managers (set during first tool call)
 _memory_manager = None
 _memory_vector = None
 _memory_provider = None
 _initialized = False
+_initialization_error = None
 
 _OWNER_ENV_KEYS = ("ODYSSEUS_MCP_MEMORY_OWNER", "ODYSSEUS_MEMORY_OWNER")
 _WORKSPACE_ENV_KEYS = ("ODYSSEUS_MCP_MEMORY_WORKSPACE", "FM_WORKSPACE_ID")
@@ -87,17 +90,12 @@ def _text_result(text: str) -> list[TextContent]:
 
 
 def _ensure_init():
-    """Lazy-init memory managers on first use."""
-    global _memory_manager, _memory_vector, _memory_provider, _initialized
+    """Lazy-init the sole canonical memory provider on first use."""
+    global _memory_provider, _initialized, _initialization_error
     if _initialized:
         return
-    _initialized = True
 
-    from src.constants import DATA_DIR
-    from src.memory import MemoryManager
-    _memory_manager = MemoryManager(DATA_DIR)
-
-    if os.environ.get("MEMORY_PROVIDER", "frankenmemory") == "frankenmemory":
+    try:
         from src.app_initializer import prepare_frankenmemory_database
         from src.constants import FM_DB_PATH
         from src.frankenmemory_provider import FrankenmemoryProvider
@@ -108,16 +106,11 @@ def _ensure_init():
             workspace_id=_configured_workspace(),
             env={"FM_DB_PATH": FM_DB_PATH, "FM_DB_ID": database_id},
         )
-        return
-
-    if not _memory_provider:
-        try:
-            from src.memory_vector import MemoryVectorStore
-            _memory_vector = MemoryVectorStore(DATA_DIR)
-            if not _memory_vector.healthy:
-                _memory_vector = None
-        except Exception:
-            _memory_vector = None
+        _initialized = True
+        _initialization_error = None
+    except Exception as exc:
+        # A transient failure must not poison init: the next tool call retries.
+        _initialization_error = str(exc)
 
 
 @server.list_tools()
@@ -154,8 +147,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _text_result(f"Unknown tool: {name}")
 
     _ensure_init()
-    if not _memory_manager:
-        return _text_result("Error: Memory manager not available")
+    if not _memory_provider and not _memory_manager:
+        detail = f": {_initialization_error}" if _initialization_error else ""
+        return _text_result(f"Error: Frankenmemory provider not available{detail}")
 
     action = arguments.get("action", "")
 

@@ -19,11 +19,11 @@ def _run_fallback(monkeypatch, per_model):
     async def fake_stream(url, model, messages, **kw):
         for ln in per_model(model):
             yield ln
-    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    monkeypatch.setattr(llm_core, "_legacy_stream_llm", fake_stream)
 
     async def run():
         out = []
-        async for c in llm_core.stream_llm_with_fallback(
+        async for c in llm_core._legacy_stream_llm_with_fallback(
             [("u1", "primary", {}), ("u2", "backup", {})], [{"role": "user", "content": "hi"}]
         ):
             out.append(c)
@@ -158,10 +158,10 @@ def test_tool_call_delta_is_forwarded_immediately_and_prevents_fallback(monkeypa
         yield tool_calls
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    monkeypatch.setattr(llm_core, "_legacy_stream_llm", fake_stream)
 
     async def run():
-        stream = llm_core.stream_llm_with_fallback(
+        stream = llm_core._legacy_stream_llm_with_fallback(
             [("u1", "primary", {}), ("u2", "backup", {})],
             [{"role": "user", "content": "hi"}],
         )
@@ -221,12 +221,12 @@ def test_duplicate_route_is_attempted_only_once(monkeypatch):
         calls.append((url, model))
         yield 'event: error\ndata: {"status": 503, "text": "down"}\n\n'
 
-    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    monkeypatch.setattr(llm_core, "_legacy_stream_llm", fake_stream)
 
     async def run():
         out = []
         cands = [("u1", "m1", {}), ("u1", "m1", {}), ("u2", "m2", {})]
-        async for c in llm_core.stream_llm_with_fallback(cands, [{"role": "user", "content": "hi"}]):
+        async for c in llm_core._legacy_stream_llm_with_fallback(cands, [{"role": "user", "content": "hi"}]):
             out.append(c)
         return out
 

@@ -1,13 +1,8 @@
 """
 RAG singleton instance for the application.
 """
-import os
 import logging
 import time
-from pathlib import Path
-
-from src.constants import RAG_DIR
-from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -17,18 +12,11 @@ _RETRY_INTERVAL = 30  # seconds between re-init attempts
 
 
 def get_rag_manager():
-    """Lazy ChromaDB-backed VectorRAG initializer.
+    """Lazy canonical Frankenmemory RAG initializer.
 
-    Returns the VectorRAG instance on first successful init, None if ChromaDB
-    isn't reachable / available. Failed init attempts are throttled to once
-    per _RETRY_INTERVAL seconds so a missing ChromaDB doesn't busy-retry on
-    every request — callers (personal-doc routes etc.) get None back and
-    return a clean 503 to the user instead.
-
-    Historical note: this used to be hardcoded to ``return None`` with a
-    comment about chromadb 1.4.1 / pydantic 2.12 being mutually incompatible.
-    That compat issue is resolved in current pinned versions
-    (chromadb 1.5.x + pydantic 2.13.x), so the real initializer is back.
+    Returns the owner-scoped SQLite projection on first successful init. Failed
+    attempts are throttled to once per ``_RETRY_INTERVAL`` so a damaged data
+    path cannot busy-retry on every request.
     """
     global rag_instance, _last_attempt
 
@@ -42,22 +30,28 @@ def get_rag_manager():
     _last_attempt = now
 
     try:
-        from src.rag_vector import VectorRAG
+        from src.frankenmemory_rag import FrankenmemoryRAG
+        from src.embeddings import get_embedding_client
 
-        persist_dir = RAG_DIR
-
-        rag_instance = VectorRAG(persist_directory=persist_dir)
+        # This is an owner-keyed factory, not an ambient provider client.  It
+        # resolves the caller's normalized ``embeddings`` binding only when a
+        # vector generation or query actually needs it.
+        embedding_client = get_embedding_client()
+        rag_instance = FrankenmemoryRAG(
+            embedding_client=embedding_client,
+            embedding_provider_ref=None,
+        )
         if not rag_instance.healthy:
-            logger.warning("VectorRAG created but not healthy, will retry later")
+            logger.warning("Document RAG backend created but not healthy, will retry later")
             rag_instance = None
         else:
-            logger.info("Initialized VectorRAG with ChromaDB")
+            logger.info("Initialized canonical Frankenmemory document RAG")
 
     except ImportError as e:
-        logger.warning(f"VectorRAG not available: {e}")
+        logger.warning(f"Document RAG backend not available: {e}")
         rag_instance = None
     except Exception as e:
-        logger.error(f"Failed to initialize RAG: {e}")
+        logger.error(f"Failed to initialize document RAG: {e}")
         rag_instance = None
 
     return rag_instance

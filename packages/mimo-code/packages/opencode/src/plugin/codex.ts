@@ -2,7 +2,7 @@ import type { Hooks, PluginInput } from "@mimo-ai/plugin"
 import { Log } from "../util"
 import { Installation } from "../installation"
 import { InstallationVersion } from "../installation/version"
-import { OAUTH_DUMMY_KEY } from "../auth"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
 
@@ -159,6 +159,22 @@ async function refreshAccessToken(refreshToken: string, signal?: AbortSignal | n
     throw new Error(`Token refresh failed: ${response.status}`)
   }
   return response.json()
+}
+
+/** Managed Open Clank refresh exchange. Persistence and concurrency fencing
+ * are deliberately owned by the ACP host lease, not this adapter. */
+export async function refreshCodexOAuthCredential(
+  credential: Auth.Oauth,
+  signal?: AbortSignal | null,
+): Promise<Auth.Oauth> {
+  const tokens = await refreshAccessToken(credential.refresh, signal)
+  return {
+    ...credential,
+    access: tokens.access_token,
+    refresh: tokens.refresh_token || credential.refresh,
+    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    accountId: extractAccountId(tokens) ?? credential.accountId,
+  }
 }
 
 export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {

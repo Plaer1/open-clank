@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "request_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "ok": true,
+  "event": "activated",
+  "payload": {
+    "callback_ready": true,
+    "ready": false,
+    "reason": "turn_execution_not_implemented",
+    "capabilities": {}
+  }
+}

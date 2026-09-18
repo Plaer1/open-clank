@@ -13,10 +13,61 @@ import markdownModule from './markdown.js';
 import codeRunnerModule from './codeRunner.js';
 import { langIcon } from './langIcons.js';
 import spinnerModule from './spinner.js';
-import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
+import { openLibrary, openLibraryResource, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
 import signatureModule from './signature.js';
 import * as Modals from './modalManager.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { filesFacadeClient } from './filesFacadeClient.js';
+import { showResourceInFiles } from './showInFiles.js';
+
+let _sharedDocumentEditorPromise = null;
+async function _loadSharedDocumentEditor() {
+  if (!_sharedDocumentEditorPromise) _sharedDocumentEditorPromise = import('./copal/codemirror.js');
+  return _sharedDocumentEditorPromise;
+}
+
+function _wireExpandedDocumentEditor(textarea) {
+  if (!textarea || textarea.dataset.multiEditReady === 'true') return;
+  textarea.dataset.multiEditReady = 'true';
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'doc-expanded-editor-btn'; button.textContent = 'Open multi-edit';
+  button.title = 'Open the shared editor with multiple cursors';
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const returnFocus = document.activeElement;
+    const dialog = document.createElement('dialog'); dialog.className = 'copal-dialog doc-expanded-editor';
+    const heading = document.createElement('h2'); heading.textContent = 'Expanded source editor';
+    const help = document.createElement('p'); help.className = 'copal-dialog-help'; help.textContent = 'Use Mod-d for the next match, Mod-Shift-L for all matches, and Mod-Alt-arrow for vertical cursors.';
+    const host = document.createElement('div'); host.className = 'copal-codemirror-host doc-expanded-editor-host';
+    const feedback = document.createElement('p'); feedback.className = 'doc-expanded-editor-feedback'; feedback.setAttribute('role', 'status');
+    const actions = document.createElement('div'); actions.className = 'copal-dialog-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'copal-btn'; cancel.textContent = 'Cancel';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'copal-btn primary'; apply.textContent = 'Apply'; apply.disabled = true;
+    actions.append(cancel, apply); dialog.append(heading, help, host, feedback, actions); document.body.append(dialog);
+    let editor = null;
+    cancel.addEventListener('click', () => dialog.close());
+    apply.addEventListener('click', () => {
+      if (!editor) return;
+      textarea.value = editor.getValue();
+      textarea.dispatchEvent(new Event('input', { bubbles:true }));
+      dialog.close();
+    });
+    dialog.addEventListener('close', () => { editor?.destroy?.(); dialog.remove(); returnFocus?.focus?.(); });
+    dialog.showModal();
+    try {
+      const module = await _loadSharedDocumentEditor();
+      const factory = module.createSourceEditor || module.createMarkdownEditor;
+      const language = String(docs.get(activeDocId)?.language || 'Plain text');
+      editor = factory({ parent:host, doc:String(textarea.value || ''), mode:'source', language });
+      await editor.languageReady;
+      apply.disabled = false; editor.focus();
+    } catch (error) {
+      feedback.textContent = `Expanded editor unavailable: ${error.message}`;
+      feedback.classList.add('error');
+    }
+  });
+  textarea.parentElement?.append(button);
+}
 
   let API_BASE = '';
   let isOpen = false;
@@ -51,7 +102,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // Language auto-detection config
   const AUTO_DETECT_DELAY = 500;
   const AUTO_DETECT_MIN_CHARS = 30;
-  const AUTO_DETECT_MIN_RELEVANCE = 8;
   const AUTO_DETECT_SAMPLE_SIZE = 2000;
   const HLJS_TO_DROPDOWN = {
     python: 'python', javascript: 'javascript', typescript: 'typescript',
@@ -123,6 +173,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let activeDocId = null;           // currently visible doc
   let _lastSessionId = '';          // session context for "+" button
   const docs = new Map();           // docId -> { id, title, language, content, version, sessionId }
+  const _isResourceDocument = (doc = docs.get(activeDocId)) => !!(doc?.readOnly && doc?.resourceRef);
   let _emailSendInFlight = false;
 
   const _docOpenKey = (sessionId) => 'odysseus-doc-open-' + sessionId;
@@ -294,7 +345,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const shortTitle = title.length > 24 ? title.slice(0, 22) + '...' : title;
       const menuBtn = `<button class="doc-tab-menu-btn" data-doc-id="${id}" title="Document actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2.5"/><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="19" r="2.5"/></svg></button>`;
       const ver = doc.version || doc.version_count || 1;
-      const verChip = `<span class="doc-tab-version" data-doc-id="${id}" title="Version history">v${ver}</span>`;
+      const verChip = _isResourceDocument(doc)
+        ? '<span class="doc-tab-version" title="Opened read-only through Files">read only</span>'
+        : `<span class="doc-tab-version" data-doc-id="${id}" title="Version history">v${ver}</span>`;
       // Language icon before the title — same family as the meta-line / picker
       // icons. Hidden via :empty CSS when the doc has no useful language.
       const lic = (doc.language && doc.language !== 'text')
@@ -371,7 +424,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         e.stopPropagation();
         const docId = tab.dataset.docId;
         const doc = docs.get(docId);
-        if (!doc) return;
+        if (!doc || doc.readOnly) return;
         startTitleEdit(titleSpan, docId, doc);
       });
     });
@@ -384,7 +437,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (verBtn) {
         e.stopPropagation();
         const docId = verBtn.dataset.docId;
-        if (docId) { if (docId !== activeDocId) switchToDoc(docId); toggleVersionHistory(); }
+        if (docId && !_isResourceDocument(docs.get(docId))) { if (docId !== activeDocId) switchToDoc(docId); toggleVersionHistory(); }
         return;
       }
       const playBtn = e.target.closest('.doc-tab-play');
@@ -606,6 +659,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   async function _downloadFilledPdf() {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     _dismissDocKb();   // export shouldn't leave the keyboard up
     await _saveActiveDocBeforeExport();
     try {
@@ -639,6 +693,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     //    user typed but the existing 2s autosave hasn't fired.
     //  - PDF view: there may be a pending debounced _pdfPaneSaveTimer that
     //    hasn't flushed the user's input changes yet.
+    if (_isResourceDocument()) return;
     if (_pdfPaneSaveTimer) {
       clearTimeout(_pdfPaneSaveTimer);
       await _savePdfPaneToMarkdown();
@@ -1029,6 +1084,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   async function _undoPdfPaneAction() {
     const docId = activeDocId;
+    if (_isResourceDocument(docs.get(docId))) return false;
     const stack = _pdfUndoStackByDoc.get(docId) || [];
     const prev = stack.pop();
     if (!prev) return false;
@@ -2050,7 +2106,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const live = document.getElementById('doc-editor-textarea')?.value
       || docs.get(activeDocId)?.content
       || '';
-    const isForm = _isFormBackedDoc(live);
+    const isForm = !_isResourceDocument() && _isFormBackedDoc(live);
     // Footer main button: for a doc opened from an email attachment, morph the
     // Save button into "Attach" (send the filled file back to the sender via
     // the signed-reply flow). Otherwise it forces a new saved version.
@@ -2917,6 +2973,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     document.getElementById('doc-editor-textarea')?.classList.add('email-mode');
     document.getElementById('doc-editor-code')?.classList.add('email-mode');
     document.getElementById('doc-editor-highlight')?.classList.add('email-mode');
+    document.querySelector('.doc-expanded-editor-btn')?.style.setProperty('display', 'none');
     let fields = _parseEmailHeader(doc.content || '');
     if (applyLocalDraft) fields = _emailFieldsWithLocalDraft(fields);
     const preserveEmailHeader = !!(fields.sourceUid || fields.inReplyTo || fields.references);
@@ -3800,6 +3857,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (_rich) _rich.style.display = 'none';
     const _srcWrap = document.getElementById('doc-editor-wrap');
     if (_srcWrap) _srcWrap.style.display = '';
+    document.querySelector('.doc-expanded-editor-btn')?.style.removeProperty('display');
     // Drop the email-mode class so editors return to monospace monochrome
     document.getElementById('doc-editor-textarea')?.classList.remove('email-mode');
     document.getElementById('doc-editor-code')?.classList.remove('email-mode');
@@ -4062,6 +4120,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   function _closeWithoutDeleting(deleteDoc = false) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) {
+      closeTab(activeDocId);
+      return;
+    }
     if (deleteDoc) {
       fetch(`${API_BASE}/api/document/${activeDocId}`, { method: 'DELETE' }).catch(() => {});
     }
@@ -4465,7 +4527,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const prevId = activeDocId;
     if (prevId && prevId !== docId && docs.has(prevId)) {
       const prev = docs.get(prevId);
-      if (prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
+      if (!_isResourceDocument(prev) && prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
         fetch(`${API_BASE}/api/document/${prevId}`, { method: 'DELETE' }).catch(() => {});
         docs.delete(prevId);
         _syncDocIndicator();
@@ -4484,7 +4546,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     if (titleInput) titleInput.value = doc.title || '';
     // For email docs, _showEmailFields will set textarea to body only (not raw header)
-    if (textarea && doc.language !== 'email') textarea.value = doc.content || '';
+    if (textarea && (doc.language !== 'email' || _isResourceDocument(doc))) textarea.value = doc.content || '';
     if (langSelect) langSelect.value = doc.language || 'markdown';
     if (badge) { const _v = doc.version || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
     { const _v = doc.version || 1; const _dbtn = document.getElementById('doc-diff-toggle-btn'); if (_dbtn) _dbtn.style.display = _v > 1 ? '' : 'none'; }
@@ -4509,7 +4571,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // markdown under the hood, so the toolbar shows up for them too — and
     // gets the PDF-specific buttons (Text/Check/Sign/AI) revealed below.
     const isMd = (doc.language || 'markdown') === 'markdown';
-    const isPdf = _isFormBackedDoc(doc.content || '');
+    const isPdf = !_isResourceDocument(doc) && _isFormBackedDoc(doc.content || '');
 
     // For PDF-backed docs, re-run text extraction on the backend so the AI
     // can see the contents on the very next message. Idempotent + skipped
@@ -4569,7 +4631,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Show/hide email fields. Markdown preview uses the same editor wrapper
     // as email source mode, so clear it before showing the rich email body;
     // otherwise the source wrapper can reappear over the composer.
-    const isEmail = doc.language === 'email';
+    const isEmail = doc.language === 'email' && !_isResourceDocument(doc);
     if (isEmail) {
       _setMarkdownPreviewActive(false, { remember: false });
       const forceHeaderFields = !!doc._skipLocalDraftOnce;
@@ -4588,6 +4650,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     renderTabs();
     _syncHeaderActions();
+    _syncResourceReadOnly(doc);
 
     // Restore any persisted suggestions for this doc
     if (_activeSuggestions.length === 0) {
@@ -4601,6 +4664,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // session makes it look like the document vanished from that chat.
   function _detachDocFromSession(docId, { toast = false } = {}) {
     const doc = docs.get(docId);
+    if (doc?.readOnly && doc?.resourceRef) {
+      docs.delete(docId);
+      _syncDocIndicator();
+      if (toast && uiModule) uiModule.showToast('Resource closed');
+      return;
+    }
     const hasContent = doc && doc.content && doc.content.trim().length > 0;
     if (hasContent) {
       saveDocument({ silent: true }).catch(() => {});
@@ -4691,6 +4760,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function saveCurrentToMap() {
     if (!activeDocId || !docs.has(activeDocId)) return;
     const doc = docs.get(activeDocId);
+    if (doc.readOnly && doc.resourceRef) return;
     const textarea = document.getElementById('doc-editor-textarea');
     const titleInput = document.getElementById('doc-title-input');
     const langSelect = document.getElementById('doc-language-select');
@@ -5006,6 +5076,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         <button id="doc-mobile-copy" class="doc-mobile-footer-btn" type="button">Copy</button>
       </div>
     `;
+
+    _wireExpandedDocumentEditor(pane.querySelector('#doc-editor-textarea'));
 
     // Consolidate into a SINGLE action bar: move Undo + the type picker out of
     // the top header into the bottom footer (left side, next to Close) so a
@@ -5760,6 +5832,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         return;
       }
       if (!activeDocId) return;
+      if (_isResourceDocument()) return;
       const ta = document.getElementById('doc-editor-textarea');
       if (!ta) return;
       const current = ta.value;
@@ -7385,6 +7458,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       version: doc.version_count || 1,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
+      resourceRef: doc.resource_ref || doc.resourceRef || null,
+      readOnly: !!(doc.read_only || doc.readOnly),
+      archived: !!doc.archived,
       _composeAtts: existing?._composeAtts,
       _skipLocalDraftOnce: !!doc._skipLocalDraftOnce,
       // Provenance for the "Send signed reply" flow
@@ -7393,6 +7469,93 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       sourceEmailAccountId: doc.source_email_account_id || null,
       sourceEmailMessageId: doc.source_email_message_id || null,
     });
+  }
+
+  function _syncResourceReadOnly(doc = docs.get(activeDocId)) {
+    const readOnly = _isResourceDocument(doc);
+    const pane = document.getElementById('doc-editor-pane');
+    if (pane) pane.dataset.resourceReadonly = readOnly ? 'true' : 'false';
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (textarea) textarea.readOnly = readOnly;
+    const title = document.getElementById('doc-title-input');
+    if (title) title.readOnly = readOnly;
+    const language = document.getElementById('doc-language-select');
+    if (language) language.disabled = readOnly;
+    const picker = document.getElementById('doc-langpicker-trigger');
+    if (picker) picker.disabled = readOnly;
+    const badge = document.getElementById('doc-version-badge');
+    if (badge && readOnly) badge.style.display = 'none';
+    const diff = document.getElementById('doc-diff-toggle-btn');
+    if (diff && readOnly) diff.style.display = 'none';
+    let show = document.getElementById('doc-show-in-files-btn');
+    if (readOnly && doc?.resourceRef) {
+      if (!show) {
+        show = document.createElement('button');
+        show.id = 'doc-show-in-files-btn';
+        show.type = 'button';
+        show.className = 'email-send-btn doc-show-in-files-btn';
+        show.textContent = 'Show in Files';
+        // Resource documents deliberately hide the legacy header. Keep this
+        // cross-app action in the visible, shared document footer so keyboard,
+        // pointer, and touch users can actually invoke it.
+        const footer = document.getElementById('doc-actions-footer');
+        const split = document.getElementById('doc-copy-export-split');
+        if (footer) footer.insertBefore(show, split || footer.firstChild);
+      }
+      const resourceRef = String(doc.resourceRef);
+      show.onclick = async () => {
+        show.disabled = true;
+        show.setAttribute('aria-busy', 'true');
+        try {
+          await showResourceInFiles(resourceRef);
+        } catch (error) {
+          uiModule?.showToast?.(error?.message || 'Resource could not be shown in Files', 3000);
+        } finally {
+          show.disabled = false;
+          show.removeAttribute('aria-busy');
+        }
+      };
+      show.hidden = false;
+    } else if (show) {
+      show.remove();
+    }
+    document.querySelectorAll('#doc-md-toolbar .md-toolbar-edit-only').forEach((control) => {
+      if ('disabled' in control) control.disabled = readOnly;
+      control.setAttribute('aria-disabled', String(readOnly));
+    });
+    const save = document.getElementById('doc-footer-copy-btn');
+    if (save) {
+      save.disabled = readOnly;
+      save.title = readOnly ? 'Opened read-only through Files' : 'Save new version';
+      if (readOnly) {
+        save.dataset.mode = 'readonly';
+        save.textContent = 'Read only';
+      }
+    }
+    _syncHeaderBarVisibility();
+  }
+
+  /** Open one Library document through an owner-bound opaque Files ref. */
+  export async function openResource(resourceRef) {
+    const response = await filesFacadeClient.openResource(resourceRef);
+    if (response?.target?.app !== 'document_editor' || !response?.resource?.ref || !response?.payload) {
+      throw new Error('This Files resource cannot be opened in the document editor');
+    }
+    const payload = response.payload;
+    const id = String(response.resource.ref);
+    addDocToTabs({
+      id,
+      title: payload.title || response.resource.name || 'Untitled',
+      language: payload.language || 'text',
+      current_content: payload.content || '',
+      version_count: payload.version || 1,
+      archived: !!payload.archived,
+      resource_ref: id,
+      read_only: true,
+    }, null);
+    _ensureDocPaneMounted();
+    switchToDoc(id);
+    return id;
   }
 
   /** Populate the editor with document data (used internally) */
@@ -7580,9 +7743,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // 'svg' so the preview/run routing still treats it as renderable markup).
     const _hlLang = lang === 'svg' ? 'xml' : lang;
     codeEl.className = _hlLang ? `language-${_hlLang}` : '';
-    if (window.hljs && _hlLang) {
-      codeEl.removeAttribute('data-highlighted');
-      window.hljs.highlightElement(codeEl);
+    if (window.odysseusHighlight && _hlLang) {
+      codeEl.removeAttribute('data-hl-done');
+      window.odysseusHighlight.highlight(codeEl);
     }
     // Markdown post-processing: colorize standalone [brackets] and heading markers
     if (lang === 'markdown') {
@@ -7798,7 +7961,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   function attemptAutoDetect() {
-    if (!window.hljs || !activeDocId) return;
+    if (!window.odysseusHighlight || !activeDocId) return;
     const doc = docs.get(activeDocId);
     if (!doc || doc.userSetLanguage) return;
 
@@ -7839,11 +8002,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
 
     const sample = text.slice(0, AUTO_DETECT_SAMPLE_SIZE);
-    const result = window.hljs.highlightAuto(sample);
+    const detected = window.odysseusHighlight ? window.odysseusHighlight.detect(sample) : '';
 
-    if (!result.language || result.relevance < AUTO_DETECT_MIN_RELEVANCE) return;
+    if (!detected) return;
 
-    const mapped = HLJS_TO_DROPDOWN[result.language];
+    const mapped = HLJS_TO_DROPDOWN[detected];
     if (!mapped) return;
 
     const langSelect = document.getElementById('doc-language-select');
@@ -9206,7 +9369,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const _deleteIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
 
     let items = '';
-    items += `<div class="dropdown-item-compact doc-tab-action" data-action="save">${_di(_saveIco)}<span>Save</span></div>`;
+    if (!doc.readOnly) items += `<div class="dropdown-item-compact doc-tab-action" data-action="save">${_di(_saveIco)}<span>Save</span></div>`;
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="copy">${_di(_copyIco)}<span>Copy</span></div>`;
     if (canRun) {
       items += `<div class="dropdown-item-compact doc-tab-action" data-action="run">${_di(_runIco)}<span>Run</span></div>`;
@@ -9223,8 +9386,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     const _closeIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="close">${_di(_closeIco)}<span>Close</span></div>`;
-    items += `<div class="dropdown-divider"></div>`;
-    items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
+    if (!doc.readOnly) {
+      items += `<div class="dropdown-divider"></div>`;
+      items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
+    }
 
     _docTabMenu.innerHTML = items;
     _docTabMenu.style.display = 'block';
@@ -9392,6 +9557,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Save manual edits */
   export async function saveDocument({ silent = false, forceVersion = false } = {}) {
     if (!activeDocId) return;
+    if (docs.get(activeDocId)?.readOnly) {
+      if (!silent && uiModule) uiModule.showToast('This Files resource is open read-only');
+      return;
+    }
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
     const savingDocId = activeDocId;
@@ -9638,7 +9807,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // markdown source. Promote it to the top of the menu.
     const liveContent = document.getElementById('doc-editor-textarea')?.value
       || docs.get(activeDocId)?.content || '';
-    const isForm = _isFormBackedDoc(liveContent);
+    const isForm = !_isResourceDocument() && _isFormBackedDoc(liveContent);
     const options = [];
     // Import lives at the top of the same dropdown — it's a sibling action
     // ("bring something IN" vs "send something OUT"), and the footer was
@@ -9789,6 +9958,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function deleteActiveDocument() {
     if (!activeDocId) return;
     const doc = docs.get(activeDocId);
+    if (doc?.readOnly) {
+      if (uiModule) uiModule.showToast('This Files resource is open read-only');
+      return;
+    }
     const name = doc ? doc.title : 'this document';
     const ok = uiModule && uiModule.styledConfirm
       ? await uiModule.styledConfirm(`Delete "${name}"?`, { confirmText: 'Delete', danger: true })
@@ -9865,9 +10038,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       } else {
         preview.innerHTML = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>');
       }
-      if (window.hljs) {
-        preview.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
-      }
+      if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(preview);
       if (markdownModule && markdownModule.renderMermaid) {
         markdownModule.renderMermaid(preview);
       }
@@ -10825,6 +10996,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function toggleVersionHistory() {
     const panel = document.getElementById('doc-version-panel');
     if (!panel || !activeDocId) return;
+    if (_isResourceDocument()) return;
 
     if (panel.classList.contains('hidden')) {
       // Stash current content so we can restore on close
@@ -10922,6 +11094,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Load version history list */
   async function loadVersionHistory() {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     const list = document.getElementById('doc-version-list');
     if (!list) return;
 
@@ -10977,6 +11150,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Preview a specific version in the editor (without saving) */
   async function previewVersion(num) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     try {
       const res = await fetch(`${API_BASE}/api/document/${activeDocId}/version/${num}`);
       const ver = await res.json();
@@ -10991,6 +11165,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Restore an old version (creates new version) */
   async function restoreVersion(num) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     try {
       const res = await fetch(`${API_BASE}/api/document/${activeDocId}/restore/${num}`, {
         method: 'POST',
@@ -11017,6 +11192,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function updateTitle(overrideDocId, overrideTitle) {
     const docId = overrideDocId || activeDocId;
     if (!docId) return;
+    if (docs.get(docId)?.readOnly) return;
     const title = overrideTitle || document.getElementById('doc-title-input')?.value;
     if (!title) return;
     try {
@@ -11084,6 +11260,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Update document language via PATCH */
   async function updateLanguage() {
     if (!activeDocId) return;
+    if (docs.get(activeDocId)?.readOnly) return;
     const select = document.getElementById('doc-language-select');
     if (!select) return;
     try {
@@ -11159,6 +11336,7 @@ const documentModule = {
   createDocument,
   newDocument,
   loadDocument,
+  openResource,
   injectFreshDoc,
   replaceEmailReplyBody,
   ensureEmailDraftEnvelope,
@@ -11182,6 +11360,7 @@ const documentModule = {
   clearSelection,
   clearAll,
   openLibrary,
+  openLibraryResource,
   closeLibrary,
   isLibraryOpen,
 };

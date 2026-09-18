@@ -40,8 +40,9 @@ export class ACPSessionManager {
     }
     log.info("creating_session", { state })
 
-    this.sessions.set(sessionId, state)
+    // Register first: a throwing registration must not leave a stale entry.
     registerMemorySessionScope(sessionId, mcpServers, cwd)
+    this.sessions.set(sessionId, state)
     return state
   }
 
@@ -72,8 +73,9 @@ export class ACPSessionManager {
     }
     log.info("loading_session", { state })
 
-    this.sessions.set(sessionId, state)
+    // Register first: a throwing registration must not leave a stale entry.
     registerMemorySessionScope(sessionId, mcpServers, cwd)
+    this.sessions.set(sessionId, state)
     return state
   }
 

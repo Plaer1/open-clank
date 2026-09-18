@@ -32,11 +32,11 @@ def test_clicking_account_sign_in_provider_prefills_setup_command_not_api_key():
     assert "'/setup ' + providerKey" in click_block
 
 
-def test_setup_chatgpt_subscription_prints_auth_url_without_auto_opening_tab():
-    flow_block = _between(_SLASH, "async function _setupProviderDeviceFlow", "async function _cmdSetup")
+def test_setup_command_opens_the_normalized_provider_control_plane():
+    setup_block = _between(_SLASH, "async function _cmdSetup", "// ── Shortcuts")
 
-    assert "providerKey === 'chatgpt-subscription'" in flow_block
-    assert "Open this URL" in flow_block
-    assert "authUrl" in flow_block
-    assert 'href="\' + uiModule.esc(authUrl || \'\') + \'"' in flow_block
-    assert "if (providerKey === 'chatgpt-subscription') return;" in flow_block
+    assert "settingsModule.open('services')" in setup_block
+    assert "Connections, account pools, rotation, model routes, and shares" in setup_block
+    assert "_setupProviderDeviceFlow" not in _SLASH
+    assert "/api/copilot/device/start" not in _SLASH
+    assert "/api/chatgpt-subscription/device/start" not in _SLASH

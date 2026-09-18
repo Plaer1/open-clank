@@ -2,7 +2,7 @@
 agent_loop.py
 
 Streaming agent loop for odysseus-ui.
-Wraps stream_llm() with multi-round tool execution.
+Wraps the managed Open Clank Agent stream with multi-round tool execution.
 The LLM decides when to use tools by writing fenced code blocks.
 """
 
@@ -13,15 +13,18 @@ import os
 import re
 import time
 import logging
+import uuid
 from typing import Any, AsyncGenerator, List, Dict, Optional, Set
-from urllib.parse import urlparse
 
-from src.llm_core import (
-    stream_llm,
-    stream_llm_with_fallback,
-    _is_ollama_native_url,
-)
+from src.endpoint_resolver import ResolvedModelTarget
+from src.model_dispatch import stream_agent_target
 from src.model_context import estimate_tokens
+from src.openclank.chat_routing import (
+    MANAGED_ENGINE_PUBLIC_URL,
+    normalized_provider_owner,
+    resolve_chat_route,
+    shared_endpoint_id,
+)
 from src.settings import get_setting, get_user_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
@@ -481,7 +484,7 @@ _DOMAIN_RULES = {
 ## File rules
 - Use file tools for real disk files. Use document tools only for editor documents.
 - Prefer `grep`, `glob`, and `ls` over shell equivalents when available.
-- Use `edit_file`/`write_file` for writes; avoid shell redirection/heredocs for editing files.""",
+- Use `edit_file`/`write_file` for writes and `manage_files` for recoverable delete or conflict-safe move; avoid shell redirection/heredocs for editing files.""",
     "settings": """\
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
@@ -506,7 +509,7 @@ _DOMAIN_TOOL_MAP = {
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
-    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
+    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_files", "manage_bg_jobs"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
@@ -662,11 +665,11 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
-    "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search/resolve), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. If the user asks you to remember a QUESTION to find out later ('ask me about X sometime', 'remind yourself to learn my Y'), add it with line 3 category `unknown` — it becomes an open question. When the user answers an open question, resolve it: line 1 `resolve`, line 2 the question's memory_id (optional line 3: the answering memory's id). DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
+    "manage_memory": "- ```manage_memory``` — Manage typed persistent knowledge for the current user and scope. Line 1 = action (list/add/edit/delete/search/resolve), rest = content. Use when the user explicitly asks to remember something, states a lasting preference/identity fact, asks about stored memory, or when your work answers a listed open question. Add an unanswered question with line 3 category `unknown`. Resolve it in place: line 1 `resolve`, line 2 the question's memory_id, remaining lines the exact answer. Do not create a second answer memory first. Information about another person's address, phone, email, or birthday belongs in `manage_contact` when the user asks to save a contact.",
     "recall_memory": "- ```recall_memory``` — READ-ONLY memory lookup. Line 1 = search query (or `id: <memory_id>` for an exact fetch). When the memory index lists a topic that matters to the current request, call this to read the details before answering; otherwise skip it. It cannot add, edit, or delete anything.",
-    "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
+    "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|delete\", ...}. `list` returns published skills; `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Added or edited skills stay staged until the user publishes them in the Skills UI or an audit passes them.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
-    "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
+    "manage_endpoints": "- ```manage_endpoints``` — List managed provider connections and stable model routes. Args (JSON): {\"action\": \"list\"}. Provider changes happen in the Providers interface.",
     "manage_mcp": "- ```manage_mcp``` — Manage MCP (Model Context Protocol) tool servers — external tools that extend your capabilities. Args (JSON): {\"action\": \"list|add|delete|reconnect|list_tools\", ...}",
     "manage_webhooks": "- ```manage_webhooks``` — Configure outgoing webhooks (HTTP notifications on events like chat completion). Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}",
     "manage_tokens": "- ```manage_tokens``` — Generate or revoke API access tokens for external integrations. Args (JSON): {\"action\": \"list|create|delete\", ...}",
@@ -871,23 +874,23 @@ AGENT_SYSTEM_PROMPT = _assemble_prompt(set(TOOL_SECTIONS.keys()))
 _cached_base_prompt = None
 _cached_base_prompt_key = None
 
-# Constants — moved out of hot paths to avoid per-request/per-round allocation
-# Hosts whose endpoints natively support OpenAI-style function calling.
-# When the active endpoint is one of these, the agent sends FUNCTION_TOOL_SCHEMAS
-# (so the model emits `tool_calls` directly) instead of relying on the model
-# to copy fenced-block examples from prompt text. Smaller models — DeepSeek
-# especially — often fail to follow the fenced-block convention and emit raw
-# JSON, which the agent then can't parse as a tool call.
-_API_HOSTS = frozenset([
-    "api.openai.com", "api.anthropic.com",
-    "openrouter.ai", "api.groq.com",
-    "api.mistral.ai", "api.cohere.com",
-    "api.deepseek.com", "deepseek.com",
-    "api.together.xyz", "api.fireworks.ai",
-    "api.perplexity.ai", "api.x.ai",
-    "ollama.com", "api.venice.ai", "api.kimi.com",
-    "api.githubcopilot.com",
-])
+
+def invalidate_cached_base_prompt(owner: str) -> bool:
+    """Drop the process prompt cache only when it belongs to ``owner``."""
+    global _cached_base_prompt, _cached_base_prompt_key
+    normalized = str(owner or "").strip().lower()
+    key = _cached_base_prompt_key
+    cached_owner = (
+        str(key[6] or "").strip().lower()
+        if isinstance(key, tuple) and len(key) > 6
+        else ""
+    )
+    if not normalized or cached_owner != normalized:
+        return False
+    _cached_base_prompt = None
+    _cached_base_prompt_key = None
+    return True
+
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
 _ADMIN_SCHEMA_NAMES = frozenset([
@@ -899,65 +902,44 @@ _ADMIN_SCHEMA_NAMES = frozenset([
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
 
 
-def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
-    """Return True for local Ollama's OpenAI-compatible /v1 surface.
+def _managed_agent_target(route) -> ResolvedModelTarget:
+    """Project one authorization-checked normalized route into managed ACP."""
 
-    Ollama's /v1 endpoint accepts the OpenAI chat shape, but model-level tool
-    streaming is uneven. Some local models terminate after a token when schemas
-    are present. Keep native schemas opt-in via ModelEndpoint.supports_tools.
-    """
-    try:
-        parsed = urlparse(endpoint_url or "")
-    except Exception:
-        return False
-    path = (parsed.path or "").rstrip("/")
-    return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
+    capabilities = dict(route.capabilities or {})
+    return ResolvedModelTarget(
+        transport="acp",
+        endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+        model_id=route.runtime_model,
+        endpoint_id=route.connection_id,
+        provider_id=route.connection_id,
+        headers={},
+        capabilities={
+            "chat": True,
+            "tools": capabilities.get("tools", True),
+            "stream": True,
+            "auxiliary": True,
+            "vision": capabilities.get("vision"),
+        },
+        lifecycle="ephemeral",
+    )
 
 
-def _is_local_openai_compat_url(endpoint_url: str) -> bool:
-    try:
-        parsed = urlparse(endpoint_url or "")
-    except Exception:
-        return False
-    host = (parsed.hostname or "").lower()
-    path = (parsed.path or "").rstrip("/")
-    if not (path == "/v1" or path.startswith("/v1/")):
-        return False
-    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
-        return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    if host.startswith("172."):
+def _normalized_context_length(route, supplied: int) -> int:
+    """Use catalogued route metadata, never a runtime endpoint probe."""
+
+    capabilities = dict(route.capabilities or {})
+    for key in ("context_length", "context_window", "max_context_tokens"):
         try:
-            second = int(host.split(".")[1])
-            return 16 <= second <= 31
-        except Exception:
-            return False
-    return False
-
-
-def _endpoint_lookup_keys(endpoint_url: str) -> List[str]:
-    """Candidate ModelEndpoint.base_url keys for a runtime chat URL."""
-    raw = (endpoint_url or "").strip()
-    keys: List[str] = []
-
-    def add(value: str):
-        value = (value or "").strip()
-        if value and value not in keys:
-            keys.append(value)
-        trimmed = value.rstrip("/")
-        if trimmed and trimmed not in keys:
-            keys.append(trimmed)
-        if trimmed and f"{trimmed}/" not in keys:
-            keys.append(f"{trimmed}/")
-
-    add(raw)
+            value = int(capabilities.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
     try:
-        from src.endpoint_resolver import normalize_base
-        add(normalize_base(raw))
-    except Exception:
-        pass
-    return keys
+        value = int(supplied or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 # Admin tool keywords — if the last user message contains any of these, include admin tools
 _ADMIN_KEYWORDS = [
@@ -1790,6 +1772,43 @@ def _looks_like_memory_identity_turn(text: str) -> bool:
     ))
 
 
+_QWEN_MEMORY_BROWSE_RE = re.compile(
+    r"\b(search|list|show|open|view)\b.{0,40}\b(memories|memory|brain)\b"
+)
+_QWEN_EXPLICIT_MEMORY_WRITE_RE = re.compile(
+    r"\b(remember|forget|preference|prefer|save this about me|update memory|delete memory)\b"
+)
+
+
+def _manage_memory_action_from_block_content(content: str) -> str:
+    """Read the action from either native JSON or the legacy line protocol."""
+    raw = str(content or "").strip()
+    if not raw:
+        return ""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw.splitlines()[0].strip().lower()
+    if isinstance(value, dict):
+        return str(value.get("action") or "").strip().lower()
+    return ""
+
+
+def _qwen_memory_action_allowed(action: str, latest_user_text: str) -> bool:
+    """Keep Qwen's lookup guard without blocking the memory lifecycle."""
+    action = str(action or "").lower()
+    latest_user_text = str(latest_user_text or "").lower()
+    if action in {"add", "resolve"}:
+        # An agent discovery may answer a standing question: persist the
+        # answer first, then resolve the question with that returned memory id.
+        return True
+    if action in {"list", "search", "view", "get", "read"}:
+        return bool(_QWEN_MEMORY_BROWSE_RE.search(latest_user_text))
+    if action in {"edit", "update", "delete", "delete_all"}:
+        return bool(_QWEN_EXPLICIT_MEMORY_WRITE_RE.search(latest_user_text))
+    return False
+
+
 def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: bool = False) -> List[Dict]:
     """Minimal fallback for Open Clank finetunes outside domain-specific paths."""
     latest = _extract_last_user_message(messages)
@@ -2437,19 +2456,6 @@ def _build_system_prompt(
                 from services.memory.skills import SkillsManager
                 from src.constants import DATA_DIR
                 sm = SkillsManager(DATA_DIR)
-                # Brain → Skills settings → "Auto-approve skills" toggle +
-                # confidence threshold. Approve OFF → published-only (no draft
-                # passes). Approve ON → drafts at/above the chosen confidence
-                # (0 = "All"). Falls back to the global default setting.
-                if not _prefs.get("auto_approve_skills", True):
-                    _skill_min_conf = 2.0  # nothing draft clears it → published only
-                else:
-                    try:
-                        _skill_min_conf = float(_prefs.get(
-                            "skill_min_confidence",
-                            get_setting("skill_autosave_min_confidence", 0.85)))
-                    except (TypeError, ValueError):
-                        _skill_min_conf = 0.85
                 try:
                     _skill_max_injected = int(_prefs.get(
                         "skill_max_injected",
@@ -2459,19 +2465,22 @@ def _build_system_prompt(
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=sm.load(owner=owner),
+                    skills=sm.load_published(owner=owner),
                     threshold=0.25,
                     max_items=_skill_max_injected,
-                    min_confidence=_skill_min_conf,
+                    min_confidence=0.0,
                 ) if _skill_max_injected > 0 else []
                 lines = [""]
                 if relevant_skills:
-                    # Bump the "uses" counter on every skill we actually surface
-                    # to the agent — otherwise every skill shows "0 times" no
-                    # matter how often it's been matched and applied.
+                    # Retrieval is not execution. Keep it distinct from the
+                    # slash/skill-tool use counter so quality metrics are honest.
                     for _sk in relevant_skills:
                         try:
-                            sm.record_use(_sk.get('name', ''), owner=owner)
+                            sm.record_retrieval(
+                                _sk.get('skill_id') or _sk.get('name', ''),
+                                owner=owner,
+                                revision=_sk.get('revision'),
+                            )
                         except Exception:
                             pass
                     lines.append("## Relevant skills for this request")
@@ -2486,6 +2495,12 @@ def _build_system_prompt(
                             tm = sk.get("teacher_model") or "teacher"
                             src_tag = f" _(learned from {tm})_"
                         lines.append(f"\n### {sk.get('name','?')}{src_tag}")
+                        lines.append(
+                            "_Trust:_ "
+                            f"{sk.get('trust') or 'unknown'} · "
+                            f"revision {sk.get('revision') or 1} · "
+                            f"source {sk.get('source') or 'unknown'}"
+                        )
                         if sk.get("description"):
                             lines.append(sk["description"])
                         if sk.get("when_to_use"):
@@ -2655,13 +2670,10 @@ def _build_base_prompt(
         elif compact:
             agent_prompt = _assemble_prompt(set(TOOL_SECTIONS.keys()), disabled, compact=True)
 
-    # Inject the Level-0 skill index — one line per skill so the agent
-    # knows what canonical procedures exist. Includes published skills
-    # plus teacher-escalation drafts (auto-written when the student
-    # fails a task; appear here on the very next turn so the student
-    # can apply them immediately). Full SKILL.md fetched on demand via
-    # `manage_skills view name=...`. Gating mirrors index_for: platform
-    # + requires_toolsets + fallback_for_toolsets.
+    # Inject the Level-0 skill index — metadata only, one line per locally
+    # published compatible revision. Full SKILL.md is fetched on demand via
+    # `manage_skills view name=...`. Gating mirrors index_for: publication,
+    # platform, requires_toolsets, and fallback_for_toolsets.
     #
     # SECURITY: skill `name` and `description` are user-editable, so the
     # index block is returned SEPARATELY (not appended to agent_prompt).
@@ -2679,18 +2691,32 @@ def _build_base_prompt(
                 lines = ["## Available skills",
                          "Procedures the assistant should consult before doing domain work. "
                          "Fetch the full procedure with `manage_skills` action=view name=<name> "
-                         "when one looks relevant. Entries tagged `(draft)` were written by the "
-                         "teacher-escalation loop after a prior failure — treat them as authoritative "
-                         "guidance; if you follow one and it works, that's a good signal the procedure "
-                         "is correct."]
+                         "when one looks relevant. Only locally published, compatible revisions "
+                         "appear here; staged and quarantined content is never authoritative."]
                 by_cat: dict[str, list] = {}
                 for s in skill_idx:
                     by_cat.setdefault(s["category"], []).append(s)
                 for cat in sorted(by_cat):
                     lines.append(f"\n**{cat}**")
                     for s in by_cat[cat]:
-                        badge = " *(draft)*" if s.get("status") == "draft" else ""
-                        lines.append(f"- `{s['name']}` — {s['description']}{badge}")
+                        source = s.get("source") or "unknown"
+                        if s.get("source_revision"):
+                            source += f"@{s['source_revision']}"
+                        metadata = [
+                            s.get("status") or "published",
+                            f"trust={s.get('trust') or 'unknown'}",
+                            f"source={source}",
+                            f"r{s.get('revision') or 1}",
+                        ]
+                        if s.get("source_status"):
+                            metadata.append(f"source-status={s['source_status']}")
+                        if s.get("audit_verdict"):
+                            metadata.append(f"audit={s['audit_verdict']}")
+                        if s.get("audit_evaluator"):
+                            metadata.append(f"evaluator={s['audit_evaluator']}")
+                        lines.append(
+                            f"- `{s['name']}` [{'; '.join(metadata)}] — {s['description']}"
+                        )
                 skill_index_block = "\n\n" + "\n".join(lines)
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
@@ -2952,6 +2978,9 @@ async def _run_verifier_subagent(
     *, endpoint_url: str, model: str, headers: dict,
     owner: Optional[str] = None, session_id: Optional[str] = None,
     workspace: Optional[str] = None,
+    provider_model_route_id: Optional[str] = None,
+    provider_grant_id: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ) -> list:
     """Fresh-context completion verifier. A second model instance with NO
     shared history reads the user's request + a record of what the agent did
@@ -2960,7 +2989,11 @@ async def _run_verifier_subagent(
     didn't do the work reads it cold. Returns a list of failure reasons
     (empty = pass, or silently empty on any error so it can't block a valid
     completion)."""
-    from src.llm_core import llm_call_async
+    from src.openclank.modality_facade import complete_text
+
+    # These arguments remain in the compatibility signature for callers of the
+    # legacy loop, but raw provider authority must not cross this helper seam.
+    del endpoint_url, model, headers, session_id, workspace
     prompt = (
         "You are an independent verifier. Another assistant just claimed the "
         "following task is complete. Using ONLY the request and the record of "
@@ -2980,11 +3013,18 @@ async def _run_verifier_subagent(
         "Output nothing after the VERIFICATION line."
     )
     try:
-        raw = await llm_call_async(
-            url=endpoint_url, model=model,
-            messages=[{"role": "user", "content": prompt}],
-            headers=headers, temperature=0.0, max_tokens=600, timeout=60,
-            owner=owner, session_id=session_id, cwd=workspace,
+        raw = await asyncio.wait_for(
+            complete_text(
+                owner=owner or "",
+                messages=[{"role": "user", "content": prompt}],
+                purpose="utility",
+                model_route_id=provider_model_route_id,
+                grant_id=provider_grant_id,
+                root_operation_id=root_operation_id,
+                temperature=0.0,
+                max_output_tokens=600,
+            ),
+            timeout=60,
         )
     except Exception as e:
         logger.warning(f"[agent] verifier subagent failed: {e}")
@@ -3042,7 +3082,14 @@ PLAN_MODE_DIRECTIVE = (
     "- [ ] next action\n"
     "Each item = one concrete action (file to create/edit, command to run, side "
     "effect). Do not execute. Do not end with 'Done' or anything implying the work "
-    "is finished. End your turn with the checklist."
+    "is finished. End your turn with the checklist.\n"
+    "\n"
+    "STRUCTURE: for anything beyond a trivial task, plan in STAGES designed to be "
+    "done sequentially, and mark them (## Stage 1 — <name>, ## Stage 2 — …). If a "
+    "stage has parallelizable parts, note them as parallel sub-parts. On approval "
+    "the plan is saved to the workspace as a metaplan at .clanker/futures/<name>.md; each "
+    "stage's detailed content belongs in .clanker/futures/<name>/slice_1.md, slice_2.md, … "
+    "and parallel work in .clanker/futures/<name>/slice_N/slice_Na.md, slice_Nb.md, …"
 )
 
 
@@ -3064,6 +3111,10 @@ def build_active_plan_note(approved_plan: str) -> str:
         "the `update_plan` tool with the full checklist and that step marked "
         "`- [x]` so progress stays visible in the user's plan window. If the user "
         "asks to change the plan, call `update_plan` with the revised checklist. "
+        "The plan is also mirrored on disk at .clanker/futures/<name>.md in the active "
+        "workspace; for staged plans, write each stage's detailed content to "
+        ".clanker/futures/<name>/slice_N.md when you start it (parallel parts go to "
+        ".clanker/futures/<name>/slice_N/slice_Nx.md). "
         "Do the next unchecked item until all are done. Do not skip, reorder, or "
         "invent steps; if a step is genuinely impossible, say so and stop.\n\n"
         "Current plan:\n"
@@ -3105,12 +3156,21 @@ async def stream_agent_loop(
     approved_plan: Optional[str] = None,
     tool_policy: Optional[ToolPolicy] = None,
     workspace: Optional[str] = None,
+    authority_workspace_id: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
+    provider_model_route_id: Optional[str] = None,
+    provider_grant_id: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
+
+    ``endpoint_url``, ``headers``, ``model``, and ``fallbacks`` remain in the
+    signature for old in-process callers only.  They carry no provider
+    authority.  Every turn must identify a stable normalized model route and
+    is re-authorized before being projected into the managed ACP transport.
 
     Yields SSE events:
       - data: {"delta": "text"}                             (text chunks)
@@ -3120,6 +3180,23 @@ async def stream_agent_loop(
       - data: {"type": "metrics", "data": {...}}            (final metrics)
       - data: [DONE]                                        (end)
     """
+
+    del endpoint_url, headers, fallbacks
+    owner = normalized_provider_owner(owner)
+    stable_route_id = str(provider_model_route_id or "").strip()
+    requested_grant_id = str(provider_grant_id or "").strip()
+    selected_route = resolve_chat_route(
+        owner=owner,
+        endpoint_id=(shared_endpoint_id(requested_grant_id) if requested_grant_id else None),
+        model_id=(None if stable_route_id else str(model or "").strip()),
+        model_route_id=stable_route_id or None,
+    )
+    managed_target = _managed_agent_target(selected_route)
+    model = selected_route.provider_model_id
+    provider_model_route_id = selected_route.model_route_id
+    provider_grant_id = selected_route.provider_grant_id
+    root_operation_id = str(root_operation_id or "").strip() or f"agent-loop-{uuid.uuid4().hex}"
+    managed_session_id = str(session_id or "").strip() or f"agent-loop-{uuid.uuid4().hex}"
 
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
@@ -3237,18 +3314,27 @@ async def stream_agent_loop(
         real_input_tokens = 0
         real_output_tokens = 0
         try:
-            async for chunk in stream_llm_with_fallback(
-                [(endpoint_url, model, headers)] + list(fallbacks or []),
+            async for chunk in stream_agent_target(
+                managed_target,
                 direct_messages,
+                session_id=managed_session_id,
+                owner=owner,
+                cwd=workspace,
                 temperature=temperature,
                 max_tokens=min(max_tokens or 128, 128),
                 prompt_type=None,
-                tools=None,
-                timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
-                session_id=session_id,
-                owner=owner,
-                cwd=workspace,
+                max_rounds=1,
+                max_tool_calls=0,
                 workload=workload,
+                turn_envelope={
+                    "allowed_tools": [],
+                    "authority_workspace_id": str(
+                        authority_workspace_id or ""
+                    ),
+                    "provider_model_route_id": provider_model_route_id,
+                    "provider_grant_id": provider_grant_id,
+                    "root_operation_id": root_operation_id,
+                },
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -3502,7 +3588,7 @@ async def stream_agent_loop(
             except Exception:
                 pass
             _sm = SkillsManager(DATA_DIR)
-            _owner_skills = _sm.load(owner=owner) if _skills_on else []
+            _owner_skills = _sm.load_published(owner=owner) if _skills_on else []
             if _owner_skills:
                 _relevant_tools.add("manage_skills")
                 if _retrieval_query:
@@ -3609,82 +3695,11 @@ async def stream_agent_loop(
     prep_timings["tool_selection"] = time.time() - _t1
 
     _t2 = time.time()
-    # Hosted-API match by URL, OR the model name looks like a recent model
-    # known to follow OpenAI-style function calling (DeepSeek, GPT*, Claude,
-    # Gemini, Qwen3+, Mixtral, Llama 3.1+). Caught the DeepSeek-via-local-
-    # vLLM case where endpoint_url doesn't include a vendor host.
-    _model_lc = (model or "").lower()
-    # Step 1: per-endpoint override (set at registration time from the
-    # serve command — `--enable-auto-tool-choice` flips it on. UI can
-    # also toggle per endpoint). NULL = unknown; for local Ollama /v1 we
-    # default to fenced tools, otherwise fall through to keyword + host checks.
-    _endpoint_supports: Optional[bool] = None
-    try:
-        from core.database import SessionLocal as _SL, ModelEndpoint as _ME
-        _db = _SL()
-        try:
-            _ep = None
-            for _key in _endpoint_lookup_keys(endpoint_url):
-                _query = _db.query(_ME).filter(_ME.base_url == _key)
-                if owner:
-                    _query = _query.filter(_ME.owner == owner)
-                else:
-                    _query = _query.filter(_ME.owner.is_(None))
-                _ep = _query.first()
-                if _ep is not None:
-                    break
-            if _ep is not None:
-                _endpoint_supports = _ep.supports_tools
-        finally:
-            _db.close()
-    except Exception as _e:
-        logger.debug(f"endpoint supports_tools lookup failed: {_e}")
-    _model_supports_tools = any(kw in _model_lc for kw in (
-        "gpt-4", "gpt-5", "gpt-o", "claude", "gemini", "gemma",
-        "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
-        "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
-        # Local-served models that follow OpenAI-style function calling
-        # via vLLM's `--enable-auto-tool-choice`. Belt-and-suspenders
-        # with the per-endpoint flag above.
-        "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
-        "glm-4", "internlm", "hermes",
-        # deepseek-v2/v3/chat support tools via the cloud API; deepseek-r1
-        # (reasoning model) does not — handled by the blocklist below.
-        "deepseek-v", "deepseek-chat",
-    ))
-    # Models known to reject tool schemas at the Ollama/local level even when
-    # the endpoint URL would otherwise enable native function calling.
-    # The per-endpoint supports_tools flag (True/False) always takes priority
-    # and can override this list for users who know their setup.
-    _model_no_tools = any(kw in _model_lc for kw in (
-        "deepseek-r1",
-        # Open-weight GPT-OSS models are commonly served through llama.cpp /
-        # llama-cpp-python. Their names contain "gpt-o", but they do not use
-        # OpenAI's native tool-call channel unless the endpoint opts in.
-        "gpt-oss",
-    ))
-    # Native Ollama endpoints (/api/chat) handle tool schemas differently from
-    # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to
-    # tool schemas by emitting a single native tool_call token then stopping,
-    # rather than writing a fenced block — the agent loop sees 1 token and no
-    # recognised tool, so the round terminates immediately (issue #1567).
-    # Unless the endpoint is explicitly marked supports_tools=True by the user
-    # (via the endpoint settings toggle), treat Ollama-native as text-only so
-    # the fenced-block path is used instead of native function calling.
-    _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
-    _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
-    if _endpoint_supports is True:
-        _is_api_model = True
-    elif (
-        _endpoint_supports is False
-        or _model_no_tools
-        or _is_ollama_native
-        or _ollama_openai_compat
-    ):
-        _is_api_model = False
-    else:
-        _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
-    _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
+    # Tool protocol and prompt shape come from normalized route capabilities;
+    # legacy endpoint rows and runtime URLs are not an execution-time authority.
+    _route_capabilities = dict(selected_route.capabilities or {})
+    _is_api_model = _route_capabilities.get("tools") is not False
+    _compact_agent_prompt = True
     messages, mcp_schemas = _build_system_prompt(
         messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
@@ -3759,7 +3774,6 @@ async def stream_agent_loop(
     try:
         from src.context_compactor import trim_for_context
         from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
-        from src.model_context import budget_context_for_model
 
         soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
         if soft_budget > 0:
@@ -3781,7 +3795,7 @@ async def stream_agent_loop(
             # Scale only off a window we actually discovered, bound to the value it
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
-            ctx_for_budget = budget_context_for_model(endpoint_url, model, fallback=context_length)
+            ctx_for_budget = _normalized_context_length(selected_route, context_length)
             effective_budget = compute_input_token_budget(
                 soft_budget,
                 ctx_for_budget,
@@ -3961,41 +3975,57 @@ async def stream_agent_loop(
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
-        # Primary target + any configured fallback models. stream_llm_with_fallback
-        # only switches on a pre-content failure, so streamed output is never
-        # duplicated; the dead-host cooldown keeps repeat primary attempts cheap.
-        _candidates = [(endpoint_url, model, headers)] + list(fallbacks or [])
-        # stream_llm enforces a per-read INACTIVITY timeout (httpx read=timeout),
-        # which kills a wedged/silent endpoint. This wall-clock deadline is the
-        # complementary cap for the rare stream that trickles bytes forever and
-        # so never trips the inactivity timeout. Generous — only catches runaway.
+        # The managed engine owns provider selection, account rotation, retries,
+        # and fallback policy. This compatibility loop supplies only stable route
+        # and capability identities to the strict ACP Agent door.
+        _managed_turn_envelope = {
+            "provider_model_route_id": provider_model_route_id,
+            "provider_grant_id": provider_grant_id,
+            "root_operation_id": root_operation_id,
+            "max_rounds": 1,
+            "authority_workspace_id": str(authority_workspace_id or ""),
+        }
+        if _force_answer:
+            _managed_turn_envelope["allowed_tools"] = []
+        elif _relevant_tools is not None:
+            _managed_turn_envelope["allowed_tools"] = sorted(_relevant_tools)
+
+        # The ACP stream has its own bounded reads. This wall-clock deadline is
+        # a complementary cap for a stream that keeps producing nonterminal
+        # events forever.
         _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
         logger.info(
-            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
+            "[agent-timing] round_start round=%s model=%s route=%s connection=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
             round_num,
             model,
-            endpoint_url,
+            provider_model_route_id,
+            selected_route.connection_id,
             estimate_tokens(messages),
             len(_tool_names_sent),
             bool(all_tool_schemas),
             agent_stream_timeout,
         )
-        async for chunk in stream_llm_with_fallback(
-            _candidates,
+        async for chunk in stream_agent_target(
+            managed_target,
             messages,
+            session_id=managed_session_id,
+            owner=owner,
+            cwd=workspace,
             temperature=temperature,
             max_tokens=max_tokens,
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
             tool_choice_none=_ody_doc_finetune_mode,
-            timeout=agent_stream_timeout,
-            session_id=session_id,
-            owner=owner,
-            cwd=workspace,
+            max_rounds=1,
+            max_tool_calls=max_tool_calls,
+            disabled_tools=disabled_tools,
+            relevant_tools=_relevant_tools,
+            plan_mode=plan_mode,
             workload=workload,
+            turn_envelope=_managed_turn_envelope,
         ):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
@@ -4013,7 +4043,7 @@ async def stream_agent_loop(
                     max(agent_stream_timeout * 4, 1200),
                 )
                 break
-            # Forward error events from stream_llm to the frontend
+            # Forward typed managed Agent errors to the frontend.
             if chunk.startswith("event: error"):
                 logger.warning(
                     "[agent-timing] stream_error round=%s elapsed=%.3fs chunk=%r",
@@ -4249,41 +4279,25 @@ async def stream_agent_loop(
                 )
 
         if _ody_qwen_finetune_model and tool_blocks:
-            _allowed_memory_write_actions = {"add", "edit", "update", "delete", "delete_all"}
-            _explicit_memory_browse = bool(re.search(
-                r"\b(search|list|show|open|view)\b.{0,40}\b(memories|memory|brain)\b",
-                _last_user.lower(),
-            ))
             _filtered_tool_blocks = []
             _filtered_converted_calls = []
-            _dropped_memory_lookup = False
+            _dropped_memory_action = False
             for _idx, _block in enumerate(tool_blocks):
                 if _block.tool_type != "manage_memory":
                     _filtered_tool_blocks.append(_block)
                     if _idx < len(converted_calls):
                         _filtered_converted_calls.append(converted_calls[_idx])
                     continue
-                _action = ""
-                try:
-                    _args = json.loads(_block.content or "{}")
-                    if isinstance(_args, dict):
-                        _action = str(_args.get("action") or "").lower()
-                except Exception:
-                    _action = ""
-                if _action in {"list", "search", "view", "get", "read"} and not _explicit_memory_browse:
-                    _dropped_memory_lookup = True
-                elif _action in _allowed_memory_write_actions and re.search(
-                    r"\b(remember|forget|preference|prefer|save this about me|update memory|delete memory)\b",
-                    _last_user.lower(),
-                ):
+                _action = _manage_memory_action_from_block_content(_block.content)
+                if _qwen_memory_action_allowed(_action, _last_user):
                     _filtered_tool_blocks.append(_block)
                     if _idx < len(converted_calls):
                         _filtered_converted_calls.append(converted_calls[_idx])
                 else:
-                    _dropped_memory_lookup = True
-            if _dropped_memory_lookup:
+                    _dropped_memory_action = True
+            if _dropped_memory_action:
                 logger.info(
-                    "[agent-intent] odysseus qwen dropped manage_memory lookup; answering from compact memory"
+                    "[agent-intent] odysseus qwen dropped an unrequested manage_memory action"
                 )
                 tool_blocks = _filtered_tool_blocks
                 converted_calls = _filtered_converted_calls
@@ -4317,7 +4331,7 @@ async def stream_agent_loop(
                 # result) before falling back to the canned apology.
                 _synth = ""
                 try:
-                    from src.llm_core import llm_call_async
+                    from src.openclank.modality_facade import complete_text
                     _synth_messages = list(messages) + [{
                         "role": "user",
                         "content": (
@@ -4328,10 +4342,18 @@ async def stream_agent_loop(
                             "what you have and note what's missing in one short line."
                         ),
                     }]
-                    _raw = await llm_call_async(
-                        url=endpoint_url, model=model, messages=_synth_messages,
-                        headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
-                        owner=owner, session_id=session_id, cwd=workspace,
+                    _raw = await asyncio.wait_for(
+                        complete_text(
+                            owner=owner or "",
+                            messages=_synth_messages,
+                            purpose="chat",
+                            model_route_id=provider_model_route_id,
+                            grant_id=provider_grant_id,
+                            root_operation_id=root_operation_id,
+                            temperature=0.3,
+                            max_output_tokens=max_tokens,
+                        ),
+                        timeout=60,
                     )
                     _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
                 except Exception as _e:
@@ -4411,8 +4433,11 @@ async def stream_agent_loop(
                 _vfail = await _run_verifier_subagent(
                     _verifier_instruction,
                     _build_actions_snapshot(tool_events),
-                    endpoint_url=endpoint_url, model=model, headers=headers,
+                    endpoint_url=MANAGED_ENGINE_PUBLIC_URL, model=model, headers={},
                     owner=owner, session_id=session_id, workspace=workspace,
+                    provider_model_route_id=provider_model_route_id,
+                    provider_grant_id=provider_grant_id,
+                    root_operation_id=root_operation_id,
                 )
                 if _vfail:
                     _verifier_rounds += 1
@@ -4685,6 +4710,7 @@ async def stream_agent_loop(
                             owner=owner,
                             progress_cb=_push_progress,
                             workspace=workspace,
+                            authority_workspace_id=authority_workspace_id,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
@@ -5263,13 +5289,14 @@ async def stream_agent_loop(
         try:
             from src.teacher_escalation import run_teacher_inline
             async for evt in run_teacher_inline(
-                student_endpoint_url=endpoint_url,
+                student_endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
                 student_messages=messages,
                 student_tool_events=tool_events,
                 student_reply=full_response,
                 owner=owner,
                 session_id=session_id,
                 workspace=workspace,
+                root_operation_id=root_operation_id,
             ):
                 yield evt
         except Exception as _esc_err:

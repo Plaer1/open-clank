@@ -27,6 +27,8 @@ def _client_with_gallery(monkeypatch, tmp_path):
             [
                 GalleryAlbum(id="album-alice", name="Alice album", owner="alice"),
                 GalleryAlbum(id="album-bob", name="Bob album", owner="bob"),
+                GalleryAlbum(id="album-local", name="Local album", owner="local-installation"),
+                GalleryAlbum(id="album-legacy", name="Legacy album", owner=None),
                 GalleryImage(
                     id="img-alice",
                     filename=f"{uuid.uuid4().hex}.png",
@@ -50,6 +52,30 @@ def _client_with_gallery(monkeypatch, tmp_path):
                     album_id="album-bob",
                     is_active=True,
                     file_size=20,
+                ),
+                GalleryImage(
+                    id="img-local",
+                    filename=f"{uuid.uuid4().hex}.png",
+                    prompt="local prompt",
+                    model="model-local",
+                    tags="local-tag",
+                    ai_tags="",
+                    owner="local-installation",
+                    album_id="album-local",
+                    is_active=True,
+                    file_size=30,
+                ),
+                GalleryImage(
+                    id="img-legacy",
+                    filename=f"{uuid.uuid4().hex}.png",
+                    prompt="legacy prompt",
+                    model="model-legacy",
+                    tags="legacy-tag",
+                    ai_tags="",
+                    owner=None,
+                    album_id="album-legacy",
+                    is_active=True,
+                    file_size=40,
                 ),
             ]
         )
@@ -94,30 +120,32 @@ def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, tmp_path
     }
 
 
-def test_auth_disabled_null_user_gallery_routes_keep_single_user_mode(monkeypatch, tmp_path):
+def test_auth_disabled_null_user_gallery_routes_use_durable_local_owner(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     client = _client_with_gallery(monkeypatch, tmp_path)
 
     library = client.get("/api/gallery/library").json()
-    assert {item["id"] for item in library["items"]} == {"img-alice", "img-bob"}
-    assert library["total"] == 2
-    assert library["tags"] == ["alice-tag", "bob-tag"]
-    assert library["models"] == ["model-a", "model-b"]
+    assert [item["id"] for item in library["items"]] == ["img-local"]
+    assert library["total"] == 1
+    assert library["tags"] == ["local-tag"]
+    assert library["models"] == ["model-local"]
 
-    assert client.get("/api/gallery/tags").json() == {"tags": ["alice-tag", "bob-tag"]}
-    assert len(client.get("/api/gallery/albums").json()["albums"]) == 2
+    assert client.get("/api/gallery/tags").json() == {"tags": ["local-tag"]}
+    assert [
+        album["id"] for album in client.get("/api/gallery/albums").json()["albums"]
+    ] == ["album-local"]
     assert client.get("/api/gallery/stats").json() == {
-        "total_photos": 2,
+        "total_photos": 1,
         "total_size": 30,
         "total_size_human": "30.0 B",
         "favorites": 0,
-        "albums": 2,
+        "albums": 1,
     }
     batch = client.post("/api/gallery/ai-tag-batch").json()
     assert batch["ok"] is True
-    assert batch["queued"] == 2
-    assert batch["total_untagged"] == 2
-    assert set(batch["image_ids"]) == {"img-alice", "img-bob"}
+    assert batch["queued"] == 1
+    assert batch["total_untagged"] == 1
+    assert batch["image_ids"] == ["img-local"]
 
 
 def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, tmp_path):

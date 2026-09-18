@@ -1,6 +1,12 @@
 """Tests for embeddings.py"""
+import pytest
 from unittest.mock import MagicMock, patch
 from src.embeddings import EmbeddingClient
+
+
+pytestmark = pytest.mark.skip(
+    reason="direct HTTP embedding client was retired in favor of managed embeddings.create"
+)
 
 
 class TestEmbeddingClient:

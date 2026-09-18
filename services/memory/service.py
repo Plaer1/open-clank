@@ -3,10 +3,8 @@
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-import os
 
 from .memory import MemoryManager
-from .memory_vector import MemoryVectorStore
 from src.memory_provider import MemoryRecord, NativeMemoryProvider
 from src.constants import DATA_DIR
 
@@ -41,9 +39,10 @@ class MemoryService:
 
     def __init__(self, data_dir: str = DATA_DIR):
         self.manager = MemoryManager(data_dir)
-        self.vector_store = MemoryVectorStore(data_dir) if os.path.exists(
-            os.path.join(data_dir, "memory_vectors")
-        ) else None
+        # Compatibility callers may inject a vector store explicitly.  The
+        # service itself must not resurrect the retired Chroma authority from
+        # an old on-disk directory.
+        self.vector_store = None
         self.provider = NativeMemoryProvider(self.manager, self.vector_store)
 
     def _sync_provider(self) -> None:

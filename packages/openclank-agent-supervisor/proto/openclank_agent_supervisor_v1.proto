@@ -1,0 +1,253 @@
+syntax = "proto3";
+
+package openclank.agent_supervisor.v1;
+
+message HealthRequest {}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  bytes schema_sha256 = 3;
+  repeated string features = 4;
+}
+
+message NegotiateRequest {
+  ProtocolVersion protocol = 1;
+  string request_id = 2;
+  string client_build = 3;
+  repeated string required_features = 4;
+}
+
+message Capability {
+  string name = 1;
+  bool supported = 2;
+  string detail_code = 3;
+}
+
+message SupervisorError {
+  string code = 1;
+  string safe_message = 2;
+  bool retryable = 3;
+  string phase = 4;
+  string request_id = 5;
+}
+
+message NegotiateResponse {
+  ProtocolVersion protocol = 1;
+  string server_build = 2;
+  repeated Capability capabilities = 3;
+  SupervisorError error = 15;
+}
+
+// Owner/runtime bindings are intentionally opaque to the browser.  The
+// daemon uses the immutable subject and authority generation to fence every
+// later lifecycle call; usernames are diagnostic/display data only.
+message OwnerRef {
+  string subject_id = 1;
+  string username = 2;
+  uint64 auth_generation = 3;
+}
+
+message AuthorityGeneration {
+  string name = 1;
+  uint64 generation = 2;
+}
+
+message RequestMeta {
+  ProtocolVersion protocol = 1;
+  string request_id = 2;
+  string idempotency_key = 3;
+  OwnerRef owner = 4;
+  int64 deadline_unix_ms = 5;
+  repeated AuthorityGeneration authority = 6;
+}
+
+message RuntimeBinding {
+  OwnerRef owner = 1;
+  string runtime_id = 2;
+  bytes epoch = 3;
+  uint64 generation = 4;
+  bytes fingerprint = 5;
+  string adapter_id = 6;
+}
+
+message OpenOwnerRuntimeRequest {
+  RequestMeta meta = 1;
+  string adapter_id = 2;
+  bytes projection_fingerprint = 3;
+  uint64 expected_generation = 4;
+}
+
+message OpenOwnerRuntimeResponse {
+  RuntimeBinding runtime = 1;
+  repeated Capability capabilities = 2;
+  uint64 driver_pid = 3;
+  string driver_start_token = 4;
+  string callback_registration_id = 5;
+  bool driver_ready = 6;
+  SupervisorError error = 15;
+}
+
+message ActivateDriverCallbackRequest {
+  RequestMeta meta = 1;
+  RuntimeBinding runtime = 2;
+  string callback_registration_id = 3;
+  uint64 driver_pid = 4;
+  string driver_start_token = 5;
+  string callback_endpoint = 6;
+  bytes callback_nonce = 7;
+  bytes callback_binding_sha256 = 8;
+}
+
+message ActivateDriverCallbackResponse {
+  bool driver_ready = 1;
+  repeated Capability capabilities = 2;
+  SupervisorError error = 15;
+}
+
+message SessionBinding {
+  RuntimeBinding runtime = 1;
+  string session_id = 2;
+  string workspace_id = 3;
+}
+
+message TurnBinding {
+  SessionBinding session = 1;
+  string run_id = 2;
+  string turn_id = 3;
+}
+
+message TerminalDescriptor {
+  string terminal_id = 1;
+  bytes epoch = 2;
+  uint32 rows = 3;
+  uint32 cols = 4;
+}
+
+message OpenSessionRequest {
+  RequestMeta meta = 1;
+  RuntimeBinding runtime = 2;
+  string session_id = 3;
+  string workspace_id = 4;
+  bytes snapshot_json = 5;
+  bytes snapshot_sha256 = 6;
+  uint64 transcript_revision = 7;
+  bytes config_json = 8;
+}
+
+message OpenSessionResponse {
+  SessionBinding session = 1;
+  bytes semantic_epoch = 2;
+  uint64 retained_head = 3;
+  uint64 retained_tail = 4;
+  repeated TerminalDescriptor terminals = 5;
+  SupervisorError error = 15;
+}
+
+message CloseSessionRequest {
+  RequestMeta meta = 1;
+  SessionBinding session = 2;
+}
+
+message CloseSessionResponse {
+  bool closed = 1;
+  SupervisorError error = 15;
+}
+
+message AttachSemanticRequest {
+  RequestMeta meta = 1;
+  SessionBinding session = 2;
+  bytes semantic_epoch = 3;
+  uint64 since_seq = 4;
+  string grade = 5;
+}
+
+message SemanticEvent {
+  string owner_subject_id = 1;
+  string session_id = 2;
+  string runtime_id = 3;
+  string runtime_epoch = 4;
+  uint64 runtime_generation = 5;
+  string run_id = 6;
+  string turn_id = 7;
+  bytes semantic_epoch = 8;
+  uint64 seq = 9;
+  int64 emitted_unix_ms = 10;
+  string op = 11;
+  string entity_kind = 12;
+  string entity_id = 13;
+  bytes payload_json = 14;
+  bytes payload_sha256 = 15;
+  uint64 append_offset_utf8_bytes = 16;
+}
+
+message SemanticStreamItem {
+  oneof item {
+    SemanticEvent event = 1;
+    SupervisorError error = 15;
+  }
+}
+
+message AckSemanticRequest {
+  RequestMeta meta = 1;
+  SessionBinding session = 2;
+  bytes semantic_epoch = 3;
+  uint64 highest_contiguous_seq = 4;
+}
+
+message AckSemanticResponse {
+  uint64 accepted_seq = 1;
+  SupervisorError error = 15;
+}
+
+enum InteractionMode {
+  INTERACTION_MODE_UNSPECIFIED = 0;
+  INTERACTION_MODE_CHAT = 1;
+  INTERACTION_MODE_PLAN = 2;
+  INTERACTION_MODE_AGENT = 3;
+}
+
+message TurnRequest {
+  RequestMeta meta = 1;
+  TurnBinding turn = 2;
+  InteractionMode mode = 3;
+  bytes prompt_json = 4;
+  bytes prompt_sha256 = 5;
+  bytes transcript_sha256 = 6;
+  uint64 transcript_revision = 7;
+  bytes plan_sha256 = 8;
+  uint64 plan_revision = 9;
+  bytes driver_config_json = 10;
+}
+
+message TurnStreamItem {
+  oneof item {
+    SemanticEvent event = 1;
+    SupervisorError error = 15;
+  }
+}
+
+message HealthResponse {
+  string protocol_major = 1;
+  string build_id = 2;
+  bool transport = 3;
+  bool protocol = 4;
+  bool containment = 5;
+  bool runtime_actor = 6;
+  bool driver = 7;
+  bool tool_policy = 8;
+  bool ready = 9;
+  string schema_sha256 = 10;
+}
+
+service AgentSupervisor {
+  rpc Negotiate(NegotiateRequest) returns (NegotiateResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc OpenOwnerRuntime(OpenOwnerRuntimeRequest) returns (OpenOwnerRuntimeResponse);
+  rpc ActivateDriverCallback(ActivateDriverCallbackRequest) returns (ActivateDriverCallbackResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc AttachSemantic(AttachSemanticRequest) returns (stream SemanticStreamItem);
+  rpc AckSemantic(AckSemanticRequest) returns (AckSemanticResponse);
+  rpc RunTurn(TurnRequest) returns (stream TurnStreamItem);
+}

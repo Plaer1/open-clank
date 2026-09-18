@@ -12,7 +12,20 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from core.session_manager import SessionManager
-from core.models import Session, ChatMessage
+from core.models import (
+    Session,
+    ChatMessage,
+    get_session_manager_instance,
+    set_session_manager_instance,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_session_manager():
+    previous = get_session_manager_instance()
+    set_session_manager_instance(None)
+    yield
+    set_session_manager_instance(previous)
 
 
 @pytest.fixture
@@ -192,3 +205,46 @@ class TestSessionIsolation:
         retrieved = sm.get_session("s1")
         assert len(retrieved.history) == 1
         assert retrieved.history[0].content == "hi"
+
+    def test_workspace_update_publishes_only_after_database_commit(self, sm, monkeypatch):
+        import core.session_manager as session_manager_module
+
+        cached = Session(
+            id="s1",
+            name="Test",
+            endpoint_url="http://ep",
+            model="model",
+            workspace_id="workspace-old",
+        )
+        sm.sessions[cached.id] = cached
+        row = MagicMock(workspace_id="workspace-old", updated_at=None)
+        database = MagicMock()
+        database.query.return_value.filter.return_value.first.return_value = row
+        monkeypatch.setattr(session_manager_module, "SessionLocal", lambda: database)
+
+        assert sm.update_session_workspace("s1", "workspace-new") is True
+        database.commit.assert_called_once()
+        assert row.workspace_id == "workspace-new"
+        assert cached.workspace_id == "workspace-new"
+
+    def test_failed_workspace_commit_leaves_cached_scope_unchanged(self, sm, monkeypatch):
+        import core.session_manager as session_manager_module
+
+        cached = Session(
+            id="s1",
+            name="Test",
+            endpoint_url="http://ep",
+            model="model",
+            workspace_id="workspace-old",
+        )
+        sm.sessions[cached.id] = cached
+        row = MagicMock(workspace_id="workspace-old", updated_at=None)
+        database = MagicMock()
+        database.query.return_value.filter.return_value.first.return_value = row
+        database.commit.side_effect = RuntimeError("disk full")
+        monkeypatch.setattr(session_manager_module, "SessionLocal", lambda: database)
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            sm.update_session_workspace("s1", "workspace-new")
+        database.rollback.assert_called_once()
+        assert cached.workspace_id == "workspace-old"

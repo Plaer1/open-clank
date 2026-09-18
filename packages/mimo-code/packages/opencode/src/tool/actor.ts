@@ -9,6 +9,7 @@ import { SessionID, MessageID, PartID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider"
+import type { ProviderID, ModelID } from "../provider/schema"
 import { sortVisionModels } from "../provider/provider"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config"
@@ -571,6 +572,8 @@ export const ActorTool = Tool.define(
             background: entry.background,
             turnCount: entry.turnCount,
             lastTurnTime: entry.lastTurnTime,
+            ...(entry.requestedModel ? { requested_model: entry.requestedModel } : {}),
+            ...(entry.effectiveModel ? { effective_model: entry.effectiveModel } : {}),
             ...(entry.lastError !== undefined ? { error: entry.lastError } : {}),
             time: entry.time,
           }
@@ -705,15 +708,25 @@ export const ActorTool = Tool.define(
         const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
         if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
 
+        const priorActor = op.actor_id ? yield* actorRegistry.get(ctx.sessionID, op.actor_id) : undefined
+        if (op.actor_id && !priorActor) {
+          return yield* Effect.fail(new RecoverableError(`Cannot resume unknown actor "${op.actor_id}".`))
+        }
         const modelRef = op.model ?? next.modelRef
-        const model = modelRef
+        const model = (priorActor?.effectiveModel && !op.model
+          ? priorActor.effectiveModel
+          : modelRef
           ? yield* provider
               .resolveModelRef(modelRef, msg.info.providerID)
               .pipe(Effect.map((m) => ({ modelID: m.id, providerID: m.providerID })))
           : (next.model ?? {
               modelID: msg.info.modelID,
               providerID: msg.info.providerID,
-            })
+            })) as { providerID: ProviderID; modelID: ModelID }
+        // Preserve the caller's source choice separately from the resolved
+        // provider/model pair. This makes inherit-agent/parent behavior
+        // inspectable without inferring a provider from a model identifier.
+        const requestedModel = op.model ?? priorActor?.requestedModel ?? next.modelRef ?? (next.model ? `${next.model.providerID}/${next.model.modelID}` : "inherit-parent")
 
         // Validate task_id by reference at execute time (NOT in the schema, so a
         // bad value degrades instead of hard-failing the call). A malformed shape
@@ -749,12 +762,14 @@ export const ActorTool = Tool.define(
           context: op.context ?? "none",
           tools: next.toolAllowlist ? [...next.toolAllowlist] : "INHERIT",
           model,
+          requestedModel,
+          ...(op.actor_id ? { actorID: op.actor_id } : {}),
           background,
           task_id: effectiveTaskId,
           onReady: ({ actorID, sessionID }) =>
             ctx.metadata({
               title: op.description,
-              metadata: { sessionId: sessionID, actorId: actorID, model },
+              metadata: { sessionId: sessionID, actorId: actorID, model, requestedModel },
             }),
           ...(op.output_schema
             ? { format: { type: "json_schema" as const, schema: op.output_schema, retryCount: 2 } }
@@ -764,7 +779,7 @@ export const ActorTool = Tool.define(
         if (op.action ==="spawn") {
           return {
             title: op.description,
-            metadata: { sessionId: spawnResult.sessionID, actorId: spawnResult.actorID, model },
+            metadata: { sessionId: spawnResult.sessionID, actorId: spawnResult.actorID, model, requestedModel },
             output:
               (taskNotice ? taskNotice + "\n" : "") +
               `Background sub-session started. actor_id: ${spawnResult.actorID}\nThe result will be delivered as a notification when complete.`,

@@ -152,6 +152,13 @@ DEFAULT_SETTINGS = {
     # Ordered fallback chain for the Utility model (summarization, naming,
     # tidy actions, etc.).
     "utility_model_fallbacks": [],
+    # Dedicated managed route for memory extraction, graph enrichment, and
+    # reversible tidy/consolidation work.  Empty means unset; migration may
+    # seed it once from the owner's Utility binding, after which the routes
+    # are independent.
+    "memory_endpoint_id": "",
+    "memory_model": "",
+    "memory_model_fallbacks": [],
     "teacher_model": "",
     "teacher_enabled": False,
     "teacher_tier2_enabled": False,
@@ -169,6 +176,12 @@ DEFAULT_SETTINGS = {
     "reminder_llm_persona": "",
     "reminder_ntfy_topic": "Reminders",
     "reminder_email_to": "",
+    # Optional account selector for installations with more than one SMTP
+    # account. Empty keeps the integration's default-account behavior.
+    "reminder_email_account_id": "",
+    # Ordered additional delivery targets. Each entry may provide a channel
+    # plus the channel-specific fields used by dispatch_reminder.
+    "reminder_endpoints": [],
     # Generic outbound webhook channel: pick any saved Integration as the
     # target and supply a JSON payload template. Use {{title}} and {{message}}
     # as placeholders — they are JSON-escaped before substitution, so the
@@ -265,6 +278,7 @@ def is_setting_overridden(key: str) -> bool:
 PER_USER_MODEL_SETTING_KEYS = frozenset({
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
+    "memory_endpoint_id", "memory_model", "memory_model_fallbacks",
     "research_endpoint_id", "research_model",
     "task_endpoint_id", "task_model",
     "vision_model", "vision_enabled", "vision_model_fallbacks",
@@ -272,6 +286,13 @@ PER_USER_MODEL_SETTING_KEYS = frozenset({
     "teacher_model", "teacher_enabled", "teacher_tier2_enabled",
     "tts_enabled", "tts_provider", "tts_model", "tts_voice", "tts_speed",
     "stt_enabled", "stt_provider", "stt_model", "stt_language",
+    # Reminder delivery is user-owned too. Keeping these in the scoped
+    # preference set prevents regular users' saves from being rejected as
+    # global admin policy.
+    "reminder_channel", "reminder_llm_synthesis", "reminder_llm_persona",
+    "reminder_ntfy_topic", "reminder_email_to", "reminder_email_account_id",
+    "reminder_webhook_integration_id", "reminder_webhook_payload_template",
+    "reminder_endpoints",
 })
 
 

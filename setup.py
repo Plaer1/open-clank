@@ -7,15 +7,19 @@ initial admin user. Safe to re-run (skips what already exists).
 
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
+import tempfile
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 from src.constants import (
     DATA_DIR, AUTH_FILE, UPLOAD_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR,
-    TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR, CHROMA_DIR,
+    TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR,
     RAG_DIR, MEMORY_VECTORS_DIR, PASSWORD_MIN_LENGTH,
 )
 from core.auth import RESERVED_USERNAMES
@@ -28,7 +32,6 @@ DIRS = [
     TTS_CACHE_DIR,
     GENERATED_IMAGES_DIR,
     DEEP_RESEARCH_DIR,
-    CHROMA_DIR,
     RAG_DIR,
     MEMORY_VECTORS_DIR,
     os.path.join(BASE_DIR, "logs"),
@@ -164,7 +167,7 @@ def create_env():
         import shutil
         shutil.copy2(example_path, env_path)
         print("  [ok] .env created from .env.example")
-        print("        ** Edit .env with your LLM host and API keys **")
+        print("        Configure model providers after login; .env is for app/integration settings only")
     else:
         print("  [warn] .env.example not found — create .env manually")
 
@@ -236,6 +239,95 @@ def check_arch():
     sys.exit(1)
 
 
+def install_public_command(script_dir=None):
+    """Install the one public, profile-aware ``openclank`` entrypoint.
+
+    Source installs are intentionally not a second provider/engine package.
+    The launcher only enters this checkout's Open Clank CLI using the exact
+    Python interpreter that ran setup.  Private engine payloads stay beneath
+    libexec and are never installed as public ``mimo``/``odysseus`` commands.
+    """
+
+    target_dir = Path(script_dir or sysconfig.get_path("scripts")).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    python = str(Path(sys.executable).resolve())
+    command = str((Path(BASE_DIR) / "scripts" / "openclank").resolve())
+    if not Path(command).is_file():
+        raise RuntimeError("public Open Clank launcher source is missing")
+
+    if os.name == "nt":
+        target = target_dir / "openclank.cmd"
+        payload = f'@echo off\r\n"{python}" "{command}" %*\r\n'.encode("utf-8")
+        mode = 0o644
+    else:
+        target = target_dir / "openclank"
+        payload = (
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(python)} {shlex.quote(command)} \"$@\"\n"
+        ).encode("utf-8")
+        mode = 0o755
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        dir=str(target_dir),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f"  [ok] Public command installed: {target}")
+    return target
+
+
+def ensure_managed_engine():
+    """Verify a packaged engine or build the exact vendored source."""
+    from src.constants import APP_VERSION
+    from src.openclank.engine_build import ensure_engine_ready
+
+    result = ensure_engine_ready(BASE_DIR, version=APP_VERSION)
+    print(f"  [ok] Managed engine verified: {result.binary}")
+
+
+def ensure_provider_cutover():
+    """Complete the provider hard cut before importing ``core.database``."""
+
+    from src.openclank.provider_migration import PROVIDER_ENV_AUTHORITIES
+    from src.openclank.provider_cutover import run_provider_cutover
+
+    configured = sorted(
+        name
+        for name in PROVIDER_ENV_AUTHORITIES
+        if str(os.environ.get(name) or "").strip()
+    )
+    if configured:
+        raise RuntimeError(
+            "retired provider environment settings are configured: "
+            + ", ".join(configured)
+            + "; add the connection in Providers and remove these variables"
+        )
+
+    auth_enabled = os.getenv("AUTH_ENABLED", "true").strip().lower() != "false"
+    result = run_provider_cutover(
+        data_dir=DATA_DIR,
+        auth_enabled=auth_enabled,
+        verify_engine=False,
+    )
+    if not result.complete:
+        raise RuntimeError(
+            f"provider cutover did not complete (phase={result.phase})"
+        )
+    if result.needed:
+        print(f"  [ok] Provider cutover complete ({result.phase})")
+    else:
+        print("  [ok] Provider cutover not required")
+
+
 def main():
     print("\n=== Open Clank Setup ===\n")
 
@@ -252,23 +344,32 @@ def main():
     # Silicon under an x86/Rosetta Python) before importing anything native.
     check_arch()
 
-    print("1. Creating directories...")
+    print("1. Verifying managed engine...")
+    ensure_managed_engine()
+
+    print("\n2. Creating directories...")
     create_dirs()
 
-    print("\n2. Environment file...")
+    print("\n3. Environment file...")
     create_env()
 
-    print("\n3. Checking dependencies...")
+    print("\n4. Checking dependencies...")
     check_deps()
 
-    print("\n4. Initializing database...")
+    print("\n5. Completing provider cutover...")
+    # This is deliberately outside the database initialization catch below.
+    # A cutover failure is a pre-launch installation error, never a condition
+    # setup may downgrade to a warning.
+    ensure_provider_cutover()
+
+    print("\n6. Initializing database...")
     try:
         init_database()
     except Exception as e:
         print(f"  [warn] Database init failed: {e}")
         print("         This is OK if dependencies aren't installed yet.")
 
-    print("\n5. Creating initial admin...")
+    print("\n7. Creating initial admin...")
 
     admin_status = "failed"
 
@@ -278,13 +379,16 @@ def main():
         print(f"  [warn] Admin creation failed: {e}")
         admin_status = "failed"
 
+    print("\n8. Installing openclank command...")
+    install_public_command()
+
     print("\n=== Setup complete ===")
     # start-macos.sh launches the server itself (on its own port) right after
     # this, so suppress the manual hint there to avoid a contradictory URL.
     if not (os.getenv("OPEN_CLANK_SKIP_RUN_HINT") or os.getenv("ODYSSEUS_SKIP_RUN_HINT")):
         print(f"\nStart the server with:")
-        print(f"  python -m uvicorn app:app --host 127.0.0.1 --port 7000")
-        print(f"\nThen open http://localhost:7000")
+        print(f"  python scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port 7777")
+        print(f"\nThen open http://localhost:7777")
 
     # Cleaned, action-focused final instruction strings
     if admin_status == "created":

@@ -3128,6 +3128,13 @@ async function _pollTaskNotifications() {
     const data = await res.json();
     const notes = data.notifications || [];
     for (const n of notes) {
+      if (n.kind === 'model_share') {
+        try { await window.modelsModule?.refreshModels?.(true); } catch (_) {}
+        if (uiModule) {
+          uiModule.showToast(n.body || 'A shared model was removed.', { duration: 7000 });
+        }
+        continue;
+      }
       const ok = n.status === 'success';
       if (ok) {
         const completedOpen = _open && document.querySelector('.tasks-tab.active[data-tab="completed"]');

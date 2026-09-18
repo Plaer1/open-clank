@@ -6,18 +6,18 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import fileHandlerModule from './js/fileHandler.js';
-import modelsModule from './js/models.js?v=20260715startupcalm2';
+import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260722ctxheader4';
+import chatModule from './js/chat.js?v=20260804doneframe1';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
-import sessionModule from './js/sessions.js?v=20260722ctxheader4';
+import chatRenderer from './js/chatRenderer.js';
+import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -28,6 +28,8 @@ import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 import copalModule from './js/copal.js';
+import codeEditorModule from './js/codeEditor.js';
+import filesModule from './js/files.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -46,6 +48,9 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import initPermissionModeControl from './js/permission-mode.js';
+import initInteractionModeControl from './js/interaction-mode.js';
+import { initCustomContextMenu } from './js/custom-context-menu.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -53,7 +58,10 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.copalModule = copalModule;
+window.filesModule = filesModule;
 settingsModule.setCopalModule(copalModule);
+window.settingsModule = settingsModule;
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -171,7 +179,7 @@ function initRailHoverLabels() {
     'rail-gallery': 'Gallery',
     'rail-archive': 'Library',
     'rail-memory': 'Brain',
-    'rail-notes': 'Notes',
+    'rail-notes': 'Editor',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
     'rail-settings': 'Settings',
@@ -187,12 +195,30 @@ function initRailHoverLabels() {
   });
 }
 
-// Redirect to login on 401 from any fetch
-const _origFetch = window.fetch;
+// Confirm auth loss before redirecting. Endpoint-local 401s remain visible to
+// their caller; only a confirmed invalid browser session redirects the shell.
+const _origFetch = window.fetch.bind(window);
+let _authStatusCheck = null;
+function _confirmBrowserSession() {
+  if (_authStatusCheck) return _authStatusCheck;
+  _authStatusCheck = _origFetch('/api/auth/status', {
+    credentials: 'same-origin',
+    cache: 'no-store',
+  }).then((status) => status.ok ? status.json() : null)
+    .catch(() => null)
+    .finally(() => { _authStatusCheck = null; });
+  return _authStatusCheck;
+}
 window.fetch = async function(...args) {
   const res = await _origFetch.apply(this, args);
-  if (res.status === 401 && !String(args[0]).includes('/api/auth/')) {
-    window.location.href = '/login';
+  // Some account-scoped panels are optional in the auth-disabled local
+  // profile.  Their deliberate 401 must stay a panel-level error; redirecting
+  // the whole shell to /login makes opening Settings transiently reload the
+  // app (notably the model-sharing panel).
+  const optionalUnauthenticated = String(args[0]).includes('/api/model-shares');
+  if (res.status === 401 && !optionalUnauthenticated && !String(args[0]).includes('/api/auth/')) {
+    const auth = await _confirmBrowserSession();
+    if (!auth || auth.authenticated !== true) window.location.href = '/login';
   }
   return res;
 };
@@ -235,6 +261,22 @@ async function _createDirectChatFromPreferredModel() {
   if (!sessionModule) return false;
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+  if (
+    pending && pending.url && pending.modelId && pending.endpointId
+    && (!pending.source || pending.source === 'manual')
+  ) {
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, pending.source || 'manual');
+    return true;
+  }
+
+  const dc = await _refreshDefaultChat();
+  if (dc) {
+    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
+    return true;
+  }
+
+  // Preserve an already-resolved automatic choice if the settings request is
+  // temporarily unavailable, but never let it outrank a fresh default.
   if (pending && pending.url && pending.modelId && pending.endpointId) {
     sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, pending.source || 'manual');
     return true;
@@ -245,12 +287,6 @@ async function _createDirectChatFromPreferredModel() {
   const current = sessions.find(s => s.id === currentId);
   if (current && current.endpoint_url && current.model && current.endpoint_id) {
     sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
-    return true;
-  }
-
-  const dc = await _refreshDefaultChat();
-  if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
     return true;
   }
 
@@ -1079,12 +1115,24 @@ function initializeEventListeners() {
   // Notes tool button
   const toolNotesBtn = el('tool-notes-btn');
   if (toolNotesBtn) {
-    toolNotesBtn.addEventListener('click', () => {
-      if (notesModule) {
-        notesModule.togglePanel();
-      }
+    toolNotesBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      history.pushState({}, '', '/copal/editor');
+      copalModule.open('notes');
     });
   }
+  const toolCodeBtn = el('tool-code-btn');
+  if (toolCodeBtn) toolCodeBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    history.pushState({}, '', '/copal/editor');
+    copalModule.open('notes');
+  });
+  const toolFilesBtn = el('tool-files-btn');
+  if (toolFilesBtn) toolFilesBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    history.pushState({}, '', '/files');
+    filesModule.open();
+  });
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
@@ -1154,10 +1202,17 @@ function initializeEventListeners() {
     }
   }
   const _routeOpen = {
+    '/code': () => {
+      history.replaceState({}, '', '/copal/editor');
+      copalModule.open('notes');
+    },
+    '/files': () => {
+      filesModule.open();
+    },
     '/notes':    () => {
-      if (!notesModule) return;
-      _collapseSidebarToRail();
-      notesModule.openPanel();
+      history.replaceState({}, '', '/copal/editor');
+      copalModule.open('notes');
+      return;
       // Promote to fullscreen-with-rail-visible. The pane wires up its own
       // fullscreen toggle (#notes-fullscreen-toggle); piggyback on that
       // path so the button icon flips and overflow:hidden gets applied
@@ -1174,6 +1229,10 @@ function initializeEventListeners() {
         setTimeout(_go, 50);
         setTimeout(_go, 200);
       }
+    },
+    '/copal/notes': () => {
+      history.replaceState({}, '', '/copal/editor');
+      copalModule.open('notes');
     },
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
@@ -1671,8 +1730,7 @@ function initializeEventListeners() {
   if (toolMemoryBtn && memoryModal) {
     toolMemoryBtn.addEventListener('click', () => {
       memoryModal.classList.remove('hidden');
-      if (memoryModule && memoryModule.renderMemoryList) memoryModule.renderMemoryList();
-      if (memoryModule && memoryModule.updateMemoryCount) memoryModule.updateMemoryCount();
+      if (memoryModule && memoryModule.loadMemories) memoryModule.loadMemories();
     });
   }
 
@@ -1762,20 +1820,55 @@ function initializeEventListeners() {
     }
   }
 
-  function setPlanMode(active, options = {}) {
-    const on = !!active;
+  const CHAT_MODES = ['chat', 'plan', 'agent'];
+
+  function getChatMode() {
+    const mode = String(loadToggleState().chat_mode || 'agent');
+    return CHAT_MODES.includes(mode) ? mode : 'agent';
+  }
+
+  function setChatMode(mode, options = {}) {
+    const normalized = CHAT_MODES.includes(mode) ? mode : 'agent';
     const st = loadToggleState();
-    st.plan_mode = on;
+    st.chat_mode = normalized;
+    // plan_mode stays as the persisted flag the stream-end plan capture
+    // (chat.js) keys off.
+    st.plan_mode = normalized === 'plan';
     saveToggleState(st);
-    syncPlanToggle(on);
-    if (on) {
+    if (typeof window.__odysseusInteractionModeSync === 'function') {
+      window.__odysseusInteractionModeSync(normalized);
+    }
+    syncPlanToggle(normalized === 'plan');
+    // Shell is structurally absent in the read-only modes; reflect that on
+    // the toggle without touching the stored preference.
+    const bashBtn = el('bash-toggle-btn');
+    if (bashBtn) {
+      const readOnly = normalized !== 'agent';
+      bashBtn.classList.toggle('mode-disabled', readOnly);
+      bashBtn.title = readOnly ? 'Shell is unavailable in Chat/Plan mode' : 'Shell Access';
+    }
+    if (normalized !== 'agent') {
       const resChk = el('research-toggle');
       if (resChk && resChk.checked) _syncResearchIndicator(false);
     }
     if (!options.silent && uiModule?.showToast) {
-      uiModule.showToast(on ? 'Plan mode on' : 'Plan mode off', 1600);
+      const labels = {
+        chat: 'Chat mode — read-only tools',
+        plan: 'Plan mode on',
+        agent: 'Agent mode — full tools',
+      };
+      uiModule.showToast(labels[normalized], 1600);
     }
   }
+
+  function setPlanMode(active, options = {}) {
+    if (active) setChatMode('plan', options);
+    else if (getChatMode() === 'plan') setChatMode('agent', options);
+  }
+
+  // Plan Execute / external callers flip modes through these globals.
+  window.__odysseusSetPlanMode = (active) => setPlanMode(active, { silent: true });
+  window.__odysseusSetChatMode = (mode) => setChatMode(mode, { silent: true });
 
   function applyModeToToggles(mode) {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
@@ -1788,8 +1881,8 @@ function initializeEventListeners() {
     });
   }
 
-  // The composer is always Agent. Storage.loadToggleState() performs the
-  // one-time cleanup of legacy mode=chat state.
+  // Tool toggles keep their historical `_agent` storage keys regardless of
+  // the composer chat/plan/agent mode; the mode itself is applied above.
   applyModeToToggles('agent');
   try { workspaceModule.applyMode('agent'); } catch (_) {}
 
@@ -1852,6 +1945,16 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+
+  // Composer mode control (chat / plan / agent). ACP provider mode is mapped
+  // server-side from this captured Open Clank choice.
+  initInteractionModeControl({
+    getMode: getChatMode,
+    setMode: (mode) => setChatMode(mode),
+  });
+  setChatMode(getChatMode(), { silent: true });
+  initCustomContextMenu();
+
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -3536,6 +3639,13 @@ function startOdysseusApp() {
   }
 
   // Initialize all event listeners
+  // Permission mode has its own lifecycle/error boundary and must not depend
+  // on the monolithic listener initializer below succeeding.
+  try {
+    initPermissionModeControl({ showToast: uiModule?.showToast });
+  } catch (e) {
+    console.error('Permission mode init error:', e);
+  }
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
 
   // Reveal the toolbar now that all toggle/overflow state is resolved
@@ -3588,7 +3698,7 @@ function startOdysseusApp() {
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
     'rail-calendar':  'tool-calendar-btn',
-    'rail-notes':     'tool-notes-btn',
+    'rail-notes':     'tool-code-btn',
     'rail-memory':    'tool-memory-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
@@ -3691,11 +3801,22 @@ function startOdysseusApp() {
   function handleSubmit(e) {
     if (e) e.preventDefault();
     _bumpChatPriority(30000);
-    // Debounce: prevent double-submit while a request is being initiated
-    if (_submitting) return;
-    _submitting = true;
-    // Release after a short delay (stream start sets its own isStreaming guard)
-    setTimeout(() => { _submitting = false; }, 300);
+    // The debounce protects a fresh send from duplicate form events, but it
+    // must never swallow an immediate Stop click.  The send button enters its
+    // streaming state before the first response bytes arrive, so a user can
+    // legitimately click Stop during this 300ms window.  Let an empty
+    // streaming submit through to chat.js; its abort path is idempotent.
+    const _submitButton = document.querySelector('.send-btn');
+    const _submitInput = document.getElementById('message') || document.getElementById('message-input');
+    const _isImmediateStop = _submitButton?.dataset?.mode === 'streaming'
+      && !((_submitInput?.value || '').trim());
+    // Debounce: prevent double-submit while a request is being initiated.
+    if (_submitting && !_isImmediateStop) return;
+    if (!_isImmediateStop) {
+      _submitting = true;
+      // Release after a short delay (stream start sets its own isStreaming guard)
+      setTimeout(() => { _submitting = false; }, 300);
+    }
 
     // Compare mode: route submit to compare handler (same message to all panes)
     if (compareModule && compareModule.isActive()) {
@@ -4483,14 +4604,6 @@ function startOdysseusApp() {
     }
   }
   
-
-
-  if (window.hljs) {
-    console.log('Highlighting all code blocks on page load');
-    document.querySelectorAll('pre code:not(.hljs)').forEach(block => {
-      window.hljs.highlightElement(block);
-    });
-  }
 }
 
 if (document.readyState === 'loading') {

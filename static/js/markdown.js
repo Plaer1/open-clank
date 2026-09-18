@@ -333,6 +333,9 @@ export function extractThinkingBlocks(text) {
  * Create a collapsible thinking section
  */
 let _thinkingSectionSeq = 0;
+// Mermaid diagram ids: per-document index + page sequence (no Date.now) so
+// renders are deterministic and ids still never collide across messages.
+let _mermaidSeq = 0;
 function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) {
   // Date.now() alone collides when several messages render in the same
   // millisecond (history rerender) — the duplicate ids made a toggle
@@ -511,7 +514,7 @@ export function mdToHtml(src, opts) {
 
     // Mermaid diagrams: render as diagram instead of code block
     if (lang && lang.toLowerCase() === 'mermaid') {
-      const mermaidId = 'mermaid-' + Date.now() + '-' + mermaidBlocks.length;
+      const mermaidId = 'mermaid-' + mermaidBlocks.length + '-' + (++_mermaidSeq);
       const raw = cleaned.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
       const placeholder = `___MERMAID_BLOCK_${mermaidBlocks.length}___`;
       mermaidBlocks.push(`<div class="mermaid-container"><pre class="mermaid" id="${mermaidId}">${escapeHtml(raw)}</pre></div>`);
@@ -970,113 +973,77 @@ document.addEventListener('click', function(e) {
   }
 })();
 
-function _endpointNameFromUrl(url) {
+function _providerLabelFromUrl(url) {
   try {
     const parsed = new URL(url, window.location.origin);
-    return parsed.host || parsed.hostname || 'Model endpoint';
+    return parsed.host || parsed.hostname || 'provider';
   } catch (_) {
-    return 'Model endpoint';
+    return 'provider';
   }
 }
 
-function _appendEndpointAddButtons(root) {
+function _appendProviderSettingsButtons(root) {
   if (!root || !root.querySelectorAll) return;
   const anchors = root.matches?.('a[href]')
     ? [root]
     : [...root.querySelectorAll('a[href]')];
   for (const anchor of anchors) {
-    if (anchor.dataset.endpointAddChecked === '1') continue;
-    anchor.dataset.endpointAddChecked = '1';
+    if (anchor.dataset.providerLinkChecked === '1') continue;
+    anchor.dataset.providerLinkChecked = '1';
     const href = anchor.getAttribute('href') || '';
     if (!_isModelEndpointUrl(href)) continue;
-    if (anchor.nextElementSibling?.classList?.contains('model-endpoint-add-btn')) continue;
+    if (anchor.nextElementSibling?.classList?.contains('provider-settings-open-btn')) continue;
 
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'model-endpoint-add-btn';
-    btn.dataset.endpointUrl = new URL(href, window.location.origin).href.replace(/\/+$/, '');
-    btn.title = 'Add this OpenAI-compatible endpoint to the model picker';
-    btn.innerHTML = '<span aria-hidden="true">+</span><span>Add to model picker</span>';
+    btn.className = 'model-endpoint-add-btn provider-settings-open-btn';
+    btn.dataset.providerUrl = new URL(href, window.location.origin).href.replace(/\/+$/, '');
+    btn.title = 'Open Providers settings to add this connection';
+    btn.innerHTML = '<span aria-hidden="true">+</span><span>Open Providers</span>';
     anchor.insertAdjacentElement('afterend', btn);
   }
 }
 
-async function _registerEndpointFromButton(btn) {
-  const baseUrl = String(btn?.dataset?.endpointUrl || '').trim();
+async function _openProvidersFromButton(btn) {
+  const baseUrl = String(btn?.dataset?.providerUrl || '').trim();
   if (!baseUrl || !_isModelEndpointUrl(baseUrl)) return;
-  const original = btn.innerHTML;
   btn.disabled = true;
-  btn.innerHTML = '<span aria-hidden="true">...</span><span>Adding</span>';
   try {
-    const existingRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    if (existingRes.ok) {
-      const endpoints = await existingRes.json();
-      const existing = Array.isArray(endpoints)
-        ? endpoints.find((ep) => String(ep.base_url || '').replace(/\/+$/, '') === baseUrl)
-        : null;
-      if (existing) {
-        btn.classList.add('added');
-        btn.innerHTML = '<span aria-hidden="true">✓</span><span>Already added</span>';
-        window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl } }));
-        if (window.modelsModule?.refreshModels) window.modelsModule.refreshModels(true);
-        if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
-        uiModule.showToast?.(`Already in model picker: ${existing.name || _endpointNameFromUrl(baseUrl)}`);
-        return;
-      }
+    if (window.adminModule && typeof window.adminModule.open === 'function') {
+      window.adminModule.open('services');
+    } else {
+      const settings = await import('./settings.js');
+      settings.default?.open?.('services');
     }
-
-    const parsed = new URL(baseUrl, window.location.origin);
-    const fd = new FormData();
-    fd.append('base_url', baseUrl);
-    fd.append('name', _endpointNameFromUrl(baseUrl));
-    fd.append('model_type', 'llm');
-    fd.append('endpoint_kind', 'auto');
-    fd.append('skip_probe', 'true');
-    if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(parsed.hostname)) {
-      fd.append('container_local', 'true');
-    }
-    const res = await fetch('/api/model-endpoints', {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: fd,
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 160) : ''}`);
-    }
-    btn.classList.add('added');
-    btn.innerHTML = '<span aria-hidden="true">✓</span><span>Added</span>';
-    window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl } }));
-    if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
-    if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
-    uiModule.showToast?.(`Model endpoint added: ${_endpointNameFromUrl(baseUrl)}`);
+    document.dispatchEvent(new CustomEvent('open-clank:open-providers'));
+    uiModule.showToast?.(`Add ${_providerLabelFromUrl(baseUrl)} from Providers settings.`);
   } catch (err) {
+    uiModule.showError?.(`Could not open Providers settings: ${err.message || err}`);
+  } finally {
     btn.disabled = false;
-    btn.innerHTML = original;
-    uiModule.showError?.(`Add endpoint failed: ${err.message || err}`);
   }
 }
 
-(function _watchModelEndpointLinks() {
-  if (window._modelEndpointLinkWatcherWired) return;
-  window._modelEndpointLinkWatcherWired = true;
+(function _watchProviderLinks() {
+  if (window._providerLinkWatcherWired) return;
+  window._providerLinkWatcherWired = true;
 
   document.addEventListener('click', (e) => {
-    const btn = e.target.closest?.('.model-endpoint-add-btn');
+    const btn = e.target.closest?.('.provider-settings-open-btn');
     if (!btn) return;
     e.preventDefault();
     e.stopPropagation();
-    _registerEndpointFromButton(btn);
+    _openProvidersFromButton(btn);
   });
 
   const start = () => {
     const root = document.body;
     if (!root) return;
-    _appendEndpointAddButtons(root);
+    _appendProviderSettingsButtons(root);
     new MutationObserver((mutations) => {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
-          if (node.nodeType === 1) _appendEndpointAddButtons(node);
+          if (node.nodeType === 1) _appendProviderSettingsButtons(node);
         }
       }
     }).observe(root, { childList: true, subtree: true });

@@ -11,7 +11,7 @@ This directory contains the Claude Code skill bundle for Odysseus.
 5. Configure the terminal Claude Code session:
 
 ```bash
-export ODYSSEUS_URL=http://your-odysseus-host:7000
+export ODYSSEUS_URL=http://your-odysseus-host:7777
 export ODYSSEUS_API_TOKEN=ody_generated_token
 mkdir -p ~/.claude
 curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/claude/plugin.zip" -o /tmp/odysseus-claude-skill.zip

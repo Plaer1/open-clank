@@ -40,6 +40,202 @@ export function glyphFor(icon) {
   return ICONS[value] || value || '•';
 }
 
+// Timeline is a semantic owner.  These small DTO helpers deliberately keep
+// Files references out of the planning model; a ResourceKey is resolved by
+// the Files facade only at the point an attachment is prepared.
+export function timelineEventHandle(event, { accountId, workspace = 'default', expectedHead = null } = {}) {
+  const eventId = String(event?.id || event?.documentId || '').trim();
+  const account = String(accountId || '').trim();
+  const scope = String(workspace || 'default').trim();
+  if (!eventId || eventId.length > 256) throw new TypeError('Timeline event id is required');
+  if (!account || account.length > 256) throw new TypeError('Timeline account is required');
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(scope)) throw new TypeError('Timeline workspace is invalid');
+  const head = expectedHead ?? event?.head ?? null;
+  if (head != null && (typeof head !== 'string' && typeof head !== 'number')) throw new TypeError('Timeline event head is invalid');
+  const resourceKey = event?.resourceKey || event?.resource_key || null;
+  if (resourceKey != null && (typeof resourceKey !== 'object' || Array.isArray(resourceKey))) throw new TypeError('Timeline resource key is invalid');
+  return Object.freeze({
+    kind: 'copal-planning-event', eventId, accountId: account, workspace: scope,
+    expectedHead: head == null ? null : String(head), expectedRevision: head == null ? null : String(head), currentTrackId: event?.trackId || null,
+    currentEventIdentity: Object.freeze({ id: eventId, trackId: event?.trackId || null }),
+    resourceKey: resourceKey ? Object.freeze({ ...resourceKey }) : null,
+  });
+}
+
+export function timelineEventResourceKey(handle) {
+  if (!handle || handle.kind !== 'copal-planning-event' || !handle.eventId) throw new TypeError('Timeline event handle is invalid');
+  if (handle.resourceKey) return { ...handle.resourceKey };
+  // This is a canonical Copal key, not a Files ref.  S01 must resolve it
+  // before any writable operation is attempted.
+  return { provider: 'copal', account_id: handle.accountId, workspace_id: handle.workspace, resource_id: handle.eventId };
+}
+
+export function timelineSemanticCommand(type, payload = {}) {
+  const command = String(type || '').trim();
+  if (!['timeline.event.reposition', 'timeline.event.resize', 'timeline.event.nudge', 'timeline.track.reorder', 'timeline.viewport.pan'].includes(command)) {
+    throw new TypeError('Timeline command is unsupported');
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new TypeError('Timeline command payload is invalid');
+  return Object.freeze({ type: command, payload: Object.freeze({ ...payload }) });
+}
+
+export function timelineSourceClassification(source) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return { supported: false, reason: 'This source cannot be attached to an event.' };
+  const kind = String(source.kind || source.type || '').trim().toLowerCase();
+  if (source.isDirectory || source.directory || kind === 'directory' || kind === 'folder') return { supported: false, reason: 'Folders cannot be attached to an event.' };
+  const ref = String(source.resourceRef || source.resource_ref || '').trim();
+  const provider = String(source.provider || source.resource?.provider || '').trim().toLowerCase();
+  const readable = source.readable ?? source.capabilities?.read ?? source.capabilities?.open ?? source.capabilities?.download;
+  if (!ref || (readable === false) || (!['host', 'copal', 'gallery', 'library'].includes(provider) && provider)) return { supported: false, reason: 'This resource cannot be read by the current account.' };
+  if (!ref) return { supported: false, reason: 'Choose a readable Files resource.' };
+  return { supported: true, resourceRef: ref, provider: provider || null, expectedRevision: source.expectedRevision || source.expected_revision || null };
+}
+
+function cloneTracks(tracks) {
+  return structuredClone(tracks);
+}
+
+export function normalizeTrackHierarchy(tracks) {
+  if (!Array.isArray(tracks)) throw new Error('tracks must be a list');
+  const normalized = cloneTracks(tracks);
+  const byId = new Map();
+  for (const track of normalized) {
+    if (!track || typeof track !== 'object' || Array.isArray(track)) throw new Error('Each track must be an object');
+    const id = String(track.id || '').trim();
+    if (!id || byId.has(id)) throw new Error('Tracks need unique ids');
+    track.id = id;
+    if (track.parentTrackId == null) track.parentTrackId = null;
+    else if (typeof track.parentTrackId !== 'string' || !track.parentTrackId.trim()) throw new Error(`Track ${id} parentTrackId must be a non-empty string or null`);
+    else track.parentTrackId = track.parentTrackId.trim();
+    byId.set(id, track);
+  }
+  for (const track of normalized) {
+    if (track.parentTrackId === track.id) throw new Error(`Track ${track.id} cannot parent itself`);
+    if (track.parentTrackId !== null && !byId.has(track.parentTrackId)) throw new Error(`Track ${track.id} has unknown parent ${track.parentTrackId}`);
+  }
+  const settled = new Set();
+  for (const track of normalized) {
+    let current = track.id;
+    const chain = new Set();
+    while (current !== null && !settled.has(current)) {
+      if (chain.has(current)) throw new Error('Track hierarchy contains a cycle');
+      chain.add(current);
+      current = byId.get(current).parentTrackId;
+    }
+    for (const id of chain) settled.add(id);
+  }
+  return normalized;
+}
+
+export function flattenTrackPreorder(tracks) {
+  const normalized = normalizeTrackHierarchy(tracks);
+  const children = new Map([[null, []]]);
+  for (const track of normalized) {
+    if (!children.has(track.parentTrackId)) children.set(track.parentTrackId, []);
+    children.get(track.parentTrackId).push(track);
+  }
+  const ordered = [];
+  const stack = [...children.get(null)].reverse();
+  while (stack.length) {
+    const track = stack.pop();
+    ordered.push(track);
+    const descendants = children.get(track.id) || [];
+    for (let index = descendants.length - 1; index >= 0; index--) stack.push(descendants[index]);
+  }
+  return ordered;
+}
+
+export function trackDescendantIds(tracks, trackId) {
+  const normalized = normalizeTrackHierarchy(tracks);
+  const id = String(trackId || '').trim();
+  if (!normalized.some((track) => track.id === id)) throw new Error(`Unknown track: ${id}`);
+  const children = new Map();
+  for (const track of normalized) {
+    if (track.parentTrackId === null) continue;
+    if (!children.has(track.parentTrackId)) children.set(track.parentTrackId, []);
+    children.get(track.parentTrackId).push(track.id);
+  }
+  const result = [];
+  const stack = [...(children.get(id) || [])].reverse();
+  while (stack.length) {
+    const childId = stack.pop();
+    result.push(childId);
+    const nested = children.get(childId) || [];
+    for (let index = nested.length - 1; index >= 0; index--) stack.push(nested[index]);
+  }
+  return result;
+}
+
+export function reparentTrackSubtree(tracks, movedTrackId, parentTrackId) {
+  const original = cloneTracks(tracks);
+  const ordered = flattenTrackPreorder(tracks);
+  const movedId = String(movedTrackId || '').trim();
+  const byId = new Map(ordered.map((track) => [track.id, track]));
+  if (!byId.has(movedId)) throw new Error(`Unknown moved track: ${movedId}`);
+  const parentId = parentTrackId == null ? null : typeof parentTrackId === 'string' ? parentTrackId.trim() : undefined;
+  if (parentId === undefined || parentId === '') throw new Error('Target parentTrackId must be a non-empty string or null');
+  if (parentId !== null && !byId.has(parentId)) throw new Error(`Unknown target parent: ${parentId}`);
+  const subtreeIds = [movedId, ...trackDescendantIds(ordered, movedId)];
+  const subtreeSet = new Set(subtreeIds);
+  if (parentId === movedId) throw new Error(`Track ${movedId} cannot parent itself`);
+  if (parentId !== null && subtreeSet.has(parentId)) throw new Error(`Track ${movedId} cannot move beneath its descendant ${parentId}`);
+  if (byId.get(movedId).parentTrackId === parentId) return original;
+
+  byId.get(movedId).parentTrackId = parentId;
+  const subtree = subtreeIds.map((id) => byId.get(id));
+  const remaining = ordered.filter((track) => !subtreeSet.has(track.id));
+  if (parentId === null) return flattenTrackPreorder([...remaining, ...subtree]);
+  const targetSubtree = new Set([parentId, ...trackDescendantIds(remaining, parentId)]);
+  let insertAt = 0;
+  for (let index = 0; index < remaining.length; index++) if (targetSubtree.has(remaining[index].id)) insertAt = index + 1;
+  return flattenTrackPreorder([...remaining.slice(0, insertAt), ...subtree, ...remaining.slice(insertAt)]);
+}
+
+export function trackBreadcrumb(tracks, trackId) {
+  const normalized = normalizeTrackHierarchy(tracks);
+  const byId = new Map(normalized.map((track) => [track.id, track]));
+  let current = byId.get(String(trackId || '').trim());
+  if (!current) throw new Error(`Unknown track: ${trackId}`);
+  const names = [];
+  while (current) {
+    names.push(String(current.name || current.id));
+    current = current.parentTrackId === null ? null : byId.get(current.parentTrackId);
+  }
+  return names.reverse().join(' / ');
+}
+
+export function effectiveTrackState(tracks, trackId, { hiddenTracks = new Set(), collapsedTrackGroups = new Set() } = {}) {
+  const normalized = normalizeTrackHierarchy(tracks);
+  const byId = new Map(normalized.map((track) => [track.id, track]));
+  const track = byId.get(String(trackId || '').trim());
+  if (!track) throw new Error(`Unknown track: ${trackId}`);
+  const hidden = hiddenTracks instanceof Set ? hiddenTracks : new Set(hiddenTracks || []);
+  const collapsed = collapsedTrackGroups instanceof Set ? collapsedTrackGroups : new Set(collapsedTrackGroups || []);
+  let ancestor = track.parentTrackId === null ? null : byId.get(track.parentTrackId);
+  let ancestorDisabledBy = null;
+  let ancestorHiddenBy = null;
+  let ancestorCollapsedBy = null;
+  while (ancestor) {
+    if (!ancestorDisabledBy && ancestor.enabled === false) ancestorDisabledBy = ancestor.id;
+    if (!ancestorHiddenBy && hidden.has(ancestor.id)) ancestorHiddenBy = ancestor.id;
+    if (!ancestorCollapsedBy && collapsed.has(ancestor.id)) ancestorCollapsedBy = ancestor.id;
+    ancestor = ancestor.parentTrackId === null ? null : byId.get(ancestor.parentTrackId);
+  }
+  const ownEnabled = track.enabled !== false;
+  const ownHidden = hidden.has(track.id);
+  const suppressedBy = !ownEnabled ? track.id : ownHidden ? track.id : ancestorDisabledBy || ancestorHiddenBy || ancestorCollapsedBy;
+  return {
+    ownEnabled,
+    ownHidden,
+    collapsed: collapsed.has(track.id),
+    ancestorDisabledBy,
+    ancestorHiddenBy,
+    ancestorCollapsedBy,
+    suppressedBy,
+    visible: suppressedBy === null,
+  };
+}
+
 export function eventLayout(event, fallbackStart, autoStart = null) {
   let start = parseLocalDate(event.startDate);
   if (event.startDate === 'FUZZY') start = parseLocalDate(event.fuzzy?.anchorStart);

@@ -248,10 +248,22 @@ it.live("tool execution produces non-empty session diff (snapshot race)", () =>
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const summary = yield* SessionSummary.Service
+      const permission = yield* Permission.Service
+      const bus = yield* Bus.Service
 
       const session = yield* sessions.create({
         title: "snapshot race test",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      // Shell redirects are deliberately forced asks even under wildcard allow.
+      // Resolve this test's exact request through the same in-band approval path.
+      yield* bus.subscribeCallback(Permission.Event.Asked, (event) => {
+        if (event.properties.sessionID !== session.id) return
+        if (event.properties.permission !== "bash_destructive") return
+        Effect.runFork(
+          permission.reply({ requestID: event.properties.id, reply: "once" }).pipe(Effect.ignore),
+        )
       })
 
       // Use bash tool (always registered) to create a file

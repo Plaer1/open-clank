@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-clank.local/schema/open-clank-hexes-v2.schema.json",
+  "title": "Open Clank Hexes v2 contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "hexes"],
+  "properties": {
+    "contract": {"const": "open-clank-hexes/v2"},
+    "imports": {"type": "array", "items": {"type": "string"}},
+    "settings": {"type": "object"},
+    "hexes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["hex"],
+        "additionalProperties": true,
+        "properties": {
+          "hex": {"type": "string", "minLength": 1},
+          "in": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+          "except": {"type": "array", "items": {"type": "string"}},
+          "level": {"enum": ["block", "warn"]}
+        }
+      }
+    }
+  }
+}

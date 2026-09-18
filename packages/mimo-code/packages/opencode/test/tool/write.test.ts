@@ -15,6 +15,13 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import {
+  bindMemorySessionClient,
+  closeSharedMcpClient,
+  registerManagedMcpClient,
+  unregisterManagedMcpClient,
+} from "../../src/memory/mcp-client"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -29,6 +36,9 @@ const ctx = {
 
 afterEach(async () => {
   await Instance.disposeAll()
+  await closeSharedMcpClient()
+  unregisterManagedMcpClient("lifetools_policy_test")
+  delete process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE
 })
 
 const it = testEffect(
@@ -66,6 +76,17 @@ describe("tool.write", () => {
 
           expect(result.output).toContain("Wrote file successfully")
           expect(result.metadata.exists).toBe(false)
+          expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+          expect(result.metadata.file.operation).toBe("write")
+          expect(result.metadata.file.page).toEqual({
+            unit: "byte",
+            cursor: 0,
+            next_cursor: null,
+            has_more: false,
+            returned: 13,
+            total: 13,
+          })
+          expect(result.metadata.file.fingerprint).toBe(result.metadata.fingerprint)
 
           const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
           expect(content).toBe("Hello, World!")
@@ -214,6 +235,47 @@ describe("tool.write", () => {
   })
 
   describe("error handling", () => {
+    it.live("leaves the file untouched when shared project policy rejects it", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "blocked.txt")
+          const client = {
+            callTool: async () => ({
+              content: [{ type: "text", text: JSON.stringify({ enforced: true, allowed: false }) }],
+            }),
+          } as unknown as Client
+          process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE = "required"
+          registerManagedMcpClient("lifetools_policy_test", client)
+          bindMemorySessionClient(
+            ctx.sessionID,
+            "lifetools_policy_test",
+            "alice",
+            "global",
+          )
+
+          const exit = yield* run({ file_path: filepath, content: "blocked" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => Bun.file(filepath).exists())).toBeFalse()
+        }),
+      ),
+    )
+
+    it.live("refuses to overwrite an existing binary file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const binaryPath = path.join(dir, "binary.txt")
+          const original = Buffer.from([0x61, 0x00, 0x62])
+          yield* Effect.promise(() => fs.writeFile(binaryPath, original))
+
+          const exit = yield* run({ file_path: binaryPath, content: "replacement" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(binaryPath))).toEqual(original)
+        }),
+      ),
+    )
+
     // Skip: root bypasses file permissions, chmod 0o444 has no effect when running as root
     it.live.skip("throws error when OS denies write access", () =>
       provideTmpdirInstance((dir) =>

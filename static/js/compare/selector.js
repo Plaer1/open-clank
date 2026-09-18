@@ -992,6 +992,7 @@ async function showModelSelector() {
         const lower = (modelId || '').toLowerCase();
         return _imageModelPrefixes.some(p => lower.includes(p));
       }
+      let _managedCatalogPromise = null;
       async function _probeOne(m) {
         if (_isImageModel(m.model)) {
           return { status: 'ok', model: m.model, skipped: true, skipReason: 'Image' };
@@ -1000,13 +1001,22 @@ async function showModelSelector() {
         if (state._compareMode === 'search' && !m.model) {
           return { status: 'ok', model: m.model, skipped: true, skipReason: 'No model' };
         }
-        const res = await fetch(`${state.API_BASE}/api/probe-selected`, {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ models: [{ endpoint_id: m.endpointId || '', model: m.model, endpoint: m.endpoint || '', with_tools: state._compareMode === 'agent' }] }),
-        });
-        const data = await res.json();
-        return (data.results || [])[0] || { status: 'fail', error: 'No response' };
+        if (!_managedCatalogPromise) {
+          _managedCatalogPromise = fetch(`${state.API_BASE}/api/models`, { credentials: 'same-origin' })
+            .then(res => {
+              if (!res.ok) throw new Error('Provider catalog unavailable');
+              return res.json();
+            });
+        }
+        const data = await _managedCatalogPromise;
+        const available = (data.items || []).some(item =>
+          item.endpoint_id === (m.endpointId || '')
+          && ((item.models || []).includes(m.model)
+            || (item.catalog || []).some(entry => entry.model_id === m.model))
+        );
+        return available
+          ? { status: 'ok', model: m.model }
+          : { status: 'fail', model: m.model, error: 'Route is no longer available' };
       }
 
       // Helper: update a probe row's visual state

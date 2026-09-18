@@ -4,11 +4,42 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+import json
 
 from core.database import AgentTurn, ChatMessage, SessionLocal, TurnActor, utcnow_naive
 
 
 _TERMINAL = {"completed", "failed", "cancelled", "interrupted", "unknown"}
+
+
+def _requested_model(actor: dict[str, Any]) -> str | None:
+    value = actor.get("requestedModel") or actor.get("requested_model")
+    if value is None:
+        return None
+    return str(value)[:512] or None
+
+
+def _effective_model_json(actor: dict[str, Any]) -> str | None:
+    value = actor.get("effectiveModel") or actor.get("effective_model")
+    if not isinstance(value, dict):
+        return None
+    provider = str(value.get("providerID") or value.get("provider_id") or "").strip()
+    model = str(value.get("modelID") or value.get("model_id") or "").strip()
+    if not provider or not model:
+        return None
+    return json.dumps({"provider_id": provider[:128], "model_id": model[:512]}, separators=(",", ":"))
+
+
+def _effective_model(value: str | None) -> dict[str, str] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("provider_id") or not parsed.get("model_id"):
+        return None
+    return {"provider_id": str(parsed["provider_id"]), "model_id": str(parsed["model_id"])}
 
 
 def _source_time(value: Any) -> datetime | None:
@@ -116,6 +147,8 @@ def apply_actor_feed(payload: dict[str, Any]) -> dict[str, Any]:
                         mode=str(actor.get("mode") or "subagent"),
                         agent=str(actor.get("agent") or "unknown"),
                         description=str(actor.get("description") or ""),
+                        requested_model=_requested_model(actor),
+                        effective_model=_effective_model_json(actor),
                         background=bool(actor.get("background")),
                         lifecycle=str(actor.get("lifecycle") or "ephemeral"),
                         counts_toward_total=counts,
@@ -137,6 +170,10 @@ def apply_actor_feed(payload: dict[str, Any]) -> dict[str, Any]:
                     row.mode = str(actor.get("mode") or row.mode)
                     row.agent = str(actor.get("agent") or row.agent)
                     row.description = str(actor.get("description") or row.description)
+                    if _requested_model(actor) is not None:
+                        row.requested_model = _requested_model(actor)
+                    if _effective_model_json(actor) is not None:
+                        row.effective_model = _effective_model_json(actor)
                     row.background = bool(actor.get("background"))
                     row.lifecycle = str(actor.get("lifecycle") or row.lifecycle)
                     row.last_error = str(actor.get("lastError") or actor.get("error") or "") or None
@@ -213,6 +250,8 @@ def _aggregate(db, turn: AgentTurn | None) -> dict[str, Any]:
             "status": row.status,
             "outcome": row.outcome,
             "background": row.background,
+            "requested_model": row.requested_model,
+            "effective_model": _effective_model(row.effective_model),
         }
         for row in rows
     ]

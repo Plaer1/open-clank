@@ -66,6 +66,31 @@ def test_catalog_keeps_entitlement_separate_from_compatibility():
     assert catalog[2]["reason"] == "hidden"
 
 
+def test_catalog_carries_explicit_native_model_relationships_only_when_supplied():
+    catalog = build_model_catalog(
+        endpoint_id="mimo:openai",
+        endpoint_url="mimo://acp",
+        model_ids=["openai/gpt-5.6-luna", "openai/gpt-5.6-luna-fast/high"],
+        relations={
+            "openai/gpt-5.6-luna": {
+                "base_model_id": "openai/gpt-5.6-luna",
+            },
+            "openai/gpt-5.6-luna-fast/high": {
+                "base_model_id": "openai/gpt-5.6-luna",
+                "preset": "fast",
+                "variant": "high",
+            },
+        },
+    )
+
+    assert catalog[0]["base_model_id"] == "openai/gpt-5.6-luna"
+    assert "preset" not in catalog[0]
+    assert "variant" not in catalog[0]
+    assert catalog[1]["base_model_id"] == "openai/gpt-5.6-luna"
+    assert catalog[1]["preset"] == "fast"
+    assert catalog[1]["variant"] == "high"
+
+
 def test_only_chatgpt_subscription_discovery_is_marked_entitled():
     assert _catalog_entitlement("https://chatgpt.com/backend-api/codex", ["new-slug"]) is True
     assert _catalog_entitlement("https://api.openai.com/v1", ["api-model"]) is None

@@ -1,248 +1,210 @@
-"""Strict Agent dispatch resolves exact persisted endpoint identity to MiMo."""
+"""Strict Agent dispatch accepts only normalized managed route identities."""
+
 import json
-import uuid
+from pathlib import Path
 
 import pytest
 
-import core.database as cdb
-from core.database import ModelEndpoint
-from src.endpoint_resolver import (
-    build_chat_url,
-    direct_runtime_provider_id,
-    endpoint_id_for_chat_url,
-    normalize_base,
-    resolve_model_target,
+from src.endpoint_resolver import ResolvedModelTarget, resolve_model_target
+from src.model_dispatch import (
+    AgentRunRequest,
+    mimo_agent_target,
+    run_agent,
+    stream_agent_target,
 )
-
-from src.model_dispatch import AgentRunRequest, mimo_agent_target, run_agent
-from src.model_capabilities import set_declared
 from src.openclank.mimo_supervisor import SupervisorAdmissionError
 
 
-def SessionLocal():
-    return cdb.SessionLocal()
+def _target(*, tools=True, lifecycle="persistent"):
+    return ResolvedModelTarget(
+        transport="acp",
+        endpoint_url="openclank://engine",
+        model_id="pcn-managed/model-a",
+        endpoint_id="pcn-managed",
+        provider_id="pcn-managed",
+        headers={},
+        capabilities={"chat": True, "tools": tools},
+        lifecycle=lifecycle,
+    )
+
+
+class _Bridge:
+    def __init__(self):
+        self.turns = []
+
+    async def run_turn(self, session_id, messages, **kwargs):
+        self.turns.append((session_id, messages, kwargs))
+        yield f'data: {json.dumps({"delta": "managed"})}\n\n'
+        yield "data: [DONE]\n\n"
 
 
 class _Worker:
-    def __init__(self, model_ids):
-        self._models = [{"modelId": mid, "name": mid} for mid in model_ids]
-        self.bridge = object()
+    def __init__(self):
+        self.bridge = _Bridge()
+        self.deleted = []
 
-    def is_alive(self):
-        return True
+    async def delete_session(self, session_id):
+        self.deleted.append(session_id)
 
-    def available_models(self, owner=None):
-        return list(self._models)
+
+class _Lease:
+    generation = 7
+    fingerprint = "fingerprint-managed"
+    projection_pending = False
+
+    def __init__(self):
+        self.worker = _Worker()
+        self.released = []
+
+    async def release(self, *, successful_terminal=False):
+        self.released.append(successful_terminal)
 
 
 class _Pool:
-    def __init__(self, worker):
-        self._worker = worker
+    def __init__(self):
+        self.lease = _Lease()
+        self.admissions = []
 
-    async def for_owner(self, owner):
-        return self._worker
-
-
-@pytest.fixture
-def endpoint():
-    ep_id = f"disp-{uuid.uuid4().hex[:8]}"
-    db = SessionLocal()
-    try:
-        db.add(ModelEndpoint(
-            id=ep_id,
-            name="Dispatch Test",
-            base_url="https://dispatch.example.test/v1",
-            api_key=None,
-            is_enabled=True,
-            cached_models=json.dumps(["glm-5.2"]),
-        ))
-        endpoint_row = db.get(ModelEndpoint, ep_id)
-        if endpoint_row is None:
-            db.flush()
-            endpoint_row = db.get(ModelEndpoint, ep_id)
-        set_declared(db, endpoint_row, "glm-5.2", True)
-        db.commit()
-    finally:
-        db.close()
-    yield ep_id
-    db = SessionLocal()
-    try:
-        db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).delete()
-        db.commit()
-    finally:
-        db.close()
+    async def admit_agent(self, owner, provider_id, model_id):
+        self.admissions.append((owner, provider_id, model_id))
+        return self.lease
 
 
-def _http_target(endpoint_id=None, ep_base="https://dispatch.example.test/v1", model="glm-5.2"):
-    return resolve_model_target(
-        build_chat_url(normalize_base(ep_base)), model, endpoint_id=endpoint_id,
+@pytest.mark.asyncio
+async def test_normalized_target_is_stable_and_raw_http_fails_closed():
+    target = _target()
+    assert await mimo_agent_target(target, owner="alice") is target
+
+    raw = resolve_model_target(
+        "https://provider.invalid/v1/chat/completions",
+        "model-a",
     )
+    with pytest.raises(SupervisorAdmissionError) as rejected:
+        await mimo_agent_target(raw, owner="alice")
+    assert rejected.value.code == "LEGACY_PROVIDER_ROUTE_RETIRED"
 
 
-def test_reverse_url_lookup(endpoint):
-    chat_url = build_chat_url(normalize_base("https://dispatch.example.test/v1"))
-    assert endpoint_id_for_chat_url(chat_url) == endpoint
-    assert endpoint_id_for_chat_url("https://other.example.test/v1") is None
-    assert endpoint_id_for_chat_url("mimo://acp") is None
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("model_id", "unqualified"),
+        ("endpoint_id", "different"),
+        ("provider_id", "different"),
+        ("headers", {"Authorization": "must-not-cross"}),
+    ],
+)
+async def test_managed_target_requires_exact_secret_free_connection_identity(field, value):
+    values = _target().__dict__.copy()
+    values[field] = value
+    malformed = ResolvedModelTarget(**values)
+    with pytest.raises(SupervisorAdmissionError) as rejected:
+        await mimo_agent_target(malformed, owner="alice")
+    assert rejected.value.code == "INVALID_MANAGED_ROUTE"
 
 
-async def test_rewrite_hit_returns_acp_target(endpoint):
-    mimo_model = f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
-    pool = _Pool(_Worker([mimo_model, "xiaomi/mimo-auto"]))
-    rewritten = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
-    assert rewritten is not None
-    assert rewritten.transport == "acp"
-    assert rewritten.model_id == mimo_model
-
-
-async def test_unrelated_native_catalog_entries_do_not_block_rewrite(endpoint):
-    pool = _Pool(_Worker(["xiaomi/mimo-auto"]))
-    rewritten = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
-    assert rewritten.model_id == f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
-
-
-async def test_public_mimo_auto_routes_to_private_runtime_identity():
-    class Bridge:
-        def __init__(self):
-            self.models = []
-
-        async def run_turn(self, *_args, model=None, **_kwargs):
-            self.models.append(model)
-            yield "data: [DONE]\n\n"
-
-    class Lease:
-        generation = 1
-        fingerprint = "test-fingerprint"
-        projection_pending = False
-
-        def __init__(self):
-            self.worker = _Worker(["mimo/mimo-auto"])
-            self.worker.bridge = Bridge()
-
-        async def release(self, *, successful_terminal=False):
-            return None
-
-    lease = Lease()
-    admitted = []
-
-    class Pool:
-        async def admit_agent(self, owner, provider_id, model_id):
-            admitted.append((owner, provider_id, model_id))
-            return lease
-
+@pytest.mark.asyncio
+async def test_run_agent_admits_exact_connection_model_and_releases_terminal_lease():
+    pool = _Pool()
     request = AgentRunRequest(
-        target=resolve_model_target("mimo://acp", "xiaomi/mimo-auto"),
+        target=_target(),
         messages=[{"role": "user", "content": "test"}],
-        session_id="public-mimo-auto",
+        session_id="managed-session",
         owner="alice",
-        supervisor=Pool(),
+        supervisor=pool,
+        turn_envelope={"root_operation_id": "root-1"},
     )
 
     events = [event async for event in run_agent(request)]
 
+    assert pool.admissions == [("alice", "pcn-managed", "model-a")]
     assert events[-1] == "data: [DONE]\n\n"
-    assert admitted == [("alice", "mimo", "mimo-auto")]
-    assert lease.worker.bridge.models == ["mimo/mimo-auto"]
+    assert pool.lease.released == [True]
+    session_id, _messages, kwargs = pool.lease.worker.bridge.turns[0]
+    assert session_id == "managed-session"
+    assert kwargs["model"] == "pcn-managed/model-a"
+    assert kwargs["turn_envelope"]["lane"] == "agent"
+    assert kwargs["turn_envelope"]["root_operation_id"] == "root-1"
 
 
-async def test_missing_endpoint_identity_fails_closed(endpoint):
-    pool = _Pool(_Worker([f"{direct_runtime_provider_id(endpoint)}/glm-5.2"]))
-    target = resolve_model_target("https://unregistered.example.test/v1/chat/completions", "glm-5.2")
-    with pytest.raises(SupervisorAdmissionError, match="persisted endpoint identity"):
-        await mimo_agent_target(target, owner="", supervisor=pool)
-
-
-async def test_no_supervisor_fails_and_acp_target_is_stable(monkeypatch, endpoint):
-    monkeypatch.setattr("src.model_dispatch._mimo_supervisor", None)
-    with pytest.raises(SupervisorAdmissionError, match="unavailable"):
-        await mimo_agent_target(_http_target(endpoint), owner="", supervisor=None)
-    acp = resolve_model_target("mimo://acp", "xiaomi/mimo-auto")
-    assert await mimo_agent_target(acp, owner="", supervisor=_Pool(_Worker([]))) is acp
-
-
-async def test_removed_kill_switch_cannot_restore_legacy_agent(monkeypatch, endpoint):
-    mimo_model = f"{direct_runtime_provider_id(endpoint)}/glm-5.2"
-    pool = _Pool(_Worker([mimo_model]))
-    monkeypatch.setattr(
-        "src.settings.get_setting",
-        lambda key, default=None: False if key == "agent_via_mimo" else default,
-    )
-    rewritten = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
-    assert rewritten.transport == "acp"
-
-
-async def test_unprobed_defaults_on_and_explicit_off_runs_without_tools(endpoint):
-    db = SessionLocal()
-    try:
-        row = db.get(ModelEndpoint, endpoint)
-        set_declared(db, row, "glm-5.2", None)
-        db.commit()
-    finally:
-        db.close()
-
-    pool = _Pool(_Worker([]))
-    default_on = await mimo_agent_target(_http_target(endpoint), owner="", supervisor=pool)
-    assert default_on.capabilities["tools"] is True
-
-    db = SessionLocal()
-    try:
-        row = db.get(ModelEndpoint, endpoint)
-        set_declared(db, row, "glm-5.2", False)
-        db.commit()
-    finally:
-        db.close()
-
-    class Bridge:
-        def __init__(self):
-            self.envelopes = []
-
-        async def run_turn(self, *_args, turn_envelope=None, **_kwargs):
-            self.envelopes.append(turn_envelope)
-            yield "data: [DONE]\n\n"
-
-    class Lease:
-        generation = 1
-        fingerprint = "test-fingerprint"
-        projection_pending = False
-
-        def __init__(self):
-            self.worker = _Worker([])
-            self.worker.bridge = Bridge()
-            self.released = False
-
-        async def release(self, *, successful_terminal=False):
-            self.released = successful_terminal
-
-    lease = Lease()
-
-    async def admit_agent(*_args, **_kwargs):
-        return lease
-
-    pool.admit_agent = admit_agent
+@pytest.mark.asyncio
+async def test_tools_false_clears_agent_tool_authority():
+    pool = _Pool()
     request = AgentRunRequest(
-        target=_http_target(endpoint),
+        target=_target(tools=False),
         messages=[{"role": "user", "content": "test"}],
         session_id="tools-off",
-        owner="",
+        owner="alice",
         supervisor=pool,
+        turn_envelope={"allowed_tools": ["bash"]},
     )
+
     events = [event async for event in run_agent(request)]
+
     assert events[-1] == "data: [DONE]\n\n"
-    assert lease.worker.bridge.envelopes[0]["lane"] == "agent"
-    assert lease.worker.bridge.envelopes[0]["allowed_tools"] == []
-    assert lease.released is True
+    envelope = pool.lease.worker.bridge.turns[0][2]["turn_envelope"]
+    assert envelope["allowed_tools"] == []
 
 
-def test_chat_routes_wiring():
-    import pathlib
+@pytest.mark.asyncio
+async def test_stream_wrapper_propagates_root_and_server_file_policy(monkeypatch):
+    import src.tool_security as tool_security
 
-    source = pathlib.Path("routes/chat_routes.py").read_text()
-    agent_at = source.index("── Agent mode: full agent loop")
-    assert "stream_agent_target(" in source[agent_at:agent_at + 4000]
-    assert "Chat mode was removed" in source
-    assert "stream_chat_target(" not in source
-    assert "_acp_target = await mimo_agent_target" not in source
-    stream_at = source.index("_chunk_source = stream_agent_target", agent_at)
-    assert "_fallback_candidates = []" in source[agent_at:stream_at], (
-        "mimo owns retries when it owns the turn"
+    monkeypatch.setattr(tool_security, "brokered_agent_file_tools", lambda owner, cwd: {"read_file"})
+    monkeypatch.setattr(
+        tool_security,
+        "unavailable_strict_agent_tools",
+        lambda owner, cwd: {"bash", "python", "write_file"},
     )
+    pool = _Pool()
+    events = [
+        event
+        async for event in stream_agent_target(
+            _target(),
+            [{"role": "user", "content": "test"}],
+            session_id="wrapped",
+            owner="alice",
+            supervisor=pool,
+            relevant_tools={"read_file", "bash"},
+            disabled_tools={"python"},
+            max_tool_calls=3,
+            turn_envelope={"root_operation_id": "root-wrapped"},
+        )
+    ]
+
+    assert events[-1] == "data: [DONE]\n\n"
+    envelope = pool.lease.worker.bridge.turns[0][2]["turn_envelope"]
+    assert envelope["root_operation_id"] == "root-wrapped"
+    assert envelope["allowed_tools"] == ["read_file"]
+    assert {"bash", "python", "write_file"}.issubset(envelope["disabled_tools"])
+    assert envelope["brokered_file_tools"] == ["read_file"]
+    assert envelope["max_tool_calls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_supervisor_returns_typed_terminal_error():
+    events = [
+        event
+        async for event in run_agent(
+            AgentRunRequest(
+                target=_target(),
+                messages=[{"role": "user", "content": "test"}],
+                session_id="missing-supervisor",
+            )
+        )
+    ]
+    assert "SUPERVISOR_UNAVAILABLE" in events[0]
+    assert events[-1] == "data: [DONE]\n\n"
+
+
+def test_mounted_chat_and_agent_loop_have_no_legacy_transport_fallback():
+    chat = Path("routes/chat_routes.py").read_text(encoding="utf-8")
+    loop = Path("src/agent_loop.py").read_text(encoding="utf-8")
+
+    assert "stream_agent_target(" in chat
+    assert 'if requested_mode not in ("", "agent", "chat", "plan"):' in chat
+    assert "stream_llm_with_fallback" not in chat
+    assert "stream_llm_with_fallback" not in loop
+    assert "llm_call_async" not in loop
+    assert "ModelEndpoint" not in loop
+    assert loop.count("stream_agent_target(") >= 2

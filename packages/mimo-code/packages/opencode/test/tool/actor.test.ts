@@ -46,19 +46,26 @@ function installMockSpawn(onSpawn?: (input: SpawnInput) => void) {
       spawn: (input: SpawnInput) =>
         Effect.gen(function* () {
           onSpawn?.(input)
-          const actorID = yield* actorReg.allocateActorID(input.sessionID, input.agentType)
-          yield* actorReg.register({
-            sessionID: input.sessionID,
-            actorID,
-            mode: input.mode,
-            parentActorID: input.parentActorID,
-            agent: input.agentType,
-            description: input.description ?? input.agentType,
-            contextMode: input.context,
-            background: input.background,
-            lifecycle: "ephemeral",
-            tools: input.tools,
-          })
+          const actorID = input.actorID ?? (yield* actorReg.allocateActorID(input.sessionID, input.agentType))
+          const existing = yield* actorReg.get(input.sessionID, actorID)
+          if (!existing) {
+            yield* actorReg.register({
+              sessionID: input.sessionID,
+              actorID,
+              mode: input.mode,
+              parentActorID: input.parentActorID,
+              agent: input.agentType,
+              description: input.description ?? input.agentType,
+              contextMode: input.context,
+              background: input.background,
+              lifecycle: "ephemeral",
+              tools: input.tools,
+              requestedModel: input.requestedModel,
+              effectiveModel: input.model,
+            })
+          } else {
+            yield* actorReg.updateModel(input.sessionID, actorID, input.requestedModel, input.model)
+          }
           yield* actorReg.updateStatus(input.sessionID, actorID, { status: "running" }).pipe(Effect.ignore)
 
           const outcome = yield* Deferred.make<AgentOutcome>()
@@ -249,7 +256,7 @@ describe("tool.actor", () => {
     ),
   )
 
-  it.live("execute resumes an existing task session from actor_id", () =>
+  it.live("execute resumes an existing actor session from actor_id", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         yield* installMockSpawn()
@@ -264,7 +271,6 @@ describe("tool.actor", () => {
               description: "inspect bug",
               prompt: "look into the cache key path",
               subagent_type: "general",
-              actor_id: "ses_missing", // v9: actor_id in run action is ignored — always creates new
             },
           },
           {
@@ -279,9 +285,21 @@ describe("tool.actor", () => {
           },
         )
 
-        // v9: run always creates a new actor under the parent session
-        expect(result.metadata.sessionId).toBe(chat.id)
-        expect(result.output).toContain("actor_id:")
+        const resumed = yield* def.execute(
+          {
+            operation: {
+              action: "run", description: "resume bug", prompt: "continue the cache review", subagent_type: "general",
+              actor_id: result.metadata.actorId,
+            },
+          },
+          {
+            sessionID: chat.id, messageID: assistant.id, agent: "build", abort: new AbortController().signal,
+            extra: {}, messages: [], metadata: () => Effect.void, ask: () => Effect.void,
+          },
+        )
+        expect(resumed.metadata.sessionId).toBe(chat.id)
+        expect(resumed.metadata.actorId).toBe(result.metadata.actorId)
+        expect(resumed.output).toContain("actor_id:")
       }),
     ),
   )
@@ -337,7 +355,7 @@ describe("tool.actor", () => {
     ),
   )
 
-  it.live("execute creates a child when actor_id does not exist", () =>
+  it.live("execute creates a child without an actor_id", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         yield* installMockSpawn()
@@ -352,7 +370,6 @@ describe("tool.actor", () => {
               description: "inspect bug",
               prompt: "look into the cache key path",
               subagent_type: "general",
-              actor_id: "ses_missing",
             },
           },
           {

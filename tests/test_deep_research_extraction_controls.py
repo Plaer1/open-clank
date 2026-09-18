@@ -140,3 +140,42 @@ async def test_planning_and_query_generation_use_configured_timeouts():
     assert "Sub-questions: one" in plan
     assert queries == ["query one", "query two"]
     assert captured == [234, 345]
+
+
+@pytest.mark.asyncio
+async def test_llm_uses_managed_research_route_without_provider_transport(monkeypatch):
+    calls = []
+
+    async def complete(**kwargs):
+        calls.append(kwargs)
+        return "<think>private scratch</think>managed answer"
+
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", complete)
+    researcher = DeepResearcher(
+        llm_endpoint="https://legacy.invalid/v1?token=must-not-forward",
+        llm_model="Research Model",
+        llm_headers={"Authorization": "Bearer must-not-forward"},
+        owner="alice",
+        session_id="rp-research1",
+        model_route_id="pmr_research",
+        grant_id="psg_research",
+    )
+
+    result = await researcher._llm(
+        [{"role": "user", "content": "question"}],
+        temperature=0.2,
+        max_tokens=321,
+        timeout=10,
+    )
+
+    assert result == "managed answer"
+    assert calls == [{
+        "owner": "alice",
+        "messages": [{"role": "user", "content": "question"}],
+        "purpose": "research",
+        "model_route_id": "pmr_research",
+        "grant_id": "psg_research",
+        "root_operation_id": "rp-research1",
+        "temperature": 0.2,
+        "max_output_tokens": 321,
+    }]

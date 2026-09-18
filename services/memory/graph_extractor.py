@@ -9,10 +9,9 @@ canonical tag vocabulary, same forgiving wire schema (small models drift —
 "src"/"dst", bare name strings for endpoints), same per-session throttle
 policy, same rule that capture NEVER depends on extraction succeeding.
 
-The LLM ride is Odysseus-native: the task endpoint (resolve_task_endpoint),
-the same background channel the legacy native extractor uses, queued
-through the sequential post-response gate so it never races the main
-completion (issue #2927).
+The LLM ride uses the owner's managed utility route and is queued through the
+sequential post-response gate so it never races the main completion (issue
+#2927).
 """
 
 import json
@@ -23,7 +22,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Canonical tag vocabulary — .futures/frankenmemory-update/tag-vocabulary.md
+
+async def _complete_text(**kwargs) -> str:
+    """Lazy import keeps graph normalization usable without app startup."""
+    from src.openclank.modality_facade import complete_text
+
+    return await complete_text(**kwargs)
+
+# Canonical tag vocabulary — .clanker/futures/frankenmemory-update/tag-vocabulary.md
 # (finalized 2026-07-08). The prompt instructs reuse-before-mint; fm's groom
 # tag_normalize op merges strays back into these.
 CANONICAL_TAGS = [
@@ -149,10 +155,15 @@ async def extract_and_upsert(
     *,
     session_id: str,
     owner: Optional[str],
-    endpoint_url: str,
-    model: str,
-    headers: Optional[dict],
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
+    headers: Optional[dict] = None,
+    root_operation_id: Optional[str] = None,
 ) -> None:
+    """Extract graph data through managed ``utility`` chat completion.
+
+    ``endpoint_url``, ``model``, and ``headers`` remain compatibility-only.
+    """
     cfg = _graph_config()
     if cfg.get("enabled") is False:
         return
@@ -165,23 +176,17 @@ async def extract_and_upsert(
         return
     state["last_extract_ms"] = time.time() * 1000
 
-    if not endpoint_url or not model:
-        logger.debug("graph extraction skipped: no task endpoint configured")
-        return
-
-    from src.llm_core import llm_call_async
-
     text = f"USER:\n{user_text}\n\nASSISTANT:\n{assistant_text}"
-    raw = await llm_call_async(
-        endpoint_url,
-        model,
-        [
+    raw = await _complete_text(
+        owner=owner or "",
+        messages=[
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": text},
         ],
+        purpose="memory",
+        root_operation_id=root_operation_id,
         temperature=0,
-        max_tokens=4096,
-        headers=headers,
+        max_output_tokens=4096,
     )
 
     payload = _parse_extraction(raw)
@@ -192,8 +197,8 @@ async def extract_and_upsert(
 
     # Usage is TRACKED, never throttled — grep target for token-burn reports.
     logger.info(
-        "graph extraction usage model=%s entities=%d edges=%d cues=%d",
-        model, len(entities), len(edges), len(cues),
+        "graph extraction usage route=memory entities=%d edges=%d cues=%d",
+        len(entities), len(edges), len(cues),
     )
     if not entities and not edges and not cues:
         return
@@ -223,10 +228,11 @@ async def capture_turn_and_enrich(
     *,
     session_id: str,
     owner: Optional[str],
-    endpoint_url: str,
-    model: str,
-    headers: Optional[dict],
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
+    headers: Optional[dict] = None,
     capture_mode: str = "candidate",
+    root_operation_id: Optional[str] = None,
 ) -> None:
     """The full per-turn pipeline mimo's capture.ts used to run child-side:
     candidate capture, then graph enrichment when the capture was accepted.
@@ -251,6 +257,7 @@ async def capture_turn_and_enrich(
             endpoint_url=endpoint_url,
             model=model,
             headers=headers,
+            root_operation_id=root_operation_id,
         )
     except Exception as exc:
         logger.warning("graph extraction failed: %s", str(exc)[:500])

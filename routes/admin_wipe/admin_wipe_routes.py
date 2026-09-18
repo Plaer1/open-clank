@@ -1,27 +1,25 @@
 """Admin Danger Zone — per-category wipes.
 
 Each endpoint is admin-only and truncates exactly one domain so the
-user can selectively reset memory / skills / notes / etc. without
+user can selectively reset skills / notes / etc. without
 nuking everything. The catch-all `chats` endpoint mirrors the
 existing /api/sessions/all so the Danger Zone speaks one URL pattern.
 
 URL shape: DELETE /api/admin/wipe/{kind}
-Kinds: chats, memory, skills, notes, tasks, documents, gallery, calendar.
+Kinds: chats, skills, notes, tasks, documents, gallery, calendar. The legacy
+memory kind is retired; use the account-owned Brain reset flow.
 """
 
-import json
 import logging
 import os
 import shutil
 from fastapi import APIRouter, HTTPException, Request
 
 from core.middleware import require_admin
-from src.auth_helpers import get_current_user
 from core.database import (
     SessionLocal,
     Session as DbSession,
     ChatMessage as DbChatMessage,
-    Memory,
     Note,
     ScheduledTask,
     TaskRun,
@@ -32,26 +30,10 @@ from core.database import (
     CalendarEvent,
     CalendarCal,
 )
-from src.constants import DATA_DIR, SKILLS_DIR, SKILLS_FILE, GALLERY_DIR, GALLERY_UPLOADS_DIR
+from src.constants import SKILLS_DIR, SKILLS_FILE, GALLERY_DIR, GALLERY_UPLOADS_DIR
+from src.generated_images import GENERATED_IMAGE_DIR, resolve_gallery_image_path
 
 logger = logging.getLogger(__name__)
-
-
-def _wipe_memory_files():
-    """Blank memory.json + drop the per-owner tidy-state sidecar so the
-    next audit doesn't try to diff against gone memories."""
-    for name in ("memory.json", "memory_tidy_state.json"):
-        p = os.path.join(DATA_DIR, name)
-        if not os.path.exists(p):
-            continue
-        try:
-            if name == "memory.json":
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump([], f)
-            else:
-                os.remove(p)
-        except OSError as e:
-            logger.warning(f"Could not reset {name}: {e}")
 
 
 def _rmtree_quiet(path: str):
@@ -74,18 +56,38 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
         require_admin(request)
         kind = (kind or "").strip().lower()
 
+        if kind == "memory":
+            raise HTTPException(
+                410,
+                "The admin Memory wipe is retired; open Brain settings to preview and confirm an account-owned reset.",
+            )
+
         db = SessionLocal()
         try:
             if kind == "chats":
-                session_ids = {row[0] for row in db.query(DbSession.id).all()}
+                session_rows = db.query(DbSession.id, DbSession.owner).all()
+                session_ids = {row[0] for row in session_rows}
+                session_owners = {
+                    str(row[0]): str(row[1] or "")
+                    for row in session_rows
+                }
                 from src.openclank.transcript_projection import (
                     list_projections,
                     purge_execution_projection,
                 )
                 supervisor = getattr(request.app.state, "mimo_supervisor", None)
-                session_ids.update(
-                    row["odysseus_session_id"] for row in list_projections()
-                )
+                projections = list_projections()
+                session_ids.update(row["odysseus_session_id"] for row in projections)
+                for row in projections:
+                    session_owners.setdefault(
+                        str(row["odysseus_session_id"]),
+                        str(row.get("owner") or ""),
+                    )
+                for session_id, session in session_manager.sessions.items():
+                    session_owners.setdefault(
+                        str(session_id),
+                        str(getattr(session, "owner", None) or ""),
+                    )
                 bridge = getattr(supervisor, "bridge", None) if supervisor else None
                 if bridge is not None:
                     session_ids.update(bridge.mapped_sessions())
@@ -94,6 +96,13 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
                         await purge_execution_projection(supervisor, session_id)
                     except RuntimeError as exc:
                         raise HTTPException(503, str(exc)) from exc
+                from src import bg_jobs
+
+                for session_id, session_owner in session_owners.items():
+                    bg_jobs.delete_for_session_owner(
+                        session_id=session_id,
+                        owner=session_owner,
+                    )
                 count = db.query(DbSession).count()
                 db.query(DbChatMessage).delete()
                 db.query(DbSession).delete()
@@ -103,33 +112,6 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
                 except Exception:
                     pass
                 return {"status": "deleted", "kind": kind, "count": count}
-
-            if kind == "memory":
-                owner = get_current_user(request) or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
-                try:
-                    provider_result = await memory_provider.purge_owner(owner=owner)
-                except Exception as exc:
-                    raise HTTPException(503, f"Active memory provider purge failed: {exc}") from exc
-                count = db.query(Memory).count()
-                db.query(Memory).delete()
-                db.commit()
-                _wipe_memory_files()
-                # Drop the vector store too so semantic search doesn't
-                # return ghosts. Lazy import — chromadb may not be
-                # initialised in every deployment.
-                try:
-                    from src.memory_vector import get_memory_vector_store
-                    mv = get_memory_vector_store()
-                    if mv and hasattr(mv, "clear"):
-                        mv.clear()
-                except Exception as e:
-                    logger.info(f"Memory vector clear skipped: {e}")
-                return {
-                    "status": "deleted",
-                    "kind": kind,
-                    "count": count,
-                    "provider": provider_result,
-                }
 
             if kind == "skills":
                 # Skills live as SKILL.md files under data/skills/. Drop
@@ -174,10 +156,32 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "gallery":
+                filenames = {
+                    str(row[0])
+                    for row in db.query(GalleryImage.filename).all()
+                    if row[0]
+                }
                 count = db.query(GalleryImage).count() + db.query(GalleryAlbum).count()
                 db.query(GalleryImage).delete()
                 db.query(GalleryAlbum).delete()
                 db.commit()
+                # Metadata proves the exact byte candidates.  Remove them only
+                # after the database wipe commits; unknown/legacy files with no
+                # row remain quarantined and inaccessible rather than becoming
+                # an unbounded recursive-delete target.
+                for filename in filenames:
+                    try:
+                        resolve_gallery_image_path(
+                            filename,
+                            root=GENERATED_IMAGE_DIR,
+                            require_exists=True,
+                        ).unlink()
+                    except (HTTPException, OSError) as exc:
+                        logger.warning(
+                            "Could not remove wiped Gallery image %r: %s",
+                            filename,
+                            exc,
+                        )
                 # Also drop the upload dir so disk doesn't keep orphans.
                 _rmtree_quiet(GALLERY_DIR)
                 _rmtree_quiet(GALLERY_UPLOADS_DIR)

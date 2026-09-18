@@ -6,3 +6,17 @@
 6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/console/app/package.json:generic-api-key:9
 6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1082
 6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1089
+
+# The same exact fixtures under directory scans, whose fingerprints do not
+# carry a Git commit prefix.
+packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
+packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
+# The same synthetic assignments after the current working-tree test expansion.
+packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:118
+packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:151
+packages/mimo-code/packages/console/app/package.json:generic-api-key:9
+packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1082
+packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1089
+
+# Header-only privacy classifier fixture; it contains no private-key body.
+mcp_servers/frankenmemory/crates/fm-core/src/privacy.rs:private-key:266

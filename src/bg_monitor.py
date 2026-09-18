@@ -17,6 +17,7 @@ import os
 import uuid
 
 from src import bg_jobs
+from src.shell_policy import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -29,21 +30,45 @@ _MONITOR_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 _FOLLOWUP_TIMEOUT_S = 15 * 60
 
 
-async def _drain_agent(sess, messages):
+async def _drain_agent(
+    sess,
+    messages,
+    *,
+    workspace: str,
+    root_operation_id: str,
+):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
     saves, so the frontend rebuilds them as standard agent-thread tool cards."""
-    from src.endpoint_resolver import resolve_model_target
+    from src.endpoint_resolver import ResolvedModelTarget
     from src.model_dispatch import stream_agent_target
+    from src.openclank.chat_routing import (
+        MANAGED_ENGINE_PUBLIC_URL,
+        resolve_chat_route,
+    )
 
     full = ""
     tool_events = []
     round_num = 1
-    target = resolve_model_target(
-        sess.endpoint_url,
-        sess.model,
-        getattr(sess, "headers", None),
+    route = resolve_chat_route(
+        owner=getattr(sess, "owner", None),
         endpoint_id=getattr(sess, "endpoint_id", None),
+        model_id=getattr(sess, "model", None),
+        model_route_id=getattr(sess, "provider_model_route_id", None),
+    )
+    capabilities = dict(route.capabilities or {})
+    capabilities.setdefault("chat", True)
+    capabilities.setdefault("stream", True)
+    capabilities.setdefault("tools", True)
+    target = ResolvedModelTarget(
+        transport="acp",
+        endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+        model_id=route.runtime_model,
+        endpoint_id=route.connection_id,
+        provider_id=route.connection_id,
+        headers={},
+        capabilities=capabilities,
+        lifecycle="ephemeral",
     )
     async for chunk in stream_agent_target(
         target,
@@ -52,8 +77,14 @@ async def _drain_agent(sess, messages):
         session_id=sess.id,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,
         owner=getattr(sess, "owner", None),
-        cwd=getattr(sess, "workspace", None),
+        cwd=workspace,
         workload="background",
+        turn_envelope={
+            "root_operation_id": root_operation_id,
+            "provider_model_route_id": route.model_route_id,
+            "provider_grant_id": route.provider_grant_id,
+            "interaction_policy": "fail_on_interaction",
+        },
     ):
         if chunk.startswith("event: error"):
             data_line = next((line[5:].strip() for line in chunk.splitlines() if line.startswith("data:")), "")
@@ -93,6 +124,15 @@ async def _drain_agent(sess, messages):
     return full, tool_events
 
 
+def _session_matches_job(sess, rec: dict) -> bool:
+    return (
+        str(getattr(sess, "id", "") or "") == str(rec.get("session_id") or "")
+        and bool(str(getattr(sess, "owner", "") or ""))
+        and str(getattr(sess, "owner", "") or "") == str(rec.get("owner") or "")
+        and bool(str(rec.get("workspace") or ""))
+    )
+
+
 async def _run_followup(rec: dict) -> bool:
     """Re-invoke the agent in the job's session with the result. Returns True
     if the follow-up completed (or there's nothing to do) — i.e. it's safe to
@@ -108,6 +148,13 @@ async def _run_followup(rec: dict) -> bool:
         # Session was deleted — nothing to continue. Consider it handled so we
         # don't retry forever.
         logger.info("bg-followup: session %s gone for job %s — skipping", rec.get("session_id"), rec.get("id"))
+        return True
+    if not _session_matches_job(sess, rec):
+        logger.warning(
+            "bg-followup: scope mismatch for session %s job %s — skipping",
+            rec.get("session_id"),
+            rec.get("id"),
+        )
         return True
 
     # Crash-safe idempotency: persistence may have succeeded immediately before
@@ -140,7 +187,12 @@ async def _run_followup(rec: dict) -> bool:
     context = sess.get_context_messages()
     context.append({"role": "user", "content": inject})
 
-    full, tool_events = await _drain_agent(sess, context)
+    full, tool_events = await _drain_agent(
+        sess,
+        context,
+        workspace=str(rec["workspace"]),
+        root_operation_id=f"bg-followup:{rec['id']}",
+    )
     if not full.strip() and not tool_events:
         raise RuntimeError("Agent follow-up ended without a result")
 
@@ -180,12 +232,18 @@ async def _loop():
                             rec["id"], claim_token, "Session is busy", count_attempt=False,
                         )
                 except Exception as e:
-                    state = bg_jobs.fail_followup(rec["id"], claim_token, str(e))
-                    logger.warning("bg-followup failed for %s (%s): %s", rec.get("id"), state, e)
+                    safe_error = redact_text(e)
+                    state = bg_jobs.fail_followup(rec["id"], claim_token, safe_error)
+                    logger.warning(
+                        "bg-followup failed for %s (%s): %s",
+                        rec.get("id"),
+                        state,
+                        safe_error,
+                    )
                     if state == "failed":
-                        await _persist_terminal_failure(rec, str(e))
+                        await _persist_terminal_failure(rec, safe_error)
         except Exception as e:
-            logger.warning("bg-monitor tick error: %s", e)
+            logger.warning("bg-monitor tick error: %s", redact_text(e))
         await asyncio.sleep(POLL_INTERVAL_S)
 
 
@@ -196,7 +254,7 @@ async def _persist_terminal_failure(rec: dict, error: str) -> None:
 
     sm = get_session_manager()
     sess = sm.get_session(rec.get("session_id")) if sm else None
-    if not sess:
+    if not sess or not _session_matches_job(sess, rec):
         return
     for message in getattr(sess, "history", ()):
         metadata = getattr(message, "metadata", None)
@@ -204,9 +262,10 @@ async def _persist_terminal_failure(rec: dict, error: str) -> None:
             metadata = message.get("metadata")
         if isinstance(metadata, dict) and metadata.get("bg_followup_failure") == rec.get("id"):
             return
+    safe_error = redact_text(error)
     sm.add_message(sess.id, ChatMessage(
         "assistant",
-        f"Background job {rec.get('id')} finished, but its automatic Agent continuation failed: {error}",
+        f"Background job {rec.get('id')} finished, but its automatic Agent continuation failed: {safe_error}",
         metadata={"bg_followup_failure": rec.get("id"), "status": "error"},
     ))
     sm.save_sessions()

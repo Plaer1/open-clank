@@ -60,14 +60,16 @@ def test_manage_session_list_delegates_to_list_sessions(monkeypatch):
     assert res == {"results": "ok"}
 
 
-def test_create_session_reaches_uuid_and_creates(monkeypatch):
-    # Regression for the missing `import uuid` (PR review): create_session must
-    # get past _resolve_model and mint a session id without NameError.
+def test_create_session_uses_normalized_route_and_reaches_uuid(monkeypatch):
+    # Model selection returns stable public/route identities and never provider
+    # transport or credential material.
     monkeypatch.setattr(
-        st,
-        "_resolve_model_target",
-        lambda spec, owner=None: SimpleNamespace(
-            endpoint_url="http://x", model_id="model-x", headers={}, endpoint_id="endpoint-x",
+        "src.openclank.chat_routing.resolve_chat_model_spec",
+        lambda **kwargs: SimpleNamespace(
+            provider_model_id="model-x",
+            public_endpoint_id="connection-x",
+            model_route_id="route-x",
+            provider_grant_id=None,
         ),
     )
     created = {}
@@ -84,6 +86,9 @@ def test_create_session_reaches_uuid_and_creates(monkeypatch):
     assert res.get("name") == "My Chat" and res.get("model") == "model-x"
     assert isinstance(res.get("session_id"), str) and res["session_id"]
     assert created.get("name") == "My Chat"  # the uuid-minted id reached the manager
+    assert created.get("endpoint_url") == "openclank://engine"
+    assert created.get("endpoint_id") == "connection-x"
+    assert created.get("provider_model_route_id") == "route-x"
 
 
 def test_manage_session_fork_reaches_uuid(monkeypatch):

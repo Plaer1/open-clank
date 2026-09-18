@@ -5,10 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 I18N = ROOT / "static" / "i18n"
-LOCALES = (
-    "en", "zh-Hans", "ja", "ko", "es", "hi", "ar", "ru", "pt", "id",
-    "pa-Guru", "bn", "sw", "ur", "fa",
-)
+REGISTRY = json.loads((I18N / "registry.json").read_text(encoding="utf-8"))
+LOCALES = tuple(REGISTRY["locales"])
 PLACEHOLDERS = re.compile(r"\{(?:[A-Za-z_][A-Za-z0-9_]*|\d+)\}")
 BIDI_CONTROLS = re.compile("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
@@ -20,16 +18,25 @@ def load(name):
 def test_registry_has_exact_supported_locale_set_and_rtl_metadata():
     registry = load("registry.json")
     assert registry["default_locale"] == "en"
-    assert tuple(registry["locales"]) == LOCALES
-    assert {key for key, value in registry["locales"].items() if value["dir"] == "rtl"} == {"ar", "ur", "fa"}
-    assert {"zh-TW", "zh-HK", "zh-MO", "zh-Hant", "pa-PK", "pa-Arab"} <= set(registry["do_not_auto_map"])
+    assert len(LOCALES) == 68
+    assert {key for key, value in registry["locales"].items() if value["dir"] == "rtl"} == {"ar", "ur", "fa", "pa-Arab", "dv"}
+    assert registry["aliases"]["zh-TW"] == "zh-Hant"
+    assert registry["aliases"]["pa-PK"] == "pa-Arab"
+    assert registry["aliases"]["br"] == "pt-BR"
+    assert registry["do_not_auto_map"] == []
 
 
 def test_every_catalog_has_parity_safe_placeholders_and_locked_brands():
     english = load("en.json")
     brands = load("brands.json")["brands"]
     for locale in LOCALES:
-        catalog = load(f"{locale}.json")
+        descriptor = REGISTRY["locales"][locale]
+        catalog_name = descriptor.get("catalog", locale)
+        # Catalog expansion is deliberately staged: the registry exposes every
+        # audited language while untranslated entries safely render English.
+        if locale != "en" and catalog_name == "en":
+            continue
+        catalog = load(f"{catalog_name}.json")
         assert catalog.keys() == english.keys(), locale
         for key, source in english.items():
             target = catalog[key]
@@ -53,8 +60,9 @@ def test_all_served_html_surfaces_load_shared_runtime_and_settings_has_selector(
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
     assert 'id="set-interface-language"' in index
     assert 'data-language-select' in index
-    for locale in LOCALES:
-        assert f'value="{locale}"' in index
+    # The initial HTML keeps the shipped catalogs small; i18n.js hydrates every
+    # canonical registry entry, including staged English-fallback locales.
+    assert "Object.entries(registry.locales)" in (ROOT / "static/js/i18n.js").read_text(encoding="utf-8")
 
 
 def test_runtime_preserves_user_content_and_requires_consent_before_browser_switch():
@@ -69,5 +77,9 @@ def test_runtime_preserves_user_content_and_requires_consent_before_browser_swit
 def test_service_worker_precaches_runtime_and_all_catalogs():
     worker = (ROOT / "static/sw.js").read_text(encoding="utf-8")
     assert "/static/js/i18n.js" in worker
-    for locale in LOCALES:
-        assert f"/static/i18n/{locale}.json" in worker
+    assert "/static/js/custom-context-menu.js" in worker
+    for locale, descriptor in REGISTRY["locales"].items():
+        catalog_name = descriptor.get("catalog", locale)
+        if locale != "en" and catalog_name == "en":
+            continue
+        assert f"/static/i18n/{catalog_name}.json" in worker

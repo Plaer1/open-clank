@@ -60,4 +60,4 @@ def test_get_or_404_album_enforces_owner():
     # Guard the precedent we rely on: the helper rejects another user's album.
     fns = _function_sources()
     helper = fns["_get_or_404_album"]
-    assert "album.owner != user" in helper
+    assert "GalleryAlbum.owner == user" in helper

@@ -292,6 +292,9 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { file_path: path.join(dir, "large.json") })
       expect(result.metadata.truncated).toBe(true)
+      expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+      expect(result.metadata.file.truncation_reason).toBe("byte_limit")
+      expect(result.metadata.file.page.unit).toBe("line")
       expect(result.output).toContain("Output capped at")
       expect(result.output).toContain("Use offset=")
     }),
@@ -387,6 +390,8 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { file_path: path.join(dir, "dir"), offset: 6, limit: 5 })
       expect(result.metadata.truncated).toBe(false)
+      expect(result.metadata.file.operation).toBe("list")
+      expect(result.metadata.file.items).toHaveLength(5)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
     }),
   )
@@ -413,6 +418,9 @@ describe("tool.read truncation", () => {
 
       const result = yield* exec(dir, { file_path: path.join(dir, "image.png") })
       expect(result.metadata.truncated).toBe(false)
+      expect(result.metadata.fingerprint).toStartWith("sha256:")
+      expect(result.metadata.file.kind).toBe("image")
+      expect(result.metadata.file.fingerprint).toBe(result.metadata.fingerprint ?? null)
       expect(result.attachments).toBeDefined()
       expect(result.attachments?.length).toBe(1)
       expect(result.attachments?.[0]).not.toHaveProperty("id")
@@ -487,24 +495,54 @@ describe("tool.read loaded instructions", () => {
 })
 
 describe("tool.read binary detection", () => {
-  it.live("rejects text extension files with null bytes", () =>
+  it.live("returns a typed result for text extension files with null bytes", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const bytes = Buffer.from([0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x77, 0x6f, 0x72, 0x6c, 0x64])
       yield* put(path.join(dir, "null-byte.txt"), bytes)
 
-      const err = yield* fail(dir, { file_path: path.join(dir, "null-byte.txt") })
-      expect(err.message).toContain("Cannot read binary file")
+      const result = yield* exec(dir, { file_path: path.join(dir, "null-byte.txt") })
+      expect(result.output).toContain("Cannot read binary file")
+      expect(result.metadata.file.kind).toBe("binary")
+      expect(result.metadata.file.page.returned).toBe(0)
+      expect(result.metadata.file.diagnostics).toEqual([
+        {
+          code: "unsupported_media",
+          message: "The read tool accepts supported text, image, and PDF files only.",
+        },
+      ])
     }),
   )
 
-  it.live("rejects known binary extensions", () =>
+  it.live("returns a typed result for known binary extensions", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       yield* put(path.join(dir, "module.wasm"), "not really wasm")
 
-      const err = yield* fail(dir, { file_path: path.join(dir, "module.wasm") })
-      expect(err.message).toContain("Cannot read binary file")
+      const result = yield* exec(dir, { file_path: path.join(dir, "module.wasm") })
+      expect(result.output).toContain("Cannot read binary file")
+      expect(result.metadata.file.kind).toBe("binary")
+      expect(result.metadata.file.diagnostics[0]?.code).toBe("unsupported_media")
+    }),
+  )
+})
+
+describe("tool.read control data", () => {
+  it.live("rejects reads from Open Clank control data inside the workspace", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const control = path.join(dir, "data")
+      const target = path.join(control, "app.db")
+      yield* put(target, "private control state")
+      const previous = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+      process.env.OPEN_CLANK_CONTROL_DATA_DIR = control
+      try {
+        const err = yield* fail(dir, { file_path: target })
+        expect(err.message).toContain("control data")
+      } finally {
+        if (previous === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+        else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previous
+      }
     }),
   )
 })

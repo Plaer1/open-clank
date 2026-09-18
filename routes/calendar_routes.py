@@ -1521,8 +1521,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         Uses the "utility" endpoint (small / fast model) to keep latency low.
         """
         owner = _require_user(request)
-        from src.endpoint_resolver import resolve_endpoint
-        from src.llm_core import llm_call_async
+        from src.openclank.modality_facade import complete_text
         from src.text_helpers import strip_think
         import json as _json
         import re as _re
@@ -1545,12 +1544,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             set_user_tz_offset(body.get("tz_offset"))
         if tz_hint:
             set_user_tz_name(tz_hint)
-
-        url, model, headers = resolve_endpoint("utility", owner=owner or None)
-        if not url:
-            url, model, headers = resolve_endpoint("default", owner=owner or None)
-        if not url or not model:
-            return {"ok": False, "error": "No LLM endpoint configured"}
 
         now = now_user_local()
         now_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
@@ -1579,17 +1572,23 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         )
 
         try:
-            raw = await llm_call_async(
-                url=url, model=model,
+            import hashlib
+
+            raw = await complete_text(
+                owner=owner or "local-installation",
+                purpose="utility",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
-                headers=headers,
                 temperature=0.0,
-                max_tokens=512,
-                timeout=20,
-                owner=owner or None,
+                max_output_tokens=512,
+                idempotency_key=(
+                    "calendar-quick-parse-"
+                    + hashlib.sha256(
+                        f"{now_iso}\0{text}".encode("utf-8")
+                    ).hexdigest()[:32]
+                ),
             )
         except Exception as e:
             return {"ok": False, "error": f"LLM call failed: {e}"}

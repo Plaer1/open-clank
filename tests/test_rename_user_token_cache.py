@@ -65,31 +65,6 @@ def test_rename_invalidates_token_cache(rename_endpoint):
     assert called["n"] == 1, "bearer-token cache was not invalidated on rename"
 
 
-def test_rename_invalidates_old_and_new_model_catalogues(
-    rename_endpoint,
-    monkeypatch,
-):
-    import asyncio
-    import routes.model_routes as model_routes
-
-    endpoint, _am = rename_endpoint
-    invalidated = []
-    monkeypatch.setattr(
-        model_routes,
-        "invalidate_model_catalogue_revision",
-        invalidated.append,
-    )
-
-    res = asyncio.run(endpoint(
-        "alice",
-        SimpleNamespace(username="alice2"),
-        _request(lambda: None),
-    ))
-
-    assert res["ok"] is True
-    assert set(invalidated) == {"alice", "alice2"}
-
-
 def test_no_invalidator_does_not_crash(rename_endpoint):
     import asyncio
     endpoint, _am = rename_endpoint

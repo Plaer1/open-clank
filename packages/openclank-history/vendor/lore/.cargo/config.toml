@@ -1,0 +1,136 @@
+[build]
+# NOTE: a per-target [target.<triple>] rustflags table fully REPLACES this
+# [build] list rather than merging with it. The lint flags (-W...) below only
+# affect warnings and can be safely dropped per-target, but the non-warning
+# values here — the --cfg flags the code compiles against (tokio_unstable,
+# uuid_unstable) and the codegen -C flags — MUST be duplicated in any
+# [target.*] block, or that target builds without them.
+rustflags = [
+    # Needed for tokio metrics
+    "--cfg", "tokio_unstable",
+    "-C", "force-unwind-tables=yes",
+    "-C", "force-frame-pointers=yes",
+    "-Wclippy::all",
+    # "-Wclippy::cargo", # TODO(raghav.narula) Enable after duplicate dependencies fixed
+    # "-Wclippy::undocumented_unsafe_blocks", # TODO(raghav.narula) enable in follow up
+    "-Wclippy::checked_conversions",
+    "-Wclippy::dbg_macro",
+    "-Wclippy::debug_assert_with_mut_call",
+    "-Wclippy::doc_markdown",
+    "-Wclippy::empty_enums",
+    "-Wclippy::enum_glob_use",
+    "-Wclippy::exit",
+    "-Wclippy::expl_impl_clone_on_copy",
+    "-Wclippy::explicit_deref_methods",
+    "-Wclippy::explicit_into_iter_loop",
+    "-Wclippy::fallible_impl_from",
+    "-Wclippy::filter_map_next",
+    "-Wclippy::flat_map_option",
+    "-Wclippy::float_cmp_const",
+    "-Wclippy::fn_params_excessive_bools",
+    "-Wclippy::from_iter_instead_of_collect",
+    "-Wclippy::implicit_clone",
+    "-Wclippy::imprecise_flops",
+    "-Wclippy::inefficient_to_string",
+    "-Wclippy::invalid_upcast_comparisons",
+    "-Wclippy::large_digit_groups",
+    "-Wclippy::large_futures",
+    "-Wclippy::large_stack_arrays",
+    "-Wclippy::large_types_passed_by_value",
+    "-Wclippy::linkedlist",
+    "-Wclippy::lossy_float_literal",
+    "-Wclippy::macro_use_imports",
+    "-Wclippy::manual_ok_or",
+    "-Wclippy::map_err_ignore",
+    "-Wclippy::map_unwrap_or",
+    "-Wclippy::match_same_arms",
+    "-Wclippy::match_wild_err_arm",
+    "-Wclippy::match_wildcard_for_single_variants",
+    "-Wclippy::mem_forget",
+    "-Wclippy::mut_mut",
+    "-Wclippy::mutex_integer",
+    "-Wclippy::needless_continue",
+    "-Wclippy::needless_for_each",
+    "-Wclippy::option_option",
+    "-Wclippy::path_buf_push_overwrite",
+    "-Wclippy::ptr_as_ptr",
+    "-Wclippy::rc_mutex",
+    "-Wclippy::ref_option_ref",
+    "-Wclippy::rest_pat_in_fully_bound_structs",
+    "-Wclippy::same_functions_in_if_condition",
+    "-Wclippy::semicolon_if_nothing_returned",
+    "-Wclippy::single_match_else",
+    "-Wclippy::string_add_assign",
+    "-Wclippy::string_add",
+    "-Wclippy::string_lit_as_bytes",
+    "-Wclippy::todo",
+    "-Wclippy::trait_duplication_in_bounds",
+    "-Wclippy::unimplemented",
+    "-Wclippy::uninlined_format_args",
+    "-Wclippy::unnested_or_patterns",
+    "-Wclippy::unused_async",
+    "-Wclippy::unused_self",
+    "-Wclippy::verbose_file_reads",
+    "-Wclippy::zero_sized_map_values",
+    "-Wfuture_incompatible",
+    "-Wnonstandard_style",
+    "-Wrust_2018_idioms",
+    # allows uuid IntoBytes/FromBytes unstable feature
+    "--cfg", "uuid_unstable"
+]
+rustdocflags = ["--cfg", "tokio_unstable"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "-C", "force-unwind-tables=yes",
+    "-C", "force-frame-pointers=yes",
+    "-C", "target-feature=+crt-static",
+    # For Windows builds, always split debuginfo
+    "-C", "split-debuginfo=packed",
+    # allows uuid IntoBytes/FromBytes unstable feature
+    "--cfg", "uuid_unstable"
+]
+# Using lld on Windows targets has two issues that needs to be resolved
+# - incompatible .debug sections in objects and >4GiB pdb
+# - ignoring +crt-static and linking dynamically against MSVC runtime
+#  The rust flags for this would be ["-C", "linker-flavor=lld-link"]
+
+[target.aarch64-unknown-linux-gnu]
+# Target Graviton3+
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "-C", "force-unwind-tables=yes",
+    "-C", "force-frame-pointers=yes",
+    "-C", "target-cpu=neoverse-512tvb",
+    # Leave debug symbols in the binary for now, we want these in place for the server binary, but still split them via
+    # package-cli.sh for CLI binaries.
+    "-C", "split-debuginfo=off",
+    # allows uuid IntoBytes/FromBytes unstable feature
+    "--cfg", "uuid_unstable"
+]
+
+# macOS: split-debuginfo=packed emits a separate .dSYM bundle (runs dsymutil);
+# the default "unpacked" leaves DWARF in the .o files and ships no .dSYM. Both
+# blocks repeat the [build] non-warning flags (see the note there).
+[target.x86_64-apple-darwin]
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "-C", "force-unwind-tables=yes",
+    "-C", "force-frame-pointers=yes",
+    "-C", "split-debuginfo=packed",
+    "--cfg", "uuid_unstable"
+]
+
+# Apple Silicon — the actual macOS build target.
+[target.aarch64-apple-darwin]
+rustflags = [
+    "--cfg", "tokio_unstable",
+    "-C", "force-unwind-tables=yes",
+    "-C", "force-frame-pointers=yes",
+    "-C", "split-debuginfo=packed",
+    "--cfg", "uuid_unstable"
+]
+
+[registry]
+global-credential-providers = ["cargo:token"]

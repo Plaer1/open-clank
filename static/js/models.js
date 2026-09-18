@@ -18,6 +18,11 @@ import {
   modelStateKey,
   resolveStoredModelChoices,
 } from './modelCatalog.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
@@ -274,7 +279,14 @@ export async function refreshModels(force = false, opts = {}) {
     if (_cachedItems && _cachedItems.length > 0) {
       _cachedItems.forEach(item => {
         const cat = item.category === 'local' ? 'local' : 'api';
-        const epName = item.endpoint_name || 'Unknown';
+        const provider = providerDisplayName(item.provider_display_name || item.provider);
+        const sharedSecondary = sharedSecondaryLabel({
+          label: item.share_label,
+          owner: item.shared_by,
+        });
+        const epName = item.shared === true
+          ? [sharedProviderLabel(provider), sharedSecondary].filter(Boolean).join(' · ')
+          : (item.endpoint_name || 'Unknown');
         const epGroup = `${item.endpoint_id || item.url || epName}\u001f${epName}`;
         const isOffline = !!item.offline;
         if (!groups[cat][epGroup]) groups[cat][epGroup] = [];
@@ -665,9 +677,7 @@ export async function refreshModels(force = false, opts = {}) {
   }
 }
 
-/**
- * Refresh and display OpenAI providers
- */
+/** Refresh the optional OpenAI-family selector from the unified route catalog. */
 export async function refreshProviders() {
   const sel = document.getElementById('openai-model');
   if (!sel) return; // Exit if element doesn't exist
@@ -675,24 +685,29 @@ export async function refreshProviders() {
   sel.innerHTML = '<option disabled>Loading providers…</option>';
 
   try {
-    const res = await fetch(`${API_BASE}/api/providers`);
-    const data = await res.json();
-    const openai = (data.providers || []).find(p => p.provider === 'openai');
+    const [connectionsRes, modelsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/v1/providers/connections`, { credentials: 'same-origin' }),
+      fetch(`${API_BASE}/api/v1/providers/models`, { credentials: 'same-origin' }),
+    ]);
+    if (!connectionsRes.ok || !modelsRes.ok) throw new Error('Provider catalog unavailable');
+    const connections = (await connectionsRes.json()).connections || [];
+    const routes = (await modelsRes.json()).models || [];
+    const connectionIds = new Set(connections.filter(item => item.family_id === 'openai' && item.enabled !== false).map(item => item.id));
+    const models = routes.filter(item => connectionIds.has(item.connection_id) && item.enabled !== false);
 
     sel.innerHTML = '';
 
-    if (openai) {
-      const models = (openai.items?.[0]?.models) || [];
-      sortModelIds(models).forEach(m => {
+    if (models.length) {
+      models.sort((left, right) => String(left.display_name || left.model_id).localeCompare(String(right.display_name || right.model_id))).forEach(model => {
         const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
+        opt.value = model.id;
+        opt.textContent = model.display_name || model.model_id;
         sel.appendChild(opt);
       });
     } else {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = '(OPENAI_API_KEY not set on server)';
+      opt.textContent = '(No enabled OpenAI model route)';
       sel.appendChild(opt);
     }
   } catch (e) {

@@ -4,6 +4,11 @@ import pytest
 from src.embeddings import EmbeddingClient
 
 
+pytestmark = pytest.mark.skip(
+    reason="direct HTTP embedding retries were retired; MiMo owns provider attempts"
+)
+
+
 class _FakeEmbeddingHttpClient:
     def __init__(self, handler):
         self.handler = handler

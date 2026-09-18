@@ -191,8 +191,8 @@ class DeepResearcher:
 
     def __init__(
         self,
-        llm_endpoint: str,
-        llm_model: str,
+        llm_endpoint: str = "",
+        llm_model: str = "",
         llm_headers: Optional[Dict] = None,
         max_rounds: int = 8,
         max_time: int = 300,
@@ -211,14 +211,24 @@ class DeepResearcher:
         category: Optional[str] = None,
         owner: Optional[str] = None,
         session_id: Optional[str] = None,
+        model_route_id: Optional[str] = None,
+        grant_id: Optional[str] = None,
+        root_operation_id: Optional[str] = None,
+        purpose: str = "research",
     ):
-        self.llm_endpoint = llm_endpoint
-        self.llm_model = llm_model
-        self.llm_headers = llm_headers
+        # ``llm_endpoint`` and ``llm_headers`` remain accepted for compatibility
+        # with older callers, but provider transport authority ends at the
+        # managed operation boundary.  Do not retain or forward either value.
+        del llm_endpoint, llm_headers
+        self.llm_model = llm_model or "managed research route"
         self.search_provider_override = search_provider
         self.category = category
         self.owner = owner
         self.session_id = session_id
+        self.model_route_id = model_route_id
+        self.grant_id = grant_id
+        self.root_operation_id = root_operation_id or session_id
+        self.purpose = str(purpose or "research").strip().lower()
         self.max_rounds = max_rounds
         self.max_time = max_time
         self.max_urls_per_round = max_urls_per_round
@@ -384,19 +394,20 @@ class DeepResearcher:
     # ------------------------------------------------------------------
     async def _llm(self, messages: List[Dict], temperature: float = 0.3,
                    max_tokens: int = 4096, timeout: int = 60) -> str:
-        """Call the LLM asynchronously and strip thinking tags."""
-        from src.llm_core import llm_call_async
-        response = await llm_call_async(
-            url=self.llm_endpoint,
-            model=self.llm_model,
+        """Run a managed, tool-free completion and strip thinking tags."""
+        from src.openclank.modality_facade import complete_text
+
+        completion = complete_text(
+            owner=self.owner or "",
             messages=messages,
+            purpose=self.purpose,
+            model_route_id=self.model_route_id,
+            grant_id=self.grant_id,
+            root_operation_id=self.root_operation_id,
             temperature=temperature,
-            max_tokens=max_tokens,
-            headers=self.llm_headers,
-            timeout=timeout,
-            owner=self.owner,
-            session_id=self.session_id,
+            max_output_tokens=max_tokens,
         )
+        response = await asyncio.wait_for(completion, timeout=timeout)
         return strip_thinking(response)
 
     # ------------------------------------------------------------------

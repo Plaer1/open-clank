@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,285 @@ def _route_endpoint(router, path: str, method: str):
         if route.path == path and method in getattr(route, "methods", set()):
             return route.endpoint
     raise AssertionError(f"route not found: {method} {path}")
+
+
+def test_email_model_inference_has_no_direct_provider_execution_paths():
+    for path in (Path("routes/email_routes.py"), Path("mcp_servers/email_server.py")):
+        source = path.read_text(encoding="utf-8")
+        assert "llm_call_async" not in source
+        assert "resolve_endpoint" not in source
+        assert "resolve_utility_fallback_candidates" not in source
+        assert "resolve_chat_fallback_candidates" not in source
+        assert "from src.openclank.modality_facade import complete_text" in source
+
+
+@pytest.mark.asyncio
+async def test_email_summary_uses_owner_scoped_managed_utility_completion(monkeypatch):
+    import routes.email_routes as email_routes
+    from src.openclank import modality_facade
+
+    calls = []
+
+    async def complete_text(**kwargs):
+        calls.append(kwargs)
+        return "<<<SUMMARY>>>\n- Reply by Friday\n<<<END>>>"
+
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+    monkeypatch.setattr(
+        email_routes,
+        "_managed_email_model_label",
+        lambda owner: "managed-test-model",
+    )
+
+    summarize = _route_endpoint(
+        email_routes.setup_email_routes(),
+        "/api/email/summarize",
+        "POST",
+    )
+    result = await summarize(
+        {
+            "body": "Please reply by Friday.",
+            "subject": "Deadline",
+            "from": "sender@example.com",
+            "root_operation_id": "root-email-summary-1",
+        },
+        owner="alice",
+    )
+
+    assert result == {
+        "success": True,
+        "summary": "- Reply by Friday",
+        "model_used": "managed-test-model",
+    }
+    assert calls[0]["owner"] == "alice"
+    assert calls[0]["purpose"] == "utility"
+    assert calls[0]["max_output_tokens"] == 8192
+    assert calls[0]["root_operation_id"] == "root-email-summary-1"
+    assert not {"url", "headers", "api_key"}.intersection(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_email_style_extraction_uses_managed_utility_completion(monkeypatch):
+    import routes.email_helpers as email_helpers
+    import routes.email_routes as email_routes
+    from src.openclank import modality_facade
+
+    calls = []
+    saved = {}
+    raw = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"Subject: Sample\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Hello there, this sample email is comfortably long enough."
+    )
+
+    class FakeImap:
+        def select(self, *_args, **_kwargs):
+            return "OK", []
+
+        def search(self, *_args, **_kwargs):
+            return "OK", [b"1 2 3"]
+
+        def fetch(self, *_args, **_kwargs):
+            return "OK", [(b"1 (RFC822)", raw)]
+
+    @contextmanager
+    def fake_imap(_account_id=None, owner=""):
+        assert owner == "alice"
+        yield FakeImap()
+
+    async def complete_text(**kwargs):
+        calls.append(kwargs)
+        return "Write emails in this style: concise and warm."
+
+    monkeypatch.setattr(email_routes, "_imap", fake_imap)
+    monkeypatch.setattr(email_routes, "_load_settings", lambda: {})
+    monkeypatch.setattr(
+        email_routes,
+        "_save_settings",
+        lambda settings: saved.update(settings),
+    )
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+
+    extract_style = _route_endpoint(
+        email_routes.setup_email_routes(),
+        "/api/email/extract-style",
+        "POST",
+    )
+    result = await extract_style(
+        email_helpers.ExtractStyleRequest(sample_count=3),
+        account_id=None,
+        owner="alice",
+    )
+
+    assert result["success"] is True
+    assert saved["email_writing_style"].startswith("Write emails in this style:")
+    assert calls[0]["owner"] == "alice"
+    assert calls[0]["purpose"] == "utility"
+    assert calls[0]["max_output_tokens"] == 2048
+    assert not {"url", "headers", "api_key"}.intersection(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_email_translation_uses_managed_utility_completion(
+    tmp_path,
+    monkeypatch,
+):
+    import routes.email_helpers as email_helpers
+    import routes.email_routes as email_routes
+    from src.openclank import modality_facade
+
+    db_path = tmp_path / "scheduled_emails.db"
+    monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
+    monkeypatch.setattr(email_routes, "SCHEDULED_DB", db_path)
+    email_helpers._init_scheduled_db()
+    calls = []
+
+    async def complete_text(**kwargs):
+        calls.append(kwargs)
+        return "<<<TRANSLATION>>>\nBonjour.\n<<<END>>>"
+
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+    monkeypatch.setattr(
+        email_routes,
+        "_managed_email_model_label",
+        lambda owner: "managed-test-model",
+    )
+
+    translate = _route_endpoint(
+        email_routes.setup_email_routes(),
+        "/api/email/translate",
+        "POST",
+    )
+    result = await translate(
+        {
+            "body": "Hello.",
+            "target_language": "French",
+            "root_operation_id": "root-email-translation-1",
+        },
+        owner="alice",
+    )
+
+    assert result == {
+        "success": True,
+        "translation": "Bonjour.",
+        "language": "French",
+        "model_used": "managed-test-model",
+    }
+    assert calls[0]["owner"] == "alice"
+    assert calls[0]["purpose"] == "utility"
+    assert calls[0]["max_output_tokens"] == 8192
+    assert calls[0]["root_operation_id"] == "root-email-translation-1"
+    assert not {"url", "headers", "api_key"}.intersection(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_email_ai_reply_preserves_limits_and_root_on_managed_completion(monkeypatch):
+    import routes.email_routes as email_routes
+    from src.openclank import chat_routing, modality_facade
+
+    calls = []
+
+    async def complete_text(**kwargs):
+        calls.append(kwargs)
+        return "<<<REPLY>>>\nThanks, I'll reply Friday.\n<<<END>>>"
+
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+    monkeypatch.setattr(
+        chat_routing,
+        "resolve_chat_model_spec",
+        lambda **kwargs: SimpleNamespace(
+            model_route_id="managed-route-1",
+            provider_grant_id="grant-1",
+            display_name="Managed Test Model",
+        ),
+    )
+    monkeypatch.setattr(email_routes, "_load_settings", lambda: {})
+    monkeypatch.setattr(
+        email_routes,
+        "_managed_email_model_label",
+        lambda owner, **kwargs: "managed-test-model",
+    )
+
+    ai_reply = _route_endpoint(
+        email_routes.setup_email_routes(),
+        "/api/email/ai-reply",
+        "POST",
+    )
+    result = await ai_reply(
+        {
+            "to": "sender@example.com",
+            "subject": "Deadline",
+            "original_body": "Please reply by Friday.",
+            "fast": True,
+            "model": "managed-route-1",
+            "rootOperationID": "root-email-reply-1",
+        },
+        owner="alice",
+    )
+
+    assert result == {
+        "success": True,
+        "reply": "Thanks, I'll reply Friday.",
+        "model_used": "managed-test-model",
+    }
+    assert calls[0]["owner"] == "alice"
+    assert calls[0]["purpose"] == "utility"
+    assert calls[0]["max_output_tokens"] == 1024
+    assert calls[0]["model_route_id"] == "managed-route-1"
+    assert calls[0]["grant_id"] == "grant-1"
+    assert calls[0]["root_operation_id"] == "root-email-reply-1"
+    assert not {"url", "headers", "api_key"}.intersection(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_email_ai_reply_retries_only_blank_draft_with_same_root(monkeypatch):
+    import routes.email_routes as email_routes
+    from src.openclank import modality_facade
+
+    calls = []
+    outputs = iter(
+        (
+            "<<<REPLY>>>\n<<<END>>>",
+            "<<<REPLY>>>\nUsable retry.\n<<<END>>>",
+        )
+    )
+
+    async def complete_text(**kwargs):
+        calls.append(kwargs)
+        return next(outputs)
+
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+    monkeypatch.setattr(email_routes, "_load_settings", lambda: {})
+    monkeypatch.setattr(
+        email_routes,
+        "_managed_email_model_label",
+        lambda owner, **kwargs: "managed-test-model",
+    )
+
+    ai_reply = _route_endpoint(
+        email_routes.setup_email_routes(),
+        "/api/email/ai-reply",
+        "POST",
+    )
+    result = await ai_reply(
+        {
+            "to": "sender@example.com",
+            "subject": "Deadline",
+            "original_body": "Please reply by Friday.",
+            "fast": True,
+            "root_operation_id": "root-email-retry-1",
+        },
+        owner="alice",
+    )
+
+    assert result["reply"] == "Usable retry."
+    assert len(calls) == 2
+    assert [call["max_output_tokens"] for call in calls] == [1024, 1536]
+    assert {call["root_operation_id"] for call in calls} == {
+        "root-email-retry-1"
+    }
 
 
 def test_email_tag_clause_excludes_legacy_owner_rows_for_authenticated_owner(monkeypatch):
@@ -654,3 +934,63 @@ def test_scheduled_poller_resolves_config_with_row_owner(tmp_path, monkeypatch):
     assert result == {"sent": ["sched-1"], "failed": []}
     assert ("config", "acct-alice", "alice") in calls
     assert ("imap", "acct-alice", "alice") in calls
+
+
+def test_scheduled_poller_filters_blank_rows_by_effective_account_owner(tmp_path, monkeypatch):
+    import routes.email_helpers as email_helpers
+    import routes.email_pollers as email_pollers
+
+    db_path = tmp_path / "scheduled-effective-owner.db"
+    monkeypatch.setattr(email_helpers, "SCHEDULED_DB", db_path)
+    monkeypatch.setattr(email_pollers, "SCHEDULED_DB", db_path)
+    email_helpers._init_scheduled_db()
+
+    conn = sqlite3.connect(db_path)
+    for sid, account_id, owner in (
+        ("sched-alice-blank", "acct-alice", ""),
+        ("sched-bob-blank", "acct-bob", ""),
+    ):
+        conn.execute(
+            """
+            INSERT INTO scheduled_emails
+            (id, to_addr, subject, body, attachments, send_at, created_at, status, account_id, owner)
+            VALUES (?, ?, ?, ?, '[]', ?, ?, 'pending', ?, ?)
+            """,
+            (sid, "recipient@example.com", sid, "Body", "2000-01-01T00:00:00", "1999-12-31T00:00:00", account_id, owner),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        email_pollers,
+        "_owner_for_email_account",
+        lambda account_id: {"acct-alice": "alice", "acct-bob": "bob"}[account_id],
+    )
+    monkeypatch.setattr(
+        email_pollers,
+        "_get_email_config",
+        lambda account_id=None, owner="": {"from_address": f"{owner}@example.com"},
+    )
+
+    class _NoopImap:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def append(self, *_args):
+            return None
+
+    monkeypatch.setattr(email_pollers, "_send_smtp_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(email_pollers, "_imap", lambda *_args, **_kwargs: _NoopImap())
+    monkeypatch.setattr(email_pollers, "_detect_sent_folder", lambda _imap: "Sent")
+    monkeypatch.setattr(email_pollers, "_cleanup_compose_uploads", lambda _attachments: None)
+
+    result = email_pollers._scheduled_poll_once(owner="alice")
+
+    assert result == {"sent": ["sched-alice-blank"], "failed": []}
+    conn = sqlite3.connect(db_path)
+    statuses = dict(conn.execute("SELECT id, status FROM scheduled_emails"))
+    conn.close()
+    assert statuses == {"sched-alice-blank": "sent", "sched-bob-blank": "pending"}

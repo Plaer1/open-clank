@@ -1,0 +1,17 @@
+[package]
+name = "lore-error-set"
+version = "0.1.0"
+edition = "2021"
+description = "Composable, traceable error handling for Rust"
+publish = false
+
+[features]
+default = ["track-locations"]
+track-locations = []
+
+[dependencies]
+lore-error-set-macro = { workspace = true }
+
+[dev-dependencies]
+thiserror = { workspace = true }
+trybuild = { workspace = true }

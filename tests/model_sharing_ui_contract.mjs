@@ -153,19 +153,37 @@ globalThis.fetch = async (url, options = {}) => {
           source_kind: 'endpoint',
           recipients: ownerRecipients.map(username => ({ username, enabled: false })),
         }],
-        received: [{
-          share_id: 'received-share',
-          endpoint_id: 'opaque-shared-endpoint',
-          model_id: 'xiaomi/mimo-v2-pro',
-          model_name: 'MiMo V2 Pro',
-          provider: 'MiMo',
-          shared_by: 'e',
-          enabled: receivedEnabled,
-          tools: true,
-          source_url: 'https://must-not-render.invalid/v1',
-          api_key: 'must-not-render',
-          headers: { Authorization: 'must-not-render' },
-        }],
+        received: [
+          {
+            share_id: 'received-share',
+            endpoint_id: 'opaque-shared-endpoint',
+            model_id: 'xiaomi/mimo-v2.5-pro/high',
+            model_name: 'high',
+            provider: 'MiMo',
+            shared_by: 'e',
+            enabled: receivedEnabled,
+            tools: true,
+            source_url: 'https://must-not-render.invalid/v1',
+            api_key: 'must-not-render',
+            headers: { Authorization: 'must-not-render' },
+          },
+          {
+            share_id: 'luna-low',
+            model_id: 'openai/gpt-5.6-luna/low',
+            model_name: 'low',
+            provider: 'OpenAI',
+            shared_by: 'e',
+            enabled: false,
+          },
+          {
+            share_id: 'luna-medium',
+            model_id: 'openai/gpt-5.6-luna/medium',
+            model_name: 'medium',
+            provider: 'OpenAI',
+            shared_by: 'e',
+            enabled: false,
+          },
+        ],
       };
     },
   };
@@ -179,13 +197,25 @@ modelSharing.init({
 await modelSharing.load();
 
 const receivedList = ids.get('model-share-list');
-assert.equal(receivedList.children.length, 1);
+assert.equal(receivedList.children.length, 2);
+assert.equal(descendants(receivedList, 'details').length, 2);
 const receivedText = allText(receivedList);
-assert.match(receivedText, /MiMo V2 Pro/);
-assert.match(receivedText, /MiMo · shared by e/);
+assert.match(receivedText, /MiMo V2\.5 Pro · High reasoning/);
+assert.match(receivedText, /GPT-5\.6 Luna · Low reasoning/);
+assert.match(receivedText, /GPT-5\.6 Luna · Medium reasoning/);
+assert.match(receivedText, /Shared by e/);
 assert.match(receivedText, /Add to my models/);
 assert.doesNotMatch(receivedText, /must-not-render/);
 assert.doesNotMatch(receivedText, /opaque-shared-endpoint/);
+
+const legacyWithoutProvider = modelSharing.normalizeReceived({
+  share_id: 'legacy-bare',
+  model_name: 'Same bare model',
+  shared_by: 'e',
+});
+assert.equal(legacyWithoutProvider.provider, 'Unknown provider');
+assert.equal(legacyWithoutProvider.providerFamilyId, '');
+assert.equal(legacyWithoutProvider.modelId, 'Same bare model');
 
 const recipientToggle = descendants(receivedList, 'input')[0];
 recipientToggle.checked = true;

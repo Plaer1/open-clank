@@ -613,7 +613,7 @@ def _oauth_authorize_page(
     auth_url: str,
     server_id: str,
     host: str,
-    redirect_uri: str = "http://localhost:7000/api/mcp/oauth/callback",
+    redirect_uri: str = "http://localhost:7777/api/mcp/oauth/callback",
 ) -> str:
     """Page with Google sign-in link and URL paste-back form for remote access."""
     # Escape values interpolated into the page: `host` comes from the request
