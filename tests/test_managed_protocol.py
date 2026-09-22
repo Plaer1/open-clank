@@ -1,17 +1,43 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
 from src.openclank.acp_client import ACPClient
 from src.openclank.managed_protocol import (
     SCHEMA_SHA256,
+    METHOD_DIRECTIONS,
     ManagedProtocolError,
+    MODEL_OPERATIONS,
     client_capability_offer,
+    validate_engine_method_result,
+    validate_managed_method_request,
     validate_initialize_result,
 )
+
+
+def _model_route():
+    return {
+        "modelID": "route-model",
+        "displayName": "Route model",
+        "operations": ["chat.complete"],
+        "capabilities": {},
+        "provenance": {},
+    }
+
+
+def _account_result(discovery):
+    return {
+        "authMethod": "api_key",
+        "authClass": "metered",
+        "credential": {"type": "api", "key": "test-key"},
+        "safeIdentity": {},
+        "modelRoutes": [_model_route()],
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "discovery": discovery,
+    }
 
 
 def _result(overrides=None):
@@ -27,6 +53,63 @@ def _result(overrides=None):
 def test_exact_managed_capability_declaration_is_required():
     parsed = validate_initialize_result(_result())
     assert parsed.schemaHash == SCHEMA_SHA256
+
+
+def test_generated_contract_preserves_all_methods_and_operations():
+    assert len(client_capability_offer()["methods"]) == 21
+    assert len(MODEL_OPERATIONS) == 15
+    assert "chat.stream" in MODEL_OPERATIONS
+    assert sum(direction == "host_to_engine" for direction in METHOD_DIRECTIONS.values()) == 8
+    assert sum(direction == "engine_to_host" for direction in METHOD_DIRECTIONS.values()) == 13
+
+
+def test_account_discovery_distinguishes_complete_from_unavailable():
+    provenance = {"source": "provider-api", "observedAt": 1}
+    complete = {
+        "status": "complete",
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "models": [_model_route()],
+        "authoritative": True,
+        "provenance": provenance,
+        "freshness": "fresh",
+    }
+    unavailable = {
+        "status": "unavailable",
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "models": [],
+        "authoritative": False,
+        "provenance": provenance,
+        "freshness": "unknown",
+        "errorCode": "discovery_unavailable",
+    }
+    assert validate_engine_method_result(
+        "_openclank/provider-control/v1/account/validate", _account_result(complete)
+    )
+    assert validate_engine_method_result(
+        "_openclank/provider-control/v1/account/validate", _account_result(unavailable)
+    )
+    with pytest.raises(ManagedProtocolError):
+        validate_engine_method_result(
+            "_openclank/provider-control/v1/account/validate",
+            _account_result({**unavailable, "authoritative": True}),
+        )
+
+
+def test_zero_byte_artifact_put_accepts_empty_chunks_and_nonzero_requires_chunks():
+    empty = {
+        "action": "put",
+        "mediaType": "application/octet-stream",
+        "contentSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sizeBytes": 0,
+        "chunks": [],
+    }
+    assert validate_managed_method_request("_openclank/operations/v1/artifact/write", empty) == empty
+    with pytest.raises(ManagedProtocolError):
+        validate_managed_method_request(
+            "_openclank/operations/v1/artifact/write", {**empty, "sizeBytes": 1}
+        )
 
 
 @pytest.mark.parametrize(

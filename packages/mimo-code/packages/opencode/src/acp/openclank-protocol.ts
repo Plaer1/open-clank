@@ -1,67 +1,19 @@
 import type { Auth } from "@/auth"
 import type { AccountSelection } from "@/provider/account-selection"
 
-export const PROTOCOL_VERSION = 1 as const
-export const PROVIDER_STORE_VERSION = 1 as const
-export const OPERATION_ROUTER_VERSION = 1 as const
-export const SCHEMA_VERSION = 1 as const
-export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v1" as const
-// SHA-256 of contracts/openclank/managed-provider-v1.schema.json.
-export const SCHEMA_HASH = "f9b9c7eb4dd50fa5d00f65f3662c9e9aa2702de63de94ada1e13321d131d0bbb" as const
-
-export const PROVIDER_STORE_METHODS = [
-  "_openclank/provider-store/v1/account/bind",
-  "_openclank/provider-store/v1/account/commit",
-  "_openclank/provider-store/v1/account/attempt",
-  "_openclank/provider-store/v1/credential/lease",
-  "_openclank/provider-store/v1/credential/replace",
-  "_openclank/provider-store/v1/refresh/acquire",
-  "_openclank/provider-store/v1/refresh/renew",
-  "_openclank/provider-store/v1/refresh/commit",
-  "_openclank/provider-store/v1/refresh/abort",
-] as const
-
-export const PROVIDER_CONTROL_METHODS = [
-  "_openclank/provider-control/v1/catalog",
-  "_openclank/provider-control/v1/connection/validate",
-  "_openclank/provider-control/v1/account/validate",
-  "_openclank/provider-control/v1/oauth/start",
-  "_openclank/provider-control/v1/oauth/poll",
-  "_openclank/provider-control/v1/oauth/callback",
-  "_openclank/provider-control/v1/oauth/cancel",
-] as const
-
-export const OPERATION_METHODS = [
-  "_openclank/operations/v1/journal/cas",
-  "_openclank/operations/v1/artifact/read",
-  "_openclank/operations/v1/artifact/write",
-  "_openclank/operations/v1/executor/invoke",
-  "_openclank/operations/v1/execute",
-] as const
-
-export const OPERATIONS = [
-  "chat.stream",
-  "chat.complete",
-  "vision.describe",
-  "image.generate",
-  "image.edit",
-  "image.inpaint",
-  "image.img2img",
-  "image.upscale",
-  "image.denoise",
-  "image.segment",
-  "image.remove_background",
-  "image.restore_face",
-  "audio.synthesize",
-  "audio.transcribe",
-  "embeddings.create",
-] as const
-
-export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
-export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
-export type OperationMethod = (typeof OPERATION_METHODS)[number]
-export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod
-export type Operation = (typeof OPERATIONS)[number]
+import {
+  OPERATION_METHODS,
+  OPERATIONS,
+  PROVIDER_CONTROL_METHODS,
+  PROVIDER_STORE_METHODS,
+  OPERATION_ROUTER_VERSION,
+  PROTOCOL_VERSION,
+  PROVIDER_STORE_VERSION,
+  SCHEMA_HASH,
+  SCHEMA_ID,
+  SCHEMA_VERSION,
+} from "./generated/openclank-managed-contract"
+export * from "./generated/openclank-managed-contract"
 
 export interface CapabilityDeclaration {
   readonly protocolVersion: typeof PROTOCOL_VERSION
@@ -253,12 +205,31 @@ export interface AccountValidationRequest {
   readonly credential: Auth.Info
 }
 
+export interface AccountDiscovery {
+  readonly status: "complete" | "unavailable" | "partial" | "reauth_required"
+  readonly accountID: string
+  readonly credentialRevision: number
+  readonly models: readonly ProviderModelRoute[]
+  readonly authoritative: boolean
+  readonly provenance: {
+    readonly source: string
+    readonly observedAt: number
+    readonly adapterVersion?: string
+    readonly requestID?: string
+  }
+  readonly freshness: "fresh" | "stale" | "unknown"
+  readonly errorCode?: "discovery_unavailable" | "discovery_partial" | "reauth_required"
+}
+
 export interface AccountValidationResult {
   readonly authMethod: "api_key" | "oauth"
   readonly authClass: string
   readonly credential: Auth.Info
+  readonly accountID?: string
+  readonly credentialRevision?: number
   readonly safeIdentity: Record<string, string>
   readonly modelRoutes: readonly ProviderModelRoute[]
+  readonly discovery?: AccountDiscovery
 }
 
 export type OAuthMode = "add" | "reauth"

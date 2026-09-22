@@ -14,73 +14,18 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-
-SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v1"
-SCHEMA_VERSION = 1
-SCHEMA_SHA256 = "f9b9c7eb4dd50fa5d00f65f3662c9e9aa2702de63de94ada1e13321d131d0bbb"
-PROTOCOL_VERSION = 1
-PROVIDER_STORE_VERSION = 1
-OPERATION_ROUTER_VERSION = 1
-
-MANAGED_METHODS = frozenset(
-    {
-        "_openclank/provider-store/v1/account/bind",
-        "_openclank/provider-store/v1/account/commit",
-        "_openclank/provider-store/v1/account/attempt",
-        "_openclank/provider-store/v1/credential/lease",
-        "_openclank/provider-store/v1/credential/replace",
-        "_openclank/provider-store/v1/refresh/acquire",
-        "_openclank/provider-store/v1/refresh/renew",
-        "_openclank/provider-store/v1/refresh/commit",
-        "_openclank/provider-store/v1/refresh/abort",
-        "_openclank/provider-control/v1/catalog",
-        "_openclank/provider-control/v1/connection/validate",
-        "_openclank/provider-control/v1/account/validate",
-        "_openclank/provider-control/v1/oauth/start",
-        "_openclank/provider-control/v1/oauth/poll",
-        "_openclank/provider-control/v1/oauth/callback",
-        "_openclank/provider-control/v1/oauth/cancel",
-        "_openclank/operations/v1/journal/cas",
-        "_openclank/operations/v1/artifact/read",
-        "_openclank/operations/v1/artifact/write",
-        "_openclank/operations/v1/executor/invoke",
-        "_openclank/operations/v1/execute",
-    }
-)
-
-ENGINE_METHODS = frozenset(
-    {
-        "_openclank/provider-control/v1/catalog",
-        "_openclank/provider-control/v1/connection/validate",
-        "_openclank/provider-control/v1/account/validate",
-        "_openclank/provider-control/v1/oauth/start",
-        "_openclank/provider-control/v1/oauth/poll",
-        "_openclank/provider-control/v1/oauth/callback",
-        "_openclank/provider-control/v1/oauth/cancel",
-        "_openclank/operations/v1/execute",
-    }
-)
-
-HOST_CALLBACK_METHODS = MANAGED_METHODS - ENGINE_METHODS
-
-MODEL_OPERATIONS = frozenset(
-    {
-        "chat.stream",
-        "chat.complete",
-        "vision.describe",
-        "image.generate",
-        "image.edit",
-        "image.inpaint",
-        "image.img2img",
-        "image.upscale",
-        "image.denoise",
-        "image.segment",
-        "image.remove_background",
-        "image.restore_face",
-        "audio.synthesize",
-        "audio.transcribe",
-        "embeddings.create",
-    }
+from .generated.managed_provider_contract import (
+    ENGINE_METHODS,
+    HOST_CALLBACK_METHODS,
+    MANAGED_METHODS,
+    METHOD_DIRECTIONS,
+    MODEL_OPERATIONS,
+    OPERATION_ROUTER_VERSION,
+    PROTOCOL_VERSION,
+    PROVIDER_STORE_VERSION,
+    SCHEMA_ID,
+    SCHEMA_SHA256,
+    SCHEMA_VERSION,
 )
 
 
@@ -275,6 +220,7 @@ __all__ = [
     "ENGINE_METHODS",
     "HOST_CALLBACK_METHODS",
     "MANAGED_METHODS",
+    "METHOD_DIRECTIONS",
     "MODEL_OPERATIONS",
     "ManagedCapabilities",
     "ManagedMethodValidationError",
