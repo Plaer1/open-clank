@@ -34,6 +34,7 @@ from src.openclank.managed_protocol import (
     PROVIDER_STORE_VERSION,
     SCHEMA_ID as MANAGED_SCHEMA_ID,
     SCHEMA_SHA256 as MANAGED_SCHEMA_HASH,
+    SCHEMA_VERSION as MANAGED_SCHEMA_VERSION,
     ManagedProtocolError,
     client_capability_offer,
     validate_initialize_result,
@@ -361,7 +362,7 @@ def load_vendor_manifest(repo_root: Path | str | None = None) -> dict[str, Any]:
     managed_schema_path = _safe_child(root, str(managed_schema.get("repository_path", "")), "managed schema")
     if (
         managed_schema.get("id") != MANAGED_SCHEMA_ID
-        or managed_schema.get("version") != 1
+        or managed_schema.get("version") != MANAGED_SCHEMA_VERSION
         or managed_schema.get("sha256") != MANAGED_SCHEMA_HASH
         or _sha256_file(managed_schema_path) != MANAGED_SCHEMA_HASH
     ):
@@ -549,7 +550,7 @@ def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
     managed_schema = provenance.get("managed_schema")
     if not isinstance(managed_schema, dict) or managed_schema != {
         "id": MANAGED_SCHEMA_ID,
-        "version": 1,
+        "version": MANAGED_SCHEMA_VERSION,
         "sha256": MANAGED_SCHEMA_HASH,
     }:
         errors.append("provenance managed schema is incompatible")

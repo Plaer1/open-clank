@@ -83,9 +83,9 @@
       "additionalProperties": false,
       "required": ["id", "version", "sha256"],
       "properties": {
-        "id": { "const": "https://openclank.dev/contracts/managed-provider/v1" },
-        "version": { "const": 1 },
-        "sha256": { "const": "a5d2fd28487ba635a4e3fe1f74a0c8fc0289faecd968a608800c39b52647fd73" }
+        "id": { "const": "https://openclank.dev/contracts/managed-provider/v2" },
+        "version": { "const": 2 },
+        "sha256": { "const": "d4fee7378cf9ecd7c519e57003484357caecde17a7b2679ddf5ae1c7152fabeb" }
       }
     },
     "source": {

@@ -13,6 +13,9 @@ import {
   SCHEMA_HASH,
   SCHEMA_ID,
   SCHEMA_VERSION,
+  type ManagedMethod,
+  type Operation,
+  type ProviderControlMethod,
 } from "./generated/openclank-managed-contract"
 export * from "./generated/openclank-managed-contract"
 
@@ -202,7 +205,7 @@ export interface ConnectionValidationResult {
 
 export interface AccountValidationRequest {
   readonly connection: ConnectionValidationRequest
-  readonly authMethod: "api_key"
+  readonly authMethod: "api_key" | "oauth"
   readonly credential: Auth.Info
   readonly accountID: string
   readonly credentialRevision: number

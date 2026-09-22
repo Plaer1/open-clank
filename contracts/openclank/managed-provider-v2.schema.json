@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://openclank.dev/contracts/managed-provider/v1",
+  "$id": "https://openclank.dev/contracts/managed-provider/v2",
   "title": "Open Clank Managed Provider Protocol v1",
   "description": "Capability negotiation and secret-bearing callback envelopes exchanged between the Open Clank host and its managed model engine.",
   "oneOf": [
@@ -164,8 +164,8 @@
         "protocolVersion": { "const": 1 },
         "providerStoreVersion": { "const": 1 },
         "operationRouterVersion": { "const": 1 },
-        "schemaID": { "const": "https://openclank.dev/contracts/managed-provider/v1" },
-        "schemaVersion": { "const": 1 },
+        "schemaID": { "const": "https://openclank.dev/contracts/managed-provider/v2" },
+        "schemaVersion": { "const": 2 },
         "schemaHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "methods": {
           "type": "array",
@@ -327,24 +327,96 @@
     },
     "accountValidationRequest": {
       "type": "object",
-      "required": ["connection", "authMethod", "credential"],
+      "required": ["connection", "authMethod", "credential", "accountID", "credentialRevision"],
       "properties": {
         "connection": { "$ref": "#/$defs/connectionValidationRequest" },
-        "authMethod": { "const": "api_key" },
-        "credential": { "$ref": "#/$defs/authInfo" }
+        "authMethod": { "enum": ["api_key", "oauth"] },
+        "credential": { "$ref": "#/$defs/authInfo" },
+        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "credentialRevision": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
     "accountValidationResult": {
       "type": "object",
-      "required": ["authMethod", "authClass", "credential", "safeIdentity", "modelRoutes"],
+      "required": [
+        "authMethod",
+        "authClass",
+        "credential",
+        "accountID",
+        "credentialRevision",
+        "safeIdentity",
+        "modelRoutes",
+        "discovery"
+      ],
       "properties": {
         "authMethod": { "enum": ["api_key", "oauth"] },
         "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
         "credential": { "$ref": "#/$defs/authInfo" },
+        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "credentialRevision": { "type": "integer", "minimum": 1 },
         "safeIdentity": { "type": "object", "additionalProperties": { "type": "string" } },
-        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } }
+        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } },
+        "discovery": { "$ref": "#/$defs/accountDiscovery" }
       },
+      "additionalProperties": false
+    },
+    "accountDiscovery": {
+      "type": "object",
+      "required": [
+        "status",
+        "accountID",
+        "credentialRevision",
+        "models",
+        "authoritative",
+        "provenance",
+        "freshness"
+      ],
+      "properties": {
+        "status": { "enum": ["complete", "unavailable", "partial", "reauth_required"] },
+        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "credentialRevision": { "type": "integer", "minimum": 1 },
+        "models": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } },
+        "authoritative": { "type": "boolean" },
+        "provenance": {
+          "type": "object",
+          "required": ["source", "observedAt"],
+          "properties": {
+            "source": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "observedAt": { "type": "integer", "minimum": 1 },
+            "adapterVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "requestID": { "type": "string", "minLength": 1, "maxLength": 256 }
+          },
+          "additionalProperties": false
+        },
+        "freshness": { "enum": ["fresh", "stale", "unknown"] },
+        "errorCode": {
+          "enum": ["discovery_unavailable", "discovery_partial", "reauth_required"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": { "properties": { "authoritative": { "const": true } } },
+          "else": { "properties": { "authoritative": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": { "not": { "required": ["errorCode"] } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "unavailable" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "discovery_unavailable" } }, "required": ["errorCode"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "partial" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "discovery_partial" } }, "required": ["errorCode"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "reauth_required" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "reauth_required" } }, "required": ["errorCode"] }
+        }
+      ],
       "additionalProperties": false
     },
     "oauthStartRequest": {
@@ -774,7 +846,6 @@
             "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
             "chunks": {
               "type": "array",
-              "minItems": 1,
               "items": {
                 "type": "object",
                 "required": ["index", "dataBase64", "sha256"],
@@ -787,6 +858,13 @@
               }
             }
           },
+          "allOf": [
+            {
+              "if": { "properties": { "sizeBytes": { "const": 0 } }, "required": ["sizeBytes"] },
+              "then": { "properties": { "chunks": { "maxItems": 0 } } },
+              "else": { "properties": { "chunks": { "minItems": 1 } } }
+            }
+          ],
           "additionalProperties": false
         },
         {
@@ -903,86 +981,107 @@
   },
   "x-openclank-methods": {
     "_openclank/provider-control/v1/catalog": {
+      "direction": "host_to_engine",
       "request": "empty object",
       "result": "#/$defs/familyCatalogResult"
     },
     "_openclank/provider-control/v1/connection/validate": {
+      "direction": "host_to_engine",
       "request": "#/$defs/connectionValidationRequest",
       "result": "#/$defs/connectionValidationResult"
     },
     "_openclank/provider-control/v1/account/validate": {
+      "direction": "host_to_engine",
       "request": "#/$defs/accountValidationRequest",
       "result": "#/$defs/accountValidationResult"
     },
     "_openclank/provider-control/v1/oauth/start": {
+      "direction": "host_to_engine",
       "request": "#/$defs/oauthStartRequest",
       "result": "#/$defs/oauthStartResult"
     },
     "_openclank/provider-control/v1/oauth/poll": {
+      "direction": "host_to_engine",
       "request": "#/$defs/oauthCompletionRequest",
       "result": "#/$defs/oauthCompletionResult"
     },
     "_openclank/provider-control/v1/oauth/callback": {
+      "direction": "host_to_engine",
       "request": "#/$defs/oauthCompletionRequest",
       "result": "#/$defs/oauthCompletionResult"
     },
     "_openclank/provider-control/v1/oauth/cancel": {
+      "direction": "host_to_engine",
       "request": "#/$defs/oauthCompletionRequest",
       "result": "#/$defs/oauthCancelResult"
     },
     "_openclank/provider-store/v1/account/bind": {
+      "direction": "engine_to_host",
       "request": "#/$defs/accountSelectionRequest",
       "result": "#/$defs/accountBinding"
     },
     "_openclank/provider-store/v1/account/commit": {
+      "direction": "engine_to_host",
       "request": "#/$defs/accountCommitRequest",
       "result": "#/$defs/accountBinding"
     },
     "_openclank/provider-store/v1/account/attempt": {
+      "direction": "engine_to_host",
       "request": "#/$defs/accountAttemptRequest",
       "result": "#/$defs/accountBinding"
     },
     "_openclank/provider-store/v1/credential/lease": {
+      "direction": "engine_to_host",
       "request": "#/$defs/credentialLeaseRequest",
       "result": "#/$defs/credentialLeaseResult"
     },
     "_openclank/provider-store/v1/credential/replace": {
+      "direction": "engine_to_host",
       "request": "#/$defs/credentialReplaceRequest",
       "result": "#/$defs/account"
     },
     "_openclank/provider-store/v1/refresh/acquire": {
+      "direction": "engine_to_host",
       "request": "#/$defs/refreshAcquireRequest",
       "result": "#/$defs/refreshLease"
     },
     "_openclank/provider-store/v1/refresh/renew": {
+      "direction": "engine_to_host",
       "request": "#/$defs/refreshRenewRequest",
       "result": "#/$defs/refreshLease"
     },
     "_openclank/provider-store/v1/refresh/commit": {
+      "direction": "engine_to_host",
       "request": "#/$defs/refreshCommitRequest",
       "result": "#/$defs/account"
     },
     "_openclank/provider-store/v1/refresh/abort": {
+      "direction": "engine_to_host",
       "request": "#/$defs/refreshAbortRequest",
       "result": "empty object"
     },
     "_openclank/operations/v1/journal/cas": {
+      "direction": "engine_to_host",
       "request": "#/$defs/operationJournalRequest",
       "result": "#/$defs/operationJournalResult"
     },
     "_openclank/operations/v1/artifact/read": {
+      "direction": "engine_to_host",
       "request": "#/$defs/artifactReadRequest",
       "result": "#/$defs/artifactReadResult"
     },
     "_openclank/operations/v1/artifact/write": {
+      "direction": "engine_to_host",
       "request": "#/$defs/artifactWriteRequest",
       "result": "#/$defs/artifactDescriptor"
     },
     "_openclank/operations/v1/executor/invoke": {
+      "direction": "engine_to_host",
       "request": "#/$defs/executorInvokeRequest",
       "result": "#/$defs/artifactDescriptor"
     },
     "_openclank/operations/v1/execute": {
+      "direction": "host_to_engine",
       "request": "#/$defs/operationExecuteRequest",
       "result": "#/$defs/operationExecuteResult"
     }

@@ -37,8 +37,9 @@ class ProviderFamilyCatalogError(RuntimeError):
 _CATALOG_SCHEMA_VERSION = 1
 _FAMILY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MODEL_CATALOG_SHA256 = "33f836f532fd8ada58f255f11030ff5500d45b0cf7e63587772221050ffb1f48"
-_ENGINE_SOURCE_SHA256 = "b7a66181c962227057d03b10f8f3b2b0de7738709dfd75ae970108d75764eda4"
-_MANAGED_SCHEMA_SHA256 = "a5d2fd28487ba635a4e3fe1f74a0c8fc0289faecd968a608800c39b52647fd73"
+_ENGINE_SOURCE_SHA256 = "bdd533afcbfea4fa1eebc4e2e1728beb3cfe5214897c89b084ff3f1a1c0d3769"
+_MANAGED_SCHEMA_VERSION = 2
+_MANAGED_SCHEMA_SHA256 = "d4fee7378cf9ecd7c519e57003484357caecde17a7b2679ddf5ae1c7152fabeb"
 _MANAGED_ADAPTERS = {
     "@ai-sdk/openai-compatible": "models-dev-openai-compatible",
     "@ai-sdk/anthropic": "models-dev-anthropic",
@@ -152,7 +153,7 @@ def _catalog_identity() -> dict[str, Any]:
     return {
         "catalog_schema_version": _CATALOG_SCHEMA_VERSION,
         "managed_acp_version": 1,
-        "managed_schema_version": 1,
+        "managed_schema_version": _MANAGED_SCHEMA_VERSION,
         "managed_schema_sha256": _MANAGED_SCHEMA_SHA256,
         "model_catalog_sha256": _MODEL_CATALOG_SHA256,
         "engine_source_sha256": _ENGINE_SOURCE_SHA256,

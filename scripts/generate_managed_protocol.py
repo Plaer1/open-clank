@@ -21,7 +21,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-SCHEMA = ROOT / "contracts/openclank/managed-provider-v1.schema.json"
+SCHEMA = ROOT / "contracts/openclank/managed-provider-v2.schema.json"
 PYTHON_OUTPUT = ROOT / "src/openclank/generated/managed_provider_contract.py"
 TYPESCRIPT_OUTPUT = ROOT / "packages/mimo-code/packages/opencode/src/acp/generated/openclank-managed-contract.ts"
 VENDOR_MANIFEST = ROOT / "packages/mimo-code/openclank-vendor.json"
@@ -39,6 +39,17 @@ def _load_schema() -> tuple[dict[str, Any], str]:
         Draft202012Validator.check_schema(schema)
     except ImportError as exc:  # pragma: no cover - environment invariant
         raise RuntimeError("jsonschema is required for managed protocol generation") from exc
+    if schema.get("$id") != "https://openclank.dev/contracts/managed-provider/v2":
+        raise RuntimeError("managed protocol generator requires the v2 contract")
+    schema_version = (
+        schema.get("$defs", {})
+        .get("capabilityDeclaration", {})
+        .get("properties", {})
+        .get("schemaVersion", {})
+        .get("const")
+    )
+    if schema_version != 2:
+        raise RuntimeError("managed protocol generator requires capability schemaVersion 2")
     return schema, digest
 
 
@@ -148,23 +159,48 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _update_digest_consumers(digest: str) -> None:
+def _update_digest_consumers(data: dict[str, Any]) -> None:
     # The managed protocol binding is part of the vendored engine source tree;
     # refresh its packaging fingerprint whenever generated source changes.
     from src.openclank.engine_build import source_fingerprint
 
     source_digest = source_fingerprint(VENDOR_MANIFEST.parent)
     vendor = json.loads(VENDOR_MANIFEST.read_text(encoding="utf-8"))
-    vendor["managed_schema"]["sha256"] = digest
+    vendor["managed_schema"] = {
+        "id": data["schema_id"],
+        "version": data["schema_version"],
+        "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
+        "sha256": data["digest"],
+    }
     vendor["build"]["source_sha256"] = source_digest
     _write(VENDOR_MANIFEST, json.dumps(vendor, indent=2) + "\n")
 
     provenance = PROVENANCE_SCHEMA.read_text(encoding="utf-8")
-    provenance = re.sub(r'("sha256": \{ "const": ")[0-9a-f]{64}(" \})', rf"\g<1>{digest}\g<2>", provenance)
+    provenance = re.sub(
+        r'("id": \{ "const": ")[^"]+(" \})',
+        rf"\g<1>{data['schema_id']}\g<2>",
+        provenance,
+        count=1,
+    )
+    provenance = re.sub(
+        r'("version": \{ "const": )\d+( \})',
+        rf"\g<1>{data['schema_version']}\g<2>",
+        provenance,
+        count=1,
+    )
+    provenance = re.sub(
+        r'("sha256": \{ "const": ")[0-9a-f]{64}(" \})',
+        rf"\g<1>{data['digest']}\g<2>",
+        provenance,
+        count=1,
+    )
     _write(PROVENANCE_SCHEMA, provenance)
 
     family = FAMILY_CATALOG.read_text(encoding="utf-8")
-    family, count = re.subn(r'(_MANAGED_SCHEMA_SHA256 = ")[0-9a-f]{64}(")', rf"\g<1>{digest}\g<2>", family)
+    family, count = re.subn(r'(_MANAGED_SCHEMA_VERSION = )\d+', rf"\g<1>{data['schema_version']}", family)
+    if count != 1:
+        raise RuntimeError("provider family catalogue managed-schema version marker is missing")
+    family, count = re.subn(r'(_MANAGED_SCHEMA_SHA256 = ")[0-9a-f]{64}(")', rf"\g<1>{data['digest']}\g<2>", family)
     if count != 1:
         raise RuntimeError("provider family catalogue managed-schema digest marker is missing")
     family, count = re.subn(r'(_ENGINE_SOURCE_SHA256 = ")[0-9a-f]{64}(")', rf"\g<1>{source_digest}\g<2>", family)
@@ -173,10 +209,15 @@ def _update_digest_consumers(digest: str) -> None:
     _write(FAMILY_CATALOG, family)
 
 
-def _check_digest_consumers(digest: str) -> list[str]:
+def _check_digest_consumers(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     vendor = json.loads(VENDOR_MANIFEST.read_text(encoding="utf-8"))
-    if vendor.get("managed_schema", {}).get("sha256") != digest:
+    if vendor.get("managed_schema") != {
+        "id": data["schema_id"],
+        "version": data["schema_version"],
+        "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
+        "sha256": data["digest"],
+    }:
         errors.append(str(VENDOR_MANIFEST.relative_to(ROOT)))
     from src.openclank.engine_build import source_fingerprint
 
@@ -184,10 +225,16 @@ def _check_digest_consumers(digest: str) -> list[str]:
     if vendor.get("build", {}).get("source_sha256") != source_digest:
         errors.append(str(VENDOR_MANIFEST.relative_to(ROOT)))
     provenance = PROVENANCE_SCHEMA.read_text(encoding="utf-8")
-    if f'"sha256": {{ "const": "{digest}" }}' not in provenance:
+    if (
+        f'"id": {{ "const": "{data["schema_id"]}" }}' not in provenance
+        or f'"version": {{ "const": {data["schema_version"]} }}' not in provenance
+        or f'"sha256": {{ "const": "{data["digest"]}" }}' not in provenance
+    ):
         errors.append(str(PROVENANCE_SCHEMA.relative_to(ROOT)))
     family = FAMILY_CATALOG.read_text(encoding="utf-8")
-    if f'_MANAGED_SCHEMA_SHA256 = "{digest}"' not in family:
+    if f'_MANAGED_SCHEMA_VERSION = {data["schema_version"]}' not in family:
+        errors.append(str(FAMILY_CATALOG.relative_to(ROOT)))
+    if f'_MANAGED_SCHEMA_SHA256 = "{data["digest"]}"' not in family:
         errors.append(str(FAMILY_CATALOG.relative_to(ROOT)))
     if f'_ENGINE_SOURCE_SHA256 = "{source_digest}"' not in family:
         errors.append(str(FAMILY_CATALOG.relative_to(ROOT)))
@@ -207,7 +254,7 @@ def main() -> int:
     if args.write:
         _write(PYTHON_OUTPUT, expected_python)
         _write(TYPESCRIPT_OUTPUT, expected_typescript)
-        _update_digest_consumers(digest)
+        _update_digest_consumers(data)
         return 0
 
     errors: list[str] = []
@@ -215,7 +262,7 @@ def main() -> int:
         errors.append(str(PYTHON_OUTPUT.relative_to(ROOT)))
     if not TYPESCRIPT_OUTPUT.exists() or TYPESCRIPT_OUTPUT.read_text(encoding="utf-8") != expected_typescript:
         errors.append(str(TYPESCRIPT_OUTPUT.relative_to(ROOT)))
-    errors.extend(_check_digest_consumers(digest))
+    errors.extend(_check_digest_consumers(data))
     if errors:
         print("managed protocol generated output drift: " + ", ".join(errors), file=sys.stderr)
         return 1

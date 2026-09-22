@@ -6,7 +6,9 @@ import pytest
 
 from src.openclank.acp_client import ACPClient
 from src.openclank.managed_protocol import (
+    SCHEMA_ID,
     SCHEMA_SHA256,
+    SCHEMA_VERSION,
     METHOD_DIRECTIONS,
     ManagedProtocolError,
     MODEL_OPERATIONS,
@@ -40,7 +42,10 @@ def _account_result(discovery):
     }
 
 
-def _account_request():
+def _account_request(auth_method="api_key"):
+    credential = {"type": "api", "key": "test-key"}
+    if auth_method == "oauth":
+        credential = {"type": "oauth", "refresh": "refresh-token", "access": "access-token", "expires": 1}
     return {
         "connection": {
             "familyID": "openai",
@@ -49,8 +54,8 @@ def _account_request():
             "billingLane": "metered_api",
             "settings": {},
         },
-        "authMethod": "api_key",
-        "credential": {"type": "api", "key": "test-key"},
+        "authMethod": auth_method,
+        "credential": credential,
         "accountID": "account-1",
         "credentialRevision": 1,
     }
@@ -125,6 +130,13 @@ def test_account_validation_request_supplies_authoritative_identity():
             validate_managed_method_request(
                 "_openclank/provider-control/v1/account/validate", incomplete
             )
+
+
+def test_account_validation_request_accepts_post_auth_oauth():
+    request = _account_request("oauth")
+    assert validate_managed_method_request(
+        "_openclank/provider-control/v1/account/validate", request
+    ) == request
 
 
 @pytest.mark.parametrize("field", ["accountID", "credentialRevision", "modelRoutes"])
@@ -224,6 +236,21 @@ def test_zero_byte_artifact_put_accepts_empty_chunks_and_nonzero_requires_chunks
 def test_mismatched_or_incomplete_engine_fails_closed(override):
     with pytest.raises(ManagedProtocolError):
         validate_initialize_result(_result(override))
+
+
+def test_stale_v1_capability_envelope_is_refused():
+    with pytest.raises(ManagedProtocolError):
+        validate_initialize_result(
+            _result(
+                {
+                    "schemaID": "https://openclank.dev/contracts/managed-provider/v1",
+                    "schemaVersion": 1,
+                    "schemaHash": "f9b9c7eb4dd50fa5d00f65f3662c9e9aa2702de63de94ada1e13321d131d0bbb",
+                }
+            )
+        )
+    assert SCHEMA_ID.endswith("/v2")
+    assert SCHEMA_VERSION == 2
 
 
 class _Writer:

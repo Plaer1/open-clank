@@ -48,7 +48,7 @@ def _fixture_install(tmp_path: Path) -> tuple[Path, Path]:
         "protocols": dict(engine_build.SUPPORTED_PROTOCOLS),
         "managed_schema": {
             "id": engine_build.MANAGED_SCHEMA_ID,
-            "version": 1,
+            "version": engine_build.MANAGED_SCHEMA_VERSION,
             "sha256": engine_build.MANAGED_SCHEMA_HASH,
         },
         "source": {
@@ -138,7 +138,7 @@ def test_container_builds_and_copies_only_a_verified_engine_payload():
 
     assert "AS openclank-bun-builder" in dockerfile
     assert "oven/bun" not in dockerfile
-    assert "COPY contracts/openclank/managed-provider-v1.schema.json" in dockerfile
+    assert "COPY contracts/openclank/managed-provider-v2.schema.json" in dockerfile
     assert "python scripts/openclank_engine.py" in dockerfile
     assert "COPY --from=openclank-bun-builder /engine/ /app/libexec/openclank/engine/" in dockerfile
     assert 'CMD ["python", "scripts/openclank_bootstrap.py", "serve"' in dockerfile

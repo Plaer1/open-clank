@@ -1,8 +1,8 @@
 """Generated managed-provider contract constants; edit the JSON schema instead."""
 
-SCHEMA_ID = 'https://openclank.dev/contracts/managed-provider/v1'
-SCHEMA_VERSION = 1
-SCHEMA_SHA256 = 'a5d2fd28487ba635a4e3fe1f74a0c8fc0289faecd968a608800c39b52647fd73'
+SCHEMA_ID = 'https://openclank.dev/contracts/managed-provider/v2'
+SCHEMA_VERSION = 2
+SCHEMA_SHA256 = 'd4fee7378cf9ecd7c519e57003484357caecde17a7b2679ddf5ae1c7152fabeb'
 PROTOCOL_VERSION = 1
 PROVIDER_STORE_VERSION = 1
 OPERATION_ROUTER_VERSION = 1

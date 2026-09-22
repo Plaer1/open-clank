@@ -6,7 +6,7 @@ import { ControlPlane, type AuthServices, validateConnection } from "../../src/a
 
 const contractPath = path.resolve(
   import.meta.dir,
-  "../../../../../../contracts/openclank/managed-provider-v1.schema.json",
+  "../../../../../../contracts/openclank/managed-provider-v2.schema.json",
 )
 
 test("managed capability declaration is pinned to the checked-in contract", async () => {
@@ -25,7 +25,7 @@ test("ACP initialize metadata declares all managed protocol versions and capabil
   expect(declaration.protocolVersion).toBe(1)
   expect(declaration.providerStoreVersion).toBe(1)
   expect(declaration.operationRouterVersion).toBe(1)
-  expect(declaration.schemaVersion).toBe(1)
+  expect(declaration.schemaVersion).toBe(2)
   expect(declaration.artifactTransfer).toBe(true)
   expect(declaration.localExecutor).toBe(true)
   expect(declaration.methods).toContain("_openclank/provider-store/v1/account/bind")

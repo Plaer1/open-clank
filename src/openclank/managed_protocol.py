@@ -1,6 +1,6 @@
 """Generated Python binding for the Open Clank managed-engine contract.
 
-Source: ``contracts/openclank/managed-provider-v1.schema.json``.  Keep the
+Source: ``contracts/openclank/managed-provider-v2.schema.json``.  Keep the
 schema digest synchronized through the contract-generation check; neither side
 may silently negotiate a different credential or operation protocol.
 """
@@ -41,7 +41,7 @@ _CONTRACT_PATH = (
     Path(__file__).resolve().parents[2]
     / "contracts"
     / "openclank"
-    / "managed-provider-v1.schema.json"
+    / "managed-provider-v2.schema.json"
 )
 
 

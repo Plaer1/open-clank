@@ -58,16 +58,16 @@
     "operation_router": 1
   },
   "managed_schema": {
-    "id": "https://openclank.dev/contracts/managed-provider/v1",
-    "version": 1,
-    "repository_path": "contracts/openclank/managed-provider-v1.schema.json",
-    "sha256": "a5d2fd28487ba635a4e3fe1f74a0c8fc0289faecd968a608800c39b52647fd73"
+    "id": "https://openclank.dev/contracts/managed-provider/v2",
+    "version": 2,
+    "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
+    "sha256": "d4fee7378cf9ecd7c519e57003484357caecde17a7b2679ddf5ae1c7152fabeb"
   },
   "build": {
     "contract_version": 1,
     "source_date_epoch": 1785240447,
     "source_hash_algorithm": "openclank-tree-sha256-v1",
-    "source_sha256": "b7a66181c962227057d03b10f8f3b2b0de7738709dfd75ae970108d75764eda4",
+    "source_sha256": "bdd533afcbfea4fa1eebc4e2e1728beb3cfe5214897c89b084ff3f1a1c0d3769",
     "tier_1_targets": [
       "linux-x64",
       "linux-arm64",
