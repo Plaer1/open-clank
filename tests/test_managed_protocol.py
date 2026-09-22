@@ -33,10 +33,26 @@ def _account_result(discovery):
         "authClass": "metered",
         "credential": {"type": "api", "key": "test-key"},
         "safeIdentity": {},
-        "modelRoutes": [_model_route()],
+        "modelRoutes": discovery["models"],
+        "accountID": discovery["accountID"],
+        "credentialRevision": discovery["credentialRevision"],
+        "discovery": discovery,
+    }
+
+
+def _account_request():
+    return {
+        "connection": {
+            "familyID": "openai",
+            "adapterID": "openai-chat",
+            "kind": "official",
+            "billingLane": "metered_api",
+            "settings": {},
+        },
+        "authMethod": "api_key",
+        "credential": {"type": "api", "key": "test-key"},
         "accountID": "account-1",
         "credentialRevision": 1,
-        "discovery": discovery,
     }
 
 
@@ -94,6 +110,66 @@ def test_account_discovery_distinguishes_complete_from_unavailable():
         validate_engine_method_result(
             "_openclank/provider-control/v1/account/validate",
             _account_result({**unavailable, "authoritative": True}),
+        )
+
+
+def test_account_validation_request_supplies_authoritative_identity():
+    request = _account_request()
+    assert validate_managed_method_request(
+        "_openclank/provider-control/v1/account/validate", request
+    ) == request
+    for missing in ("accountID", "credentialRevision"):
+        incomplete = _account_request()
+        incomplete.pop(missing)
+        with pytest.raises(ManagedProtocolError):
+            validate_managed_method_request(
+                "_openclank/provider-control/v1/account/validate", incomplete
+            )
+
+
+@pytest.mark.parametrize("field", ["accountID", "credentialRevision", "modelRoutes"])
+def test_account_validation_rejects_discovery_echo_mismatch(field):
+    provenance = {"source": "provider-api", "observedAt": 1}
+    discovery = {
+        "status": "complete",
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "models": [_model_route()],
+        "authoritative": True,
+        "provenance": provenance,
+        "freshness": "fresh",
+    }
+    result = _account_result(discovery)
+    result[field] = {
+        "accountID": "other-account",
+        "credentialRevision": 2,
+        "modelRoutes": [],
+    }[field]
+    with pytest.raises(ManagedProtocolError):
+        validate_engine_method_result(
+            "_openclank/provider-control/v1/account/validate", result
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [("complete", "discovery_unavailable"), ("partial", "discovery_unavailable"), ("unavailable", None)],
+)
+def test_account_discovery_error_code_matches_status(status, error_code):
+    discovery = {
+        "status": status,
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "models": [] if status != "complete" else [_model_route()],
+        "authoritative": status == "complete",
+        "provenance": {"source": "provider-api", "observedAt": 1},
+        "freshness": "unknown" if status != "complete" else "fresh",
+    }
+    if error_code is not None:
+        discovery["errorCode"] = error_code
+    with pytest.raises(ManagedProtocolError):
+        validate_engine_method_result(
+            "_openclank/provider-control/v1/account/validate", _account_result(discovery)
         )
 
 

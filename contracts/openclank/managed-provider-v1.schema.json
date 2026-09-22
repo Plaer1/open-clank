@@ -327,11 +327,13 @@
     },
     "accountValidationRequest": {
       "type": "object",
-      "required": ["connection", "authMethod", "credential"],
+      "required": ["connection", "authMethod", "credential", "accountID", "credentialRevision"],
       "properties": {
         "connection": { "$ref": "#/$defs/connectionValidationRequest" },
         "authMethod": { "const": "api_key" },
-        "credential": { "$ref": "#/$defs/authInfo" }
+        "credential": { "$ref": "#/$defs/authInfo" },
+        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "credentialRevision": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
@@ -397,6 +399,22 @@
           "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
           "then": { "properties": { "authoritative": { "const": true } } },
           "else": { "properties": { "authoritative": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": { "not": { "required": ["errorCode"] } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "unavailable" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "discovery_unavailable" } }, "required": ["errorCode"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "partial" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "discovery_partial" } }, "required": ["errorCode"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "reauth_required" } }, "required": ["status"] },
+          "then": { "properties": { "errorCode": { "const": "reauth_required" } }, "required": ["errorCode"] }
         }
       ],
       "additionalProperties": false

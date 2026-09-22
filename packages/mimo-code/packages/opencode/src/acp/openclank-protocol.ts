@@ -204,6 +204,8 @@ export interface AccountValidationRequest {
   readonly connection: ConnectionValidationRequest
   readonly authMethod: "api_key"
   readonly credential: Auth.Info
+  readonly accountID: string
+  readonly credentialRevision: number
 }
 
 export interface AccountDiscovery {

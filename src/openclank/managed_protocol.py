@@ -108,6 +108,16 @@ def validate_managed_method_payload(
             f"managed provider callback {direction} does not match its "
             f"pinned schema at {path}"
         )
+    if method == "_openclank/provider-control/v1/account/validate" and direction == "result":
+        discovery = payload["discovery"]
+        if (
+            payload["accountID"] != discovery["accountID"]
+            or payload["credentialRevision"] != discovery["credentialRevision"]
+            or payload["modelRoutes"] != discovery["models"]
+        ):
+            raise ManagedMethodValidationError(
+                "account validation result disagrees with its discovery result"
+            )
     return payload
 
 
