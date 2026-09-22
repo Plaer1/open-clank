@@ -25,8 +25,14 @@ from core.provider_models import (
 )
 from src.openclank.managed_protocol import (
     ManagedMethodValidationError,
+    HOST_CALLBACK_METHODS,
+    METHOD_DIRECTIONS,
     validate_managed_method_request,
     validate_managed_method_result,
+)
+from src.openclank.generated.managed_provider_contract import (
+    OPERATION_METHODS,
+    PROVIDER_STORE_METHODS,
 )
 from src.openclank.artifacts import ArtifactError, ArtifactStore
 from src.openclank.local_executor import LocalExecutorBroker, LocalExecutorError
@@ -37,26 +43,21 @@ from src.openclank.operation_journal import (
 from src.openclank.provider_store import ProviderStore, ProviderStoreError
 
 
-PROVIDER_CALLBACK_METHODS = (
-    "_openclank/provider-store/v1/account/bind",
-    "_openclank/provider-store/v1/account/commit",
-    "_openclank/provider-store/v1/account/attempt",
-    "_openclank/provider-store/v1/credential/lease",
-    "_openclank/provider-store/v1/credential/replace",
-    "_openclank/provider-store/v1/refresh/acquire",
-    "_openclank/provider-store/v1/refresh/renew",
-    "_openclank/provider-store/v1/refresh/commit",
-    "_openclank/provider-store/v1/refresh/abort",
+_GENERATED_CALLBACK_METHODS = tuple(
+    method
+    for method in (*PROVIDER_STORE_METHODS, *OPERATION_METHODS)
+    if METHOD_DIRECTIONS[method] == "engine_to_host"
 )
+if frozenset(_GENERATED_CALLBACK_METHODS) != HOST_CALLBACK_METHODS:
+    raise RuntimeError("generated managed callback direction set is inconsistent")
 
-OPERATION_CALLBACK_METHODS = (
-    "_openclank/operations/v1/journal/cas",
-    "_openclank/operations/v1/artifact/read",
-    "_openclank/operations/v1/artifact/write",
-    "_openclank/operations/v1/executor/invoke",
+PROVIDER_CALLBACK_METHODS = tuple(
+    method for method in _GENERATED_CALLBACK_METHODS if method.startswith("_openclank/provider-store/")
 )
-
-MANAGED_CALLBACK_METHODS = PROVIDER_CALLBACK_METHODS + OPERATION_CALLBACK_METHODS
+OPERATION_CALLBACK_METHODS = tuple(
+    method for method in _GENERATED_CALLBACK_METHODS if method.startswith("_openclank/operations/")
+)
+MANAGED_CALLBACK_METHODS = _GENERATED_CALLBACK_METHODS
 
 _SENSITIVE_METADATA_KEYS = frozenset(
     {

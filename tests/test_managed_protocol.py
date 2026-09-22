@@ -97,6 +97,26 @@ def test_account_discovery_distinguishes_complete_from_unavailable():
         )
 
 
+@pytest.mark.parametrize("missing", ["accountID", "credentialRevision", "discovery"])
+def test_account_validation_rejects_legacy_missing_discovery_fields(missing):
+    provenance = {"source": "provider-api", "observedAt": 1}
+    complete = {
+        "status": "complete",
+        "accountID": "account-1",
+        "credentialRevision": 1,
+        "models": [_model_route()],
+        "authoritative": True,
+        "provenance": provenance,
+        "freshness": "fresh",
+    }
+    result = _account_result(complete)
+    result.pop(missing)
+    with pytest.raises(ManagedProtocolError):
+        validate_engine_method_result(
+            "_openclank/provider-control/v1/account/validate", result
+        )
+
+
 def test_zero_byte_artifact_put_accepts_empty_chunks_and_nonzero_requires_chunks():
     empty = {
         "action": "put",

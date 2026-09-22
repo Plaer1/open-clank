@@ -9,6 +9,7 @@ import {
   OPERATION_ROUTER_VERSION,
   PROTOCOL_VERSION,
   PROVIDER_STORE_VERSION,
+  METHOD_DIRECTIONS,
   SCHEMA_HASH,
   SCHEMA_ID,
   SCHEMA_VERSION,
@@ -225,11 +226,11 @@ export interface AccountValidationResult {
   readonly authMethod: "api_key" | "oauth"
   readonly authClass: string
   readonly credential: Auth.Info
-  readonly accountID?: string
-  readonly credentialRevision?: number
+  readonly accountID: string
+  readonly credentialRevision: number
   readonly safeIdentity: Record<string, string>
   readonly modelRoutes: readonly ProviderModelRoute[]
-  readonly discovery?: AccountDiscovery
+  readonly discovery: AccountDiscovery
 }
 
 export type OAuthMode = "add" | "reauth"
@@ -485,7 +486,11 @@ export interface EngineMethodResultMap {
   "_openclank/operations/v1/execute": OperationExecuteResult
 }
 
-const ENGINE_METHOD_SET: ReadonlySet<string> = new Set([...PROVIDER_CONTROL_METHODS, "_openclank/operations/v1/execute"])
+const ENGINE_METHOD_SET: ReadonlySet<string> = new Set(
+  Object.entries(METHOD_DIRECTIONS)
+    .filter(([, direction]) => direction === "host_to_engine")
+    .map(([method]) => method),
+)
 const PROVIDER_CONTROL_METHOD_SET: ReadonlySet<string> = new Set(PROVIDER_CONTROL_METHODS)
 
 export function isProviderControlMethod(value: string): value is ProviderControlMethod {

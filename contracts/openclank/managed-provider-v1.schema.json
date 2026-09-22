@@ -337,7 +337,16 @@
     },
     "accountValidationResult": {
       "type": "object",
-      "required": ["authMethod", "authClass", "credential", "safeIdentity", "modelRoutes"],
+      "required": [
+        "authMethod",
+        "authClass",
+        "credential",
+        "accountID",
+        "credentialRevision",
+        "safeIdentity",
+        "modelRoutes",
+        "discovery"
+      ],
       "properties": {
         "authMethod": { "enum": ["api_key", "oauth"] },
         "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
