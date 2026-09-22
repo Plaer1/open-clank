@@ -12,6 +12,18 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
+// Refuse to compile with a different Bun than the repository contract. The
+// managed host verifies this pin too, but checking here prevents a direct
+// script invocation from embedding a different runtime in the engine.
+const expectedBunVersion = (await Bun.file(path.resolve(dir, "../../package.json")).json()).packageManager?.split("@")[1]
+if (!expectedBunVersion) {
+  throw new Error("packageManager field not found in root package.json")
+}
+if (process.versions.bun !== expectedBunVersion)
+  throw new Error(
+    `This build requires exactly bun@${expectedBunVersion}, but you are using bun@${process.versions.bun}`,
+  )
+
 await import("./generate.ts")
 
 import { Script } from "@mimo-ai/script"
