@@ -1,33 +1,29 @@
 import { describe, expect, test } from "bun:test"
 import type { Interface as ActorInterface } from "../../src/actor/spawn"
-import { registerBinding, spawnRef } from "../../src/actor/spawn-ref"
+import { makeBindingRegistry } from "../../src/actor/spawn-ref"
 
 describe("actor spawn bindings", () => {
   test("restores the newest live binding after out-of-order disposal", () => {
-    const previous = spawnRef.current
     const sentinel = {} as ActorInterface
     const actorA = {} as ActorInterface
     const actorB = {} as ActorInterface
-    spawnRef.current = sentinel
-    let disposeA: (() => void) | undefined
-    let disposeB: (() => void) | undefined
-    try {
-      disposeA = registerBinding(actorA)
-      disposeB = registerBinding(actorB)
+    const actorC = {} as ActorInterface
+    const registry = makeBindingRegistry(sentinel)
+    const disposeA = registry.register(actorA)
+    const disposeB = registry.register(actorB)
+    const disposeC = registry.register(actorC)
 
-      expect(spawnRef.current).toBe(actorB)
-      disposeA()
-      expect(spawnRef.current).toBe(actorB)
+    expect(registry.ref.current).toBe(actorC)
+    disposeB()
+    expect(registry.ref.current).toBe(actorC)
 
-      disposeB()
-      expect(spawnRef.current).toBe(sentinel)
+    disposeC()
+    expect(registry.ref.current).toBe(actorA)
 
-      disposeB()
-      expect(spawnRef.current).toBe(sentinel)
-    } finally {
-      disposeB?.()
-      disposeA?.()
-      spawnRef.current = previous
-    }
+    disposeA()
+    expect(registry.ref.current).toBe(sentinel)
+
+    disposeB()
+    expect(registry.ref.current).toBe(sentinel)
   })
 })

@@ -12,34 +12,46 @@
 // rather than a hard invariant.
 import type { Interface as ActorInterface } from "./spawn"
 
-export const spawnRef: { current: ActorInterface | undefined } = { current: undefined }
-
-const bindings: Array<{ token: symbol; implementation: ActorInterface }> = []
-let baseBinding: ActorInterface | undefined
-let baseCaptured = false
-
-/** Register one live Actor layer and return its idempotent scope finalizer. */
-export const registerBinding = (implementation: ActorInterface) => {
-  if (bindings.length === 0) {
-    baseBinding = spawnRef.current
-    baseCaptured = true
-  }
-  const binding = { token: Symbol("actor-spawn-binding"), implementation }
-  bindings.push(binding)
-  spawnRef.current = implementation
-
-  return () => {
-    const index = bindings.findIndex((entry) => entry.token === binding.token)
-    if (index < 0) return
-    bindings.splice(index, 1)
-
-    const current = spawnRef.current
-    if (current === implementation || bindings.some((entry) => entry.implementation === current)) {
-      spawnRef.current = bindings.at(-1)?.implementation ?? baseBinding
-    }
-    if (bindings.length === 0 && baseCaptured) {
-      baseBinding = undefined
-      baseCaptured = false
-    }
-  }
+export interface SpawnBindingRegistry {
+  readonly ref: { current: ActorInterface | undefined }
+  readonly register: (implementation: ActorInterface) => () => void
 }
+
+export const makeBindingRegistry = (initial?: ActorInterface): SpawnBindingRegistry => {
+  const ref = { current: initial }
+  const bindings: Array<{ token: symbol; implementation: ActorInterface }> = []
+  let baseBinding = initial
+  let baseCaptured = false
+
+  /** Register one live Actor layer and return its idempotent scope finalizer. */
+  const register = (implementation: ActorInterface) => {
+    if (bindings.length === 0) {
+      baseBinding = ref.current
+      baseCaptured = true
+    }
+    const binding = { token: Symbol("actor-spawn-binding"), implementation }
+    bindings.push(binding)
+    ref.current = implementation
+
+    return () => {
+      const index = bindings.findIndex((entry) => entry.token === binding.token)
+      if (index < 0) return
+      bindings.splice(index, 1)
+
+      const current = ref.current
+      if (current === implementation || bindings.some((entry) => entry.implementation === current)) {
+        ref.current = bindings.at(-1)?.implementation ?? baseBinding
+      }
+      if (bindings.length === 0 && baseCaptured) {
+        baseBinding = undefined
+        baseCaptured = false
+      }
+    }
+  }
+
+  return { ref, register }
+}
+
+const production = makeBindingRegistry()
+export const spawnRef = production.ref
+export const registerBinding = production.register
