@@ -146,6 +146,9 @@ _PROVIDER_FAMILY_BROWSER_CACHE_SECONDS = 5 * 60
 _ACCOUNT_INVENTORY_FRESHNESS_SECONDS = 15 * 60
 _ACCOUNT_INVENTORY_CACHE: dict[tuple[str, str, str, int, str, str], dict[str, Any]] = {}
 _ACCOUNT_INVENTORY_LOCK = threading.RLock()
+_ACCOUNT_INVENTORY_KEY_LOCKS: dict[tuple[str, str, str, int, str, str], threading.Lock] = {}
+_OAUTH_COMPLETION_LOCKS: dict[str, threading.Lock] = {}
+_OAUTH_COMPLETION_LOCKS_GUARD = threading.Lock()
 
 
 class _StrictModel(BaseModel):
@@ -1001,6 +1004,30 @@ def _invalidate_inventory_cache(*, owner: str, connection_id: Optional[str] = No
                 _ACCOUNT_INVENTORY_CACHE.pop(key, None)
 
 
+def _run_async_bridge(awaitable: Any) -> Any:
+    """Run an awaitable from sync FastAPI routes without nesting event loops."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            result.append(asyncio.run(awaitable))
+        except BaseException as exc:  # pragma: no cover - defensive bridge
+            error.append(exc)
+
+    worker = threading.Thread(target=runner, daemon=True)
+    worker.start()
+    worker.join()
+    if error:
+        raise error[0]
+    return result[0] if result else None
+
+
 def _engine_model_routes(
     *,
     store: ProviderStore,
@@ -1254,6 +1281,23 @@ def setup_provider_v1_routes(
         flow: OAuthHostFlow,
         result: Mapping[str, Any],
     ) -> dict[str, Any]:
+        with _OAUTH_COMPLETION_LOCKS_GUARD:
+            lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
+        acquired = await asyncio.to_thread(lock.acquire)
+        try:
+            if flow.status == "complete" and flow.account_public is not None:
+                return flow.public()
+            if flow.status == "failed" and flow.error_code:
+                return flow.public()
+            return await _persist_oauth_result_locked(flow, result)
+        finally:
+            if acquired:
+                lock.release()
+
+    async def _persist_oauth_result_locked(
+        flow: OAuthHostFlow,
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
         _validate_engine_flow_result(flow, result)
         status = str(result.get("status") or "failed")
         if status in {"pending", "running"}:
@@ -1361,41 +1405,24 @@ def setup_provider_v1_routes(
                 idempotency_key=flow.flow_id,
                 raw_routes=validated.get("modelRoutes") or [],
             )
-            if flow.mode == "add":
-                row = store.create_account(
-                    owner=flow.owner,
-                    connection_id=flow.connection_id,
-                    account_id=host_account_id,
-                    label=flow.label,
-                    auth_method=str(validated["authMethod"]),
-                    auth_class=str(validated["authClass"]),
-                    credentials=dict(validated["credential"]),
-                    safe_identity=dict(validated.get("safeIdentity") or {}),
-                    sort_order=len(
-                        store.list_accounts(
-                            owner=flow.owner,
-                            connection_id=flow.connection_id,
-                        )
-                    ),
-                )
-            else:
-                row = store.update_account(
-                    owner=flow.owner,
-                    account_id=flow.target_account_id,
-                    expected_revision=flow.expected_revision,
-                    label=flow.label,
-                    credentials=dict(validated["credential"]),
-                    safe_identity=dict(validated.get("safeIdentity") or {}),
-                    enabled=True,
-                )
-            store.reconcile_account_discovery(
+            row = store.persist_account_discovery(
                 owner=flow.owner,
-                account_id=row.id,
+                account_id=host_account_id,
+                connection_id=flow.connection_id,
+                label=flow.label,
+                auth_method=str(validated["authMethod"]),
+                auth_class=str(validated["authClass"]),
+                credentials=dict(validated["credential"]),
+                safe_identity=dict(validated.get("safeIdentity") or {}),
                 model_routes=declared_routes,
                 status=str(discovery["status"]),
                 authoritative=bool(discovery.get("authoritative")),
                 error_code=_discovery_error_code(discovery),
                 provenance=discovery.get("provenance"),
+                expected_account_revision=(
+                    None if flow.mode == "add" else flow.expected_revision
+                ),
+                expected_credential_revision=expected_credential_revision,
             )
             _invalidate_inventory_cache(owner=flow.owner, connection_id=flow.connection_id)
         except ProviderStoreError as exc:
@@ -1409,6 +1436,10 @@ def setup_provider_v1_routes(
                     )
                 except ProviderStoreError:
                     pass
+                _invalidate_inventory_cache(
+                    owner=flow.owner,
+                    connection_id=flow.connection_id,
+                )
             flow.status = "failed"
             flow.error_code = "oauth_persistence_failed"
             await _release_terminal_flow(flow, successful=False)
@@ -1727,6 +1758,7 @@ def setup_provider_v1_routes(
                 expected_revision=expected,
                 **kwargs,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.id)
             body = _connection_json(row)
             return _record_response(
                 store,
@@ -1768,6 +1800,7 @@ def setup_provider_v1_routes(
                 connection_id=connection_id,
                 expected_revision=expected,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.id)
             body = {
                 "id": row.id,
                 "status": "deleted",
@@ -1849,24 +1882,21 @@ def setup_provider_v1_routes(
                 idempotency_key=key,
                 raw_routes=validated.get("modelRoutes") or [],
             )
-            row = store.create_account(
+            row = store.persist_account_discovery(
                 owner=owner,
                 connection_id=connection_id,
                 account_id=account_id,
                 label=payload.label,
-                auth_method=validated["authMethod"],
-                auth_class=validated["authClass"],
+                auth_method=str(validated["authMethod"]),
+                auth_class=str(validated["authClass"]),
                 credentials=validated["credential"],
-                safe_identity=validated["safeIdentity"],
-            )
-            store.reconcile_account_discovery(
-                owner=owner,
-                account_id=row.id,
+                safe_identity=dict(validated["safeIdentity"]),
                 model_routes=declared_routes,
                 status=str(discovery["status"]),
                 authoritative=bool(discovery.get("authoritative")),
                 error_code=_discovery_error_code(discovery),
                 provenance=discovery.get("provenance"),
+                expected_credential_revision=1,
             )
             _invalidate_inventory_cache(owner=owner, connection_id=connection_id)
             body = _account_json(row)
@@ -1969,23 +1999,33 @@ def setup_provider_v1_routes(
                 )
             if not kwargs:
                 raise HTTPException(422, "No account fields were provided")
-            row = store.update_account(
-                owner=owner,
-                account_id=account_id,
-                expected_revision=expected,
-                **kwargs,
-            )
-            _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             if "api_key" in payload.model_fields_set:
-                store.reconcile_account_discovery(
+                row = store.persist_account_discovery(
                     owner=owner,
-                    account_id=row.id,
+                    account_id=account_id,
+                    connection_id=current.connection_id,
+                    label=str(kwargs.get("label", current.label)),
+                    auth_method="api_key",
+                    auth_class=str(validated["authClass"]),
+                    credentials=dict(kwargs["credentials"]),
+                    safe_identity=dict(kwargs["safe_identity"]),
                     model_routes=declared_routes,
                     status=str(discovery["status"]),
                     authoritative=bool(discovery.get("authoritative")),
                     error_code=_discovery_error_code(discovery),
                     provenance=discovery.get("provenance"),
+                    expected_account_revision=expected,
+                    expected_credential_revision=int(current.credential_version) + 1,
                 )
+            else:
+                row = store.update_account(
+                    owner=owner,
+                    account_id=account_id,
+                    expected_revision=expected,
+                    **kwargs,
+                )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
+            if "api_key" in payload.model_fields_set:
                 _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             body = _account_json(row)
             return _record_response(
@@ -2343,7 +2383,7 @@ def setup_provider_v1_routes(
                 connection_id=connection.id,
                 expected_revision=expected,
                 model_routes=declared_routes,
-                entitle_all_accounts=True,
+                entitle_all_accounts=False,
             )
             _invalidate_inventory_cache(owner=owner, connection_id=connection.id)
             body = {
@@ -3129,9 +3169,12 @@ def setup_provider_v1_routes(
         force: bool = False,
     ) -> None:
         key = _inventory_cache_key(owner=owner, connection=connection, account=account)
-        now = time.monotonic()
         with _ACCOUNT_INVENTORY_LOCK:
-            previous = _ACCOUNT_INVENTORY_CACHE.get(key)
+            key_lock = _ACCOUNT_INVENTORY_KEY_LOCKS.setdefault(key, threading.Lock())
+        with key_lock:
+            now = time.monotonic()
+            with _ACCOUNT_INVENTORY_LOCK:
+                previous = _ACCOUNT_INVENTORY_CACHE.get(key)
             if (
                 not force
                 and previous is not None
@@ -3141,7 +3184,7 @@ def setup_provider_v1_routes(
                 return
             try:
                 access = store.credential_access(owner=owner, account_id=account.id)
-                result = asyncio.run(
+                result = _run_async_bridge(
                     control.call(
                         request=request,
                         owner=owner,
@@ -3176,21 +3219,24 @@ def setup_provider_v1_routes(
                     authoritative=bool(discovery.get("authoritative")),
                     error_code=_discovery_error_code(discovery),
                     provenance=discovery.get("provenance"),
+                    expected_credential_revision=int(access.credential_version),
                 )
-                _ACCOUNT_INVENTORY_CACHE[key] = {
-                    "observed_at": time.monotonic(),
-                    "status": str(discovery["status"]),
-                    "last_good": str(discovery["status"]) == "complete",
-                }
+                with _ACCOUNT_INVENTORY_LOCK:
+                    _ACCOUNT_INVENTORY_CACHE[key] = {
+                        "observed_at": time.monotonic(),
+                        "status": str(discovery["status"]),
+                        "last_good": str(discovery["status"]) == "complete",
+                    }
             except Exception as exc:
                 # Preserve store entitlements and the cache marker on a
                 # transient failure; an account with no prior snapshot stays
                 # unavailable because it has no entitlement rows.
-                _ACCOUNT_INVENTORY_CACHE[key] = {
-                    "observed_at": time.monotonic(),
-                    "status": "unavailable",
-                    "last_good": bool(previous and previous.get("last_good")),
-                }
+                with _ACCOUNT_INVENTORY_LOCK:
+                    _ACCOUNT_INVENTORY_CACHE[key] = {
+                        "observed_at": time.monotonic(),
+                        "status": "unavailable",
+                        "last_good": bool(previous and previous.get("last_good")),
+                    }
                 logger.info(
                     "Managed account inventory refresh unavailable for %s: %s",
                     account.id,

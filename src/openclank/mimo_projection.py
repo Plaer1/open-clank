@@ -28,6 +28,7 @@ from core.provider_models import (
     ProviderRouteBinding,
     ProviderShareGrant,
 )
+from src.openclank.provider_store import _KEYLESS_CONNECTION_KINDS
 
 
 LOCAL_INSTALLATION_OWNER = "local-installation"
@@ -521,6 +522,7 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                 .filter(
                     ProviderModelRoute.connection_id.in_(connection_ids),
                     ProviderModelRoute.enabled.is_(True),
+                    ProviderModelRoute.visibility == "visible",
                     ProviderModelRoute.deleted_at.is_(None),
                 )
                 .order_by(
@@ -536,9 +538,18 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                 if route.owner == normalized_owner
                 and route.connection_id in own_connection_ids
                 and (
-                    not account_ids_by_connection.get(route.connection_id)
-                    or route.connection_id not in snapshot_connections
-                    or route.id in entitled_route_ids_by_connection.get(route.connection_id, set())
+                    (
+                        str(connection_by_id[route.connection_id].kind or "").strip().lower()
+                        in _KEYLESS_CONNECTION_KINDS
+                        and not account_ids_by_connection.get(route.connection_id)
+                    )
+                    or (
+                        account_ids_by_connection.get(route.connection_id)
+                        and route.connection_id in snapshot_connections
+                        and route.id in entitled_route_ids_by_connection.get(
+                            route.connection_id, set()
+                        )
+                    )
                 )
                 and _route_supports_runtime(route, connection_by_id[route.connection_id])
             ]
@@ -586,9 +597,16 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                         or route.id in explicit_ids
                     )
                     and (
-                        not account_ids_by_connection.get(grant.connection_id)
-                        or grant.connection_id not in snapshot_connections
-                        or route.id in eligible_shared_ids
+                        (
+                            str(connection.kind or "").strip().lower()
+                            in _KEYLESS_CONNECTION_KINDS
+                            and not account_ids_by_connection.get(grant.connection_id)
+                        )
+                        or (
+                            account_ids_by_connection.get(grant.connection_id)
+                            and grant.connection_id in snapshot_connections
+                            and route.id in eligible_shared_ids
+                        )
                     )
                     and _route_supports_runtime(route, connection)
                 )

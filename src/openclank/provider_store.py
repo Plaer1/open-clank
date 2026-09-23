@@ -1407,6 +1407,7 @@ class ProviderStore:
         authoritative: bool = True,
         error_code: Optional[str] = None,
         provenance: Optional[Mapping[str, Any]] = None,
+        expected_credential_revision: Optional[int] = None,
         now: Optional[datetime] = None,
     ) -> tuple[ProviderConnection, list[ProviderModelRoute]]:
         """Upsert connection metadata and reconcile exactly one account.
@@ -1453,6 +1454,14 @@ class ProviderStore:
         timestamp = _utc(now or self._clock())
         with self._transaction() as db:
             account = self._require_account(db, owner, account_id)
+            if (
+                expected_credential_revision is not None
+                and int(account.credential_version) != int(expected_credential_revision)
+            ):
+                raise ProviderRevisionConflict(
+                    expected=int(expected_credential_revision),
+                    current=int(account.credential_version),
+                )
             connection = self._require_connection(db, owner, account.connection_id)
             connection.revision += 1
             current_rows = db.query(ProviderModelRoute).filter(
@@ -1557,6 +1566,214 @@ class ProviderStore:
             db.flush()
             return self._detach(db, connection), self._detach_many(db, active_rows)
 
+    def persist_account_discovery(
+        self,
+        *,
+        owner: str,
+        account_id: str,
+        connection_id: str,
+        label: str,
+        auth_method: str,
+        auth_class: str,
+        credentials: Mapping[str, Any],
+        safe_identity: Optional[Mapping[str, Any]],
+        model_routes: Iterable[Mapping[str, Any]],
+        status: str = "complete",
+        authoritative: bool = True,
+        error_code: Optional[str] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        expected_account_revision: Optional[int] = None,
+        expected_credential_revision: int = 1,
+        now: Optional[datetime] = None,
+    ) -> ProviderAccount:
+        """Atomically commit credentials and this account's discovery snapshot."""
+
+        owner = _owner(owner)
+        account_id = _required(account_id, "account_id")
+        connection_id = _required(connection_id, "connection_id")
+        normalized_status = _required(status, "status").lower()
+        if normalized_status not in {"complete", "unavailable", "partial", "reauth_required"}:
+            raise ProviderValidationError("unsupported account discovery status")
+        if normalized_status == "complete" and not authoritative:
+            raise ProviderValidationError("complete account discovery must be authoritative")
+        normalized: list[dict[str, Any]] = []
+        seen_models: set[str] = set()
+        for raw in model_routes:
+            value = dict(raw)
+            model_id = _required(value.get("provider_model_id"), "provider_model_id")
+            if model_id in seen_models:
+                raise ProviderValidationError("engine model routes contain a duplicate model")
+            seen_models.add(model_id)
+            operations = sorted({_required(item, "operation") for item in value.get("operations") or ()})
+            if not operations:
+                raise ProviderValidationError("engine model route has no operations")
+            normalized.append({
+                "id": _required(value.get("id"), "model_route_id"),
+                "provider_model_id": model_id,
+                "display_name": _required(value.get("display_name") or model_id, "display_name"),
+                "operations": operations,
+                "capabilities": _json_mapping(value.get("capabilities")),
+                "provenance": _json_mapping(value.get("provenance")),
+                "enabled": bool(value.get("enabled", True)),
+            })
+        timestamp = _utc(now or self._clock())
+        with self._transaction() as db:
+            connection = self._require_connection(db, owner, connection_id)
+            account = db.query(ProviderAccount).filter(
+                ProviderAccount.id == account_id,
+                ProviderAccount.owner == owner,
+            ).first()
+            creating = account is None
+            already_applied = False
+            if creating:
+                if expected_account_revision not in (None, 0):
+                    raise ProviderRevisionConflict(expected=expected_account_revision, current=0)
+                fingerprint = credential_fingerprint(
+                    credentials, owner=owner, connection_id=connection.id
+                )
+                duplicate = db.query(ProviderAccount.id).filter(
+                    ProviderAccount.connection_id == connection.id,
+                    ProviderAccount.credential_fingerprint == fingerprint,
+                    ProviderAccount.deleted_at.is_(None),
+                ).first()
+                if duplicate is not None:
+                    raise ProviderConflict("credential is already registered for this connection")
+                last_order = db.query(func.max(ProviderAccount.sort_order)).filter(
+                    ProviderAccount.connection_id == connection.id,
+                    ProviderAccount.deleted_at.is_(None),
+                ).scalar()
+                account = ProviderAccount(
+                    id=account_id,
+                    connection_id=connection.id,
+                    owner=owner,
+                    label=_required(label, "label"),
+                    auth_method=_required(auth_method, "auth_method"),
+                    auth_class=_required(auth_class, "auth_class"),
+                    sort_order=(last_order if last_order is not None else -1) + 1,
+                    enabled=True,
+                    credential_envelope=seal_credential(
+                        credentials,
+                        CredentialScope(owner, connection.id, account_id, int(expected_credential_revision)),
+                    ),
+                    credential_fingerprint=fingerprint,
+                    credential_version=int(expected_credential_revision),
+                    safe_identity=_json_mapping(safe_identity),
+                )
+                db.add(account)
+                connection.revision += 1
+            else:
+                if account.connection_id != connection.id or account.deleted_at is not None:
+                    raise ProviderNotFound("provider account was not found")
+                incoming_fingerprint = credential_fingerprint(
+                    credentials, owner=owner, connection_id=connection.id
+                )
+                already_applied = (
+                    expected_account_revision is None
+                    and int(account.credential_version) == int(expected_credential_revision)
+                    and account.credential_fingerprint == incoming_fingerprint
+                )
+                if not already_applied:
+                    if expected_account_revision is None:
+                        raise ProviderValidationError("expected account revision is required")
+                    account = self._claim_row_revision(
+                        db, ProviderAccount,
+                        (ProviderAccount.id == account_id, ProviderAccount.owner == owner,
+                         ProviderAccount.deleted_at.is_(None)),
+                        expected_revision=expected_account_revision,
+                        missing_message="provider account was not found",
+                    )
+                    if int(account.credential_version) + 1 != int(expected_credential_revision):
+                        raise ProviderRevisionConflict(
+                            expected=expected_credential_revision,
+                            current=int(account.credential_version),
+                        )
+                    account = self._install_credential(
+                        db, account, credentials,
+                        expected_credential_version=int(account.credential_version),
+                        bump_revision=False,
+                    )
+                    account.label = _required(label, "label")
+                    account.auth_method = _required(auth_method, "auth_method")
+                    account.auth_class = _required(auth_class, "auth_class")
+                    account.safe_identity = _json_mapping(safe_identity)
+                    account.enabled = True
+                    connection.revision += 1
+
+            db.flush()
+            current_rows = db.query(ProviderModelRoute).filter(
+                ProviderModelRoute.owner == owner,
+                ProviderModelRoute.connection_id == connection.id,
+            ).all()
+            current = {row.provider_model_id: row for row in current_rows}
+            catalog_revision = max((int(row.catalog_revision or 0) for row in current_rows), default=0) + 1
+            active_rows: list[ProviderModelRoute] = []
+            for value in normalized:
+                row = current.get(value["provider_model_id"])
+                if row is None:
+                    row = ProviderModelRoute(
+                        id=value["id"], connection_id=connection.id, owner=owner,
+                        provider_model_id=value["provider_model_id"],
+                    )
+                    db.add(row)
+                else:
+                    row.revision += 1
+                row.display_name = value["display_name"]
+                row.operations = value["operations"]
+                row.capabilities = value["capabilities"]
+                row.provenance = {**value["provenance"], **_json_mapping(provenance)}
+                row.catalog_revision = catalog_revision
+                row.enabled = value["enabled"]
+                row.deleted_at = None
+                active_rows.append(row)
+            if normalized_status == "complete":
+                db.flush()
+                active_ids = {row.id for row in active_rows if row.enabled}
+                existing = {row.model_route_id: row for row in db.query(ProviderAccountEntitlement).filter(
+                    ProviderAccountEntitlement.account_id == account.id,
+                ).all()}
+                evidence = {"authority": "managed-engine", "discovery_status": normalized_status}
+                evidence.update(_json_mapping(provenance))
+                for route in {route.id: route for route in (*current_rows, *active_rows)}.values():
+                    entitlement = existing.get(route.id)
+                    if entitlement is None:
+                        entitlement = ProviderAccountEntitlement(account_id=account.id, model_route_id=route.id)
+                        db.add(entitlement)
+                    else:
+                        entitlement.revision += 1
+                    entitlement.eligible = route.id in active_ids
+                    entitlement.evidence = evidence
+                    entitlement.last_seen_at = timestamp
+                for route in current_rows:
+                    if route.id in active_ids:
+                        continue
+                    sibling = db.query(ProviderAccountEntitlement).join(
+                        ProviderAccount, ProviderAccount.id == ProviderAccountEntitlement.account_id,
+                    ).filter(
+                        ProviderAccountEntitlement.model_route_id == route.id,
+                        ProviderAccountEntitlement.eligible.is_(True),
+                        ProviderAccountEntitlement.account_id != account.id,
+                        ProviderAccount.connection_id == connection.id,
+                        ProviderAccount.deleted_at.is_(None),
+                    ).first()
+                    if sibling is None and route.deleted_at is None:
+                        route.enabled = False
+                        route.deleted_at = timestamp
+                        route.revision += 1
+            health = db.query(ProviderAccountHealth).filter(
+                ProviderAccountHealth.account_id == account.id,
+            ).first()
+            if health is None:
+                health = ProviderAccountHealth(account_id=account.id)
+                db.add(health)
+            else:
+                health.revision += 1
+            health.state = {"complete": "healthy", "unavailable": "degraded", "partial": "degraded", "reauth_required": "reauth_required"}[normalized_status]
+            health.last_error_code = _safe_error_code(error_code)
+            if normalized_status == "complete":
+                health.last_success_at = timestamp
+            db.flush()
+            return self._detach(db, account)
+
     def permitted_model_route_ids(
         self,
         *,
@@ -1574,7 +1791,7 @@ class ProviderStore:
             else None
         )
         with self._transaction() as db:
-            self._require_connection(db, owner, connection_id)
+            connection = self._require_connection(db, owner, connection_id)
             accounts = db.query(ProviderAccount.id).filter(
                 ProviderAccount.owner == owner,
                 ProviderAccount.connection_id == connection_id,
@@ -1587,7 +1804,16 @@ class ProviderStore:
                 accounts = accounts.filter(ProviderAccount.id.in_(allowed))
             account_ids = [row[0] for row in accounts.all()]
             if not account_ids:
-                return set()
+                if str(connection.kind or "").strip().lower() not in _KEYLESS_CONNECTION_KINDS:
+                    return set()
+                return {
+                    row[0]
+                    for row in db.query(ProviderModelRoute.id).filter(
+                        ProviderModelRoute.connection_id == connection_id,
+                        ProviderModelRoute.enabled.is_(True),
+                        ProviderModelRoute.deleted_at.is_(None),
+                    ).all()
+                }
             rows = db.query(ProviderAccountEntitlement.model_route_id).filter(
                 ProviderAccountEntitlement.account_id.in_(account_ids),
                 ProviderAccountEntitlement.eligible.is_(True),
@@ -1600,6 +1826,8 @@ class ProviderStore:
                     ProviderAccountEntitlement.account_id.in_(account_ids),
                 ).first() is not None
                 if not has_snapshot:
+                    if str(connection.kind or "").strip().lower() not in _KEYLESS_CONNECTION_KINDS:
+                        return set()
                     return {
                         row[0]
                         for row in db.query(ProviderModelRoute.id).filter(
@@ -1619,7 +1847,9 @@ class ProviderStore:
     ) -> bool:
         route_id = _required(model_route_id, "model_route_id")
         with self._transaction() as db:
-            route = self._require_route(db, _owner(owner), route_id)
+            normalized_owner = _owner(owner)
+            route = self._require_route(db, normalized_owner, route_id)
+            connection = self._require_connection(db, normalized_owner, route.connection_id)
             account_query = db.query(ProviderAccount.id).filter(
                 ProviderAccount.owner == _owner(owner),
                 ProviderAccount.connection_id == route.connection_id,
@@ -1636,8 +1866,7 @@ class ProviderStore:
                     account_query = account_query.filter(ProviderAccount.id.in_(account_ids))
             account_ids = [row[0] for row in account_query.all()]
             if not account_ids:
-                # Keyless connections have no account entitlement table.
-                return True
+                return str(connection.kind or "").strip().lower() in _KEYLESS_CONNECTION_KINDS
             entitlements = db.query(ProviderAccountEntitlement).filter(
                 ProviderAccountEntitlement.account_id.in_(account_ids),
                 ProviderAccountEntitlement.model_route_id == route.id,
@@ -1649,7 +1878,7 @@ class ProviderStore:
                     ProviderAccountEntitlement.account_id.in_(account_ids),
                 ).first() is not None:
                     return False
-                return True
+                return str(connection.kind or "").strip().lower() in _KEYLESS_CONNECTION_KINDS
             for entitlement in entitlements:
                 if not entitlement.eligible:
                     continue
