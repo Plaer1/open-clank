@@ -20,6 +20,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 import core.database as core_database
 from core.provider_models import (
+    ProviderAccount,
+    ProviderAccountEntitlement,
+    ProviderAccountHealth,
     ProviderConnection,
     ProviderModelRoute,
     ProviderRouteBinding,
@@ -468,6 +471,51 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
         }
         connection_ids = sorted(connection_by_id)
         if connection_ids:
+            account_rows = db.query(ProviderAccount).filter(
+                ProviderAccount.connection_id.in_(connection_ids),
+                ProviderAccount.deleted_at.is_(None),
+                ProviderAccount.enabled.is_(True),
+            ).all()
+            account_ids_by_connection: dict[str, set[str]] = {}
+            for account in account_rows:
+                account_ids_by_connection.setdefault(account.connection_id, set()).add(account.id)
+            entitlement_rows = db.query(ProviderAccountEntitlement).filter(
+                ProviderAccountEntitlement.account_id.in_([row.id for row in account_rows])
+                if account_rows else ProviderAccountEntitlement.account_id == "__none__",
+            ).all()
+            account_health = {
+                row.account_id: row
+                for row in db.query(ProviderAccountHealth).filter(
+                    ProviderAccountHealth.account_id.in_([row.id for row in account_rows])
+                    if account_rows else ProviderAccountHealth.account_id == "__none__",
+                ).all()
+            }
+            entitled_rows = [
+                row
+                for row in entitlement_rows
+                if row.eligible
+                and str(getattr(account_health.get(row.account_id), "state", "healthy"))
+                not in {"disabled", "reauth_required", "revoked"}
+            ]
+            snapshot_connections: set[str] = set()
+            entitled_route_ids_by_connection: dict[str, set[str]] = {}
+            route_connection = {
+                route.id: route.connection_id
+                for route in db.query(ProviderModelRoute).filter(
+                    ProviderModelRoute.connection_id.in_(connection_ids),
+                ).all()
+            }
+            for entitlement in entitled_rows:
+                connection_id = route_connection.get(entitlement.model_route_id)
+                if connection_id:
+                    snapshot_connections.add(connection_id)
+                    entitled_route_ids_by_connection.setdefault(connection_id, set()).add(
+                        entitlement.model_route_id
+                    )
+            for entitlement in entitlement_rows:
+                connection_id = route_connection.get(entitlement.model_route_id)
+                if connection_id:
+                    snapshot_connections.add(connection_id)
             candidate_routes = (
                 db.query(ProviderModelRoute)
                 .filter(
@@ -487,6 +535,11 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                 for route in candidate_routes
                 if route.owner == normalized_owner
                 and route.connection_id in own_connection_ids
+                and (
+                    not account_ids_by_connection.get(route.connection_id)
+                    or route.connection_id not in snapshot_connections
+                    or route.id in entitled_route_ids_by_connection.get(route.connection_id, set())
+                )
                 and _route_supports_runtime(route, connection_by_id[route.connection_id])
             ]
             shared_route_ids: set[str] = set()
@@ -507,6 +560,22 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                     for value in (selector.get("model_route_ids") or ())
                     if str(value).strip()
                 }
+                selected_account_ids = account_ids_by_connection.get(grant.connection_id, set())
+                account_selector = grant.account_selector or {}
+                if account_selector.get("mode") == "explicit_accounts":
+                    selected_account_ids &= {
+                        str(value).strip()
+                        for value in (account_selector.get("account_ids") or ())
+                    }
+                eligible_shared_ids = {
+                    route_id
+                    for route_id in entitled_route_ids_by_connection.get(grant.connection_id, set())
+                    if any(
+                        row.account_id in selected_account_ids
+                        for row in entitled_rows
+                        if row.model_route_id == route_id
+                    )
+                }
                 selected_ids = sorted(
                     route.id
                     for route in candidate_routes
@@ -515,6 +584,11 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
                     and (
                         mode == "all_live_models"
                         or route.id in explicit_ids
+                    )
+                    and (
+                        not account_ids_by_connection.get(grant.connection_id)
+                        or grant.connection_id not in snapshot_connections
+                        or route.id in eligible_shared_ids
                     )
                     and _route_supports_runtime(route, connection)
                 )

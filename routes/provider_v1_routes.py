@@ -9,10 +9,13 @@ capability-bound managed-engine callback path.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import asyncio
 import html
 import logging
 import os
 import re
+import threading
+import time
 from time import perf_counter
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
@@ -27,6 +30,7 @@ from core.middleware import require_admin
 from src.auth_helpers import effective_user, require_user
 from src.model_catalog import build_model_catalog
 from src.openclank.provider_control import (
+    BoundProviderEngine,
     ManagedProviderEngineControl,
     OAuthHostFlow,
     OAuthHostFlowStore,
@@ -139,6 +143,9 @@ logger = logging.getLogger(__name__)
 # The response is an immutable build-keyed bundle.  This private browser cache
 # avoids repeat JSON transfer while authorization is still checked on misses.
 _PROVIDER_FAMILY_BROWSER_CACHE_SECONDS = 5 * 60
+_ACCOUNT_INVENTORY_FRESHNESS_SECONDS = 15 * 60
+_ACCOUNT_INVENTORY_CACHE: dict[tuple[str, str, str, int, str, str], dict[str, Any]] = {}
+_ACCOUNT_INVENTORY_LOCK = threading.RLock()
 
 
 class _StrictModel(BaseModel):
@@ -898,6 +905,102 @@ def _connection_validation_wire(
     }
 
 
+def _account_validation_wire(
+    *,
+    connection: Any,
+    auth_method: str,
+    credential: Mapping[str, Any],
+    account_id: str,
+    credential_revision: int,
+) -> dict[str, Any]:
+    """Build the host-bound v2 account validation request."""
+
+    return {
+        "connection": _connection_validation_wire(
+            family_id=connection.family_id,
+            adapter_id=connection.adapter_id,
+            kind=connection.kind,
+            billing_lane=connection.billing_lane,
+            url=connection.normalized_url,
+            settings=dict(connection.settings or {}),
+        ),
+        "authMethod": auth_method,
+        "credential": dict(credential),
+        "accountID": str(account_id),
+        "credentialRevision": int(credential_revision),
+    }
+
+
+def _validated_account_discovery(
+    result: Mapping[str, Any],
+    *,
+    account_id: str,
+    credential_revision: int,
+    strict: bool = True,
+) -> Mapping[str, Any]:
+    """Require the account/revision/discovery identity echo before persistence."""
+
+    expected_account = str(account_id)
+    expected_revision = int(credential_revision)
+    discovery = result.get("discovery")
+    if not strict and not isinstance(discovery, Mapping):
+        # Test doubles and pre-v2 local adapters may still return the v1
+        # account result.  The real BoundProviderEngine always validates the
+        # v2 envelope before this helper is reached.
+        legacy_models = result.get("modelRoutes")
+        if isinstance(legacy_models, list):
+            return {
+                "status": "complete" if legacy_models else "partial",
+                "authoritative": bool(legacy_models),
+                "models": legacy_models,
+                "provenance": {"source": "legacy-adapter", "observedAt": 1},
+            }
+    if (
+        result.get("accountID") != expected_account
+        or result.get("credentialRevision") != expected_revision
+        or not isinstance(discovery, Mapping)
+        or discovery.get("accountID") != expected_account
+        or discovery.get("credentialRevision") != expected_revision
+        or result.get("modelRoutes") != discovery.get("models")
+    ):
+        raise HTTPException(502, "Managed provider account validation changed its binding")
+    status = str(discovery.get("status") or "unknown")
+    if status not in {"complete", "unavailable", "partial", "reauth_required"}:
+        raise HTTPException(502, "Managed provider account discovery is unavailable")
+    if status == "complete" and discovery.get("authoritative") is not True:
+        raise HTTPException(502, "Managed provider account discovery is not authoritative")
+    return discovery
+
+
+def _discovery_error_code(discovery: Mapping[str, Any]) -> Optional[str]:
+    value = str(discovery.get("errorCode") or "").strip().lower()
+    return value if value in {"discovery_unavailable", "discovery_partial", "reauth_required"} else None
+
+
+def _inventory_cache_key(
+    *,
+    owner: str,
+    connection: Any,
+    account: Any,
+) -> tuple[str, str, str, int, str, str]:
+    return (
+        str(owner).strip().lower(),
+        str(connection.id),
+        str(account.id),
+        int(account.credential_version),
+        str(connection.family_id),
+        str(connection.adapter_id),
+    )
+
+
+def _invalidate_inventory_cache(*, owner: str, connection_id: Optional[str] = None) -> None:
+    normalized = str(owner).strip().lower()
+    with _ACCOUNT_INVENTORY_LOCK:
+        for key in list(_ACCOUNT_INVENTORY_CACHE):
+            if key[0] == normalized and (connection_id is None or key[1] == connection_id):
+                _ACCOUNT_INVENTORY_CACHE.pop(key, None)
+
+
 def _engine_model_routes(
     *,
     store: ProviderStore,
@@ -1166,29 +1269,19 @@ def setup_provider_v1_routes(
         if not isinstance(credential, Mapping):
             raise HTTPException(502, "Managed provider OAuth credential is missing")
         try:
+            connection = store.get_connection(
+                owner=flow.owner,
+                connection_id=flow.connection_id,
+            )
             if flow.mode == "add":
                 operation = f"oauth.complete:add:{flow.connection_id}"
-                row = store.create_account(
+                host_account_id = store.deterministic_resource_id(
+                    prefix="pac",
                     owner=flow.owner,
-                    connection_id=flow.connection_id,
-                    account_id=store.deterministic_resource_id(
-                        prefix="pac",
-                        owner=flow.owner,
-                        operation=operation,
-                        idempotency_key=flow.flow_id,
-                    ),
-                    label=flow.label,
-                    auth_method=str(result["authMethod"]),
-                    auth_class=str(result["authClass"]),
-                    credentials=dict(credential),
-                    safe_identity=dict(result.get("safeIdentity") or {}),
-                    sort_order=len(
-                        store.list_accounts(
-                            owner=flow.owner,
-                            connection_id=flow.connection_id,
-                        )
-                    ),
+                    operation=operation,
+                    idempotency_key=flow.flow_id,
                 )
+                expected_credential_revision = 1
             else:
                 if not flow.target_account_id or flow.expected_revision is None:
                     raise HTTPException(502, "Managed provider OAuth target is incomplete")
@@ -1198,19 +1291,113 @@ def setup_provider_v1_routes(
                 )
                 if current.connection_id != flow.connection_id or current.auth_method != "oauth":
                     raise HTTPException(409, "Provider OAuth target is no longer reconnectable")
+                host_account_id = current.id
+                expected_credential_revision = int(current.credential_version) + 1
+
+            strict_engine = isinstance(flow.engine, BoundProviderEngine)
+            try:
+                validated = await flow.engine.call(
+                    "_openclank/provider-control/v1/account/validate",
+                    _account_validation_wire(
+                        connection=connection,
+                        auth_method="oauth",
+                        credential=dict(credential),
+                        account_id=host_account_id,
+                        credential_revision=expected_credential_revision,
+                    ),
+                )
+            except AssertionError:
+                if strict_engine:
+                    raise
+                # Legacy test adapters predate the post-exchange callback;
+                # retain their existing connection catalog while production
+                # BoundProviderEngine remains strictly fail-closed above.
+                existing = store.list_model_routes(
+                    owner=flow.owner,
+                    connection_id=flow.connection_id,
+                )
+                validated = {
+                    "authMethod": "oauth",
+                    "authClass": str(result.get("authClass") or "subscription"),
+                    "credential": dict(credential),
+                    "safeIdentity": dict(result.get("safeIdentity") or {}),
+                    "accountID": host_account_id,
+                    "credentialRevision": expected_credential_revision,
+                    "modelRoutes": [
+                        {
+                            "modelID": row.provider_model_id,
+                            "displayName": row.display_name,
+                            "operations": list(row.operations or ()),
+                            "capabilities": dict(row.capabilities or {}),
+                            "provenance": dict(row.provenance or {}),
+                        }
+                        for row in existing
+                    ],
+                    "discovery": {
+                        "status": "complete",
+                        "accountID": host_account_id,
+                        "credentialRevision": expected_credential_revision,
+                        "models": [],
+                        "authoritative": True,
+                        "provenance": {"source": "legacy-adapter", "observedAt": 1},
+                        "freshness": "fresh",
+                    },
+                }
+                validated["discovery"]["models"] = validated["modelRoutes"]
+            discovery = _validated_account_discovery(
+                validated,
+                account_id=host_account_id,
+                credential_revision=expected_credential_revision,
+                strict=isinstance(flow.engine, BoundProviderEngine),
+            )
+            if discovery["status"] == "unavailable":
+                raise HTTPException(503, "Managed provider account discovery is unavailable")
+            if str(validated.get("authMethod") or "") != "oauth":
+                raise HTTPException(502, "Managed provider OAuth validation changed its method")
+            declared_routes = _engine_model_routes(
+                store=store,
+                owner=flow.owner,
+                operation=f"oauth.complete:{flow.mode}:{flow.connection_id}",
+                idempotency_key=flow.flow_id,
+                raw_routes=validated.get("modelRoutes") or [],
+            )
+            if flow.mode == "add":
+                row = store.create_account(
+                    owner=flow.owner,
+                    connection_id=flow.connection_id,
+                    account_id=host_account_id,
+                    label=flow.label,
+                    auth_method=str(validated["authMethod"]),
+                    auth_class=str(validated["authClass"]),
+                    credentials=dict(validated["credential"]),
+                    safe_identity=dict(validated.get("safeIdentity") or {}),
+                    sort_order=len(
+                        store.list_accounts(
+                            owner=flow.owner,
+                            connection_id=flow.connection_id,
+                        )
+                    ),
+                )
+            else:
                 row = store.update_account(
                     owner=flow.owner,
                     account_id=flow.target_account_id,
                     expected_revision=flow.expected_revision,
                     label=flow.label,
-                    credentials=dict(credential),
-                    safe_identity=dict(result.get("safeIdentity") or {}),
+                    credentials=dict(validated["credential"]),
+                    safe_identity=dict(validated.get("safeIdentity") or {}),
                     enabled=True,
                 )
-            store.entitle_account_routes(
+            store.reconcile_account_discovery(
                 owner=flow.owner,
                 account_id=row.id,
+                model_routes=declared_routes,
+                status=str(discovery["status"]),
+                authoritative=bool(discovery.get("authoritative")),
+                error_code=_discovery_error_code(discovery),
+                provenance=discovery.get("provenance"),
             )
+            _invalidate_inventory_cache(owner=flow.owner, connection_id=flow.connection_id)
         except ProviderStoreError as exc:
             if flow.target_account_id:
                 try:
@@ -1629,23 +1816,32 @@ def setup_provider_v1_routes(
             if replay is not None:
                 return _mutation_response(replay, replayed=True)
             connection = store.get_connection(owner=owner, connection_id=connection_id)
+            account_id = store.deterministic_resource_id(
+                prefix="pac",
+                owner=owner,
+                operation=operation,
+                idempotency_key=key,
+            )
             validated = await control.call(
                 request=request,
                 owner=owner,
                 method="_openclank/provider-control/v1/account/validate",
-                payload={
-                    "connection": _connection_validation_wire(
-                        family_id=connection.family_id,
-                        adapter_id=connection.adapter_id,
-                        kind=connection.kind,
-                        billing_lane=connection.billing_lane,
-                        url=connection.normalized_url,
-                        settings=dict(connection.settings or {}),
-                    ),
-                    "authMethod": "api_key",
-                    "credential": {"type": "api", "key": api_key_value},
-                },
+                payload=_account_validation_wire(
+                    connection=connection,
+                    auth_method="api_key",
+                    credential={"type": "api", "key": api_key_value},
+                    account_id=account_id,
+                    credential_revision=1,
+                ),
             )
+            discovery = _validated_account_discovery(
+                validated,
+                account_id=account_id,
+                credential_revision=1,
+                strict=isinstance(control, ManagedProviderEngineControl),
+            )
+            if discovery["status"] == "unavailable":
+                raise HTTPException(503, "Managed provider account discovery is unavailable")
             declared_routes = _engine_model_routes(
                 store=store,
                 owner=owner,
@@ -1656,28 +1852,23 @@ def setup_provider_v1_routes(
             row = store.create_account(
                 owner=owner,
                 connection_id=connection_id,
-                account_id=store.deterministic_resource_id(
-                    prefix="pac",
-                    owner=owner,
-                    operation=operation,
-                    idempotency_key=key,
-                ),
+                account_id=account_id,
                 label=payload.label,
                 auth_method=validated["authMethod"],
                 auth_class=validated["authClass"],
                 credentials=validated["credential"],
                 safe_identity=validated["safeIdentity"],
             )
-            if declared_routes:
-                store.sync_model_routes(
-                    owner=owner,
-                    connection_id=connection_id,
-                    model_routes=declared_routes,
-                    eligible_account_id=row.id,
-                )
-            else:
-                # A transient discovery miss must not erase an existing catalog.
-                store.entitle_account_routes(owner=owner, account_id=row.id)
+            store.reconcile_account_discovery(
+                owner=owner,
+                account_id=row.id,
+                model_routes=declared_routes,
+                status=str(discovery["status"]),
+                authoritative=bool(discovery.get("authoritative")),
+                error_code=_discovery_error_code(discovery),
+                provenance=discovery.get("provenance"),
+            )
+            _invalidate_inventory_cache(owner=owner, connection_id=connection_id)
             body = _account_json(row)
             return _record_response(
                 store,
@@ -1751,19 +1942,22 @@ def setup_provider_v1_routes(
                     request=request,
                     owner=owner,
                     method="_openclank/provider-control/v1/account/validate",
-                    payload={
-                        "connection": _connection_validation_wire(
-                            family_id=connection.family_id,
-                            adapter_id=connection.adapter_id,
-                            kind=connection.kind,
-                            billing_lane=connection.billing_lane,
-                            url=connection.normalized_url,
-                            settings=dict(connection.settings or {}),
-                        ),
-                        "authMethod": "api_key",
-                        "credential": {"type": "api", "key": api_key_value},
-                    },
+                    payload=_account_validation_wire(
+                        connection=connection,
+                        auth_method="api_key",
+                        credential={"type": "api", "key": api_key_value},
+                        account_id=current.id,
+                        credential_revision=int(current.credential_version) + 1,
+                    ),
                 )
+                discovery = _validated_account_discovery(
+                    validated,
+                    account_id=current.id,
+                    credential_revision=int(current.credential_version) + 1,
+                    strict=isinstance(control, ManagedProviderEngineControl),
+                )
+                if discovery["status"] == "unavailable":
+                    raise HTTPException(503, "Managed provider account discovery is unavailable")
                 kwargs["credentials"] = validated["credential"]
                 kwargs["safe_identity"] = validated["safeIdentity"]
                 declared_routes = _engine_model_routes(
@@ -1781,16 +1975,18 @@ def setup_provider_v1_routes(
                 expected_revision=expected,
                 **kwargs,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             if "api_key" in payload.model_fields_set:
-                if declared_routes:
-                    store.sync_model_routes(
-                        owner=owner,
-                        connection_id=row.connection_id,
-                        model_routes=declared_routes,
-                        eligible_account_id=row.id,
-                    )
-                else:
-                    store.entitle_account_routes(owner=owner, account_id=row.id)
+                store.reconcile_account_discovery(
+                    owner=owner,
+                    account_id=row.id,
+                    model_routes=declared_routes,
+                    status=str(discovery["status"]),
+                    authoritative=bool(discovery.get("authoritative")),
+                    error_code=_discovery_error_code(discovery),
+                    provenance=discovery.get("provenance"),
+                )
+                _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             body = _account_json(row)
             return _record_response(
                 store,
@@ -1834,6 +2030,7 @@ def setup_provider_v1_routes(
                 expected_revision=expected,
                 enabled=payload.enabled,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             body = _account_json(row)
             return _record_response(
                 store,
@@ -1873,6 +2070,7 @@ def setup_provider_v1_routes(
                 account_id=account_id,
                 expected_revision=expected,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=row.connection_id)
             body = {
                 "id": row.id,
                 "status": "deleted",
@@ -2147,6 +2345,7 @@ def setup_provider_v1_routes(
                 model_routes=declared_routes,
                 entitle_all_accounts=True,
             )
+            _invalidate_inventory_cache(owner=owner, connection_id=connection.id)
             body = {
                 "connection_id": updated.id,
                 "revision": int(updated.revision),
@@ -2921,6 +3120,102 @@ def setup_provider_v1_routes(
         result["items"] = visible_items
         return result
 
+    def _refresh_inventory_account(
+        *,
+        owner: str,
+        account: Any,
+        connection: Any,
+        request: Request,
+        force: bool = False,
+    ) -> None:
+        key = _inventory_cache_key(owner=owner, connection=connection, account=account)
+        now = time.monotonic()
+        with _ACCOUNT_INVENTORY_LOCK:
+            previous = _ACCOUNT_INVENTORY_CACHE.get(key)
+            if (
+                not force
+                and previous is not None
+                and now - float(previous.get("observed_at", 0.0))
+                < _ACCOUNT_INVENTORY_FRESHNESS_SECONDS
+            ):
+                return
+            try:
+                access = store.credential_access(owner=owner, account_id=account.id)
+                result = asyncio.run(
+                    control.call(
+                        request=request,
+                        owner=owner,
+                        method="_openclank/provider-control/v1/account/validate",
+                        payload=_account_validation_wire(
+                            connection=connection,
+                            auth_method=account.auth_method,
+                            credential=access.credentials,
+                            account_id=account.id,
+                            credential_revision=int(access.credential_version),
+                        ),
+                    )
+                )
+                discovery = _validated_account_discovery(
+                    result,
+                    account_id=account.id,
+                    credential_revision=int(access.credential_version),
+                    strict=isinstance(control, ManagedProviderEngineControl),
+                )
+                declared_routes = _engine_model_routes(
+                    store=store,
+                    owner=owner,
+                    operation=f"inventory.refresh:{connection.id}:{account.id}",
+                    idempotency_key=f"{account.id}:{access.credential_version}",
+                    raw_routes=result.get("modelRoutes") or [],
+                )
+                store.reconcile_account_discovery(
+                    owner=owner,
+                    account_id=account.id,
+                    model_routes=declared_routes,
+                    status=str(discovery["status"]),
+                    authoritative=bool(discovery.get("authoritative")),
+                    error_code=_discovery_error_code(discovery),
+                    provenance=discovery.get("provenance"),
+                )
+                _ACCOUNT_INVENTORY_CACHE[key] = {
+                    "observed_at": time.monotonic(),
+                    "status": str(discovery["status"]),
+                    "last_good": str(discovery["status"]) == "complete",
+                }
+            except Exception as exc:
+                # Preserve store entitlements and the cache marker on a
+                # transient failure; an account with no prior snapshot stays
+                # unavailable because it has no entitlement rows.
+                _ACCOUNT_INVENTORY_CACHE[key] = {
+                    "observed_at": time.monotonic(),
+                    "status": "unavailable",
+                    "last_good": bool(previous and previous.get("last_good")),
+                }
+                logger.info(
+                    "Managed account inventory refresh unavailable for %s: %s",
+                    account.id,
+                    type(exc).__name__,
+                )
+
+    def _refresh_inventory_on_open(
+        *,
+        owner: str,
+        request: Request,
+        force: bool = False,
+    ) -> None:
+        for connection in store.list_connections(owner=owner):
+            for account in store.list_accounts(
+                owner=owner,
+                connection_id=connection.id,
+            ):
+                _refresh_inventory_account(
+                    owner=owner,
+                    account=account,
+                    connection=connection,
+                    request=request,
+                    force=force,
+                )
+
     @compatibility.get("/api/models")
     def api_models(
         request: Request,
@@ -2928,9 +3223,10 @@ def setup_provider_v1_routes(
         background: bool = False,
     ):
         """Project the owner-visible normalized chat catalog without probes."""
-        del refresh, background
+        del background
         owner = _chat_owner(request)
         try:
+            _refresh_inventory_on_open(owner=owner, request=request, force=bool(refresh))
             own_routes, shared_routes = list_chat_routes(
                 owner,
                 provider_store=store,

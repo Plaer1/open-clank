@@ -146,6 +146,11 @@ def _build_owned(
         raise ChatRouteUnavailable("Selected provider connection is unavailable")
     if route.connection_id != connection.id or not _route_is_chat_capable(route):
         raise ChatRouteUnavailable("Selected model is not available for chat")
+    if not store.route_has_permitted_account(
+        owner=owner,
+        model_route_id=route.id,
+    ):
+        raise ChatRouteUnavailable("Selected model is not entitled for this account")
     normalized_connection_id = _validate_connection_identity(connection.id)
     return NormalizedChatRoute(
         model_route_id=route.id,
@@ -176,6 +181,12 @@ def _build_shared(
     )
     if route.id not in scope.model_route_ids or not _route_is_chat_capable(route):
         raise ChatRouteUnavailable("Shared model is not available for chat")
+    if not store.route_has_permitted_account(
+        owner=scope.owner,
+        model_route_id=route.id,
+        allowed_account_ids=scope.account_ids,
+    ):
+        raise ChatRouteUnavailable("Shared model is not entitled for this account")
     connection = store.get_connection(
         owner=scope.owner,
         connection_id=scope.connection_id,
@@ -367,6 +378,11 @@ def list_chat_routes(
         ):
             if not _route_is_chat_capable(route):
                 continue
+            if not store.route_has_permitted_account(
+                owner=recipient,
+                model_route_id=route.id,
+            ):
+                continue
             own.append(
                 _build_owned(
                     store,
@@ -389,6 +405,12 @@ def list_chat_routes(
                     model_route_id=route_id,
                 )
                 if _route_is_chat_capable(route):
+                    if not store.route_has_permitted_account(
+                        owner=scope.owner,
+                        model_route_id=route.id,
+                        allowed_account_ids=scope.account_ids,
+                    ):
+                        continue
                     shared.append(
                         _build_shared(
                             store,

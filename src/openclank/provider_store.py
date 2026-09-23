@@ -1397,6 +1397,286 @@ class ProviderStore:
             detached_connection = self._detach(db, connection)
             return detached_connection, self._detach_many(db, active_rows)
 
+    def reconcile_account_discovery(
+        self,
+        *,
+        owner: str,
+        account_id: str,
+        model_routes: Iterable[Mapping[str, Any]],
+        status: str = "complete",
+        authoritative: bool = True,
+        error_code: Optional[str] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> tuple[ProviderConnection, list[ProviderModelRoute]]:
+        """Upsert connection metadata and reconcile exactly one account.
+
+        Account discovery is a snapshot of one credential.  Route rows are
+        connection metadata and therefore form the union seen by all sibling
+        accounts; entitlement rows are the account-scoped snapshot.  A
+        non-authoritative result leaves the last-good entitlement snapshot in
+        place while recording a secret-free account health state.
+        """
+
+        owner = _owner(owner)
+        account_id = _required(account_id, "account_id")
+        normalized_status = _required(status, "status").lower()
+        if normalized_status not in {"complete", "unavailable", "partial", "reauth_required"}:
+            raise ProviderValidationError("unsupported account discovery status")
+        if normalized_status == "complete" and not authoritative:
+            raise ProviderValidationError("complete account discovery must be authoritative")
+        normalized: list[dict[str, Any]] = []
+        seen_models: set[str] = set()
+        for raw in model_routes:
+            value = dict(raw)
+            model_id = _required(value.get("provider_model_id"), "provider_model_id")
+            if model_id in seen_models:
+                raise ProviderValidationError("engine model routes contain a duplicate model")
+            seen_models.add(model_id)
+            operations = sorted(
+                {_required(item, "operation") for item in value.get("operations") or ()}
+            )
+            if not operations:
+                raise ProviderValidationError("engine model route has no operations")
+            normalized.append(
+                {
+                    "id": _required(value.get("id"), "model_route_id"),
+                    "provider_model_id": model_id,
+                    "display_name": _required(value.get("display_name") or model_id, "display_name"),
+                    "operations": operations,
+                    "capabilities": _json_mapping(value.get("capabilities")),
+                    "provenance": _json_mapping(value.get("provenance")),
+                    "enabled": bool(value.get("enabled", True)),
+                }
+            )
+
+        timestamp = _utc(now or self._clock())
+        with self._transaction() as db:
+            account = self._require_account(db, owner, account_id)
+            connection = self._require_connection(db, owner, account.connection_id)
+            connection.revision += 1
+            current_rows = db.query(ProviderModelRoute).filter(
+                ProviderModelRoute.owner == owner,
+                ProviderModelRoute.connection_id == connection.id,
+            ).all()
+            current = {row.provider_model_id: row for row in current_rows}
+            catalog_revision = max(
+                (int(row.catalog_revision or 0) for row in current_rows),
+                default=0,
+            ) + 1
+            active_rows: list[ProviderModelRoute] = []
+            for value in normalized:
+                row = current.get(value["provider_model_id"])
+                if row is None:
+                    row = ProviderModelRoute(
+                        id=value["id"],
+                        connection_id=connection.id,
+                        owner=owner,
+                        provider_model_id=value["provider_model_id"],
+                    )
+                    db.add(row)
+                else:
+                    row.revision += 1
+                row.display_name = value["display_name"]
+                row.operations = value["operations"]
+                row.capabilities = value["capabilities"]
+                row.provenance = {
+                    **value["provenance"],
+                    **_json_mapping(provenance),
+                }
+                row.catalog_revision = catalog_revision
+                row.enabled = value["enabled"]
+                row.deleted_at = None
+                active_rows.append(row)
+
+            if normalized_status == "complete":
+                db.flush()
+                active_ids = {row.id for row in active_rows if row.enabled}
+                existing_entitlements = {
+                    row.model_route_id: row
+                    for row in db.query(ProviderAccountEntitlement).filter(
+                        ProviderAccountEntitlement.account_id == account.id,
+                    ).all()
+                }
+                evidence = {
+                    "authority": "managed-engine",
+                    "discovery_status": normalized_status,
+                }
+                evidence.update(_json_mapping(provenance))
+                all_routes = {route.id: route for route in (*current_rows, *active_rows)}
+                for route in all_routes.values():
+                    existing = route.id in existing_entitlements
+                    if existing:
+                        entitlement = existing_entitlements[route.id]
+                    else:
+                        entitlement = ProviderAccountEntitlement(
+                            account_id=account.id,
+                            model_route_id=route.id,
+                        )
+                        db.add(entitlement)
+                    if existing:
+                        entitlement.revision += 1
+                    entitlement.eligible = route.id in active_ids
+                    entitlement.evidence = evidence
+                    entitlement.last_seen_at = timestamp
+                for route in current_rows:
+                    if route.id in active_ids:
+                        continue
+                    sibling = db.query(ProviderAccountEntitlement).join(
+                        ProviderAccount,
+                        ProviderAccount.id == ProviderAccountEntitlement.account_id,
+                    ).filter(
+                        ProviderAccountEntitlement.model_route_id == route.id,
+                        ProviderAccountEntitlement.eligible.is_(True),
+                        ProviderAccountEntitlement.account_id != account.id,
+                        ProviderAccount.connection_id == connection.id,
+                        ProviderAccount.deleted_at.is_(None),
+                    ).first()
+                    if sibling is None and route.deleted_at is None:
+                        route.enabled = False
+                        route.deleted_at = timestamp
+                        route.revision += 1
+
+            health = db.query(ProviderAccountHealth).filter(
+                ProviderAccountHealth.account_id == account.id,
+            ).first()
+            if health is None:
+                health = ProviderAccountHealth(account_id=account.id)
+                db.add(health)
+            else:
+                health.revision += 1
+            health.state = {
+                "complete": "healthy",
+                "unavailable": "degraded",
+                "partial": "degraded",
+                "reauth_required": "reauth_required",
+            }[normalized_status]
+            health.last_error_code = _safe_error_code(error_code)
+            if normalized_status == "complete":
+                health.last_success_at = timestamp
+            db.flush()
+            return self._detach(db, connection), self._detach_many(db, active_rows)
+
+    def permitted_model_route_ids(
+        self,
+        *,
+        owner: str,
+        connection_id: str,
+        allowed_account_ids: Optional[Iterable[str]] = None,
+    ) -> set[str]:
+        """Return route IDs eligible for at least one live account."""
+
+        owner = _owner(owner)
+        connection_id = _required(connection_id, "connection_id")
+        allowed = (
+            {_required(item, "account_id") for item in allowed_account_ids}
+            if allowed_account_ids is not None
+            else None
+        )
+        with self._transaction() as db:
+            self._require_connection(db, owner, connection_id)
+            accounts = db.query(ProviderAccount.id).filter(
+                ProviderAccount.owner == owner,
+                ProviderAccount.connection_id == connection_id,
+                ProviderAccount.enabled.is_(True),
+                ProviderAccount.deleted_at.is_(None),
+            )
+            if allowed is not None:
+                if not allowed:
+                    return set()
+                accounts = accounts.filter(ProviderAccount.id.in_(allowed))
+            account_ids = [row[0] for row in accounts.all()]
+            if not account_ids:
+                return set()
+            rows = db.query(ProviderAccountEntitlement.model_route_id).filter(
+                ProviderAccountEntitlement.account_id.in_(account_ids),
+                ProviderAccountEntitlement.eligible.is_(True),
+            ).distinct().all()
+            if not rows:
+                # Legacy/keyless rows may have accounts created before the
+                # entitlement snapshot existed.  Once any snapshot exists,
+                # the explicit eligible flags are authoritative.
+                has_snapshot = db.query(ProviderAccountEntitlement).filter(
+                    ProviderAccountEntitlement.account_id.in_(account_ids),
+                ).first() is not None
+                if not has_snapshot:
+                    return {
+                        row[0]
+                        for row in db.query(ProviderModelRoute.id).filter(
+                            ProviderModelRoute.connection_id == connection_id,
+                            ProviderModelRoute.enabled.is_(True),
+                            ProviderModelRoute.deleted_at.is_(None),
+                        ).all()
+                    }
+            return {str(row[0]) for row in rows}
+
+    def route_has_permitted_account(
+        self,
+        *,
+        owner: str,
+        model_route_id: str,
+        allowed_account_ids: Optional[Iterable[str]] = None,
+    ) -> bool:
+        route_id = _required(model_route_id, "model_route_id")
+        with self._transaction() as db:
+            route = self._require_route(db, _owner(owner), route_id)
+            account_query = db.query(ProviderAccount.id).filter(
+                ProviderAccount.owner == _owner(owner),
+                ProviderAccount.connection_id == route.connection_id,
+                ProviderAccount.enabled.is_(True),
+                ProviderAccount.deleted_at.is_(None),
+            )
+            if allowed_account_ids is not None:
+                account_ids = {
+                    _required(item, "account_id") for item in allowed_account_ids
+                }
+                # An empty all-live selector means the owner currently has no
+                # account rows; retain keyless/share catalogue compatibility.
+                if account_ids:
+                    account_query = account_query.filter(ProviderAccount.id.in_(account_ids))
+            account_ids = [row[0] for row in account_query.all()]
+            if not account_ids:
+                # Keyless connections have no account entitlement table.
+                return True
+            entitlements = db.query(ProviderAccountEntitlement).filter(
+                ProviderAccountEntitlement.account_id.in_(account_ids),
+                ProviderAccountEntitlement.model_route_id == route.id,
+            ).all()
+            if not entitlements:
+                # Preserve pre-snapshot account rows; explicit false is a
+                # revocation and therefore remains a hard denial.
+                if db.query(ProviderAccountEntitlement).filter(
+                    ProviderAccountEntitlement.account_id.in_(account_ids),
+                ).first() is not None:
+                    return False
+                return True
+            for entitlement in entitlements:
+                if not entitlement.eligible:
+                    continue
+                health = db.query(ProviderAccountHealth).filter(
+                    ProviderAccountHealth.account_id == entitlement.account_id,
+                ).first()
+                if health is not None and not self._health_available(
+                    health.state,
+                    health.cooldown_until,
+                    quota_reset_at=health.quota_reset_at,
+                    now=_utc(self._clock()),
+                ):
+                    continue
+                model_health = db.query(ProviderAccountModelHealth).filter(
+                    ProviderAccountModelHealth.account_id == entitlement.account_id,
+                    ProviderAccountModelHealth.model_route_id == route.id,
+                ).first()
+                if model_health is None or self._health_available(
+                    model_health.state,
+                    model_health.cooldown_until,
+                    quota_reset_at=model_health.quota_reset_at,
+                    now=_utc(self._clock()),
+                    model_scope=True,
+                ):
+                    return True
+            return False
+
     def entitle_account_routes(
         self,
         *,
