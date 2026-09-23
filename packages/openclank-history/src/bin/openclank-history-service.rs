@@ -4,7 +4,7 @@
 use openclank_history::catalog::{ActionRecord, ActionState, BeginResult};
 #[cfg(unix)]
 use openclank_history::operations::{
-    begin, capture_input_digest, BatchCaptureInput, HistoryCoordinator,
+    batch_capture_digest, begin, capture_input_digest, BatchCaptureInput, HistoryCoordinator,
 };
 #[cfg(unix)]
 use openclank_history::protocol::{
@@ -1972,10 +1972,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     let inline_bytes = entries
                                         .iter()
                                         .filter_map(|entry| entry.content.as_ref())
-                                        .map(Vec::len)
-                                        .sum::<usize>();
-                                    let bound_error = bound_error.or_else(|| (inline_bytes > MAX_BATCH_INLINE_BYTES)
-                                        .then(|| format!("mutation batch inline bytes exceed {}", MAX_BATCH_INLINE_BYTES)));
+                                        .try_fold(0usize, |total, bytes| {
+                                            total.checked_add(bytes.len())
+                                        });
+                                    let bound_error = bound_error.or_else(|| match inline_bytes {
+                                        None => Some("mutation batch inline byte count overflow".into()),
+                                        Some(total) if total > MAX_BATCH_INLINE_BYTES => Some(
+                                            format!(
+                                                "mutation batch inline bytes exceed {}",
+                                                MAX_BATCH_INLINE_BYTES
+                                            ),
+                                        ),
+                                        Some(_) => None,
+                                    });
                                     if let Some(error) = bound_error {
                                         ServiceResponse::Error { code: error }
                                     } else {
@@ -2060,12 +2069,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 record.state,
                                                 ActionState::Intent | ActionState::CaptureFailed
                                             ) => {
-                                                for upload_id in staged_ids {
-                                                    if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
-                                                        remove_staged_upload(&removed, &staged_bytes);
+                                                let incoming_digest = batch_capture_digest(&inputs);
+                                                if record.before_capture_digest.as_deref()
+                                                    == Some(incoming_digest.as_str())
+                                                {
+                                                    for upload_id in staged_ids {
+                                                        if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
+                                                            remove_staged_upload(&removed, &staged_bytes);
+                                                        }
+                                                    }
+                                                    ServiceResponse::Action(record)
+                                                } else {
+                                                    ServiceResponse::Error {
+                                                        code: "history_prepare_conflict: existing batch digest differs".into(),
                                                     }
                                                 }
-                                                ServiceResponse::Action(record)
                                             },
                                         Ok(_) => match coordinator
                                             .capture_batch_before(

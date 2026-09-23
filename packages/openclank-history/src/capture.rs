@@ -8,7 +8,9 @@ use crate::catalog::{
     ActionRecord, ActionState, CaptureManifest, CatalogResult, LiveReceipt, LiveStatus, Locator,
     ResourceKey, ResourceOutcome, Revision,
 };
-use crate::operations::{begin, ActionRequest, BatchCaptureInput, HistoryCoordinator};
+use crate::operations::{
+    batch_capture_digest, begin, ActionRequest, BatchCaptureInput, HistoryCoordinator,
+};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -143,8 +145,26 @@ impl<'a> CaptureAdapter<'a> {
                     .push(entry.resource_key.clone());
             }
         }
+        let digest = batch_capture_digest(&entries);
         match begin(self.coordinator.catalog(), request)? {
-            crate::catalog::BeginResult::Existing(record) => Ok(record),
+            crate::catalog::BeginResult::Existing(record)
+                if matches!(
+                    record.state,
+                    ActionState::Intent | ActionState::CaptureFailed
+                ) =>
+            {
+                self.coordinator
+                    .capture_batch_before(&record.action_id, entries)
+                    .await
+            }
+            crate::catalog::BeginResult::Existing(record)
+                if record.before_capture_digest.as_deref() == Some(digest.as_str()) =>
+            {
+                Ok(record)
+            }
+            crate::catalog::BeginResult::Existing(_) => {
+                Err("history_prepare_conflict: existing batch digest differs".into())
+            }
             crate::catalog::BeginResult::New(record) => {
                 debug_assert_eq!(record.state, ActionState::Intent);
                 self.coordinator

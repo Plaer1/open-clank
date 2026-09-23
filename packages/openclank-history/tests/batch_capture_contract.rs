@@ -226,6 +226,81 @@ async fn batch_prepare_rejects_foreign_scope_and_inexact_directory_before_lore_w
     coordinator.shutdown_checked().await.unwrap();
 }
 
+#[tokio::test]
+async fn batch_prepare_rejects_malformed_wire_preimages() {
+    let root = tempdir().unwrap();
+    let coordinator = HistoryCoordinator::open(
+        root.path().join("catalog"),
+        root.path().join("lore"),
+        "account",
+    )
+    .await
+    .unwrap();
+    let adapter = CaptureAdapter::new(&coordinator);
+
+    let absent_with_content = entry(
+        "absent-content",
+        "new.txt",
+        "new.txt",
+        ResourceExistence::Absent,
+        Some(b"forged-before"),
+    );
+    let mut absent_envelope = envelope();
+    absent_envelope.action_id = "batch-absent-content".into();
+    absent_envelope.resource_key = absent_with_content.resource_key.clone();
+    let error = adapter
+        .prepare_batch(absent_envelope, vec![absent_with_content.clone()])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invalid_preimage"));
+
+    let present_without_content = entry(
+        "present-missing",
+        "existing.txt",
+        "existing.txt",
+        ResourceExistence::Present,
+        None,
+    );
+    let mut present_envelope = envelope();
+    present_envelope.action_id = "batch-present-missing".into();
+    present_envelope.resource_key = present_without_content.resource_key.clone();
+    let error = adapter
+        .prepare_batch(present_envelope, vec![present_without_content])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("missing_preimage"));
+
+    let mut directory = entry(
+        "directory-forged",
+        "folder",
+        "folder",
+        ResourceExistence::Present,
+        Some(b"caller-claimed-manifest"),
+    );
+    directory.resource_type = ResourceType::Directory;
+    directory.coverage.metadata = Some(serde_json::json!({ "exact_preimage": true }));
+    let mut directory_envelope = envelope();
+    directory_envelope.action_id = "batch-directory-forged".into();
+    directory_envelope.resource_key = directory.resource_key.clone();
+    let error = adapter
+        .prepare_batch(directory_envelope, vec![directory])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("inexact_preimage"));
+
+    for action_id in [
+        "batch-absent-content",
+        "batch-present-missing",
+        "batch-directory-forged",
+    ] {
+        coordinator.abort(action_id).unwrap();
+    }
+    coordinator.shutdown_checked().await.unwrap();
+}
+
 #[test]
 fn batch_protocol_round_trip_keeps_preimage_and_absent_markers() {
     let mut request = envelope().request();

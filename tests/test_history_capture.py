@@ -9,6 +9,7 @@ import pytest
 from core.atomic_io import AtomicWriteConflict, atomic_write_batch, AtomicFileChange
 from src.openclank import history_capture
 from src.openclank.history_capture import HistoryContext
+from src.openclank.history_client import HistoryClientError
 
 
 class FakeHistoryClient:
@@ -94,6 +95,50 @@ def test_configured_recoverable_batch_is_gated_when_prepare_fails(tmp_path):
         )
     assert first.read_bytes() == b"before"
     assert not second.exists()
+
+
+def test_batch_staging_cleans_every_upload_when_publish_fails():
+    class FailingPublish:
+        def __init__(self):
+            self.staged: list[str] = []
+            self.aborted: list[tuple[str, str]] = []
+
+        def _check_content(self, content):
+            return None
+
+        def _canonical_staged_fingerprint(self, content, _fingerprint):
+            return f"sha256:{len(content):064x}:{len(content)}"
+
+        def _stage_content(self, action_id, content, _fingerprint):
+            upload_id = f"upload-{len(self.staged)}"
+            self.staged.append(upload_id)
+            return upload_id
+
+        def _request_envelope(self, envelope):
+            return envelope
+
+        def _call(self, _payload):
+            raise HistoryClientError("worker stopped after staging the batch")
+
+        def _abort_staged(self, action_id, upload_id):
+            self.aborted.append((action_id, upload_id))
+
+    client = FailingPublish()
+    entries = [
+        {"content": b"a" * (640 * 1024 + 1), "fingerprint": "first"},
+        {"content": b"b" * (640 * 1024 + 1), "fingerprint": "second"},
+    ]
+    with pytest.raises(HistoryClientError, match="worker stopped"):
+        # The method only relies on these transport hooks, so this test does
+        # not start a worker or create a live service.
+        from src.openclank.history_client import HistoryClient
+
+        HistoryClient.prepare_batch(client, {"action_id": "batch-stage"}, entries)
+    assert client.staged == ["upload-0", "upload-1"]
+    assert client.aborted == [
+        ("batch-stage", "upload-0"),
+        ("batch-stage", "upload-1"),
+    ]
 
 
 def test_failed_after_capture_is_reported_without_rolling_back_live_write(tmp_path):

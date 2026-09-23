@@ -977,6 +977,43 @@ impl HistoryCoordinator {
                 )
                 .into());
             }
+            if entry.existence == ResourceExistence::Absent && entry.content.is_some() {
+                return Err(
+                    "history_prepare_invalid_preimage: absent resources cannot carry content"
+                        .into(),
+                );
+            }
+            if entry.existence == ResourceExistence::Present && entry.content.is_none() {
+                return Err(
+                    "history_prepare_missing_preimage: present resources require content".into(),
+                );
+            }
+            if entry.existence == ResourceExistence::Present
+                && entry.resource_type == ResourceType::Directory
+            {
+                let content = entry
+                    .content
+                    .as_ref()
+                    .expect("present content checked above");
+                let content_digest = blake3::hash(content).to_hex().to_string();
+                let digest_bound =
+                    entry.coverage.content_digest.as_deref() == Some(content_digest.as_str());
+                let opaque_manifest = entry
+                    .metadata
+                    .opaque
+                    .as_ref()
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|value| value.get("manifest_digest"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(content_digest.as_str());
+                if !digest_bound && !opaque_manifest {
+                    return Err(format!(
+                        "history_prepare_inexact_preimage: {} directory requires a content-bound manifest or opaque payload",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
         }
         let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
@@ -1040,24 +1077,8 @@ impl HistoryCoordinator {
             }
         };
         let mut resources = Vec::with_capacity(entries.len());
-        let mut digest_input = Vec::new();
+        let digest = batch_capture_digest(&entries);
         for (index, entry) in entries.into_iter().enumerate() {
-            let content_for_digest = entry.content.as_ref().map(|bytes| bytes.as_ref());
-            digest_input.extend_from_slice(&serde_json::to_vec(&(
-                index,
-                &entry.resource_key,
-                &entry.old_locator,
-                &entry.new_locator,
-                &entry.expected_revision,
-                &entry.existence,
-                &entry.resource_type,
-                &entry.metadata,
-                &entry.coverage,
-                &entry.fingerprint,
-            ))?);
-            if let Some(content) = content_for_digest {
-                digest_input.extend_from_slice(blake3::hash(content).as_bytes());
-            }
             let receipt = match self
                 .capture(
                     action_id,
@@ -1105,7 +1126,6 @@ impl HistoryCoordinator {
             },
             resources,
         };
-        let digest = blake3::hash(&digest_input).to_hex().to_string();
         let result = self.catalog.record_batch_before_durable(
             action_id,
             batch,
@@ -1403,6 +1423,43 @@ pub fn capture_input_digest(content: Option<&[u8]>, fingerprint: &str) -> String
         data.extend_from_slice(bytes);
     }
     blake3::hash(&data).to_hex().to_string()
+}
+
+pub fn batch_capture_digest(entries: &[BatchCaptureInput]) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"openclank-mutation-batch-digest-v1");
+    for (index, entry) in entries.iter().enumerate() {
+        let metadata = serde_json::to_vec(&(
+            index,
+            &entry.resource_key,
+            &entry.old_locator,
+            &entry.new_locator,
+            &entry.expected_revision,
+            &entry.existence,
+            &entry.resource_type,
+            &entry.metadata,
+            &entry.coverage,
+            &entry.fingerprint,
+        ))
+        .expect("batch capture metadata is serializable");
+        append_digest_frame(&mut input, b"entry", &metadata);
+        if let Some(content) = entry.content.as_ref() {
+            let mut content_frame = Vec::with_capacity(8 + 32);
+            content_frame.extend_from_slice(&(content.len() as u64).to_be_bytes());
+            content_frame.extend_from_slice(blake3::hash(content).as_bytes());
+            append_digest_frame(&mut input, b"content", &content_frame);
+        } else {
+            append_digest_frame(&mut input, b"content-absent", &[]);
+        }
+    }
+    blake3::hash(&input).to_hex().to_string()
+}
+
+fn append_digest_frame(input: &mut Vec<u8>, domain: &[u8], payload: &[u8]) {
+    input.extend_from_slice(&(domain.len() as u64).to_be_bytes());
+    input.extend_from_slice(domain);
+    input.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    input.extend_from_slice(payload);
 }
 
 pub fn request_digest(request: &ActionRequest) -> String {
