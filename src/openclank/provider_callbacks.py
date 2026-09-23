@@ -90,6 +90,7 @@ class ManagedProviderRouteContext:
     model_id: str
     model_route_id: str
     grant_id: Optional[str] = None
+    grant_revision: Optional[int] = None
 
     def to_wire(self, *, root_operation_id: str) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -102,6 +103,8 @@ class ManagedProviderRouteContext:
         }
         if self.grant_id:
             result["grantID"] = self.grant_id
+            if self.grant_revision is not None:
+                result["grantRevision"] = int(self.grant_revision)
         return result
 
 
@@ -479,6 +482,7 @@ class ManagedProviderCallbacks:
             credential_owner = self._owner
             fixed_connection_id: Optional[str] = None
             normalized_grant_id: Optional[str] = None
+            grant_revision: Optional[int] = None
             if grant_id:
                 normalized_grant_id = _required_text(grant_id, "provider grant")
                 grant = (
@@ -495,6 +499,7 @@ class ManagedProviderCallbacks:
                         "managed provider grant is not active"
                     )
                 credential_owner = grant.owner
+                grant_revision = int(grant.revision)
                 fixed_connection_id = grant.connection_id
 
             query = (
@@ -538,6 +543,7 @@ class ManagedProviderCallbacks:
                 model_id=route.provider_model_id,
                 model_route_id=route.id,
                 grant_id=normalized_grant_id,
+                grant_revision=grant_revision,
             )
         finally:
             db.close()

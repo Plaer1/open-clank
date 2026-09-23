@@ -1,4 +1,5 @@
 import type { InboxRow } from "./inbox.sql"
+import type { ActorHostContext, ActorModel } from "@/actor/schema"
 
 export function renderInboxRow(row: InboxRow): string {
   if (row.type === "actor_notification") {
@@ -26,10 +27,18 @@ export function renderActorNotification(event: {
   error?: string
   reportedStatus?: string
   reportedSummary?: string
+  requestedModel?: string
+  effectiveModel?: ActorModel
+  hostContext?: ActorHostContext
   // For a stalled notification: how long (ms) since the child's last turn advanced.
   stalledForMs?: number
 }): string {
   const header = `Background sub-session "${event.description}" (actor_id: ${event.actorID})`
+  const identity = [
+    event.requestedModel ? `\nRequested model: ${event.requestedModel}` : "",
+    event.effectiveModel ? `\nEffective model: ${JSON.stringify(event.effectiveModel)}` : "",
+    event.hostContext ? `\nHost context: ${JSON.stringify(event.hostContext)}` : "",
+  ].join("")
   if (event.status === "completed") {
     // event.status is the sub-session *process lifecycle* — it ended cleanly.
     // event.reportedStatus is the *task* outcome the sub-session self-reported
@@ -43,26 +52,26 @@ export function renderActorNotification(event: {
     // affirmative "completed" verb.
     if (!reported || reported === "success" || reported === "partial") {
       const statusLine = reported ? `\nStatus: ${reported}` : ""
-      return `<actor-notification>\n${header} completed.${statusLine}${summaryLine}${resultLine}\n</actor-notification>`
+      return `<actor-notification>\n${header}${identity} completed.${statusLine}${summaryLine}${resultLine}\n</actor-notification>`
     }
     // failed/blocked → the sub-session ran to the end but the task did not
     // succeed. State the outcome; never say "completed".
     if (reported === "failed" || reported === "blocked") {
-      return `<actor-notification>\n${header} finished (status: ${reported}).${summaryLine}${resultLine}\n</actor-notification>`
+      return `<actor-notification>\n${header}${identity} finished (status: ${reported}).${summaryLine}${resultLine}\n</actor-notification>`
     }
     // Any other reported value = unknown/unrecognized → neutral verb, and omit
     // the misleading "Status: unknown" line entirely.
-    return `<actor-notification>\n${header} ended (status not reported).${summaryLine}${resultLine}\n</actor-notification>`
+    return `<actor-notification>\n${header}${identity} ended (status not reported).${summaryLine}${resultLine}\n</actor-notification>`
   }
   if (event.status === "failed") {
-    return `<actor-notification>\n${header} failed.\nError: ${event.error ?? "unknown"}\n</actor-notification>`
+    return `<actor-notification>\n${header}${identity} failed.\nError: ${event.error ?? "unknown"}\n</actor-notification>`
   }
   if (event.status === "stalled") {
     const forLine =
       event.stalledForMs !== undefined ? ` (no turn advance for ${Math.floor(event.stalledForMs / 1000)}s)` : ""
-    return `<actor-notification>\n${header} appears stalled${forLine}. It is still running but has made no progress. Consider checking on it, sending it a nudge, or cancelling it.\n</actor-notification>`
+    return `<actor-notification>\n${header}${identity} appears stalled${forLine}. It is still running but has made no progress. Consider checking on it, sending it a nudge, or cancelling it.\n</actor-notification>`
   }
-  return `<actor-notification>\n${header} was cancelled.\n</actor-notification>`
+  return `<actor-notification>\n${header}${identity} was cancelled.\n</actor-notification>`
 }
 
 export type ParsedActorNotification = {

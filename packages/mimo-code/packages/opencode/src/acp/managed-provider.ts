@@ -24,6 +24,63 @@ export const RouteContext = Schema.Struct({
 })
 export type RouteContext = Schema.Schema.Type<typeof RouteContext>
 
+/**
+ * Process-local host identity for the current authenticated ACP operation.
+ * This never crosses the public session.prompt request body. The ACP agent
+ * installs it only after ManagedProvider has established the real lease, and
+ * restores the previous value when the SDK call completes.
+ */
+export type ManagedHostContext = {
+  accountID?: string
+  grantID?: string
+  grantRevision?: number
+  credentialRevision?: number
+  chatID?: string
+  workspaceID?: string
+  cwd?: string
+  goalID?: string
+}
+
+const hostContexts = new Map<string, { context: ManagedHostContext; depth: number }>()
+
+function sameHostContext(left: ManagedHostContext, right: ManagedHostContext): boolean {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (left[key as keyof ManagedHostContext] !== right[key as keyof ManagedHostContext]) return false
+  }
+  return true
+}
+
+export function currentHostContext(sessionID: string): ManagedHostContext | undefined {
+  const entry = hostContexts.get(sessionID)
+  return entry ? { ...entry.context } : undefined
+}
+
+export async function withHostContext<A>(
+  sessionID: string,
+  context: ManagedHostContext,
+  run: () => Promise<A>,
+): Promise<A> {
+  const active = hostContexts.get(sessionID)
+  if (active) {
+    if (!sameHostContext(active.context, context)) {
+      throw new ManagedProviderError("A different managed host context is already active for this session")
+    }
+    active.depth += 1
+  } else {
+    hostContexts.set(sessionID, { context: { ...context }, depth: 1 })
+  }
+  try {
+    return await run()
+  } finally {
+    const current = hostContexts.get(sessionID)
+    if (current) {
+      current.depth -= 1
+      if (current.depth <= 0) hostContexts.delete(sessionID)
+    }
+  }
+}
+
 const CredentialLease = Schema.Struct({
   leaseID: Schema.String,
   connectionID: Schema.String,
@@ -603,6 +660,7 @@ export async function refreshOAuthCredential(input: {
 export function resetForTest(): void {
   host = undefined
   operations.clear()
+  hostContexts.clear()
 }
 
 export * as ManagedProvider from "./managed-provider"

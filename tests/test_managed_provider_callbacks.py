@@ -184,6 +184,37 @@ async def test_route_resolution_fails_closed_when_family_is_ambiguous(managed_ca
 
 
 @pytest.mark.asyncio
+async def test_route_wire_carries_real_share_revision_and_omits_direct_owner_revision(managed_callbacks):
+    callbacks, store, factory, artifacts = managed_callbacks
+    grant = store.create_share_grant(
+        owner="alice",
+        recipient="bob",
+        connection_id="openai-api",
+        account_selector={"mode": "all_live_accounts"},
+        model_selector={"mode": "explicit_models", "model_route_ids": ["route-gpt-test"]},
+        grant_id="grant-revision-test",
+    )
+    recipient = ManagedProviderCallbacks(
+        owner="bob",
+        holder_id="worker-generation-bob",
+        store=store,
+        session_factory=factory,
+        operation_journal=OperationJournalStore(factory),
+        artifact_store=artifacts,
+    )
+    shared = await recipient.resolve_route_context(
+        "openai-api/gpt-test", grant_id=grant.id
+    )
+    assert shared.grant_revision == grant.revision == 1
+    assert shared.to_wire(root_operation_id="root-grant")["grantRevision"] == 1
+
+    direct = await callbacks.resolve_route_context("openai-api/gpt-test")
+    assert direct.grant_id is None
+    assert direct.grant_revision is None
+    assert "grantRevision" not in direct.to_wire(root_operation_id="root-direct")
+
+
+@pytest.mark.asyncio
 async def test_keyless_local_connection_binds_without_an_account_or_credential_lease(
     managed_callbacks,
 ):

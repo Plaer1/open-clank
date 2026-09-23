@@ -110,7 +110,7 @@ import { TaskRegistry } from "@/task/registry"
 import { EffectBridge } from "@/effect"
 import { Team } from "@/team"
 import { ActorRegistry } from "@/actor/registry"
-import type { ActorHostContext } from "@/actor/schema"
+import { ManagedProvider, type ManagedHostContext } from "@/acp/managed-provider"
 import { Metrics } from "@/metrics"
 import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation-style"
 import { ToolResultError } from "../tool/result-error"
@@ -271,6 +271,14 @@ const INVALID_OUTPUT_CONTINUATION_LIMIT = Flag.MIMOCODE_INVALID_OUTPUT_CONTINUAT
 const TEXT_TOOL_CALL_RETRY_LIMIT = Flag.MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT
 
 const log = Log.create({ service: "session.prompt" })
+
+/** Existing actors keep their durable host binding across parent turns. */
+export function hostContextForPrompt(
+  actorHostContext: ManagedHostContext | undefined,
+  managedHostContext: ManagedHostContext | undefined,
+): ManagedHostContext | undefined {
+  return actorHostContext ?? managedHostContext
+}
 
 // Hooks are NOT listed here: the plugin layer detects hook file changes
 // itself via mtime staleness checks (covers external editors too), so only
@@ -947,7 +955,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       messages: MessageV2.WithParts[]
       agentID?: string
       task_id?: string
-      trustedHostContext?: ActorHostContext
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -970,6 +977,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       )
       const run = yield* runner()
       const promptOps = yield* ops()
+      const managedHostContext = ManagedProvider.currentHostContext(input.session.id)
 
       // Per-tool runtime whitelist: when the LLM call is being made on behalf
       // of a registered actor (subagent or peer), look up the actor row and,
@@ -1028,11 +1036,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           bypassAgentCheck: input.bypassAgentCheck,
           promptOps,
           ...(whitelist ? { toolWhitelist: [...whitelist] } : {}),
-          ...(input.trustedHostContext
-            ? { hostContext: input.trustedHostContext }
-            : askActor?.hostContext
-              ? { hostContext: askActor.hostContext }
-              : {}),
+          ...(hostContextForPrompt(askActor?.hostContext, managedHostContext)
+            ? { hostContext: hostContextForPrompt(askActor?.hostContext, managedHostContext) }
+            : {}),
           mcpToolSearch: mcpCatalog.current,
           execMcp,
           ...(() => {
@@ -3691,7 +3697,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               messages: msgs,
               agentID: lastUser.agentID,
               task_id,
-              trustedHostContext: input.trustedHostContext,
             })
             const tools = resolvedTools.tools
             const activeTools = resolvedTools.activeTools
@@ -4319,6 +4324,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   actorID: agentID,
                   description: actor.description,
                   status,
+                  ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
+                  ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
+                  ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
                   ...(status === "completed"
                     ? {
                         result: finalText ?? "(no output)",
@@ -4774,10 +4782,7 @@ export const PromptInput = z.object({
     )
     .min(1, "parts must contain at least one element"),
 }).strict()
-export type PromptInput = z.infer<typeof PromptInput> & {
-  /** Host-injected identity; never accepted by the public prompt schema. */
-  readonly trustedHostContext?: ActorHostContext
-}
+export type PromptInput = z.infer<typeof PromptInput>
 
 export const LoopInput = z.object({
   sessionID: SessionID.zod,

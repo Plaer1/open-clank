@@ -90,6 +90,38 @@ async def test_projection_cleanup_only_touches_the_current_worker_partition():
 
 
 @pytest.mark.asyncio
+async def test_session_negotiate_and_config_reuse_the_mapped_runtime_session():
+    worker = MimoSupervisor(owner="alice", partitioned=True)
+    calls = []
+
+    class Bridge:
+        def negotiated_state(self, session_id):
+            calls.append(("state", session_id))
+            return {"commands": [{"name": "compact"}]}
+
+        async def ensure_session(self, session_id, *, cwd=None, owner=None):
+            calls.append(("ensure", session_id, cwd, owner))
+            return "mimo-a"
+
+        async def set_config_option(self, session_id, config_id, value, *, cwd=None, owner=None):
+            calls.append(("config", session_id, config_id, value, cwd, owner))
+            return {"current": {config_id: value}}
+
+    worker._bridge = Bridge()
+    worker.is_alive = lambda: True
+    negotiated = await worker.negotiate_session("chat-a", owner="alice", cwd="/workspace/a")
+    configured = await worker.set_session_config("chat-a", "mode", "build", owner="alice", cwd="/workspace/a")
+
+    assert negotiated["commands"]
+    assert configured == {"current": {"mode": "build"}}
+    assert calls == [
+        ("ensure", "chat-a", "/workspace/a", "alice"),
+        ("state", "chat-a"),
+        ("config", "chat-a", "mode", "build", "/workspace/a", "alice"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_model_catalog_warmup_timeout_does_not_block_worker_start(
     monkeypatch,
     caplog,

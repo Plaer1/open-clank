@@ -814,7 +814,13 @@ export const ActorTool = Tool.define(
         if (op.action ==="spawn") {
           return {
             title: op.description,
-            metadata: { sessionId: spawnResult.sessionID, actorId: spawnResult.actorID, model, requestedModel },
+            metadata: {
+              sessionId: spawnResult.sessionID,
+              actorId: spawnResult.actorID,
+              ...(spawnResult.effectiveModel ? { model: spawnResult.effectiveModel } : { model }),
+              ...(spawnResult.requestedModel ? { requestedModel: spawnResult.requestedModel } : {}),
+              ...(spawnResult.hostContext ? { hostContext: spawnResult.hostContext } : {}),
+            },
             output:
               (taskNotice ? taskNotice + "\n" : "") +
               `Background sub-session started. actor_id: ${spawnResult.actorID}\nThe result will be delivered as a notification when complete.`,
@@ -868,7 +874,13 @@ export const ActorTool = Tool.define(
             : ""
         return {
           title: op.description,
-          metadata: { sessionId: spawnResult.sessionID, actorId: spawnResult.actorID, model } as Record<string, any>,
+          metadata: {
+            sessionId: spawnResult.sessionID,
+            actorId: spawnResult.actorID,
+            ...(spawnResult.effectiveModel ? { model: spawnResult.effectiveModel } : { model }),
+            ...(spawnResult.requestedModel ? { requestedModel: spawnResult.requestedModel } : {}),
+            ...(spawnResult.hostContext ? { hostContext: spawnResult.hostContext } : {}),
+          } as Record<string, any>,
           output: [
             ...(taskNotice ? [taskNotice, ""] : []),
             `actor_id: ${spawnResult.actorID} (for resuming to continue this task if needed)`,

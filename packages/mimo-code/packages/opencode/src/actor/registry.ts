@@ -599,6 +599,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           description: entry.description,
           lastTurnTime: entry.lastTurnTime,
           stuckDuration: Date.now() - entry.lastTurnTime,
+          ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+          ...(entry.effectiveModel ? { effectiveModel: entry.effectiveModel } : {}),
+          ...(entry.hostContext ? { hostContext: entry.hostContext } : {}),
         })
       }
     })

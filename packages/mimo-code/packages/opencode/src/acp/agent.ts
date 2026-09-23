@@ -1655,14 +1655,6 @@ export class Agent implements ACPAgent {
       cachedWriteTokens: msg.tokens.cache?.write || undefined,
     })
 
-    const runManaged = <A>(run: () => Promise<A>) =>
-      ManagedProvider.withOperation(
-        sessionID,
-        managedProvider,
-        { providerID: model.providerID, modelID: model.modelID },
-        run,
-      )
-
     const managedRoute =
       managedProvider && typeof managedProvider === "object"
         ? (managedProvider as Record<string, unknown>)
@@ -1694,6 +1686,14 @@ export class Agent implements ACPAgent {
         cwd: directory,
       }
     }
+
+    const runManaged = <A>(run: () => Promise<A>) =>
+      ManagedProvider.withOperation(
+        sessionID,
+        managedProvider,
+        { providerID: model.providerID, modelID: model.modelID },
+        () => ManagedProvider.withHostContext(sessionID, hostContextForOperation(), run),
+      )
 
     // The server resolves session.prompt 200 even when the turn died on a
     // provider error (it lands on info.error), and the SDK reports transport
@@ -1737,7 +1737,6 @@ export class Agent implements ACPAgent {
           directory,
           tools: odysseus?.tools,
           system: hostSystem,
-          trustedHostContext: hostContextForOperation(),
         } as any),
       )
       const msg = response.data?.info

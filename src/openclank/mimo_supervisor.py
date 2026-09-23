@@ -623,8 +623,6 @@ class MimoSupervisor:
 
         await self._warm_model_catalog()
 
-        await self._purge_stale_projections()
-
         # Start health monitor
         self._health_task = asyncio.create_task(self._health_monitor())
 
@@ -885,15 +883,12 @@ class MimoSupervisor:
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
         await self._bridge.ensure_session(session_id, cwd=cwd, owner=owner)
-        try:
-            for _ in range(10):
-                state = self._bridge.negotiated_state(session_id)
-                if state.get("commands"):
-                    break
-                await asyncio.sleep(0.01)
-            return dict(state)
-        finally:
-            await self.delete_session(session_id)
+        for _ in range(10):
+            state = self._bridge.negotiated_state(session_id)
+            if state.get("commands"):
+                break
+            await asyncio.sleep(0.01)
+        return dict(state)
 
     async def set_session_config(
         self,
@@ -907,17 +902,13 @@ class MimoSupervisor:
         """Acknowledge and persist a typed Open Clank agent session config value."""
         if not self._bridge or not self.is_alive():
             raise RuntimeError("mimo ACP is unavailable")
-        try:
-            return await self._bridge.set_config_option(
-                session_id,
-                config_id,
-                value,
-                cwd=cwd,
-                owner=owner,
-            )
-        finally:
-            if session_id in self._bridge.mapped_sessions():
-                await self.delete_session(session_id)
+        return await self._bridge.set_config_option(
+            session_id,
+            config_id,
+            value,
+            cwd=cwd,
+            owner=owner,
+        )
 
     async def delete_session(
         self,

@@ -78,6 +78,45 @@ test("managed turns bind and lease through the host and discard scope afterward"
   expect(JSON.stringify(calls)).not.toContain("leased-secret")
 })
 
+test("host context is isolated by session and cleaned up after overlap or failure", async () => {
+  const contextA = { accountID: "account-a", chatID: "chat-a", cwd: "/work/a" }
+  const contextB = { accountID: "account-b", chatID: "chat-b", cwd: "/work/b" }
+  const entered: string[] = []
+  await Promise.all([
+    ManagedProvider.withHostContext("session-a", contextA, async () => {
+      entered.push(ManagedProvider.currentHostContext("session-a")!.chatID!)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      expect(ManagedProvider.currentHostContext("session-b")).toBeUndefined()
+    }),
+    ManagedProvider.withHostContext("session-b", contextB, async () => {
+      entered.push(ManagedProvider.currentHostContext("session-b")!.chatID!)
+    }),
+  ])
+  expect(entered.toSorted()).toEqual(["chat-a", "chat-b"])
+  expect(ManagedProvider.currentHostContext("session-a")).toBeUndefined()
+  expect(ManagedProvider.currentHostContext("session-b")).toBeUndefined()
+
+  await expect(
+    ManagedProvider.withHostContext("session-failure", contextA, async () => {
+      throw new Error("prompt failed")
+    }),
+  ).rejects.toThrow("prompt failed")
+  expect(ManagedProvider.currentHostContext("session-failure")).toBeUndefined()
+
+  await ManagedProvider.withHostContext("session-nested", contextA, async () => {
+    await ManagedProvider.withHostContext("session-nested", { cwd: "/work/a", chatID: "chat-a", accountID: "account-a" }, async () => {
+      expect(ManagedProvider.currentHostContext("session-nested")?.chatID).toBe("chat-a")
+    })
+    expect(ManagedProvider.currentHostContext("session-nested")?.chatID).toBe("chat-a")
+  })
+  await expect(
+    ManagedProvider.withHostContext("session-conflict", contextA, async () =>
+      ManagedProvider.withHostContext("session-conflict", contextB, async () => undefined),
+    ),
+  ).rejects.toThrow("different managed host context")
+  expect(ManagedProvider.currentHostContext("session-conflict")).toBeUndefined()
+})
+
 test("pre-commit quota failover re-leases the next account and commit fences it", async () => {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
   const binding = (accountID: string, revision: number, committed = false) => ({

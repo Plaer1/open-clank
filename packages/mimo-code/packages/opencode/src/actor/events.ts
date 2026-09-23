@@ -43,6 +43,9 @@ export const ActorStuck = BusEvent.define(
     description: z.string(),
     lastTurnTime: z.number(),
     stuckDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
   }),
 )
 
@@ -59,6 +62,9 @@ export const ActorStalled = BusEvent.define(
     description: z.string(),
     lastTurnTime: z.number(),
     stalledDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
   }),
 )
 

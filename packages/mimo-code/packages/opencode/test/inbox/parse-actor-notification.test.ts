@@ -2,6 +2,21 @@ import { describe, expect, test } from "bun:test"
 import { parseActorNotification, renderActorNotification } from "../../src/inbox/render"
 
 describe("parseActorNotification", () => {
+  test("renders persisted models and host context on a result notification", () => {
+    const text = renderActorNotification({
+      actorID: "general-context",
+      description: "Context-preserving child",
+      status: "completed",
+      requestedModel: "luna",
+      effectiveModel: { providerID: "mimo", modelID: "gpt-5.6-luna" },
+      hostContext: { accountID: "account-1", chatID: "chat-1", workspaceID: "workspace-1" },
+      result: "done",
+    })
+    expect(text).toContain('Requested model: luna')
+    expect(text).toContain('Effective model: {"providerID":"mimo","modelID":"gpt-5.6-luna"}')
+    expect(text).toContain('Host context: {"accountID":"account-1","chatID":"chat-1","workspaceID":"workspace-1"}')
+  })
+
   test("parses a completed notification with reported status + summary", () => {
     const text = renderActorNotification({
       actorID: "explore-1",

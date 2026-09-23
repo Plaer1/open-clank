@@ -196,6 +196,9 @@ export interface SpawnResult {
   actorID: string
   sessionID: SessionID
   outcome: Deferred.Deferred<AgentOutcome>
+  requestedModel?: string
+  effectiveModel?: { providerID: ProviderID; modelID: ModelID }
+  hostContext?: ActorHostContext
 }
 
 export interface Interface {
@@ -302,6 +305,8 @@ export const layer = Layer.effect(
       description?: string
       background: boolean
       model?: { providerID: ProviderID; modelID: ModelID }
+      requestedModel?: string
+      hostContext?: ActorHostContext
       lifecycle: "ephemeral" | "persistent"
       task_id?: string
       // True for non-specialized subagents (those that received
@@ -354,6 +359,9 @@ export const layer = Layer.effect(
                     actorID: input.actorID,
                     description,
                     status,
+                    ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
+                    ...(input.model ? { effectiveModel: { providerID: input.model.providerID, modelID: input.model.modelID } } : {}),
+                    ...(input.hostContext ? { hostContext: input.hostContext } : {}),
                     ...extra,
                   }),
                 })
@@ -726,13 +734,22 @@ export const layer = Layer.effect(
         description: input.description,
         background: input.background,
         model: input.model,
+        requestedModel: input.requestedModel,
+        hostContext,
         lifecycle: input.lifecycle ?? "persistent",
         task_id: input.task_id,
         format: input.format,
         ...(instanceRef ? { instanceRef } : {}),
       })
       if (!input.background) yield* Fiber.join(fiber).pipe(Effect.ignore)
-      return { actorID: child.id, sessionID: child.id, outcome }
+      return {
+        actorID: child.id,
+        sessionID: child.id,
+        outcome,
+        ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
+        ...(input.model ? { effectiveModel: input.model } : {}),
+        ...(hostContext ? { hostContext } : {}),
+      }
     })
 
     const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: SpawnInput) {
@@ -753,6 +770,8 @@ export const layer = Layer.effect(
         ? yield* actorReg.get(input.parentSessionID ?? input.sessionID, input.parentActorID)
         : undefined
       const inheritedHostContext = input.hostContext ?? existing?.hostContext ?? parentHostContext?.hostContext
+      const persistedRequestedModel = input.requestedModel ?? existing?.requestedModel
+      const persistedEffectiveModel = input.model ?? existing?.effectiveModel
 
       if (existing) {
         yield* actorReg.updateModel(input.sessionID, actorID, input.requestedModel, input.model)
@@ -806,7 +825,9 @@ export const layer = Layer.effect(
         task: taskWithFormat,
         description: input.description,
         background: input.background,
-        model: input.model,
+        model: persistedEffectiveModel,
+        requestedModel: persistedRequestedModel,
+        hostContext: inheritedHostContext,
         lifecycle: input.lifecycle ?? "ephemeral",
         task_id: input.task_id,
         gateEligible,
@@ -814,7 +835,14 @@ export const layer = Layer.effect(
       })
       if (input.onReady) yield* Effect.ignore(input.onReady({ actorID, sessionID: input.sessionID }))
       if (!input.background) yield* Fiber.join(fiber).pipe(Effect.ignore)
-      return { actorID, sessionID: input.sessionID, outcome }
+      return {
+        actorID,
+        sessionID: input.sessionID,
+        outcome,
+        ...(persistedRequestedModel ? { requestedModel: persistedRequestedModel } : {}),
+        ...(persistedEffectiveModel ? { effectiveModel: persistedEffectiveModel } : {}),
+        ...(inheritedHostContext ? { hostContext: inheritedHostContext } : {}),
+      }
     })
 
     const spawn = Effect.fn("Actor.spawn")(function* (input: SpawnInput) {
@@ -861,6 +889,9 @@ export const layer = Layer.effect(
               actorID,
               description: actor.description,
               status,
+              ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
+              ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
+              ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
             }),
           })
           .pipe(Effect.ignore)
@@ -939,6 +970,9 @@ export const layer = Layer.effect(
               actorID: actor.actorID,
               description: actor.description,
               status: "stalled",
+              ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
+              ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
+              ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
               stalledForMs,
             }),
           })
@@ -950,6 +984,9 @@ export const layer = Layer.effect(
             description: actor.description,
             lastTurnTime: actor.lastTurnTime,
             stalledDuration: stalledForMs,
+            ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
+            ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
+            ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
           })
           .pipe(Effect.ignore)
         yield* Effect.promise(() =>

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
-import { PromptInput, SessionPrompt, hasSubstantiveContent } from "../../src/session/prompt"
+import { hostContextForPrompt, PromptInput, SessionPrompt, hasSubstantiveContent } from "../../src/session/prompt"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Instance } from "../../src/project/instance"
@@ -49,6 +49,28 @@ describe("PromptInput.parts schema", () => {
       parts: [{ type: "text", text: "hello" }],
     })
     expect(result.success).toBe(false)
+  })
+
+  test("rejects the private seam when it is presented in a public request", () => {
+    const trusted = PromptInput.safeParse({
+      ...base,
+      trustedHostContext: { accountID: "spoofed-account" },
+      parts: [{ type: "text", text: "hello" }],
+    })
+    const publicHost = PromptInput.safeParse({
+      ...base,
+      hostContext: { accountID: "spoofed-account" },
+      parts: [{ type: "text", text: "hello" }],
+    })
+    expect(trusted.success).toBe(false)
+    expect(publicHost.success).toBe(false)
+  })
+
+  test("retains an existing actor binding when the parent managed scope changes", () => {
+    const sibling = { accountID: "account-a", grantID: "grant-a", workspaceID: "workspace-a" }
+    const parent = { accountID: "account-b", grantID: "grant-b", workspaceID: "workspace-b" }
+    expect(hostContextForPrompt(sibling, parent)).toEqual(sibling)
+    expect(hostContextForPrompt(undefined, parent)).toEqual(parent)
   })
 })
 

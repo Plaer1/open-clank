@@ -1102,14 +1102,14 @@ class ACPBridge:
             if prior_mimo_session is not None
             else (cwd or mapped_workspace)
         ).strip()
-        if odysseus_session in self._session_map and self._delete_session_callback:
-            await self._delete_session_callback(odysseus_session)
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
         # These are host-authenticated routing fields. Never infer them from
         # the provider session id or accept model/user payload identity.
         envelope["chat_id"] = odysseus_session
         if prior_context.get("workspace_id"):
             envelope["workspace_id"] = prior_context["workspace_id"]
+        if prior_context.get("goal_id") and not envelope.get("goal_id"):
+            envelope["goal_id"] = prior_context["goal_id"]
         authority_workspace_id = str(
             envelope.get("authority_workspace_id") or ""
         ).strip()

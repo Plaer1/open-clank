@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 
 from src.openclank.acp_bridge import ACPBridge, _TurnState
 
@@ -8,6 +9,8 @@ from src.openclank.acp_bridge import ACPBridge, _TurnState
 class _Client:
     def __init__(self):
         self.resumed = []
+        self.configured = []
+        self.prompted = []
 
     def register_callback(self, *_args):
         pass
@@ -18,6 +21,14 @@ class _Client:
     async def resume_session(self, session_id, cwd, *, mcp_servers=None):
         self.resumed.append((session_id, cwd, mcp_servers))
         return {"models": {"availableModels": []}}
+
+    async def set_session_config_option(self, session_id, config_id, value):
+        self.configured.append((session_id, config_id, value))
+        return {}
+
+    async def prompt(self, session_id, parts, *, metadata=None):
+        self.prompted.append((session_id, parts, metadata))
+        return {"stopReason": "end_turn", "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2}}
 
 
 def _bridge(tmp_path, adapter):
@@ -162,6 +173,7 @@ def test_session_cwd_requires_mapped_owner_and_authorized_root(tmp_path):
         "file_policy_workspace": "workspace-stable",
         "copal_workspace": "copal-a",
         "memory_workspace": "memory-a",
+        "goal_id": "goal-a",
     }
 
     async def run():
@@ -180,6 +192,7 @@ def test_session_cwd_requires_mapped_owner_and_authorized_root(tmp_path):
     assert bridge._session_context["mimo-a"]["file_policy_workspace"] == "workspace-stable"
     assert bridge._session_context["mimo-a"]["copal_workspace"] == "copal-a"
     assert bridge._session_context["mimo-a"]["memory_workspace"] == "memory-a"
+    assert bridge._session_context["mimo-a"]["goal_id"] == "goal-a"
     assert updates == [("chat-a", str(allowed))]
 
 
@@ -243,3 +256,95 @@ def test_mapped_chat_ignores_stale_caller_cwd_on_resume(tmp_path):
     }
     asyncio.run(bridge.ensure_session("chat-a", cwd="/etc", owner="alice"))
     assert client.resumed[0][1] == str(tmp_path)
+
+
+def test_normal_turn_and_config_keep_the_mapped_mimo_session(tmp_path):
+    client = _Client()
+    bridge = ACPBridge(client, str(tmp_path), owner="alice")
+    bridge._session_map["chat-a"] = "mimo-a"
+    bridge._session_context["mimo-a"] = {
+        "odysseus_session_id": "chat-a", "owner": "alice", "workspace": str(tmp_path)
+    }
+    deleted = []
+
+    async def delete(chat_id, **_kwargs):
+        deleted.append(chat_id)
+
+    bridge.set_session_delete_callback(delete)
+    bridge._session_state["mimo-a"] = {
+        "config_options": [{"id": "mode", "options": [{"value": "build"}]}],
+        "workspace": str(tmp_path),
+    }
+    asyncio.run(bridge.set_config_option("chat-a", "mode", "build", owner="alice"))
+    assert client.configured == [("mimo-a", "mode", "build")]
+    assert bridge.mapped_session_id("chat-a") == "mimo-a"
+    assert deleted == []
+    asyncio.run(bridge.ensure_session("chat-a", cwd="/stale", owner="alice"))
+    asyncio.run(bridge.ensure_session("chat-a", cwd="/also-stale", owner="alice"))
+    assert [call[0] for call in client.resumed] == ["mimo-a", "mimo-a"]
+
+    async def collect_invalid_turn():
+        return [item async for item in bridge.run_turn(
+            "chat-a", [{"role": "user", "content": "hello"}], turn_envelope={"authority_workspace_id": "bad space"}
+        )]
+
+    asyncio.run(collect_invalid_turn())
+    assert bridge.mapped_session_id("chat-a") == "mimo-a"
+    assert deleted == []
+
+
+def test_two_normal_turns_resume_one_mimo_session_and_retain_chat_state(tmp_path, monkeypatch):
+    from src.openclank import transcript_projection
+
+    persisted = {}
+
+    def save_state(_session_id, state, *, owner=None):
+        persisted.update(state)
+        return {**persisted, "revision": int(persisted.get("revision", 0)) + 1}
+
+    monkeypatch.setattr(transcript_projection, "save_mimo_state", save_state)
+    monkeypatch.setattr(transcript_projection, "get_mimo_state", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("chat-a")))
+    monkeypatch.setattr(transcript_projection, "canonical_snapshot", lambda *_args, **_kwargs: SimpleNamespace(revision=1))
+    monkeypatch.setattr(transcript_projection, "record_projection", lambda *_args, **_kwargs: None)
+
+    client = _Client()
+    bridge = ACPBridge(client, str(tmp_path), owner="alice")
+    bridge._session_map["chat-a"] = "mimo-a"
+    bridge._session_context["mimo-a"] = {
+        "odysseus_session_id": "chat-a",
+        "owner": "alice",
+        "workspace": str(tmp_path),
+        "cwd": str(tmp_path),
+        "goal_id": "goal-a",
+        "workspace_id": "workspace-a",
+    }
+    bridge._session_state["mimo-a"] = {
+        "config_options": [{"id": "mode", "options": [{"value": "build"}]}],
+        "workspace": str(tmp_path),
+        "goal_id": "goal-a",
+        "desired": {"model": "mimo/gpt-5.6-luna"},
+    }
+    deleted = []
+
+    async def delete(chat_id, **_kwargs):
+        deleted.append(chat_id)
+
+    bridge.set_session_delete_callback(delete)
+
+    async def run_turns():
+        first = [item async for item in bridge.run_turn(
+            "chat-a", [{"role": "user", "content": "first"}], owner="alice", cwd="/stale-a"
+        )]
+        second = [item async for item in bridge.run_turn(
+            "chat-a", [{"role": "user", "content": "second"}], owner="alice", cwd="/stale-b"
+        )]
+        return first, second
+
+    asyncio.run(run_turns())
+    assert [session_id for session_id, _parts, _metadata in client.prompted] == ["mimo-a", "mimo-a"]
+    assert [call[0] for call in client.resumed] == ["mimo-a", "mimo-a"]
+    assert bridge.mapped_session_id("chat-a") == "mimo-a"
+    assert bridge._session_context["mimo-a"]["cwd"] == str(tmp_path)
+    assert bridge._session_context["mimo-a"]["goal_id"] == "goal-a"
+    assert bridge._session_state["mimo-a"]["desired"]["model"] == "mimo/gpt-5.6-luna"
+    assert deleted == []
