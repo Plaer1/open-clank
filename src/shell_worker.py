@@ -39,6 +39,7 @@ from src.project_hex import (
     validate_project_file_candidates,
     verified_contract_snapshot,
 )
+from src.openclank.history_capture import context_from_mapping
 
 _MAX_LOG_BYTES = 4 * 1024 * 1024
 _MAX_COMMAND_BYTES = 1024 * 1024
@@ -196,6 +197,10 @@ def _publish_overlay(
             + json.dumps(result.get("findings") or [], ensure_ascii=False)[:4096]
         )
     root = Path(workspace).resolve(strict=True)
+    history_context = None
+    raw_history = spec.get("history_context")
+    if isinstance(raw_history, dict):
+        history_context = context_from_mapping(raw_history)
     changes: list[AtomicFileChange] = []
     for relative, payload in candidates.items():
         target = root / relative
@@ -230,6 +235,7 @@ def _publish_overlay(
                 expected_fingerprint=before,
                 require_missing=payload is not None and before is None,
                 mode=modes.get(relative),
+                history_context=history_context,
             )
         )
     if changes:

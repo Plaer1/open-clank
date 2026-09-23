@@ -52,6 +52,31 @@ from src.shell_policy import (
     shell_command_argv,
 )
 
+
+def history_context_mapping(value: Any) -> Optional[Dict[str, Any]]:
+    """Serialize trusted capture context for the detached overlay worker."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    actor_id = str(getattr(value, "actor_id", "") or "")
+    account_id = str(getattr(value, "account_id", "") or "")
+    workspace_id = str(getattr(value, "workspace_id", "") or "")
+    roots = list(getattr(value, "roots", ()) or ())
+    socket_path = str(getattr(value, "socket_path", "") or "")
+    token = str(getattr(value, "token", "") or "")
+    if not actor_id or not account_id or not workspace_id or not roots:
+        return None
+    return {
+        "history_capture": True,
+        "actor_id": actor_id,
+        "account_id": account_id,
+        "workspace_id": workspace_id,
+        "history_socket": socket_path,
+        "history_token": token,
+        "history_roots": roots,
+    }
+
 _JOBS_DIR = Path(BG_JOBS_DIR)
 _STORE = Path(BG_JOBS_FILE)
 
@@ -131,6 +156,7 @@ def launch(
     network: Optional[str] = None,
     approval_binding: Optional[str] = None,
     extra_env: Optional[Dict[str, str]] = None,
+    history_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Launch `command` detached. Returns the job record (status='running').
 
@@ -243,6 +269,7 @@ def launch(
         # rewrite itself, AFTER the binding check, so approval always binds to
         # the exact command the owner approved.
         "sudo_askpass": bool(extra_env and extra_env.get("SUDO_ASKPASS")),
+        "history_context": dict(history_context) if history_context else None,
     }
     atomic_write_json(str(spec_path), spec)
     if os.name != "nt":

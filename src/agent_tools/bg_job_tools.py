@@ -186,6 +186,7 @@ class ManageBgJobsTool:
                     max_runtime_s=max_runtime_s,
                     network=network,
                     approval_binding=approval_binding,
+                    history_context=bg_jobs.history_context_mapping(ctx.get("history_context")),
                 )
             except Exception as exc:
                 return {"error": f"manage_bg_jobs: {exc}", "exit_code": 1}

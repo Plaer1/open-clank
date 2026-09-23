@@ -422,6 +422,7 @@ class BashTool:
                 network=network_mode,
                 approval_binding=approval_binding,
                 extra_env=_sudo_askpass_env(sudo_secret) if sudo_secret else None,
+                history_context=bg_jobs.history_context_mapping(ctx.get("history_context")),
             )
         except ShellApprovalError as exc:
             return {"error": f"bash: {exc}", "exit_code": 126}

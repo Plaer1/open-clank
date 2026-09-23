@@ -74,6 +74,7 @@ export namespace AppFileSystem {
     readonly accountId: string
     readonly workspaceId: string
     readonly workspaceRoot: string
+    readonly rootId?: string
     readonly socketPath: string
     readonly token?: string
     status: HistoryStatus
@@ -95,6 +96,7 @@ export namespace AppFileSystem {
     const accountId = typeof value.accountId === "string" ? value.accountId.trim() : ""
     const workspaceId = typeof value.workspaceId === "string" ? value.workspaceId.trim() : ""
     const workspaceRoot = typeof value.workspaceRoot === "string" ? value.workspaceRoot.trim() : ""
+    const rootId = typeof value.rootId === "string" ? value.rootId.trim() : undefined
     const socketPath = typeof value.socketPath === "string" ? value.socketPath.trim() : ""
     const token = typeof value.token === "string" ? value.token.trim() : ""
     if (!actorId || !accountId || !workspaceId || !workspaceRoot || !socketPath || !token) return undefined
@@ -107,6 +109,7 @@ export namespace AppFileSystem {
       accountId,
       workspaceId,
       workspaceRoot: root,
+      rootId,
       socketPath,
       token,
       status: { status: "paused", history_status: "paused", capture_phase: "unavailable", durable: false, coverage: "NoCapture" },
@@ -342,39 +345,145 @@ export namespace AppFileSystem {
     }
   }
 
+  type HistoryTarget = {
+    readonly path: string
+    readonly resource: Record<string, string>
+    readonly before: Buffer | undefined
+    readonly resourceType: "File" | "Directory" | "Symlink"
+    readonly metadata: Record<string, unknown>
+  }
+
+  const directoryManifest = async (target: string): Promise<Buffer> => {
+    const root = await NFS.realpath(target)
+    const entries: Record<string, unknown>[] = []
+    const visit = async (current: string) => {
+      const children = (await NFS.readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))
+      for (const child of children) {
+        const item = join(current, child.name)
+        const relativePath = relative(root, item).split(sep).join("/")
+        const info = await NFS.lstat(item)
+        const record: Record<string, unknown> = {
+          path: relativePath,
+          mode: info.mode & 0o7777,
+          mtime_millis: Math.trunc(info.mtimeMs),
+        }
+        if (info.isSymbolicLink()) {
+          record.type = "symlink"
+          record.target = await NFS.readlink(item)
+        } else if (info.isDirectory()) {
+          record.type = "directory"
+          await visit(item)
+        } else {
+          const bytes = await NFS.readFile(item)
+          record.type = "file"
+          record.size = bytes.byteLength
+          record.sha256 = createHash("sha256").update(bytes).digest("hex")
+        }
+        entries.push(record)
+      }
+    }
+    await visit(root)
+    return Buffer.from(JSON.stringify({ version: 1, root_type: "directory", entries }))
+  }
+
+  const readHistoryTarget = async (target: string): Promise<HistoryTarget> => {
+    const resource = {
+      account_id: "",
+      workspace_id: "",
+      provider: "mimo-filesystem",
+      resource_id: "",
+    }
+    try {
+      const info = await NFS.lstat(target)
+      let before: Buffer
+      let resourceType: HistoryTarget["resourceType"]
+      if (info.isSymbolicLink()) {
+        before = Buffer.from(await NFS.readlink(target))
+        resourceType = "Symlink"
+      } else if (info.isDirectory()) {
+        before = await directoryManifest(target)
+        resourceType = "Directory"
+      } else {
+        before = await NFS.readFile(target)
+        resourceType = "File"
+      }
+      return { path: target, resource, before, resourceType, metadata: { mode: info.mode, size: info.size, modified_millis: Math.trunc(info.mtimeMs) } }
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error
+      return { path: target, resource, before: undefined, resourceType: "File", metadata: { mode: null, size: null, modified_millis: null } }
+    }
+  }
+
+  const historyResource = async (context: HistoryContext, target: string) => {
+    const response = await historyRequest(context.socketPath, {
+      RegisterResource: {
+        envelope: { protocol_version: 1, auth: historyAuth(context), action_id: `resource-${randomUUID()}` },
+        account_id: context.accountId,
+        workspace_id: context.workspaceId,
+        root_id: context.rootId ?? null,
+        root_path: context.workspaceRoot,
+        relative_path: relative(context.workspaceRoot, resolve(target)).split(sep).join("/"),
+        resource_id: null,
+      },
+    })
+    const handle = response?.Resource?.handle
+    if (!handle?.resource_id || handle.account_id !== context.accountId || handle.workspace_id !== context.workspaceId) {
+      throw new Error("history service returned no trusted resource handle")
+    }
+    return {
+      account_id: handle.account_id,
+      workspace_id: handle.workspace_id,
+      provider: "mimo-filesystem",
+      resource_id: handle.resource_id,
+    }
+  }
+
   const beginHistoryCapture = async (change: AtomicChange, canonicalTargets: string[]) => {
     const context = change.history
     const actionId = change.actionId
     if (!context || !actionId) return undefined
-    const before = await NFS.readFile(canonicalTargets[0]!).catch((error: any) => {
-      if (error?.code === "ENOENT") return undefined
-      throw error
-    })
+    const targets = await Promise.all(canonicalTargets.map((target) => readHistoryTarget(target)))
+    const before = targets[0]?.before
     const operation = before ? "replace" : "create"
+    const resources = await Promise.all(targets.map((target) => historyResource(context, target.path)))
+    const envelope = historyEnvelope(context, actionId, canonicalTargets[0]!, operation, before, canonicalTargets.slice(1))
+    envelope.resource_key = resources[0]
+    envelope.modified_resource_ids = resources
+    const entries = targets.map((target, index) => {
+      const resource = resources[index]!
+      target.resource.account_id = resource.account_id
+      target.resource.workspace_id = resource.workspace_id
+      target.resource.resource_id = resource.resource_id
+      const digest = target.before ? `sha256:${createHash("sha256").update(target.before).digest("hex")}` : null
+      return {
+        resource_key: resource,
+        old_locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
+        new_locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
+        expected_revision: { Opaque: { kind: "fingerprint", value: target.before ? fingerprintBytes(target.before) : "missing" } },
+        existence: target.before ? "Present" : "Absent",
+        resource_type: target.resourceType,
+        metadata: { ...target.metadata, opaque: target.resourceType === "Directory" ? { manifest_digest: digest } : null },
+        content: target.before ? Buffer.from(target.before).toString("base64") : null,
+        staged_upload_id: null,
+        fingerprint: target.before ? fingerprintBytes(target.before) : "missing",
+        coverage: { byte_len: target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_preimage: true } },
+      }
+    })
     try {
-      await historyRequest(context.socketPath, {
-        Prepare: {
-          envelope: { protocol_version: 1, auth: historyAuth(context), claimed_digest: "", request: historyEnvelope(context, actionId, canonicalTargets[0]!, operation, before, canonicalTargets.slice(1)) },
-          content: before ? Buffer.from(before).toString("base64") : null,
-          fingerprint: before ? fingerprintBytes(before) : "missing",
-        },
-      })
-      context.status = Object.assign(context.status, { status: "prepared", action_id: actionId, history_status: "prepared", capture_phase: "before_durable", durable: true, coverage: canonicalTargets.length > 1 ? "ObservedAfterOnly" : "KnownMutationHooks" })
-      return { context, actionId, before }
+      await historyRequest(context.socketPath, { PrepareBatch: { envelope: { protocol_version: 1, auth: historyAuth(context), claimed_digest: "", request: envelope }, batch_version: 1, entries } })
+      context.status = Object.assign(context.status, { status: "prepared", action_id: actionId, history_status: "prepared", capture_phase: "before_durable", durable: true, coverage: "ExactBatch" })
+      return { context, actionId, before, targets }
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "before_failed", durable: false, coverage: "NoCapture", error: String(error) })
       return undefined
     }
   }
 
-  const finishHistoryCapture = async (capture: { context: HistoryContext; actionId: string }, canonicalTargets: string[], committed: boolean) => {
+  const finishHistoryCapture = async (capture: { context: HistoryContext; actionId: string; targets: HistoryTarget[] }, canonicalTargets: string[], committed: boolean) => {
     const { context, actionId } = capture
     let after: Buffer | undefined
     try {
-      after = await NFS.readFile(canonicalTargets[0]!).catch((error: any) => {
-        if (error?.code === "ENOENT") return undefined
-        throw error
-      })
+      after = (await readHistoryTarget(canonicalTargets[0]!)).before
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
       return
@@ -386,7 +495,24 @@ export namespace AppFileSystem {
     }
     try {
       await historyRequest(context.socketPath, { RecordLive: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, receipt: { action_id: actionId, status: "Committed", fingerprint: after ? fingerprintBytes(after) : "missing", after_unavailable: false } } })
-      await historyRequest(context.socketPath, { Complete: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, content: after ? Buffer.from(after).toString("base64") : null, fingerprint: after ? fingerprintBytes(after) : "missing" } })
+      const afterTargets = await Promise.all(canonicalTargets.map((target) => readHistoryTarget(target)))
+      const entries = await Promise.all(afterTargets.map(async (target) => {
+        const resource = await historyResource(context, target.path)
+        const digest = target.before ? `sha256:${createHash("sha256").update(target.before).digest("hex")}` : null
+        return {
+          resource_key: resource,
+          locator: { display_name: basename(target.path), location_label: relative(context.workspaceRoot, target.path), opaque_ref: resource.resource_id },
+          existence: target.before ? "Present" : "Absent",
+          resource_type: target.resourceType,
+          metadata: { ...target.metadata, opaque: target.resourceType === "Directory" ? { manifest_digest: digest } : null },
+          content: target.before ? target.before.toString("base64") : null,
+          staged_upload_id: null,
+          fingerprint: target.before ? fingerprintBytes(target.before) : "missing",
+          coverage: { byte_len: target.before?.byteLength ?? 0, content_digest: digest, metadata: { exact_after: true } },
+          outcome: { resource_id: resource.resource_id, status: "Committed", revision: { Opaque: { kind: "fingerprint", value: target.before ? fingerprintBytes(target.before) : "missing" } } },
+        }
+      }))
+      await historyRequest(context.socketPath, { CompleteBatch: { envelope: { protocol_version: 1, auth: historyAuth(context), action_id: actionId }, batch_version: 1, entries } })
       context.status = Object.assign(context.status, { status: "complete", action_id: actionId, history_status: "complete", capture_phase: "complete", durable: true })
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
@@ -494,7 +620,7 @@ export namespace AppFileSystem {
     const backups = new Map<string, string>()
     const installed = new Set<string>()
     const retainedBackups = new Set<string>()
-    let historyCapture: { context: HistoryContext; actionId: string } | undefined
+    let historyCapture: { context: HistoryContext; actionId: string; targets: HistoryTarget[] } | undefined
     let committed = false
     const syncDirectories = async () => {
       if (process.platform === "win32") return
