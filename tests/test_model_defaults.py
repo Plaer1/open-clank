@@ -79,7 +79,7 @@ def _add_route(
         billing_lane="metered_api",
         label=connection_id,
     )
-    return store.create_model_route(
+    route = store.create_model_route(
         owner=owner,
         connection_id=connection_id,
         model_route_id=model_route_id,
@@ -87,6 +87,22 @@ def _add_route(
         display_name=model_id,
         operations=operations,
     )
+    account = store.create_account(
+        owner=owner,
+        connection_id=connection_id,
+        account_id=f"pac_default_{owner}_{connection_id}",
+        label=f"{connection_id} account",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": f"fixture-{owner}-{connection_id}"},
+    )
+    store.set_entitlement(
+        owner=owner,
+        account_id=account.id,
+        model_route_id=route.id,
+        eligible=True,
+    )
+    return route
 
 
 def test_default_chat_is_empty_without_a_normalized_chat_route(provider_store):
