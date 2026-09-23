@@ -80,7 +80,10 @@ function copilotCapabilities(value: unknown): Record<string, unknown> {
         const safeMediaTypes = mediaTypes.filter(
           (item): item is string => typeof item === "string" && item.length > 0 && item.length <= 128,
         )
-        if (safeMediaTypes.length > 0) result.vision_media_types = safeMediaTypes.slice(0, 32)
+        if (safeMediaTypes.length > 0) {
+          result.vision_media_types = safeMediaTypes.slice(0, 32)
+          if (safeMediaTypes.some((item) => item.toLowerCase().startsWith("image/"))) result.vision = true
+        }
       }
     }
   }
