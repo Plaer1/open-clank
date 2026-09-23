@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 
 import { Instance } from "../project/instance"
+import { InstanceRef } from "@/effect/instance-ref"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -62,7 +63,8 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
-        const project = Instance.project
+        const instance = (yield* InstanceRef) ?? Instance.current
+        const project = instance.project
         const base = [
           [
             // Identity is never claimed here — who the agent IS comes from the
@@ -72,8 +74,8 @@ export const layer = Layer.effect(
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
             `Here is some useful information about the environment you are running in:`,
             `<env>`,
-            `  Working directory: ${Instance.directory}`,
-            `  Workspace root folder: ${Instance.worktree}`,
+            `  Working directory: ${instance.directory}`,
+            `  Workspace root folder: ${instance.worktree}`,
             `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
             // Anchored to the session's creation time (not request time) so this block

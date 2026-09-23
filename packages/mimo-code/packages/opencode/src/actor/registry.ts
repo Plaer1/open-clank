@@ -1,4 +1,4 @@
-import { Effect, Layer, Context, Schedule } from "effect"
+import { Effect, Layer, Context, Schedule, Semaphore } from "effect"
 import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
@@ -22,6 +22,23 @@ const SCAN_INTERVAL_MS = 60 * 1000 // every 60s
 const PROCESS_INSTANCE_ID = randomUUID()
 
 type ActorRow = typeof ActorRegistryTable.$inferSelect
+
+export type RegisterInput = {
+  sessionID: SessionID
+  actorID: string
+  mode: SpawnMode
+  parentActorID?: string
+  agent: string
+  description: string
+  contextMode: ContextMode
+  contextWatermark?: MessageID
+  background: boolean
+  lifecycle: Lifecycle
+  tools?: ToolWhitelist
+  requestedModel?: string
+  effectiveModel?: ActorModel
+  hostContext?: ActorHostContext
+}
 
 function hostContextFromRow(row: ActorRow): ActorHostContext | undefined {
   const hostContext = {
@@ -80,22 +97,9 @@ function fromRow(row: ActorRow): Actor {
 }
 
 export interface Interface {
-  readonly register: (input: {
-    sessionID: SessionID
-    actorID: string
-    mode: SpawnMode
-    parentActorID?: string
-    agent: string
-    description: string
-    contextMode: ContextMode
-    contextWatermark?: MessageID
-    background: boolean
-    lifecycle: Lifecycle
-    tools?: ToolWhitelist
-    requestedModel?: string
-    effectiveModel?: ActorModel
-    hostContext?: ActorHostContext
-  }) => Effect.Effect<Actor>
+  readonly register: (input: RegisterInput) => Effect.Effect<Actor>
+  /** Allocate the next agent-N ID and insert its pending row under one writer transaction. */
+  readonly registerAllocated: (input: Omit<RegisterInput, "actorID">) => Effect.Effect<Actor>
 
   readonly updateStatus: (
     sessionID: SessionID,
@@ -107,7 +111,13 @@ export interface Interface {
     },
   ) => Effect.Effect<void>
   /** Start one actor execution and return its durable revision. */
-  readonly beginExecution: (sessionID: SessionID, actorID: string) => Effect.Effect<number | undefined>
+  readonly beginExecution: (
+    sessionID: SessionID,
+    actorID: string,
+    expectedStatus?: "pending",
+  ) => Effect.Effect<number | undefined>
+  /** Cancel a never-started pending actor without creating an execution revision. */
+  readonly cancelPending: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
   /** Settle one execution exactly once. Returns false when another contender won. */
   readonly settleExecution: (
     sessionID: SessionID,
@@ -152,6 +162,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    const allocationLock = Semaphore.makeUnsafe(1)
 
     // Use the process-level singleton for orphan recovery.
     // This is stable across layer rebuilds within the same process.
@@ -159,60 +170,44 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
 
     // --- CRUD methods ---
 
-    const register = Effect.fn("ActorRegistry.register")(function* (input: {
-      sessionID: SessionID
-      actorID: string
-      mode: SpawnMode
-      parentActorID?: string
-      agent: string
-      description: string
-      contextMode: ContextMode
-      contextWatermark?: MessageID
-      background: boolean
-      lifecycle: Lifecycle
-      tools?: ToolWhitelist
-      requestedModel?: string
-      effectiveModel?: ActorModel
-      hostContext?: ActorHostContext
-    }) {
-      const now = Date.now()
-      const row = {
-        session_id: input.sessionID,
-        actor_id: input.actorID,
-        mode: input.mode,
-        parent_actor_id: input.parentActorID ?? null,
-        status: "pending" as const,
-        last_outcome: null,
-        execution_revision: 0,
-        terminal_notification_revision: null,
-        terminal_notification_outcome: null,
-        lifecycle: input.lifecycle,
-        agent: input.agent,
-        description: input.description,
-        context_mode: input.contextMode,
-        context_watermark: input.contextWatermark ?? null,
-        background: input.background,
-        tools: input.tools ?? null,
-        requested_model: input.requestedModel ?? null,
-        effective_model: input.effectiveModel ? JSON.stringify(input.effectiveModel) : null,
-        host_account_id: input.hostContext?.accountID ?? null,
-        provider_grant_id: input.hostContext?.grantID ?? null,
-        grant_revision: input.hostContext?.grantRevision ?? null,
-        credential_revision: input.hostContext?.credentialRevision ?? null,
-        chat_id: input.hostContext?.chatID ?? null,
-        workspace_id: input.hostContext?.workspaceID ?? null,
-        cwd: input.hostContext?.cwd ?? null,
-        goal_id: input.hostContext?.goalID ?? null,
-        last_turn_time: now,
-        turn_count: 0,
-        last_error: null,
-        instance_id: instanceID,
-        time_completed: null,
-        time_created: now,
-        time_updated: now,
-      }
-      yield* Effect.sync(() => Database.use((db) => db.insert(ActorRegistryTable).values(row).run()))
-      yield* bus.publish(Events.ActorRegistered, {
+    const makeRow = (input: RegisterInput, now: number) => ({
+      session_id: input.sessionID,
+      actor_id: input.actorID,
+      mode: input.mode,
+      parent_actor_id: input.parentActorID ?? null,
+      status: "pending" as const,
+      last_outcome: null,
+      execution_revision: 0,
+      terminal_notification_revision: null,
+      terminal_notification_outcome: null,
+      lifecycle: input.lifecycle,
+      agent: input.agent,
+      description: input.description,
+      context_mode: input.contextMode,
+      context_watermark: input.contextWatermark ?? null,
+      background: input.background,
+      tools: input.tools ?? null,
+      requested_model: input.requestedModel ?? null,
+      effective_model: input.effectiveModel ? JSON.stringify(input.effectiveModel) : null,
+      host_account_id: input.hostContext?.accountID ?? null,
+      provider_grant_id: input.hostContext?.grantID ?? null,
+      grant_revision: input.hostContext?.grantRevision ?? null,
+      credential_revision: input.hostContext?.credentialRevision ?? null,
+      chat_id: input.hostContext?.chatID ?? null,
+      workspace_id: input.hostContext?.workspaceID ?? null,
+      cwd: input.hostContext?.cwd ?? null,
+      goal_id: input.hostContext?.goalID ?? null,
+      last_turn_time: now,
+      turn_count: 0,
+      last_error: null,
+      instance_id: instanceID,
+      time_completed: null,
+      time_created: now,
+      time_updated: now,
+    })
+
+    const publishRegistered = (input: RegisterInput) =>
+      bus.publish(Events.ActorRegistered, {
         sessionID: input.sessionID,
         actorID: input.actorID,
         mode: input.mode,
@@ -224,12 +219,51 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         ...(input.effectiveModel ? { effectiveModel: input.effectiveModel } : {}),
         ...(input.hostContext ? { hostContext: input.hostContext } : {}),
       })
+
+    const register = Effect.fn("ActorRegistry.register")(function* (input: RegisterInput) {
+      const now = Date.now()
+      const row = makeRow(input, now)
+      yield* Effect.sync(() => Database.use((db) => db.insert(ActorRegistryTable).values(row).run()))
+      yield* publishRegistered(input)
       return fromRow(row)
+    })
+
+    const registerAllocated = Effect.fn("ActorRegistry.registerAllocated")(function* (
+      input: Omit<RegisterInput, "actorID">,
+    ) {
+      const now = Date.now()
+      const result = yield* allocationLock.withPermits(1)(Effect.sync(() =>
+        Database.transaction((db) => {
+          const prefix = `${input.agent}-`
+          const existing = db
+            .select({ actor_id: ActorRegistryTable.actor_id })
+            .from(ActorRegistryTable)
+            .where(eq(ActorRegistryTable.session_id, input.sessionID))
+            .all()
+          let max = 0
+          for (const row of existing) {
+            if (!row.actor_id.startsWith(prefix)) continue
+            const suffix = row.actor_id.slice(prefix.length)
+            if (!/^[1-9]\d*$/.test(suffix)) continue
+            const n = Number(suffix)
+            if (Number.isSafeInteger(n) && n > max) max = n
+          }
+          const actorID = `${input.agent}-${max + 1}`
+          const full = { ...input, actorID } as RegisterInput
+          const row = makeRow(full, now)
+          db.insert(ActorRegistryTable).values(row).run()
+          return { actorID, row }
+        }, { behavior: "immediate" }),
+      ))
+      const full = { ...input, actorID: result.actorID } as RegisterInput
+      yield* publishRegistered(full)
+      return fromRow(result.row)
     })
 
     const beginExecution = Effect.fn("ActorRegistry.beginExecution")(function* (
       sessionID: SessionID,
       actorID: string,
+      expectedStatus?: "pending",
     ) {
       const now = Date.now()
       const row = yield* Effect.sync(() =>
@@ -248,7 +282,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
               and(
                 eq(ActorRegistryTable.session_id, sessionID),
                 eq(ActorRegistryTable.actor_id, actorID),
-                sql`${ActorRegistryTable.status} != 'running'`,
+                expectedStatus
+                  ? eq(ActorRegistryTable.status, expectedStatus)
+                  : sql`${ActorRegistryTable.status} != 'running'`,
               ),
             )
             .returning()
@@ -258,6 +294,36 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       if (!row || row.status !== "running") return undefined
       yield* publishSettledStatus(row, sessionID, actorID)
       return row.execution_revision
+    })
+
+    const cancelPending = Effect.fn("ActorRegistry.cancelPending")(function* (
+      sessionID: SessionID,
+      actorID: string,
+    ) {
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "idle",
+              last_outcome: "cancelled",
+              last_error: null,
+              time_updated: Date.now(),
+              time_completed: Date.now(),
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.status, "pending"),
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (row) yield* publishSettledStatus(row, sessionID, actorID)
+      return row ? fromRow(row) : undefined
     })
 
     const publishSettledStatus = (row: ActorRow, sessionID: SessionID, actorID: string) =>
@@ -664,28 +730,32 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return actor.mode !== "subagent"
     })
 
+    // Compatibility helper only computes a label. New subagent rows use
+    // registerAllocated, which chooses and inserts under BEGIN IMMEDIATE.
     const allocateActorID = Effect.fn("ActorRegistry.allocateActorID")(function* (
       sessionID: SessionID,
       agentType: string,
     ) {
-      const existing = yield* Effect.sync(() =>
-        Database.use((db) =>
+      return yield* Effect.sync(() => {
+        const existing = Database.use((db) =>
           db
             .select({ actor_id: ActorRegistryTable.actor_id })
             .from(ActorRegistryTable)
-            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.agent, agentType)))
+            .where(eq(ActorRegistryTable.session_id, sessionID))
             .all(),
-        ),
-      )
-      const prefix = `${agentType}-`
-      let max = 0
-      for (const row of existing) {
-        if (row.actor_id.startsWith(prefix)) {
-          const n = parseInt(row.actor_id.slice(prefix.length), 10)
-          if (Number.isFinite(n) && n > max) max = n
+        )
+        const prefix = `${agentType}-`
+        let max = 0
+        for (const row of existing) {
+          if (row.actor_id.startsWith(prefix)) {
+            const suffix = row.actor_id.slice(prefix.length)
+            if (!/^[1-9]\d*$/.test(suffix)) continue
+            const n = Number(suffix)
+            if (Number.isSafeInteger(n) && n > max) max = n
+          }
         }
-      }
-      return `${agentType}-${max + 1}`
+        return `${agentType}-${max + 1}`
+      })
     })
 
     // --- Orphan Recovery ---
@@ -750,8 +820,10 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
 
     return Service.of({
       register,
+      registerAllocated,
       updateStatus,
       beginExecution,
+      cancelPending,
       settleExecution,
       claimTerminalNotification,
       updateTurn,

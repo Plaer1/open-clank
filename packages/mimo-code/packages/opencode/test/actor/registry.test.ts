@@ -947,5 +947,60 @@ describe("ActorRegistry", () => {
         expect(result).toBe("writer-1")
       })
     })
+
+    test("registerAllocated serializes concurrent writers and follows explicit high IDs", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const session = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.register({
+              sessionID: session.id,
+              actorID: "writer-9",
+              mode: "subagent",
+              agent: "writer",
+              description: "manual high ID",
+              contextMode: "full",
+              background: true,
+              lifecycle: "ephemeral",
+            }),
+          ),
+        )
+        const high = await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.registerAllocated({
+              sessionID: session.id,
+              mode: "subagent",
+              agent: "writer",
+              description: "after manual ID",
+              contextMode: "full",
+              background: true,
+              lifecycle: "ephemeral",
+            }),
+          ),
+        )
+        expect(high.actorID).toBe("writer-10")
+
+        const concurrent = await Promise.all(
+          Array.from({ length: 4 }, (_, index) =>
+            rt.runPromise(
+              ActorRegistry.Service.use((svc) =>
+                svc.registerAllocated({
+                  sessionID: session.id,
+                  mode: "subagent",
+                  agent: "writer",
+                  description: `concurrent ${index}`,
+                  contextMode: "full",
+                  background: true,
+                  lifecycle: "ephemeral",
+                }),
+              ),
+            ),
+          ),
+        )
+        expect(concurrent.map((entry) => entry.actorID).sort()).toEqual(["writer-11", "writer-12", "writer-13", "writer-14"])
+        expect((await rt.runPromise(ActorRegistry.Service.use((svc) => svc.listBySession(session.id)))).length).toBe(7)
+      })
+    })
   })
 })

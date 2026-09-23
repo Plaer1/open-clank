@@ -332,7 +332,10 @@ describe("WorkflowRuntime cancel cascade", () => {
           title: "wf cancel no-orphan",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
-        yield* llm.hang // every child hangs at the LLM → in-flight at cancel time
+        // Queue one hang per child so the test never relies on the mock's
+        // empty-queue auto-answer. Every registered child must still be in
+        // flight when cancellation begins.
+        yield* Effect.forEach(Array.from({ length: 8 }), () => llm.hang)
         // A wide fan-out keeps spawns resolving across the bridge so the cancel
         // lands while children are registered but the post-resolve add (the bug)
         // has not run.

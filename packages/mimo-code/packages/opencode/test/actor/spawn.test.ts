@@ -123,7 +123,7 @@ const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
 
-function makeLayer() {
+function makeLayer(runLayer: Layer.Layer<SessionRunState.Service> = run) {
   const deps = Layer.mergeAll(
     Session.defaultLayer,
     Snapshot.defaultLayer,
@@ -144,6 +144,7 @@ function makeLayer() {
   const todo = Todo.layer.pipe(Layer.provideMerge(deps))
   const checkpoint = SessionCheckpoint.defaultLayer
   const taskRegistry = ActorRegistry.defaultLayer
+  const taskStore = TaskRegistry.defaultLayer
   const taskWaiter = ActorWaiter.defaultLayer
   const team = Team.defaultLayer
   const registry = ToolRegistry.layer.pipe(
@@ -153,12 +154,17 @@ function makeLayer() {
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Format.defaultLayer),
     Layer.provide(taskRegistry),
-    Layer.provide(taskWaiter),
+    // ActorTool resolves its waiter when init() runs, so preserve this
+    // service in the outer fixture alongside the registry wiring.
+    Layer.provideMerge(taskWaiter),
     Layer.provide(team),
-    Layer.provide(checkpoint),
+    // Keep the checkpoint service in the test environment as well as wiring it
+    // into ToolRegistry: ActorTool resolves it when init() runs, after the
+    // registry layer has already been built.
+    Layer.provideMerge(checkpoint),
     Layer.provide(Memory.defaultLayer),
     Layer.provide(History.defaultLayer),
-    Layer.provide(TaskRegistry.defaultLayer),
+    Layer.provide(taskStore),
     Layer.provide(SchedulerDefaultLayer),
     Layer.provide(Auth.defaultLayer),
     Layer.provideMerge(todo),
@@ -176,7 +182,7 @@ function makeLayer() {
     Layer.provide(SessionCompaction.defaultLayer),
     Layer.provide(team),
     Layer.provide(taskRegistry),
-    Layer.provideMerge(run),
+    Layer.provideMerge(runLayer),
     Layer.provideMerge(prune),
     Layer.provideMerge(proc),
     Layer.provideMerge(registry),
@@ -188,18 +194,232 @@ function makeLayer() {
   )
   return Layer.mergeAll(
     TestLLMServer.layer,
+    taskStore,
     Actor.layer.pipe(
       Layer.provideMerge(prompt),
       Layer.provide(Worktree.defaultLayer),
       Layer.provideMerge(taskRegistry),
-      Layer.provide(TaskRegistry.defaultLayer),
+      Layer.provide(taskStore),
     Layer.provide(SchedulerDefaultLayer),
       Layer.provide(Inbox.defaultLayer),
     ),
   ).pipe(Layer.provide(summary))
 }
 
-const it = testEffect(makeLayer())
+const postStopGate: { target?: string; held?: Deferred.Deferred<void>; release?: Deferred.Deferred<void> } = {}
+const cancelGate: { target?: string; entered?: Deferred.Deferred<void>; release?: Deferred.Deferred<void> } = {}
+
+function makeGenerationGateLayer() {
+  const ensureRunningCounts = new Map<string, number>()
+  const baseRun = SessionRunState.layer.pipe(Layer.provide(status))
+  const gatedRun = Layer.effect(
+    SessionRunState.Service,
+    Effect.gen(function* () {
+      const base = yield* SessionRunState.Service
+      return SessionRunState.Service.of({
+        assertNotBusy: base.assertNotBusy,
+        cancel: base.cancel,
+        cancelActor: (sessionID, actorID) =>
+          cancelGate.target === `${sessionID}:${actorID}` && cancelGate.release
+            ? Effect.gen(function* () {
+                if (cancelGate.entered) yield* Deferred.succeed(cancelGate.entered, undefined)
+                yield* Deferred.await(cancelGate.release!)
+                yield* base.cancelActor(sessionID, actorID)
+              })
+            : base.cancelActor(sessionID, actorID),
+        startShell: base.startShell,
+        ensureRunning: (sessionID, actorID, onInterrupt, work) => {
+          const key = `${sessionID}:${actorID}`
+          const count = (ensureRunningCounts.get(key) ?? 0) + 1
+          ensureRunningCounts.set(key, count)
+          const started = base.ensureRunning(sessionID, actorID, onInterrupt, work)
+          return postStopGate.target === key && count === 2 && postStopGate.held && postStopGate.release
+            ? started.pipe(
+                Effect.ensuring(
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(postStopGate.held!, undefined).pipe(Effect.ignore)
+                    yield* Effect.uninterruptible(Deferred.await(postStopGate.release!))
+                  }),
+                ),
+              )
+            : started
+        },
+      })
+    }),
+  ).pipe(Layer.provide(baseRun))
+  return makeLayer(gatedRun)
+}
+
+const it = testEffect(makeGenerationGateLayer())
+
+describe("Actor execution generation retirement", () => {
+  it.live("holds same-ID resume until the settled postStop runner is released", () =>
+    Effect.gen(function* () {
+      const held = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      postStopGate.held = held
+      postStopGate.release = release
+      yield* Effect.addFinalizer(() =>
+        postStopGate.release
+          ? Deferred.succeed(postStopGate.release, undefined).pipe(
+              Effect.ignore,
+              Effect.ensuring(
+                Effect.sync(() => {
+                  postStopGate.target = undefined
+                  postStopGate.held = undefined
+                  postStopGate.release = undefined
+                }),
+              ),
+            )
+          : Effect.sync(() => {
+              postStopGate.target = undefined
+              postStopGate.held = undefined
+            }),
+      )
+      return yield* provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const actor = yield* Actor.Service
+          const session = yield* Session.Service
+          const registry = yield* ActorRegistry.Service
+          const tasks = yield* TaskRegistry.Service
+          const parent = yield* session.create({ title: "postStop generation gate" })
+          const task = yield* tasks.create({ session_id: parent.id, summary: "already done" })
+          yield* tasks.done({ session_id: parent.id, id: task.id })
+          yield* llm.text("first")
+          yield* llm.text("postStop")
+
+          const first = yield* actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "general",
+            task: "first generation",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+            task_id: task.id,
+          })
+          postStopGate.target = `${parent.id}:${first.actorID}`
+          yield* llm.wait(2)
+          const firstOutcome = yield* Deferred.await(first.outcome)
+          expect(firstOutcome.status).toBe("success")
+          const firstRow = yield* registry.get(parent.id, first.actorID)
+          expect(firstRow?.status).toBe("idle")
+          yield* Deferred.await(held)
+
+          yield* llm.text("second")
+          const resume = yield* Effect.forkChild(
+            actor.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              actorID: first.actorID,
+              agentType: "explore",
+              task: "second generation",
+              context: "none",
+              tools: ["read"],
+              background: false,
+              model: ref,
+            }),
+          )
+          yield* Effect.sleep("100 millis")
+          const parked = yield* registry.get(parent.id, first.actorID)
+          expect(parked?.executionRevision).toBe(firstRow?.executionRevision)
+          expect(yield* llm.calls).toBe(2)
+
+          yield* Deferred.succeed(release, undefined)
+          const second = yield* Fiber.join(resume)
+          expect((yield* Deferred.await(second.outcome)).status).toBe("success")
+          const finalRow = yield* registry.get(parent.id, first.actorID)
+          expect(finalRow?.executionRevision).toBeGreaterThan(firstRow?.executionRevision ?? 0)
+          expect(yield* llm.calls).toBe(3)
+        }),
+        { git: true, config: providerCfg },
+      )
+    }),
+  )
+
+  it.live("keeps same-ID resume behind timed-out cancellation cleanup", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      cancelGate.target = undefined
+      cancelGate.entered = entered
+      cancelGate.release = release
+      yield* Effect.addFinalizer(() =>
+        (cancelGate.release
+          ? Deferred.succeed(cancelGate.release, undefined).pipe(Effect.ignore)
+          : Effect.void).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              cancelGate.target = undefined
+              cancelGate.entered = undefined
+              cancelGate.release = undefined
+            }),
+          ),
+        ),
+      )
+      return yield* provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const actor = yield* Actor.Service
+          const session = yield* Session.Service
+          const registry = yield* ActorRegistry.Service
+          const parent = yield* session.create({ title: "cancel cleanup gate" })
+          yield* llm.hang
+          const first = yield* actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "build",
+            task: "cancel me",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+          })
+          cancelGate.target = `${parent.id}:${first.actorID}`
+          yield* llm.wait(1)
+          const firstRow = yield* registry.get(parent.id, first.actorID)
+
+          const cancelFiber = yield* Effect.forkChild(
+            actor.cancel(parent.id, first.actorID, "forced").pipe(Effect.timeout("50 millis"), Effect.exit),
+          )
+          yield* Deferred.await(entered)
+          const timed = yield* Fiber.join(cancelFiber)
+          expect(timed._tag).toBe("Failure")
+          const afterCancel = yield* registry.get(parent.id, first.actorID)
+          expect(afterCancel?.status).toBe("idle")
+          expect(afterCancel?.lastOutcome).toBe("cancelled")
+
+          yield* llm.text("resumed after cleanup")
+          const resume = yield* Effect.forkChild(
+            actor.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              actorID: first.actorID,
+              agentType: "explore",
+              task: "resume after cancellation",
+              context: "none",
+              tools: ["read"],
+              background: false,
+              model: ref,
+            }),
+          )
+          yield* Effect.sleep("100 millis")
+          const parked = yield* registry.get(parent.id, first.actorID)
+          expect(parked?.executionRevision).toBe(firstRow?.executionRevision)
+          expect(yield* llm.calls).toBe(1)
+
+          yield* Deferred.succeed(release, undefined)
+          const second = yield* Fiber.join(resume)
+          expect((yield* Deferred.await(second.outcome)).status).toBe("success")
+          const finalRow = yield* registry.get(parent.id, first.actorID)
+          expect(finalRow?.executionRevision).toBeGreaterThan(firstRow?.executionRevision ?? 0)
+          expect(yield* llm.calls).toBe(2)
+        }),
+        { git: true, config: providerCfg },
+      )
+    }),
+  )
+})
 
 const ref = {
   providerID: ProviderID.make("test"),
@@ -318,7 +538,7 @@ describe("ActorTool durable host binding", () => {
           {
             operation: {
               action: "run",
-              subagent_type: "build",
+              subagent_type: "general",
               description: "durable child",
               prompt: "first prompt",
               model: "test/test-model",
@@ -337,7 +557,7 @@ describe("ActorTool durable host binding", () => {
           {
             operation: {
               action: "run",
-              subagent_type: "build",
+              subagent_type: "general",
               description: "resume must retain A",
               prompt: "second prompt",
               actor_id: actorID,
@@ -367,10 +587,11 @@ describe("ActorTool durable host binding", () => {
         const sibling = yield* def.execute(
           {
             operation: {
-              action: "spawn",
-              subagent_type: "build",
+              action: "run",
+              subagent_type: "general",
               description: "new sibling inherits B",
               prompt: "sibling prompt",
+              model: "test/test-model",
             },
           },
           actorToolContext(parent.id, messageID, contextB),
@@ -474,6 +695,101 @@ describe("Actor.spawn peer mode", () => {
         if (sent._tag === "Success") expect(sent.value.inboxID).toBeTruthy()
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("cancelling a pending peer prevents its first model turn", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const reg = yield* ActorRegistry.Service
+        const parent = yield* session.create({ title: "pending cancel" })
+        yield* llm.hang
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "must not start",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+        yield* actor.cancel(result.sessionID, result.actorID, "forced")
+        const outcome = yield* Deferred.await(result.outcome)
+        const row = yield* reg.get(result.sessionID, result.actorID)
+        expect(outcome.status).toBe("cancelled")
+        expect(row?.status).toBe("idle")
+        expect(row?.turnCount).toBe(0)
+        expect(row?.lastOutcome).toBe("cancelled")
+        expect(yield* llm.calls).toBe(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("foreground peer waits for its deferred launcher and outcome", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "foreground peer" })
+        yield* llm.text("finished")
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "finish now",
+          context: "none",
+          tools: ["read"],
+          background: false,
+          model: ref,
+        })
+        const outcome = yield* Deferred.await(result.outcome)
+        expect(outcome.status).toBe("success")
+        expect(yield* llm.calls).toBeGreaterThan(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("background peer remains pending at return, then launches and completes", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const reg = yield* ActorRegistry.Service
+        const parent = yield* session.create({ title: "background peer handoff" })
+        yield* llm.text("background result")
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "run after spawn returns",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+
+        // The deferred launcher keeps the receiver addressable without starting
+        // model/task work before the caller observes the new actor.
+        const parked = yield* reg.get(result.sessionID, result.actorID)
+        expect(parked?.status).toBe("pending")
+        expect(parked?.turnCount).toBe(0)
+
+        const outcome = yield* Deferred.await(result.outcome).pipe(Effect.timeout("10 seconds"))
+        expect(outcome.status).toBe("success")
+        expect(yield* llm.calls).toBeGreaterThan(0)
+        const finished = yield* reg.get(result.sessionID, result.actorID)
+        expect(finished?.status).toBe("idle")
+        expect(finished?.turnCount).toBeGreaterThan(0)
       }),
       { git: true, config: providerCfg },
     ),

@@ -653,7 +653,15 @@ export const layer = Layer.effect(
           Effect.flatMap((r) =>
             r === (STRAGGLER_TIMEOUT as unknown)
               ? (spawnRef.current
-                  ? spawnRef.current.cancel(input.sessionID, actorID, "graceful").pipe(Effect.ignore)
+                  ? spawnRef.current
+                      .cancel(input.sessionID, actorID, "graceful")
+                      .pipe(
+                        Effect.timeout(RECLAIM_ACTOR_TIMEOUT_MS),
+                        Effect.catchTag("TimeoutError", () =>
+                          Effect.sync(() => log.warn("actor cancel timed out during agent timeout", { actorID })),
+                        ),
+                        Effect.ignore,
+                      )
                   : Effect.void
                 ).pipe(
                   Effect.tap(() =>
