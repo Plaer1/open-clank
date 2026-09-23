@@ -29,7 +29,7 @@ export const runTurn = <A, E>(
       // Compatibility path for direct single-turn callers/tests. Production
       // forks always pass their top-level execution revision.
       const executionRevision = yield* reg.beginExecution(sessionID, actorID)
-      if (executionRevision === undefined) yield* Effect.interrupt
+      if (executionRevision === undefined) return yield* Effect.interrupt
       const exit: Exit.Exit<A, E> = yield* work.pipe(Effect.interruptible, Effect.exit)
       if (Exit.isSuccess(exit)) {
         yield* reg.settleExecution(sessionID, actorID, executionRevision, "success").pipe(Effect.ignore)

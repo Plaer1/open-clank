@@ -1,7 +1,7 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, describe, expect } from "bun:test"
-import { Deferred, Effect, Layer } from "effect"
+import { Deferred, Effect, Fiber, Layer } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
@@ -49,7 +49,7 @@ import { Auth } from "../../src/auth"
 import { Database } from "../../src/storage"
 import { MessageTable } from "../../src/session/session.sql"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { Instance } from "../../src/project/instance"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Ripgrep } from "../../src/file/ripgrep"
@@ -275,7 +275,7 @@ function gptProviderCfg(url: string) {
   }
 }
 
-function actorToolContext(sessionID: string, messageID: MessageID, hostContext: Record<string, string>) {
+function actorToolContext(sessionID: SessionID, messageID: MessageID, hostContext: Record<string, string>) {
   return {
     sessionID,
     messageID,
@@ -330,6 +330,7 @@ describe("ActorTool durable host binding", () => {
         const storedAfterFirst = yield* registry.get(parent.id, actorID)
         expect(storedAfterFirst?.hostContext).toEqual(contextA)
         expect(storedAfterFirst?.turnCount).toBeGreaterThanOrEqual(1)
+        expect(storedAfterFirst?.executionRevision).toBeGreaterThan(0)
 
         yield* llm.text("second successful turn")
         const second = yield* def.execute(
@@ -347,6 +348,7 @@ describe("ActorTool durable host binding", () => {
         const storedAfterSecond = yield* registry.get(parent.id, actorID)
         expect(storedAfterSecond?.hostContext).toEqual(contextA)
         expect(storedAfterSecond?.turnCount).toBeGreaterThanOrEqual(2)
+        expect(storedAfterSecond?.executionRevision).toBeGreaterThan(storedAfterFirst?.executionRevision ?? 0)
         expect(second.metadata.hostContext).toEqual(contextA)
 
         const status = yield* def.execute(
@@ -376,7 +378,7 @@ describe("ActorTool durable host binding", () => {
         expect(sibling.metadata.hostContext).toEqual(contextB)
       }),
       { git: true, config: providerCfg },
-    ),
+    ) as any,
     30000,
   )
 })
@@ -1286,8 +1288,8 @@ describe("Actor.spawn structured output (P3)", () => {
 describe("Actor.spawn onActorID pre-registration (MR104 #2)", () => {
   // The workflow runtime needs the child's actorID in its reclaim set BEFORE the
   // background work fiber detaches, otherwise a cancel that races an in-flight
-  // spawn leaves an orphan. spawn exposes onActorID: fired synchronously inside
-  // the spawn Effect, right after register(), before forkWork detaches. Proof:
+  // spawn leaves an orphan. spawn exposes onActorID after forkWork parks and
+  // registers its outer fiber, before the start gate opens. Proof:
   // by the time spawn RESOLVES to the caller, the callback has already run AND
   // carries the SAME actorID the registry was populated with — so any consumer
   // (the workflow) is guaranteed to know the id the instant the actor exists.
@@ -1326,6 +1328,43 @@ describe("Actor.spawn onActorID pre-registration (MR104 #2)", () => {
         expect(row?.actorID).toBe(result.actorID)
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("reclaim during the parked callback window interrupts the outer fiber", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({
+          title: "parked reclaim",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.hang
+        const callbackID = yield* Deferred.make<string>()
+        const reclaim = yield* Effect.forkChild(
+          Deferred.await(callbackID).pipe(Effect.flatMap((actorID) => actor.cancel(parent.id, actorID, "forced"))),
+        )
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "must not start",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+          onActorID: (actorID) => Effect.runSync(Deferred.succeed(callbackID, actorID)),
+        })
+        yield* Fiber.join(reclaim)
+        const outcome = yield* Deferred.await(result.outcome)
+        expect(outcome.status).toBe("cancelled")
+        expect(yield* llm.calls).toBe(0)
+        const row = yield* ActorRegistry.Service.use((reg) => reg.get(parent.id, result.actorID))
+        expect(row?.status).toBe("idle")
+        expect(row?.lastOutcome).toBe("cancelled")
       }),
       { git: true, config: providerCfg },
     ),

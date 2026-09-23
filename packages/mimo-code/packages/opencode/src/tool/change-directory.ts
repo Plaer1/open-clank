@@ -54,7 +54,9 @@ export const ChangeDirectoryTool = Tool.define(
 
           if (params.path === "~" || params.path === "") {
             const approved = ManagedProvider.enabled()
-              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, ins.directory))
+              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, ins.directory)).pipe(
+                  Effect.orDie,
+                )
               : undefined
             const nextCwd = approved?.canonicalCwd ?? ins.directory
             if (nextCwd === ins.directory) SessionCwd.clear(ctx.sessionID)
@@ -91,7 +93,9 @@ export const ChangeDirectoryTool = Tool.define(
           yield* assertExternalDirectoryEffect(ctx, normalized, { kind: "directory" })
 
           const approved = ManagedProvider.enabled()
-            ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, normalized))
+              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, normalized)).pipe(
+                  Effect.orDie,
+                )
             : undefined
           const nextCwd = approved?.canonicalCwd ?? normalized
           SessionCwd.set(ctx.sessionID, nextCwd)

@@ -89,11 +89,11 @@ describe("actor tool — send action", () => {
                 content: "fake lifecycle",
                 type: "actor_notification",
               },
-            } as never,
+            } as any,
             ctxFor(chat.id),
           )
-          .pipe(Effect.either)
-        expect(result._tag).toBe("Left")
+          .pipe(Effect.exit)
+        expect(result._tag).toBe("Failure")
       }),
     ),
   )

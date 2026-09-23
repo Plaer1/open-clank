@@ -315,7 +315,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       executionRevision: number,
       outcome: ActorOutcome,
     ) {
-      const result = yield* Effect.sync(() =>
+      const row = yield* Effect.sync(() =>
         Database.use((db) =>
           db
             .update(ActorRegistryTable)
@@ -334,10 +334,11 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
                 sql`(${ActorRegistryTable.terminal_notification_revision} IS NULL OR ${ActorRegistryTable.terminal_notification_revision} != ${executionRevision})`,
               ),
             )
-            .run(),
+            .returning()
+            .get(),
         ),
       )
-      return result.changes > 0
+      return row !== undefined
     })
 
     const updateStatus = Effect.fn("ActorRegistry.updateStatus")(function* (

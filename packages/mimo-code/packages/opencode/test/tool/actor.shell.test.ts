@@ -185,8 +185,8 @@ describe("actor.shell.parse: send", () => {
   })
 
   test("flags before positionals still parse", async () => {
-    const out = await parse('actor send --type text main "go"')
-    expect(out).toEqual([{ operation: { action: "send", to_actor_id: "main", content: "go", type: "text" } }])
+    const out = await parse('actor send --session text main "go"')
+    expect(out).toEqual([{ operation: { action: "send", to_actor_id: "main", content: "go", to_session_id: "text" } }])
   })
 
   test("send with wrong arity reports got/expected", async () => {
