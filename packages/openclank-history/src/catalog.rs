@@ -303,6 +303,8 @@ pub struct ActionRecord {
     #[serde(default)]
     pub after_capture_digest: Option<String>,
     #[serde(default)]
+    pub complete_request_digest: Option<String>,
+    #[serde(default)]
     pub before_scope_id: Option<String>,
     #[serde(default)]
     pub after_scope_id: Option<String>,
@@ -1093,6 +1095,23 @@ impl Catalog {
             record.after_scope_id = Some(scope_id);
             record.after_logical_bytes = logical_bytes;
             record.state = ActionState::AfterDurable;
+            Ok(())
+        })
+    }
+
+    pub fn bind_complete_request(
+        &self,
+        action_id: &str,
+        request_digest: &str,
+    ) -> CatalogResult<ActionRecord> {
+        self.update(action_id, |record| {
+            if let Some(existing) = record.complete_request_digest.as_deref() {
+                if existing != request_digest {
+                    return Err("complete batch retry payload mismatch".into());
+                }
+            } else {
+                record.complete_request_digest = Some(request_digest.to_owned());
+            }
             Ok(())
         })
     }

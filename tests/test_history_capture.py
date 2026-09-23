@@ -189,7 +189,7 @@ def test_batch_staging_obeys_aggregate_inline_cap():
     assert wire_entries[1]["content"] is None
 
 
-def test_failed_after_capture_is_reported_without_rolling_back_live_write(tmp_path):
+def test_failed_after_capture_is_recoverable_without_rolling_back_live_write(tmp_path):
     class FailingAfter(FakeHistoryClient):
         def complete(self, action_id, *, content, fingerprint):
             raise RuntimeError("worker stopped")
@@ -197,7 +197,8 @@ def test_failed_after_capture_is_reported_without_rolling_back_live_write(tmp_pa
     client = FailingAfter()
     context = _context(tmp_path, client)
     target = tmp_path / "note.md"
-    atomic_write_batch([AtomicFileChange(str(target), b"live", require_missing=True, history_context=context)])
+    with pytest.raises(AtomicWriteConflict, match="history reconciliation pending"):
+        atomic_write_batch([AtomicFileChange(str(target), b"live", require_missing=True, history_context=context)])
     assert target.read_bytes() == b"live"
     status = history_capture.last_history_status(context)
     assert status["history_status"] == "failed"

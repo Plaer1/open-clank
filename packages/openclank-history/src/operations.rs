@@ -169,6 +169,7 @@ pub fn new_action_record(request: ActionRequest) -> ActionRecord {
         mutation_batch: None,
         after: None,
         after_resources: Vec::new(),
+        complete_request_digest: None,
         live: None,
         before_capture_digest: None,
         after_capture_digest: None,
@@ -1160,6 +1161,13 @@ impl HistoryCoordinator {
         }
     }
 
+    fn release_after_failure(&self, action_id: &str, lease: &[String]) {
+        if let Ok(mut held) = self.held_leases.lock() {
+            held.remove(action_id);
+        }
+        let _ = self.catalog.release_leases(action_id, lease);
+    }
+
     pub async fn capture_after(
         &self,
         action_id: &str,
@@ -1220,6 +1228,7 @@ impl HistoryCoordinator {
                     ActionState::CapturingAfter,
                     ActionState::AfterCaptureFailed,
                 );
+                self.release_after_failure(action_id, &lease);
                 return Err(format!("history_paused_budget: {error}").into());
             }
         };
@@ -1240,6 +1249,7 @@ impl HistoryCoordinator {
                     ActionState::CapturingAfter,
                     ActionState::AfterCaptureFailed,
                 );
+                self.release_after_failure(action_id, &lease);
                 let _ = self.release_capture_reservation(&reservation_id);
                 return Err(error);
             }
@@ -1248,6 +1258,9 @@ impl HistoryCoordinator {
             self.catalog
                 .record_after(action_id, receipt, capture_digest, scope_id, logical_bytes);
         let _ = self.release_capture_reservation(&reservation_id);
+        if result.is_err() {
+            self.release_after_failure(action_id, &lease);
+        }
         result
     }
 
@@ -1297,6 +1310,110 @@ impl HistoryCoordinator {
         if supplied != declared || supplied.len() != entries.len() {
             return Err("after-state batch does not match prepared resources".into());
         }
+        let prepared = action
+            .mutation_batch
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .resources
+                    .iter()
+                    .map(|resource| (&resource.resource_key, resource))
+                    .collect::<BTreeMap<_, _>>()
+            });
+        for entry in &entries {
+            if entry.outcome.resource_id != entry.resource_key.resource_id
+                || entry.outcome.status != "Committed"
+                || entry.outcome.revision.is_none()
+            {
+                return Err(format!(
+                    "after-state outcome is not an authoritative committed result for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present && entry.content.is_none() {
+                return Err(format!(
+                    "after-state present resource {} has no exact content",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if let Some(content_digest) = entry.coverage.content_digest.as_deref() {
+                let content = entry.content.as_ref().ok_or_else(|| {
+                    format!(
+                        "after-state content digest has no content for {}",
+                        entry.resource_key.resource_id
+                    )
+                })?;
+                let blake3_digest = blake3::hash(content).to_hex().to_string();
+                let sha256_digest = format!("sha256:{:x}", Sha256::digest(content));
+                if content_digest != blake3_digest && content_digest != sha256_digest {
+                    return Err(format!(
+                        "after-state content digest mismatch for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+            if let Some(size) = entry.metadata.size {
+                if entry.existence == ResourceExistence::Present
+                    && matches!(entry.resource_type, ResourceType::File | ResourceType::Symlink)
+                    && entry.content.as_ref().map(|content| content.len() as u64) != Some(size)
+                {
+                    return Err(format!(
+                        "after-state metadata size mismatch for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+            let exact_after = entry
+                .coverage
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("exact_after"))
+                == Some(&serde_json::Value::Bool(true));
+            if !exact_after {
+                return Err(format!(
+                    "after-state coverage is not exact for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if let Some(prepared) = prepared.as_ref().and_then(|resources| resources.get(&entry.resource_key)) {
+                if prepared.existence == ResourceExistence::Present
+                    && prepared.resource_type != entry.resource_type
+                {
+                    return Err(format!(
+                        "after-state type changed unexpectedly for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+                if prepared.new_locator.is_some()
+                    && entry.locator.as_ref() != prepared.new_locator.as_ref()
+                {
+                    return Err(format!(
+                        "after-state locator does not match prepared destination for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+                if entry.existence == ResourceExistence::Present
+                    && prepared.metadata.mode.is_some()
+                    && entry.metadata.mode != prepared.metadata.mode
+                {
+                    return Err(format!(
+                        "after-state mode changed unexpectedly for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+        }
+        if action.state == ActionState::AfterDurable {
+            return Ok(action);
+        }
         let start_state = if action.state == ActionState::AfterCaptureFailed {
             ActionState::AfterCaptureFailed
         } else {
@@ -1315,10 +1432,21 @@ impl HistoryCoordinator {
             .lock()
             .map_err(|_| "lease lock poisoned")?
             .insert(action_id.to_owned(), lease.clone());
-        let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
+        let logical_bytes = match entries.iter().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
                 .ok_or("after-state byte size overflow")
-        })?;
+        }) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                self.release_after_failure(action_id, &lease);
+                return Err(error.into());
+            }
+        };
         let (reservation_id, scope_id) = match self
             .reserve_with_reclaim(&action, "after", logical_bytes)
             .await
@@ -1330,6 +1458,7 @@ impl HistoryCoordinator {
                     ActionState::CapturingAfter,
                     ActionState::AfterCaptureFailed,
                 );
+                self.release_after_failure(action_id, &lease);
                 return Err(format!("history_paused_budget: {error}").into());
             }
         };
@@ -1353,6 +1482,7 @@ impl HistoryCoordinator {
                         ActionState::CapturingAfter,
                         ActionState::AfterCaptureFailed,
                     );
+                    self.release_after_failure(action_id, &lease);
                     let _ = self.release_capture_reservation(&reservation_id);
                     return Err(format!("history_after_failed: {error}").into());
                 }
@@ -1379,6 +1509,9 @@ impl HistoryCoordinator {
             logical_bytes,
         );
         let _ = self.release_capture_reservation(&reservation_id);
+        if result.is_err() {
+            self.release_after_failure(action_id, &lease);
+        }
         result
     }
 

@@ -206,17 +206,46 @@ fn provider_engine_capture_matrix_covers_file_lifecycle_and_multitarget_failures
         .with_capture_hook(Arc::new(hook));
 
     assert!(matches!(
-        engine.create_file_app(&source, b"created").unwrap(),
-        odysseus_files::ReplaceOutcome::Created { .. }
+        engine.create_file_app(&source, b"created"),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
     ));
+    assert_eq!(std::fs::read(&source).unwrap(), b"created");
     let expected = engine.stat_app(&source, true).unwrap().fingerprint;
-    engine
-        .replace_if_fingerprint_app(&source, expected.as_ref(), b"replaced")
-        .unwrap();
-    engine.copy_file_app(&source, &copy).unwrap();
-    engine.move_file_app(&copy, &moved).unwrap();
-    let trash = engine.trash_file_app(&moved).unwrap();
-    engine.restore_file_app(&trash).unwrap();
+    assert!(matches!(
+        engine.replace_if_fingerprint_app(&source, expected.as_ref(), b"replaced"),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
+    ));
+    assert_eq!(std::fs::read(&source).unwrap(), b"replaced");
+    assert!(matches!(
+        engine.copy_file_app(&source, &copy),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
+    ));
+    assert!(matches!(
+        engine.move_file_app(&copy, &moved),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
+    ));
+    assert!(moved.exists());
+    assert!(matches!(
+        engine.trash_file_app(&moved),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
+    ));
+    let trashed_path = std::fs::read_dir(root.path().join(".odysseus-trash"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let trash = odysseus_files::TrashEntry {
+        id: "injected".into(),
+        root_id: "app-host".into(),
+        original_path: moved.clone(),
+        trashed_path,
+        fingerprint: None,
+    };
+    assert!(matches!(
+        engine.restore_file_app(&trash),
+        Err(odysseus_files::EngineError::HistoryCapture(_))
+    ));
     assert_eq!(std::fs::read(&moved).unwrap(), b"replaced");
 
     let events = events.lock().unwrap().clone();

@@ -660,39 +660,24 @@ impl MutationCaptureTicket for ServiceTicket {
     fn complete(self: Box<Self>, after: Vec<CaptureAfter>) -> Result<(), String> {
         let auth = self.hook.auth();
         let control = json!({"protocol_version": 1, "auth": auth, "action_id": self.action_id});
+        if after.len() != self.resource_ids.len() {
+            let error = format!(
+                "history after-state cardinality mismatch: expected {}, got {}",
+                self.resource_ids.len(),
+                after.len()
+            );
+            self.hook
+                .set_status(&self.action_id, "pending", "after-cardinality", Some(error.clone()));
+            return Err(error);
+        }
         let first = after.first();
         let content = first.and_then(|target| target.after.as_deref());
         let live = json!({"action_id": self.action_id, "status": "Committed", "fingerprint": HistoryServiceHook::fingerprint(content)});
-        // The physical mutation has already committed. Move the service-owned
-        // identity first, then publish the live receipt. If the registry is
-        // temporarily unavailable we still drive the action to a terminal
-        // capture state below so no live action is stranded in Applying.
+        // The physical mutation has already committed. Publish the live and
+        // exact after-state receipts before moving the service-owned identity.
+        // A registry failure is then an explicit reconciliation task attached
+        // to an already durable history action.
         let mut registry_error = None;
-        if let Some(commit) = self.registry_commit.as_ref() {
-            let result = match commit {
-                RegistryCommit::Move {
-                    source_id,
-                    destination_id,
-                    destination,
-                } => self.hook.move_resource(
-                    source_id,
-                    (destination_id != source_id).then_some(destination_id.as_str()),
-                    destination,
-                ),
-                RegistryCommit::Revoke { resource_id } => {
-                    self.hook.revoke_resource(resource_id, "resource deleted")
-                }
-            };
-            if let Err(error) = result {
-                self.hook.set_status(
-                    &self.action_id,
-                    "pending",
-                    "registry-reconcile",
-                    Some(error.clone()),
-                );
-                registry_error = Some(error);
-            }
-        }
         if let Err(error) = self
             .hook
             .request(json!({"RecordLive": {"envelope": control, "receipt": live}}))
@@ -750,6 +735,33 @@ impl MutationCaptureTicket for ServiceTicket {
         if result.is_err() {
             for upload_id in &staged_uploads {
                 let _ = self.hook.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "upload_id": upload_id}}));
+            }
+        }
+        if result.is_ok() {
+            if let Some(commit) = self.registry_commit.as_ref() {
+                let registry_result = match commit {
+                    RegistryCommit::Move {
+                        source_id,
+                        destination_id,
+                        destination,
+                    } => self.hook.move_resource(
+                        source_id,
+                        (destination_id != source_id).then_some(destination_id.as_str()),
+                        destination,
+                    ),
+                    RegistryCommit::Revoke { resource_id } => {
+                        self.hook.revoke_resource(resource_id, "resource deleted")
+                    }
+                };
+                if let Err(error) = registry_result {
+                    self.hook.set_status(
+                        &self.action_id,
+                        "pending",
+                        "registry-reconcile",
+                        Some(error.clone()),
+                    );
+                    registry_error = Some(error);
+                }
             }
         }
         match result {

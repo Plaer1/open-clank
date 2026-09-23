@@ -44,6 +44,17 @@ class AtomicRollbackError(RuntimeError):
         )
 
 
+def _require_history_complete(result: dict[str, Any]) -> None:
+    if result.get("history_status") in {"paused", "unavailable", "unconfigured"}:
+        return
+    if result.get("history_status") != "complete":
+        phase = result.get("capture_phase") or "unknown"
+        detail = result.get("error") or "history reconciliation did not complete"
+        raise AtomicWriteConflict(
+            f"history reconciliation pending ({phase}): {detail}"
+        )
+
+
 def _canonical_target(path: str) -> str:
     return os.path.realpath(os.path.abspath(path))
 
@@ -181,6 +192,7 @@ def atomic_write_bytes(
             action_id=action_id,
         )
         tmp: Optional[str] = None
+        history_completion_failed = False
         try:
             tmp = _stage_bytes(path, data, mode)
             _assert_canonical_target(requested, canonical)
@@ -203,9 +215,14 @@ def atomic_write_bytes(
             else:
                 os.replace(tmp, path)
             _fsync_directory(directory)
-            complete_file_capture(history, path)
+            try:
+                _require_history_complete(complete_file_capture(history, path))
+            except BaseException:
+                history_completion_failed = True
+                raise
         except BaseException:
-            history.abort()
+            if not history_completion_failed:
+                history.abort()
             raise
         finally:
             try:
@@ -270,6 +287,7 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
         backups: dict[str, str] = {}
         installed: set[str] = set()
         retained_backups: set[str] = set()
+        history_completion_failed = False
         try:
             for change, canonical in zip(changes, canonical_targets):
                 requested = change.path
@@ -331,10 +349,20 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
                         installed.add(target)
                 _fsync_directory(os.path.dirname(target) or ".")
             if history is not None:
-                complete_file_capture(history, primary)
+                try:
+                    _require_history_complete(complete_file_capture(history, primary))
+                except BaseException:
+                    history_completion_failed = True
+                    raise
         except BaseException as original:
-            if history is not None:
+            if history is not None and not history_completion_failed:
                 history.abort()
+            if history_completion_failed:
+                # The physical batch is already installed. Keep it in place
+                # and surface the durable history retry requirement; restoring
+                # backups here would falsely report rollback after a committed
+                # live action.
+                raise
             rollback_failures: list[str] = []
             for change, target in reversed(list(zip(changes, canonical_targets))):
                 backup = backups.get(target)

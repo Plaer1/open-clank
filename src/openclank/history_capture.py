@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import pathlib
+import stat
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -167,6 +168,16 @@ def _fingerprint(data: bytes | None) -> str:
     if data is None:
         return "missing"
     return f"sha256:{hashlib.sha256(data).hexdigest()}:{len(data)}"
+
+
+def _capture_payload(path: str) -> bytes | None:
+    """Read the exact provider payload for a file, directory, or symlink."""
+    stat_result = os.lstat(path)
+    if stat.S_ISLNK(stat_result.st_mode):
+        return os.readlink(path).encode("utf-8", "surrogateescape")
+    if stat.S_ISDIR(stat_result.st_mode):
+        return _directory_manifest(path)
+    return pathlib.Path(path).read_bytes()
 
 
 def _opaque_root_label(root: str) -> str:
@@ -543,10 +554,7 @@ class CaptureHandle:
                         target_after = after
                     else:
                         try:
-                            if os.path.isdir(target) and not os.path.islink(target):
-                                target_after = _directory_manifest(target)
-                            else:
-                                target_after = pathlib.Path(target).read_bytes()
+                            target_after = _capture_payload(target)
                         except FileNotFoundError:
                             target_after = None
                     item = dict(before_entry)
@@ -639,12 +647,7 @@ def begin_file_capture(
         _set_status(context, action_id=action_id, history_status="paused", capture_phase="excluded", error=reason)
         return handle
     try:
-        if os.path.isdir(path) and not os.path.islink(path):
-            before = _directory_manifest(path)
-        elif os.path.islink(path):
-            before = os.readlink(path).encode("utf-8", "surrogateescape")
-        else:
-            before = pathlib.Path(path).read_bytes()
+        before = _capture_payload(path)
     except FileNotFoundError:
         before = None
     except OSError as exc:
@@ -729,7 +732,7 @@ def file_capture(
 def complete_file_capture(handle: CaptureHandle, path: str, *, committed: bool = True) -> dict[str, Any]:
     read_error = None
     try:
-        after = pathlib.Path(path).read_bytes()
+        after = _capture_payload(path)
     except FileNotFoundError:
         after = None
     except OSError as exc:

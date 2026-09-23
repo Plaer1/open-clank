@@ -324,6 +324,8 @@ pub enum EngineError {
     BinaryOrUnsupportedText,
     #[error("target is not a directory")]
     NotADirectory,
+    #[error("filesystem mutation committed but history reconciliation is pending: {0}")]
+    HistoryCapture(String),
 }
 
 pub struct FileEngine {
@@ -475,18 +477,26 @@ impl FileEngine {
         &self,
         operation: &str,
         targets: Vec<CaptureTarget>,
-    ) -> Option<Box<dyn MutationCaptureTicket>> {
-        let hook = self.capture_hook.as_ref()?;
+    ) -> Result<Option<Box<dyn MutationCaptureTicket>>, EngineError> {
+        let Some(hook) = self.capture_hook.as_ref() else {
+            return Ok(None);
+        };
         match hook.prepare(operation, &targets) {
-            Ok(ticket) => Some(ticket),
-            Err(_) => None,
+            Ok(ticket) => Ok(Some(ticket)),
+            Err(error) => Err(EngineError::HistoryCapture(error)),
         }
     }
 
-    fn finish_capture(ticket: Option<Box<dyn MutationCaptureTicket>>, after: Vec<CaptureAfter>) {
+    fn finish_capture(
+        ticket: Option<Box<dyn MutationCaptureTicket>>,
+        after: Vec<CaptureAfter>,
+    ) -> Result<(), EngineError> {
         if let Some(ticket) = ticket {
-            let _ = ticket.complete(after);
+            ticket
+                .complete(after)
+                .map_err(EngineError::HistoryCapture)?;
         }
+        Ok(())
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -1764,7 +1774,7 @@ impl FileEngine {
                 resource_id: path.to_path_buf(),
                 before: None,
             }],
-        );
+        )?;
         fs::create_dir(path)?;
         self.clear_sorted_snapshot_cache();
         match (ticket, crate::history_capture::directory_manifest(path)) {
@@ -1775,9 +1785,12 @@ impl FileEngine {
                     after: Some(after),
                 }],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(path.to_path_buf())
     }
 
@@ -1814,7 +1827,7 @@ impl FileEngine {
                 resource_id: path.to_path_buf(),
                 before: current.as_ref().map(|_| Self::history_payload(path)).transpose()?,
             }],
-        );
+        )?;
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;
@@ -1856,9 +1869,12 @@ impl FileEngine {
                     after: Some(after),
                 }],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(if current.is_some() {
             ReplaceOutcome::Replaced { fingerprint }
         } else {
@@ -1933,7 +1949,7 @@ impl FileEngine {
                     before: None,
                 },
             ],
-        );
+        )?;
         let parent = destination.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "missing destination parent")
         })?;
@@ -1982,9 +1998,12 @@ impl FileEngine {
                     },
                 ],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(CopyOutcome {
             source: source.to_path_buf(),
             destination: destination.to_path_buf(),
@@ -2114,7 +2133,7 @@ impl FileEngine {
                     before: None,
                 },
             ],
-        );
+        )?;
         let result = fs::rename(source, destination).map_err(|error| {
             if error.raw_os_error() == Some(18) {
                 EngineError::CrossVolume
@@ -2143,9 +2162,12 @@ impl FileEngine {
                     },
                 ],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(())
     }
 
@@ -2221,7 +2243,7 @@ impl FileEngine {
                     before: None,
                 },
             ],
-        );
+        )?;
         if let Err(error) = fs::rename(&entry.trashed_path, &entry.original_path) {
             if let Some(ticket) = ticket {
                 ticket.abort();
@@ -2243,9 +2265,12 @@ impl FileEngine {
                     },
                 ],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(())
     }
 
@@ -2313,7 +2338,7 @@ impl FileEngine {
                 resource_id: resolved.to_path_buf(),
                 before: Some(Self::history_payload(resolved)?),
             }],
-        );
+        )?;
         if let Err(error) = fs::rename(resolved, &trashed_path).map_err(EngineError::Io) {
             if let Some(ticket) = ticket {
                 ticket.abort();
@@ -2327,7 +2352,7 @@ impl FileEngine {
                 resource_id: resolved.to_path_buf(),
                 after: None,
             }],
-        );
+        )?;
         Ok(TrashEntry {
             id,
             root_id: root_id.to_string(),
@@ -2418,7 +2443,7 @@ impl FileEngine {
                     before: None,
                 },
             ],
-        );
+        )?;
         if let Err(error) = fs::rename(&entry.trashed_path, &entry.original_path) {
             if let Some(ticket) = ticket {
                 ticket.abort();
@@ -2440,9 +2465,12 @@ impl FileEngine {
                     },
                 ],
             ),
-            (Some(ticket), Err(_)) => ticket.abort(),
-            (None, _) => {}
-        }
+            (Some(ticket), Err(error)) => {
+                ticket.abort();
+                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+            }
+            (None, _) => Ok(())
+        }?;
         Ok(())
     }
 

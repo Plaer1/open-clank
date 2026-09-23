@@ -10,7 +10,7 @@ use openclank_history::operations::{
 #[cfg(unix)]
 use openclank_history::protocol::{
     validate as protocol_validate, validate_control as protocol_validate_control,
-    BatchPrepareEntry, ControlEnvelope, ProtocolError, RequestEnvelope, ResourceHandle,
+    BatchCompleteEntry, BatchPrepareEntry, ControlEnvelope, ProtocolError, RequestEnvelope, ResourceHandle,
     ServiceRequest, ServiceResponse,
 };
 #[cfg(unix)]
@@ -1400,6 +1400,12 @@ fn trusted_registry_aliases(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+#[cfg(unix)]
+fn complete_batch_digest(entries: &[BatchCompleteEntry]) -> String {
+    let bytes = serde_json::to_vec(entries).expect("complete batch entries are serializable");
+    blake3::hash(&bytes).to_hex().to_string()
 }
 
 #[cfg(unix)]
@@ -3033,7 +3039,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 code: format!("unsupported mutation batch version: {batch_version}"),
                             },
                             Ok(record) if record.state == ActionState::Complete => {
-                                ServiceResponse::Action(record)
+                                let digest = complete_batch_digest(&entries);
+                                if record.complete_request_digest.as_deref() == Some(digest.as_str()) {
+                                    ServiceResponse::Action(record)
+                                } else {
+                                    ServiceResponse::Error { code: "complete batch retry payload mismatch".into() }
+                                }
                             }
                             Ok(_) if entries.is_empty() || entries.len() > MAX_BATCH_RESOURCES => {
                                 ServiceResponse::Error {
@@ -3041,9 +3052,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }
                             Ok(_) => {
-                                let mut inputs = Vec::with_capacity(entries.len());
-                                let mut error = None;
-                                for entry in entries {
+                                let request_digest = complete_batch_digest(&entries);
+                                if let Err(error) = coordinator.catalog().bind_complete_request(&envelope.action_id, &request_digest) {
+                                    ServiceResponse::Error { code: error.to_string() }
+                                } else {
+                                    let mut inputs = Vec::with_capacity(entries.len());
+                                    let mut error = None;
+                                    for entry in entries {
                                     if entry.content.is_some() && entry.staged_upload_id.is_some() {
                                         error = Some("batch after entry must use inline content or staged content, not both".to_owned());
                                         break;
@@ -3108,19 +3123,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                         coverage: entry.coverage,
                                         outcome: entry.outcome,
                                     });
-                                }
-                                if let Some(reason) = error {
-                                    ServiceResponse::Error { code: reason }
-                                } else {
-                                    let result = coordinator
-                                        .capture_after_batch(&envelope.action_id, inputs)
-                                        .await
-                                        .and_then(|_| coordinator.complete(&envelope.action_id));
-                                    match result {
-                                        Ok(record) => ServiceResponse::Action(record),
-                                        Err(error) => ServiceResponse::Error {
-                                            code: error.to_string(),
-                                        },
+                                    }
+                                    if let Some(reason) = error {
+                                        ServiceResponse::Error { code: reason }
+                                    } else {
+                                        let result = coordinator
+                                            .capture_after_batch(&envelope.action_id, inputs)
+                                            .await
+                                            .and_then(|_| coordinator.complete(&envelope.action_id));
+                                        match result {
+                                            Ok(record) => ServiceResponse::Action(record),
+                                            Err(error) => ServiceResponse::Error {
+                                                code: error.to_string(),
+                                            },
+                                        }
                                     }
                                 }
                             }
