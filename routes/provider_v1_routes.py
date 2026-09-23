@@ -146,7 +146,7 @@ _PROVIDER_FAMILY_BROWSER_CACHE_SECONDS = 5 * 60
 _ACCOUNT_INVENTORY_FRESHNESS_SECONDS = 15 * 60
 _ACCOUNT_INVENTORY_CACHE: dict[tuple[str, str, str, int, str, str], dict[str, Any]] = {}
 _ACCOUNT_INVENTORY_LOCK = threading.RLock()
-_ACCOUNT_INVENTORY_KEY_LOCKS: dict[tuple[str, str, str, int, str, str], threading.Lock] = {}
+_ACCOUNT_INVENTORY_FLIGHTS: dict[tuple[str, str, str, int, str, str], asyncio.Task] = {}
 _OAUTH_COMPLETION_LOCKS: dict[str, threading.Lock] = {}
 _OAUTH_COMPLETION_LOCKS_GUARD = threading.Lock()
 
@@ -939,25 +939,12 @@ def _validated_account_discovery(
     *,
     account_id: str,
     credential_revision: int,
-    strict: bool = True,
 ) -> Mapping[str, Any]:
     """Require the account/revision/discovery identity echo before persistence."""
 
     expected_account = str(account_id)
     expected_revision = int(credential_revision)
     discovery = result.get("discovery")
-    if not strict and not isinstance(discovery, Mapping):
-        # Test doubles and pre-v2 local adapters may still return the v1
-        # account result.  The real BoundProviderEngine always validates the
-        # v2 envelope before this helper is reached.
-        legacy_models = result.get("modelRoutes")
-        if isinstance(legacy_models, list):
-            return {
-                "status": "complete" if legacy_models else "partial",
-                "authoritative": bool(legacy_models),
-                "models": legacy_models,
-                "provenance": {"source": "legacy-adapter", "observedAt": 1},
-            }
     if (
         result.get("accountID") != expected_account
         or result.get("credentialRevision") != expected_revision
@@ -998,34 +985,20 @@ def _inventory_cache_key(
 
 def _invalidate_inventory_cache(*, owner: str, connection_id: Optional[str] = None) -> None:
     normalized = str(owner).strip().lower()
+    flights: list[asyncio.Task] = []
     with _ACCOUNT_INVENTORY_LOCK:
         for key in list(_ACCOUNT_INVENTORY_CACHE):
             if key[0] == normalized and (connection_id is None or key[1] == connection_id):
                 _ACCOUNT_INVENTORY_CACHE.pop(key, None)
-
-
-def _run_async_bridge(awaitable: Any) -> Any:
-    """Run an awaitable from sync FastAPI routes without nesting event loops."""
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-    result: list[Any] = []
-    error: list[BaseException] = []
-
-    def runner() -> None:
+        for key, task in list(_ACCOUNT_INVENTORY_FLIGHTS.items()):
+            if key[0] == normalized and (connection_id is None or key[1] == connection_id):
+                _ACCOUNT_INVENTORY_FLIGHTS.pop(key, None)
+                flights.append(task)
+    for task in flights:
         try:
-            result.append(asyncio.run(awaitable))
-        except BaseException as exc:  # pragma: no cover - defensive bridge
-            error.append(exc)
-
-    worker = threading.Thread(target=runner, daemon=True)
-    worker.start()
-    worker.join()
-    if error:
-        raise error[0]
-    return result[0] if result else None
+            task.get_loop().call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
 
 
 def _engine_model_routes(
@@ -1294,6 +1267,28 @@ def setup_provider_v1_routes(
             if acquired:
                 lock.release()
 
+    async def _complete_oauth_callback(
+        flow: OAuthHostFlow,
+        *,
+        code: Optional[str],
+    ) -> dict[str, Any]:
+        """Serialize callback exchange, validation, persistence, and release."""
+
+        with _OAUTH_COMPLETION_LOCKS_GUARD:
+            lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
+        acquired = await asyncio.to_thread(lock.acquire)
+        try:
+            if flow.status in {"complete", "failed", "cancelled", "expired"}:
+                return flow.public()
+            result = await flow.engine.call(
+                "_openclank/provider-control/v1/oauth/callback",
+                flow.completion_payload(code=code),
+            )
+            return await _persist_oauth_result_locked(flow, result)
+        finally:
+            if acquired:
+                lock.release()
+
     async def _persist_oauth_result_locked(
         flow: OAuthHostFlow,
         result: Mapping[str, Any],
@@ -1338,61 +1333,20 @@ def setup_provider_v1_routes(
                 host_account_id = current.id
                 expected_credential_revision = int(current.credential_version) + 1
 
-            strict_engine = isinstance(flow.engine, BoundProviderEngine)
-            try:
-                validated = await flow.engine.call(
-                    "_openclank/provider-control/v1/account/validate",
-                    _account_validation_wire(
-                        connection=connection,
-                        auth_method="oauth",
-                        credential=dict(credential),
-                        account_id=host_account_id,
-                        credential_revision=expected_credential_revision,
-                    ),
-                )
-            except AssertionError:
-                if strict_engine:
-                    raise
-                # Legacy test adapters predate the post-exchange callback;
-                # retain their existing connection catalog while production
-                # BoundProviderEngine remains strictly fail-closed above.
-                existing = store.list_model_routes(
-                    owner=flow.owner,
-                    connection_id=flow.connection_id,
-                )
-                validated = {
-                    "authMethod": "oauth",
-                    "authClass": str(result.get("authClass") or "subscription"),
-                    "credential": dict(credential),
-                    "safeIdentity": dict(result.get("safeIdentity") or {}),
-                    "accountID": host_account_id,
-                    "credentialRevision": expected_credential_revision,
-                    "modelRoutes": [
-                        {
-                            "modelID": row.provider_model_id,
-                            "displayName": row.display_name,
-                            "operations": list(row.operations or ()),
-                            "capabilities": dict(row.capabilities or {}),
-                            "provenance": dict(row.provenance or {}),
-                        }
-                        for row in existing
-                    ],
-                    "discovery": {
-                        "status": "complete",
-                        "accountID": host_account_id,
-                        "credentialRevision": expected_credential_revision,
-                        "models": [],
-                        "authoritative": True,
-                        "provenance": {"source": "legacy-adapter", "observedAt": 1},
-                        "freshness": "fresh",
-                    },
-                }
-                validated["discovery"]["models"] = validated["modelRoutes"]
+            validated = await flow.engine.call(
+                "_openclank/provider-control/v1/account/validate",
+                _account_validation_wire(
+                    connection=connection,
+                    auth_method="oauth",
+                    credential=dict(credential),
+                    account_id=host_account_id,
+                    credential_revision=expected_credential_revision,
+                ),
+            )
             discovery = _validated_account_discovery(
                 validated,
                 account_id=host_account_id,
                 credential_revision=expected_credential_revision,
-                strict=isinstance(flow.engine, BoundProviderEngine),
             )
             if discovery["status"] == "unavailable":
                 raise HTTPException(503, "Managed provider account discovery is unavailable")
@@ -1871,7 +1825,6 @@ def setup_provider_v1_routes(
                 validated,
                 account_id=account_id,
                 credential_revision=1,
-                strict=isinstance(control, ManagedProviderEngineControl),
             )
             if discovery["status"] == "unavailable":
                 raise HTTPException(503, "Managed provider account discovery is unavailable")
@@ -1984,7 +1937,6 @@ def setup_provider_v1_routes(
                     validated,
                     account_id=current.id,
                     credential_revision=int(current.credential_version) + 1,
-                    strict=isinstance(control, ManagedProviderEngineControl),
                 )
                 if discovery["status"] == "unavailable":
                     raise HTTPException(503, "Managed provider account discovery is unavailable")
@@ -2267,11 +2219,7 @@ def setup_provider_v1_routes(
                 raise HTTPException(400, "Provider OAuth state is invalid")
             if flow.status == "complete":
                 return flow.public()
-            result = await flow.engine.call(
-                "_openclank/provider-control/v1/oauth/callback",
-                flow.completion_payload(code=payload.code),
-            )
-            return await _persist_oauth_result(flow, result)
+            return await _complete_oauth_callback(flow, code=payload.code)
         except Exception as exc:
             _raise_engine_error(exc)
 
@@ -2290,16 +2238,19 @@ def setup_provider_v1_routes(
             if not flow.state_matches(state):
                 return _oauth_page(False, "Provider OAuth state is invalid", status_code=400)
             if error:
-                flow.status = "failed"
-                flow.error_code = "oauth_exchange_failed"
-                await _release_terminal_flow(flow, successful=False)
+                with _OAUTH_COMPLETION_LOCKS_GUARD:
+                    lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
+                acquired = await asyncio.to_thread(lock.acquire)
+                try:
+                    if flow.status not in {"complete", "failed", "cancelled", "expired"}:
+                        flow.status = "failed"
+                        flow.error_code = "oauth_exchange_failed"
+                        await _release_terminal_flow(flow, successful=False)
+                finally:
+                    if acquired:
+                        lock.release()
                 return _oauth_page(False, "The provider denied login", status_code=400)
-            if flow.status != "complete":
-                result = await flow.engine.call(
-                    "_openclank/provider-control/v1/oauth/callback",
-                    flow.completion_payload(code=code),
-                )
-                await _persist_oauth_result(flow, result)
+            await _complete_oauth_callback(flow, code=code)
             if flow.status == "complete":
                 return _oauth_page(True, "Your provider account is connected")
             return _oauth_page(False, "Provider login did not complete", status_code=400)
@@ -2417,6 +2368,15 @@ def setup_provider_v1_routes(
                 owner=owner,
                 connection_id=connection_id,
             )
+            rows = [
+                row
+                for row in rows
+                if str(row.visibility or "visible") == "visible"
+                and store.route_has_permitted_account(
+                    owner=owner,
+                    model_route_id=row.id,
+                )
+            ]
         except ProviderStoreError as exc:
             _raise_store_error(exc)
         return {"models": [_model_json(row) for row in rows]}
@@ -3160,7 +3120,81 @@ def setup_provider_v1_routes(
         result["items"] = visible_items
         return result
 
-    def _refresh_inventory_account(
+    async def _refresh_inventory_account_once(
+        *,
+        owner: str,
+        account: Any,
+        connection: Any,
+        request: Request,
+        force: bool = False,
+    ) -> None:
+        key = _inventory_cache_key(owner=owner, connection=connection, account=account)
+        now = time.monotonic()
+        with _ACCOUNT_INVENTORY_LOCK:
+            previous = _ACCOUNT_INVENTORY_CACHE.get(key)
+        if (
+            not force
+            and previous is not None
+            and now - float(previous.get("observed_at", 0.0))
+            < _ACCOUNT_INVENTORY_FRESHNESS_SECONDS
+        ):
+            return
+        try:
+            access = store.credential_access(owner=owner, account_id=account.id)
+            result = await control.call(
+                request=request,
+                owner=owner,
+                method="_openclank/provider-control/v1/account/validate",
+                payload=_account_validation_wire(
+                    connection=connection,
+                    auth_method=account.auth_method,
+                    credential=access.credentials,
+                    account_id=account.id,
+                    credential_revision=int(access.credential_version),
+                ),
+            )
+            discovery = _validated_account_discovery(
+                result,
+                account_id=account.id,
+                credential_revision=int(access.credential_version),
+            )
+            declared_routes = _engine_model_routes(
+                store=store,
+                owner=owner,
+                operation=f"inventory.refresh:{connection.id}:{account.id}",
+                idempotency_key=f"{account.id}:{access.credential_version}",
+                raw_routes=result.get("modelRoutes") or [],
+            )
+            store.reconcile_account_discovery(
+                owner=owner,
+                account_id=account.id,
+                model_routes=declared_routes,
+                status=str(discovery["status"]),
+                authoritative=bool(discovery.get("authoritative")),
+                error_code=_discovery_error_code(discovery),
+                provenance=discovery.get("provenance"),
+                expected_credential_revision=int(access.credential_version),
+            )
+            with _ACCOUNT_INVENTORY_LOCK:
+                _ACCOUNT_INVENTORY_CACHE[key] = {
+                    "observed_at": time.monotonic(),
+                    "status": str(discovery["status"]),
+                    "last_good": str(discovery["status"]) == "complete",
+                }
+        except Exception as exc:
+            with _ACCOUNT_INVENTORY_LOCK:
+                _ACCOUNT_INVENTORY_CACHE[key] = {
+                    "observed_at": time.monotonic(),
+                    "status": "unavailable",
+                    "last_good": bool(previous and previous.get("last_good")),
+                }
+            logger.info(
+                "Managed account inventory refresh unavailable for %s: %s",
+                account.id,
+                type(exc).__name__,
+            )
+
+    async def _refresh_inventory_account(
         *,
         owner: str,
         account: Any,
@@ -3170,100 +3204,46 @@ def setup_provider_v1_routes(
     ) -> None:
         key = _inventory_cache_key(owner=owner, connection=connection, account=account)
         with _ACCOUNT_INVENTORY_LOCK:
-            key_lock = _ACCOUNT_INVENTORY_KEY_LOCKS.setdefault(key, threading.Lock())
-        with key_lock:
-            now = time.monotonic()
-            with _ACCOUNT_INVENTORY_LOCK:
-                previous = _ACCOUNT_INVENTORY_CACHE.get(key)
-            if (
-                not force
-                and previous is not None
-                and now - float(previous.get("observed_at", 0.0))
-                < _ACCOUNT_INVENTORY_FRESHNESS_SECONDS
-            ):
-                return
-            try:
-                access = store.credential_access(owner=owner, account_id=account.id)
-                result = _run_async_bridge(
-                    control.call(
-                        request=request,
+            flight = _ACCOUNT_INVENTORY_FLIGHTS.get(key)
+            if flight is None or flight.done():
+                flight = asyncio.create_task(
+                    _refresh_inventory_account_once(
                         owner=owner,
-                        method="_openclank/provider-control/v1/account/validate",
-                        payload=_account_validation_wire(
-                            connection=connection,
-                            auth_method=account.auth_method,
-                            credential=access.credentials,
-                            account_id=account.id,
-                            credential_revision=int(access.credential_version),
-                        ),
+                        account=account,
+                        connection=connection,
+                        request=request,
+                        force=force,
                     )
                 )
-                discovery = _validated_account_discovery(
-                    result,
-                    account_id=account.id,
-                    credential_revision=int(access.credential_version),
-                    strict=isinstance(control, ManagedProviderEngineControl),
-                )
-                declared_routes = _engine_model_routes(
-                    store=store,
-                    owner=owner,
-                    operation=f"inventory.refresh:{connection.id}:{account.id}",
-                    idempotency_key=f"{account.id}:{access.credential_version}",
-                    raw_routes=result.get("modelRoutes") or [],
-                )
-                store.reconcile_account_discovery(
-                    owner=owner,
-                    account_id=account.id,
-                    model_routes=declared_routes,
-                    status=str(discovery["status"]),
-                    authoritative=bool(discovery.get("authoritative")),
-                    error_code=_discovery_error_code(discovery),
-                    provenance=discovery.get("provenance"),
-                    expected_credential_revision=int(access.credential_version),
-                )
-                with _ACCOUNT_INVENTORY_LOCK:
-                    _ACCOUNT_INVENTORY_CACHE[key] = {
-                        "observed_at": time.monotonic(),
-                        "status": str(discovery["status"]),
-                        "last_good": str(discovery["status"]) == "complete",
-                    }
-            except Exception as exc:
-                # Preserve store entitlements and the cache marker on a
-                # transient failure; an account with no prior snapshot stays
-                # unavailable because it has no entitlement rows.
-                with _ACCOUNT_INVENTORY_LOCK:
-                    _ACCOUNT_INVENTORY_CACHE[key] = {
-                        "observed_at": time.monotonic(),
-                        "status": "unavailable",
-                        "last_good": bool(previous and previous.get("last_good")),
-                    }
-                logger.info(
-                    "Managed account inventory refresh unavailable for %s: %s",
-                    account.id,
-                    type(exc).__name__,
-                )
+                _ACCOUNT_INVENTORY_FLIGHTS[key] = flight
+        try:
+            await asyncio.shield(flight)
+        finally:
+            with _ACCOUNT_INVENTORY_LOCK:
+                if _ACCOUNT_INVENTORY_FLIGHTS.get(key) is flight:
+                    _ACCOUNT_INVENTORY_FLIGHTS.pop(key, None)
 
-    def _refresh_inventory_on_open(
+    async def _refresh_inventory_on_open(
         *,
         owner: str,
         request: Request,
         force: bool = False,
     ) -> None:
-        for connection in store.list_connections(owner=owner):
-            for account in store.list_accounts(
+        tasks = [
+            _refresh_inventory_account(
                 owner=owner,
-                connection_id=connection.id,
-            ):
-                _refresh_inventory_account(
-                    owner=owner,
-                    account=account,
-                    connection=connection,
-                    request=request,
-                    force=force,
-                )
+                account=account,
+                connection=connection,
+                request=request,
+                force=force,
+            )
+            for connection in store.list_connections(owner=owner)
+            for account in store.list_accounts(owner=owner, connection_id=connection.id)
+        ]
+        await asyncio.gather(*tasks)
 
     @compatibility.get("/api/models")
-    def api_models(
+    async def api_models(
         request: Request,
         refresh: bool = False,
         background: bool = False,
@@ -3272,7 +3252,11 @@ def setup_provider_v1_routes(
         del background
         owner = _chat_owner(request)
         try:
-            _refresh_inventory_on_open(owner=owner, request=request, force=bool(refresh))
+            await _refresh_inventory_on_open(
+                owner=owner,
+                request=request,
+                force=bool(refresh),
+            )
             own_routes, shared_routes = list_chat_routes(
                 owner,
                 provider_store=store,

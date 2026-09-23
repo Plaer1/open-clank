@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 import core.database as core_database
 from core.provider_models import (
     ProviderAccount,
+    ProviderAccountEntitlement,
     ProviderBase,
     ProviderConnection,
     ProviderModelRoute,
@@ -68,6 +69,23 @@ def _connection(
     )
     db.add(row)
     db.flush()
+    db.add(
+        ProviderAccount(
+            id=f"pac_fixture_{connection_id}",
+            connection_id=connection_id,
+            owner=owner,
+            label="Fixture account",
+            auth_method="api_key",
+            auth_class="metered",
+            sort_order=0,
+            enabled=True,
+            credential_envelope="fixture-envelope",
+            credential_fingerprint="a" * 64,
+            credential_version=1,
+            safe_identity={},
+        )
+    )
+    db.flush()
     return row
 
 
@@ -93,6 +111,15 @@ def _route(
         enabled=True,
     )
     db.add(row)
+    db.flush()
+    db.add(
+        ProviderAccountEntitlement(
+            account_id=f"pac_fixture_{connection.id}",
+            model_route_id=route_id,
+            eligible=True,
+            evidence={"authority": "managed-engine", "fixture": True},
+        )
+    )
     db.flush()
     return row
 

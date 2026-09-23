@@ -1,9 +1,13 @@
 """Security and revision contracts for the normalized provider HTTP API."""
 
 from datetime import datetime, timedelta
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,8 +17,10 @@ from core.provider_models import (
     ProviderAccount,
     ProviderBase,
     ProviderIdempotencyRecord,
+    ProviderModelRoute,
 )
 from routes.provider_v1_routes import setup_provider_v1_routes
+import routes.provider_v1_routes as provider_v1_module
 from src import secret_storage
 from src.openclank.provider_store import AccountSelector, ModelSelector, ProviderStore
 from src.openclank.provider_control import OAuthHostFlow, OAuthHostFlowStore
@@ -51,6 +57,12 @@ class FakeEngineControl:
         self.connection_model_ids: list[str] = []
         self.account_model_ids: list[str] = []
         self.catalog_owners: list[str] = []
+        self.inventory_delay = 0.0
+        self.inventory_calls = 0
+        self.inventory_active = 0
+        self.inventory_max_active = 0
+        self.inventory_entered = None
+        self.inventory_release = None
 
     @staticmethod
     def _model_routes(model_ids):
@@ -102,16 +114,45 @@ class FakeEngineControl:
                 **({"normalizedURL": payload["url"]} if payload.get("url") else {}),
             }
         if method.endswith("/account/validate"):
+            self.inventory_calls += 1
+            self.inventory_active += 1
+            self.inventory_max_active = max(
+                self.inventory_max_active,
+                self.inventory_active,
+            )
+            try:
+                if self.inventory_entered is not None:
+                    self.inventory_entered.set()
+                if self.inventory_release is not None:
+                    await self.inventory_release.wait()
+                if self.inventory_delay:
+                    await asyncio.sleep(self.inventory_delay)
+            finally:
+                self.inventory_active -= 1
+            auth_method = payload["authMethod"]
+            model_routes = self._model_routes(self.account_model_ids)
             return {
-                "authMethod": "api_key",
+                "authMethod": auth_method,
                 "authClass": (
-                    "local"
+                    "subscription"
+                    if auth_method == "oauth"
+                    else "local"
                     if payload["connection"]["billingLane"] == "local"
                     else "metered"
                 ),
                 "credential": payload["credential"],
                 "safeIdentity": {},
-                "modelRoutes": self._model_routes(self.account_model_ids),
+                "accountID": payload["accountID"],
+                "credentialRevision": payload["credentialRevision"],
+                "modelRoutes": model_routes,
+                "discovery": {
+                    "status": "complete",
+                    "accountID": payload["accountID"],
+                    "credentialRevision": payload["credentialRevision"],
+                    "models": model_routes,
+                    "authoritative": True,
+                    "provenance": {"authority": "managed-engine", "catalog": "test"},
+                },
             }
         raise AssertionError(method)
 
@@ -178,7 +219,11 @@ class FakeOAuthLease:
         if method.endswith("/oauth/poll"):
             return self.control.completion(payload)
         if method.endswith("/oauth/callback"):
+            self.control.callback_calls += 1
+            time.sleep(0.05)
             return self.control.completion(payload)
+        if method.endswith("/account/validate"):
+            return await self.control.call(method=method, payload=payload)
         if method.endswith("/oauth/cancel"):
             self.control.cancelled.add(payload["flowID"])
             return {"flowID": payload["flowID"], "status": "cancelled"}
@@ -195,6 +240,7 @@ class FakeOAuthControl(FakeEngineControl):
         self.flows = {}
         self.leases = []
         self.cancelled = set()
+        self.callback_calls = 0
 
     async def bind(self, **_kwargs):
         lease = FakeOAuthLease(self)
@@ -411,8 +457,24 @@ def test_management_snapshot_is_one_nonsecret_supervisor_free_response(provider_
 
 def test_model_compatibility_routes_project_only_normalized_state(provider_api):
     client, store, _ = provider_api
+    client.app.state.fake_provider_control.account_model_ids = ["gpt-test"]
     connection = _create_connection(client, key="catalog-parent").json()
     route = _seed_route(store, connection["id"])
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection["id"],
+        account_id="pac_catalog_fixture",
+        label="Catalog fixture",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": "catalog-fixture"},
+    )
+    store.set_entitlement(
+        owner="alice",
+        account_id=account.id,
+        model_route_id=route.id,
+        eligible=True,
+    )
     store.put_route_binding(
         owner="alice",
         purpose="chat",
@@ -433,6 +495,196 @@ def test_model_compatibility_routes_project_only_normalized_state(provider_api):
         "endpoint_url": "openclank://engine",
         "model": "gpt-test",
     }
+
+
+def test_inventory_same_key_coalesces_on_one_async_flight(provider_api):
+    client, store, _factory = provider_api
+    control = client.app.state.fake_provider_control
+    control.account_model_ids = ["inventory-model"]
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label="Inventory",
+    )
+    store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="pac_inventory_same",
+        label="Inventory",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": "fixture"},
+    )
+    control.inventory_delay = 0.05
+
+    async def fetch():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            return await asyncio.gather(
+                http.get("/api/models", headers={"x-test-user": "alice"}),
+                http.get("/api/models", headers={"x-test-user": "alice"}),
+            )
+
+    responses = asyncio.run(fetch())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert control.inventory_calls == 1
+
+
+def test_inventory_different_keys_run_in_parallel(provider_api):
+    client, store, _factory = provider_api
+    control = client.app.state.fake_provider_control
+    control.account_model_ids = ["inventory-model"]
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label="Inventory",
+    )
+    for account_id in ("pac_inventory_first", "pac_inventory_second"):
+        store.create_account(
+            owner="alice",
+            connection_id=connection.id,
+            account_id=account_id,
+            label=account_id,
+            auth_method="api_key",
+            auth_class="metered",
+            credentials={"type": "api_key", "key": account_id},
+        )
+    control.inventory_delay = 0.05
+
+    async def fetch():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            return await http.get("/api/models", headers={"x-test-user": "alice"})
+
+    response = asyncio.run(fetch())
+
+    assert response.status_code == 200
+    assert control.inventory_calls == 2
+    assert control.inventory_max_active == 2
+
+
+def test_inventory_cache_invalidates_on_connection_and_account_lifecycle_changes(
+    provider_api,
+):
+    client, store, _factory = provider_api
+    control = client.app.state.fake_provider_control
+    control.account_model_ids = ["inventory-model"]
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label="Inventory",
+    )
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="pac_inventory_lifecycle",
+        label="Lifecycle",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": "fixture"},
+    )
+    assert client.get("/api/models").status_code == 200
+    assert any(key[2] == account.id for key in provider_v1_module._ACCOUNT_INVENTORY_CACHE)
+
+    updated = client.patch(
+        f"/api/v1/providers/connections/{connection.id}",
+        headers={
+            "If-Match": f'"{store.get_connection(owner="alice", connection_id=connection.id).revision}"',
+            "Idempotency-Key": "inventory-connection-invalidate",
+        },
+        json={"label": "Inventory updated"},
+    )
+    assert updated.status_code == 200
+    assert not any(key[2] == account.id for key in provider_v1_module._ACCOUNT_INVENTORY_CACHE)
+
+    assert client.get("/api/models").status_code == 200
+    disabled = client.post(
+        f"/api/v1/providers/accounts/{account.id}/enable",
+        headers={
+            "If-Match": f'"{account.revision}"',
+            "Idempotency-Key": "inventory-account-disable",
+        },
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert not any(key[2] == account.id for key in provider_v1_module._ACCOUNT_INVENTORY_CACHE)
+
+
+def test_stale_inventory_refresh_cannot_reconcile_after_credential_rotation(provider_api):
+    client, store, _factory = provider_api
+    control = client.app.state.fake_provider_control
+    control.account_model_ids = ["inventory-model"]
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label="Inventory",
+    )
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="pac_inventory_stale",
+        label="Stale",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": "old"},
+    )
+
+    async def fetch_with_rotation():
+        control.inventory_entered = asyncio.Event()
+        control.inventory_release = asyncio.Event()
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            pending = asyncio.create_task(
+                http.get("/api/models", headers={"x-test-user": "alice"})
+            )
+            await control.inventory_entered.wait()
+            current = store.get_account(owner="alice", account_id=account.id)
+            store.persist_account_discovery(
+                owner="alice",
+                account_id=account.id,
+                connection_id=connection.id,
+                label=current.label,
+                auth_method="api_key",
+                auth_class="metered",
+                credentials={"type": "api_key", "key": "new"},
+                safe_identity={},
+                model_routes=[
+                    {
+                        "id": "pmr_inventory_new",
+                        "provider_model_id": "new-model",
+                        "display_name": "new-model",
+                        "operations": ["chat.complete"],
+                        "capabilities": {},
+                        "provenance": {"authority": "fixture"},
+                    }
+                ],
+                expected_account_revision=current.revision,
+                expected_credential_revision=current.credential_version + 1,
+            )
+            control.inventory_release.set()
+            return await pending, await http.get(
+                "/api/models", headers={"x-test-user": "alice"}
+            )
+
+    first, second = asyncio.run(fetch_with_rotation())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert control.inventory_calls == 2
+    assert store.credential_access(owner="alice", account_id=account.id).credentials["key"] == "new"
 
 
 def test_model_catalog_requires_chat_scope_for_api_tokens(provider_api):
@@ -694,6 +946,7 @@ def test_refresh_preserves_catalog_on_empty_and_syncs_with_revision_fence(provid
     control = client.app.state.fake_provider_control
     control.connection_model_ids = ["model-before"]
     connection = _create_connection(client, key="refresh-parent").json()
+    control.account_model_ids = ["model-before"]
     account = client.post(
         f"/api/v1/providers/connections/{connection['id']}/accounts",
         headers={"Idempotency-Key": "refresh-existing-account"},
@@ -745,6 +998,21 @@ def test_refresh_preserves_catalog_on_empty_and_syncs_with_revision_fence(provid
             model_route_id=refreshed_route.id,
         )
         if item["eligible"]
+    } == set()
+
+    control.account_model_ids = ["model-after"]
+    catalogue = client.get(
+        "/api/models",
+        params={"refresh": "true"},
+    )
+    assert catalogue.status_code == 200
+    assert {
+        item["account_id"]
+        for item in store.model_eligibility(
+            owner="alice",
+            model_route_id=refreshed_route.id,
+        )
+        if item["eligible"]
     } == {account["id"]}
     replay = client.post(
         f"/api/v1/providers/connections/{connection['id']}/models/refresh",
@@ -761,6 +1029,7 @@ def test_refresh_preserves_catalog_on_empty_and_syncs_with_revision_fence(provid
 def test_oauth_add_flows_append_accounts_and_ack_only_after_persistence(oauth_provider_api):
     client, store, control = oauth_provider_api
     control.connection_model_ids = ["subscription-model"]
+    control.account_model_ids = ["subscription-model"]
     connection = client.post(
         "/api/v1/providers/connections",
         headers={"Idempotency-Key": "oauth-parent-create"},
@@ -817,6 +1086,88 @@ def test_oauth_add_flows_append_accounts_and_ack_only_after_persistence(oauth_pr
     } == set(account_ids)
     assert all(lease.released and lease.successful for lease in control.leases)
     assert set(control.cancelled) == {item["flow_id"] for item in starts}
+
+
+def test_oauth_callback_is_single_flight_across_concurrent_endpoint_requests(
+    oauth_provider_api,
+):
+    client, store, control = oauth_provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="subscription",
+        billing_lane="subscription",
+        label="ChatGPT subscriptions",
+    )
+    started = client.post(
+        f"/api/v1/providers/connections/{connection.id}/oauth/start",
+        headers={"Idempotency-Key": "oauth-concurrent-start"},
+        json={"label": "Concurrent", "method": 0, "inputs": {}},
+    )
+    assert started.status_code == 201
+    flow_id = started.json()["flow_id"]
+    callback = f"/api/v1/providers/oauth/flows/{flow_id}/callback"
+    payload = {"state": control.flows[flow_id]["state"], "code": "same-code"}
+
+    def complete():
+        return client.post(callback, json=payload)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _item: complete(), range(2)))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert {response.json()["status"] for response in responses} == {"complete"}
+    assert control.callback_calls == 1
+    assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
+
+
+def test_provider_models_hide_invisible_and_unentitled_routes(provider_api):
+    client, store, factory = provider_api
+    connection = store.create_connection(
+        owner="alice",
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label="OpenAI API",
+    )
+    account = store.create_account(
+        owner="alice",
+        connection_id=connection.id,
+        account_id="pac_models_filter",
+        label="Models filter",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": "fixture"},
+    )
+    visible = store.create_model_route(
+        owner="alice",
+        connection_id=connection.id,
+        model_route_id="pmr_models_visible",
+        provider_model_id="visible-model",
+        display_name="Visible",
+        operations=("chat.complete",),
+    )
+    hidden = store.create_model_route(
+        owner="alice",
+        connection_id=connection.id,
+        model_route_id="pmr_models_hidden",
+        provider_model_id="hidden-model",
+        display_name="Hidden",
+        operations=("chat.complete",),
+    )
+    store.set_entitlement(
+        owner="alice", account_id=account.id, model_route_id=visible.id, eligible=True
+    )
+    with factory() as db:
+        db.get(ProviderModelRoute, hidden.id).visibility = "hidden"
+        db.commit()
+
+    response = client.get("/api/v1/providers/models")
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()["models"]] == [visible.id]
 
 
 def test_oauth_reauth_cas_replaces_only_the_stable_target(oauth_provider_api):
@@ -1307,6 +1658,21 @@ def test_shared_catalog_uses_authoritative_family_for_bare_duplicate_models(prov
             provider_model_id="same-bare-model",
             display_name="Same bare model",
             operations=("chat.stream", "chat.complete"),
+        )
+        account = store.create_account(
+            owner="alice",
+            connection_id=connection.id,
+            account_id=f"pac_same_model_{index}",
+            label="Shared fixture",
+            auth_method="api_key",
+            auth_class="metered",
+            credentials={"type": "api_key", "key": f"shared-fixture-{index}"},
+        )
+        store.set_entitlement(
+            owner="alice",
+            account_id=account.id,
+            model_route_id=route.id,
+            eligible=True,
         )
         grants.append(store.create_share_grant(
             owner="alice",

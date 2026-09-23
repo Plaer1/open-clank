@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -18,7 +19,12 @@ import src.openclank.chat_routing as normalized
 import core.database as core_database
 import core.session_manager as session_manager_module
 from core.models import ChatMessage
-from core.provider_models import ProviderBase, ProviderShareGrant
+from core.provider_models import (
+    ProviderAccount,
+    ProviderAccountEntitlement,
+    ProviderBase,
+    ProviderShareGrant,
+)
 from core.session_manager import SessionManager
 from routes.chat_helpers import add_user_message
 from src.openclank.acp_bridge import _message_root_operation_id, _turn_source_id
@@ -89,6 +95,56 @@ def provider_topology(monkeypatch):
         disclosure_fields=[],
         grant_id="psg_team",
     )
+    with factory() as db:
+        db.add_all(
+            [
+                ProviderAccount(
+                    id="pac_alice_fixture",
+                    connection_id=own_connection.id,
+                    owner="alice",
+                    label="Alice fixture account",
+                    auth_method="api_key",
+                    auth_class="metered",
+                    sort_order=0,
+                    enabled=True,
+                    credential_envelope="fixture-envelope",
+                    credential_fingerprint="a" * 64,
+                    credential_version=1,
+                    safe_identity={},
+                ),
+                ProviderAccount(
+                    id="pac_carol_fixture",
+                    connection_id=source_connection.id,
+                    owner="carol",
+                    label="Carol fixture account",
+                    auth_method="oauth",
+                    auth_class="subscription",
+                    sort_order=0,
+                    enabled=True,
+                    credential_envelope="fixture-envelope",
+                    credential_fingerprint="b" * 64,
+                    credential_version=1,
+                    safe_identity={},
+                ),
+            ]
+        )
+        db.add_all(
+            [
+                ProviderAccountEntitlement(
+                    account_id="pac_alice_fixture",
+                    model_route_id=own_route.id,
+                    eligible=True,
+                    evidence={"authority": "managed-engine", "fixture": True},
+                ),
+                ProviderAccountEntitlement(
+                    account_id="pac_carol_fixture",
+                    model_route_id=shared_route.id,
+                    eligible=True,
+                    evidence={"authority": "managed-engine", "fixture": True},
+                ),
+            ]
+        )
+        db.commit()
     # Simulate an active pre-simplification row that never received explicit
     # recipient acceptance.  Active legacy grants must project immediately.
     with factory() as db:
@@ -173,7 +229,7 @@ def test_exact_own_and_shared_routes_resolve_to_connection_qualified_runtime_ids
 
 def test_api_models_is_secret_free_normalized_projection(provider_topology):
     router = setup_provider_v1_routes(provider_topology.store, object())
-    result = _endpoint(router, "/api/models")(_request())
+    result = asyncio.run(_endpoint(router, "/api/models")(_request()))
 
     by_endpoint = {item["endpoint_id"]: item for item in result["items"]}
     assert set(by_endpoint) == {
@@ -207,7 +263,7 @@ def test_api_models_is_secret_free_normalized_projection(provider_topology):
         "allowed_models_restricted": True,
         "allowed_models": [provider_topology.shared_route.id],
     }
-    restricted_result = _endpoint(router, "/api/models")(restricted)
+    restricted_result = asyncio.run(_endpoint(router, "/api/models")(restricted))
     assert [item["endpoint_id"] for item in restricted_result["items"]] == [
         f"share:{provider_topology.grant_id}"
     ]

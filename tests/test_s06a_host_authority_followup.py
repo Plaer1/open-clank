@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -16,6 +17,7 @@ from src.openclank.provider_store import (
     ProviderRevisionConflict,
     ProviderStore,
 )
+from routes.provider_v1_routes import _validated_account_discovery
 
 
 @pytest.fixture()
@@ -252,3 +254,46 @@ def test_reconciliation_rejects_stale_credential_revision(host_store):
             authoritative=True,
             expected_credential_revision=account.credential_version - 1,
         )
+
+
+def test_discovery_requires_exact_v2_account_and_revision_echoes():
+    with pytest.raises(HTTPException):
+        _validated_account_discovery(
+            {"modelRoutes": []}, account_id="pac_strict", credential_revision=3
+        )
+    with pytest.raises(HTTPException):
+        _validated_account_discovery(
+            {
+                "accountID": "pac_other",
+                "credentialRevision": 3,
+                "discovery": {
+                    "status": "complete",
+                    "accountID": "pac_other",
+                    "credentialRevision": 3,
+                    "authoritative": True,
+                },
+            },
+            account_id="pac_strict",
+            credential_revision=3,
+        )
+
+
+def test_disabled_or_deleted_last_account_denies_dispatch(host_store):
+    store, _factory = host_store
+    connection = _connection(store)
+    account = _persist(
+        store, account_id="pac_last", connection_id=connection.id, routes=[_route()]
+    )
+    route = store.list_model_routes(owner="alice", connection_id=connection.id)[0]
+    assert store.route_has_permitted_account(owner="alice", model_route_id=route.id)
+
+    disabled = store.update_account(
+        owner="alice", account_id=account.id, expected_revision=account.revision, enabled=False
+    )
+    assert not store.route_has_permitted_account(owner="alice", model_route_id=route.id)
+
+    deleted = store.delete_account(
+        owner="alice", account_id=account.id, expected_revision=disabled.revision
+    )
+    assert deleted.deleted_at is not None
+    assert not store.route_has_permitted_account(owner="alice", model_route_id=route.id)
