@@ -59,6 +59,7 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { reply } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
+import { InboxTable } from "../../src/inbox/inbox.sql"
 import { inboxServiceRef } from "../../src/inbox/inbox-ref"
 import { Flag } from "../../src/flag/flag"
 
@@ -731,6 +732,51 @@ describe("Actor.cancel", () => {
         const row = yield* reg.get(result.sessionID, result.actorID)
         expect(row?.status).toBe("idle")
         expect(row?.lastOutcome).toBe("cancelled")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("completion and forced cancel emit one terminal parent notification", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({
+          title: "terminal race",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        // The result may win before cancel or cancellation may win while the
+        // turn is active; either way the durable claim must leave one row.
+        yield* llm.text("race result")
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "race task",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+        yield* Effect.all(
+          [actor.cancel(result.sessionID, result.actorID, "forced"), Deferred.await(result.outcome)],
+          { concurrency: "unbounded" },
+        )
+        const rows = Database.use((db) =>
+          db
+            .select()
+            .from(InboxTable)
+            .where(
+              and(
+                eq(InboxTable.receiver_session_id, parent.id),
+                eq(InboxTable.receiver_actor_id, "main"),
+                eq(InboxTable.type, "actor_notification"),
+              ),
+            )
+            .all(),
+        )
+        expect(rows).toHaveLength(1)
       }),
       { git: true, config: providerCfg },
     ),

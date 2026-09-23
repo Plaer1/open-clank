@@ -57,6 +57,7 @@ function fromRow(row: ActorRow): Actor {
     parentActorID: row.parent_actor_id ?? undefined,
     status: row.status,
     lastOutcome: row.last_outcome ?? undefined,
+    executionRevision: row.execution_revision,
     lifecycle: row.lifecycle,
     agent: row.agent,
     description: row.description,
@@ -105,6 +106,23 @@ export interface Interface {
       lastError?: string | undefined
     },
   ) => Effect.Effect<void>
+  /** Start one actor execution and return its durable revision. */
+  readonly beginExecution: (sessionID: SessionID, actorID: string) => Effect.Effect<number | undefined>
+  /** Settle one execution exactly once. Returns false when another contender won. */
+  readonly settleExecution: (
+    sessionID: SessionID,
+    actorID: string,
+    executionRevision: number,
+    outcome: ActorOutcome,
+    lastError?: string,
+  ) => Effect.Effect<boolean>
+  /** Claim the one terminal lifecycle notification for one settled execution. */
+  readonly claimTerminalNotification: (
+    sessionID: SessionID,
+    actorID: string,
+    executionRevision: number,
+    outcome: ActorOutcome,
+  ) => Effect.Effect<boolean>
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
   readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
   readonly updateModel: (sessionID: SessionID, actorID: string, requestedModel?: string, effectiveModel?: ActorModel) => Effect.Effect<void>
@@ -165,6 +183,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         parent_actor_id: input.parentActorID ?? null,
         status: "pending" as const,
         last_outcome: null,
+        execution_revision: 0,
+        terminal_notification_revision: null,
+        terminal_notification_outcome: null,
         lifecycle: input.lifecycle,
         agent: input.agent,
         description: input.description,
@@ -204,6 +225,119 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         ...(input.hostContext ? { hostContext: input.hostContext } : {}),
       })
       return fromRow(row)
+    })
+
+    const beginExecution = Effect.fn("ActorRegistry.beginExecution")(function* (
+      sessionID: SessionID,
+      actorID: string,
+    ) {
+      const now = Date.now()
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "running",
+              execution_revision: sql`${ActorRegistryTable.execution_revision} + 1`,
+              last_outcome: null,
+              last_error: null,
+              time_completed: null,
+              time_updated: now,
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                sql`${ActorRegistryTable.status} != 'running'`,
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (!row || row.status !== "running") return undefined
+      yield* publishSettledStatus(row, sessionID, actorID)
+      return row.execution_revision
+    })
+
+    const publishSettledStatus = (row: ActorRow, sessionID: SessionID, actorID: string) =>
+      bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
+
+    const settleExecution = Effect.fn("ActorRegistry.settleExecution")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      executionRevision: number,
+      outcome: ActorOutcome,
+      lastError?: string,
+    ) {
+      const now = Date.now()
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "idle",
+              last_outcome: outcome,
+              last_error: outcome === "failure" ? (lastError ?? null) : null,
+              time_completed: now,
+              time_updated: now,
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.execution_revision, executionRevision),
+                eq(ActorRegistryTable.status, "running"),
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (row) yield* publishSettledStatus(row, sessionID, actorID)
+      return row !== undefined
+    })
+
+    const claimTerminalNotification = Effect.fn("ActorRegistry.claimTerminalNotification")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      executionRevision: number,
+      outcome: ActorOutcome,
+    ) {
+      const result = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              terminal_notification_revision: executionRevision,
+              terminal_notification_outcome: outcome,
+              time_updated: Date.now(),
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.execution_revision, executionRevision),
+                eq(ActorRegistryTable.status, "idle"),
+                eq(ActorRegistryTable.last_outcome, outcome),
+                sql`(${ActorRegistryTable.terminal_notification_revision} IS NULL OR ${ActorRegistryTable.terminal_notification_revision} != ${executionRevision})`,
+              ),
+            )
+            .run(),
+        ),
+      )
+      return result.changes > 0
     })
 
     const updateStatus = Effect.fn("ActorRegistry.updateStatus")(function* (
@@ -616,6 +750,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     return Service.of({
       register,
       updateStatus,
+      beginExecution,
+      settleExecution,
+      claimTerminalNotification,
       updateTurn,
       updateAgent,
       updateModel,

@@ -51,6 +51,7 @@ export const Actor = z
     parentActorID: z.string().optional(),
     status: ActorStatus,
     lastOutcome: ActorOutcome.optional(),
+    executionRevision: z.number().int().nonnegative(),
     lifecycle: Lifecycle,
     agent: z.string(),
     description: z.string(),

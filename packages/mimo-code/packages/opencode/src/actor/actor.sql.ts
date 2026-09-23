@@ -15,6 +15,11 @@ export const ActorRegistryTable = sqliteTable(
     parent_actor_id: text(),
     status: text().$type<"pending" | "running" | "idle">().notNull(),
     last_outcome: text().$type<"success" | "failure" | "cancelled">(),
+    // Monotonic execution identity. Actor rows are reusable across resumes,
+    // so terminal state must always be compared with the revision that wrote it.
+    execution_revision: integer().notNull().default(0),
+    terminal_notification_revision: integer(),
+    terminal_notification_outcome: text().$type<"success" | "failure" | "cancelled">(),
     lifecycle: text().$type<"ephemeral" | "persistent">().notNull(),
     agent: text().notNull(),
     description: text().notNull(),

@@ -14,6 +14,7 @@ function actor(patch: Partial<Actor>): Actor {
     actorID: "ses_x",
     mode: "peer",
     status: "idle",
+    executionRevision: 0,
     lifecycle: "persistent",
     agent: "build",
     description: "",

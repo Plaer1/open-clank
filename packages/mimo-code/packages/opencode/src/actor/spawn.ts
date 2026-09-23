@@ -236,14 +236,9 @@ export const layer = Layer.effect(
     // cleared on terminal status. Fiber tracking moved to SessionRunState.
     const forkContexts = new Map<string, ForkContext>()
 
-    // Actors whose cancel() has begun, keyed "sessionID:actorID". Populated
-    // BEFORE the fiber is interrupted so forkWork's onSuccess/onFailure notify
-    // can suppress its own (misleading) emit — a cancelled child's interrupt is
-    // masked by the runLoop onInterrupt handler (returns lastAssistant), so the
-    // work fiber sees a spurious "success". The authoritative "cancelled"
-    // notification is emitted instead by Actor.cancel via notifyTerminal, which
-    // runs in-context after updateStatus. This unifies success/failure/cancel
-    // onto one parent-notification contract without double-notifying. See T41.
+    // Process-local cancellation hint retained for diagnostics/interrupt
+    // coordination. Durable begin/settle/claim CAS operations are authoritative;
+    // this set must never decide an outcome or notification.
     const cancelling = new Set<string>()
     const cancelKey = (sessionID: SessionID, actorID: string) => `${sessionID}:${actorID}`
 
@@ -321,6 +316,19 @@ export const layer = Layer.effect(
     }) =>
       Effect.gen(function* () {
         const outcome = yield* Deferred.make<AgentOutcome>()
+        // One durable execution spans every preStop, completion-gate, and
+        // postStop turn in this fork. Re-entries must not create fresh terminal
+        // rows or expose an idle gap that lets cancellation overwrite success.
+        const executionRevision = yield* actorReg.beginExecution(input.sessionID, input.actorID)
+        if (executionRevision === undefined) {
+          const existing = yield* actorReg.get(input.sessionID, input.actorID)
+          return yield* Effect.die(
+            new Error(existing ? `Cannot start already-running actor ${input.actorID}` : `Cannot start unknown actor ${input.actorID}`),
+          )
+        }
+        // A reusable actor may be resumed after an earlier cancellation. The
+        // process-local hint is never authority and must not leak across epochs.
+        yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
         const description = input.description ?? input.agentType
         // Auto-start the bound task: spawning an actor for a task IS that task
         // beginning work. Status transition is a structural side-effect of spawn,
@@ -339,44 +347,37 @@ export const layer = Layer.effect(
         const notify = (
           status: "completed" | "failed" | "cancelled",
           extra: { result?: string; error?: string; reportedStatus?: ReturnStatus; reportedSummary?: string },
+          revision: number,
         ) =>
-          // An external cancel masks its own interrupt (runLoop.onInterrupt
-          // returns lastAssistant), so this fiber would otherwise emit a bogus
-          // "completed"/"failed". Defer to the terminal-status bridge, which
-          // emits the single authoritative "cancelled" notification.
-          cancelling.has(cancelKey(input.sessionID, input.actorID))
-            ? Effect.void
-            : input.background && input.agentType !== "checkpoint-writer"
-            ? inbox
-                .send({
-                  receiverSessionID: input.parentSessionID,
-                  receiverActorID: input.parentActorID ?? "main",
-                  senderSessionID: input.sessionID,
-                  senderActorID: input.actorID,
-                  type: "actor_notification",
-                  notification: {
-                    actorID: input.actorID,
-                    description,
-                    status,
-                    ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
-                    ...(input.model ? { effectiveModel: { providerID: input.model.providerID, modelID: input.model.modelID } } : {}),
-                    ...(input.hostContext ? { hostContext: input.hostContext } : {}),
-                    ...extra,
-                  },
-                })
-                .pipe(Effect.ignore)
-                // Also give the user a visible signal (the child may be unfocused).
-                .pipe(
-                  Effect.andThen(
-                    Effect.promise(() =>
-                      Bus.publish(TuiEvent.ToastShow, {
-                        message: `Child "${description}" ${status}`,
-                        variant: status === "completed" ? "success" : status === "cancelled" ? "info" : "error",
-                      }),
-                    ).pipe(Effect.ignore),
-                  ),
-                )
-            : Effect.void
+          Effect.gen(function* () {
+            if (!input.background || input.agentType === "checkpoint-writer") return
+            const outcome = status === "completed" ? "success" : status === "failed" ? "failure" : "cancelled"
+            if (!(yield* actorReg.claimTerminalNotification(input.sessionID, input.actorID, revision, outcome))) return
+            yield* inbox
+              .send({
+                receiverSessionID: input.parentSessionID,
+                receiverActorID: input.parentActorID ?? "main",
+                senderSessionID: input.sessionID,
+                senderActorID: input.actorID,
+                type: "actor_notification",
+                notification: {
+                  actorID: input.actorID,
+                  description,
+                  status,
+                  ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
+                  ...(input.model ? { effectiveModel: { providerID: input.model.providerID, modelID: input.model.modelID } } : {}),
+                  ...(input.hostContext ? { hostContext: input.hostContext } : {}),
+                  ...extra,
+                },
+              })
+              .pipe(Effect.ignore)
+            yield* Effect.promise(() =>
+              Bus.publish(TuiEvent.ToastShow, {
+                message: `Child "${description}" ${status}`,
+                variant: status === "completed" ? "success" : status === "cancelled" ? "info" : "error",
+              }),
+            ).pipe(Effect.ignore)
+          })
 
         // Derive actor mode from spawn shape: peer creates a new session, subagent shares parent's
         const actorMode: "peer" | "subagent" = input.parentSessionID === input.sessionID ? "subagent" : "peer"
@@ -421,6 +422,7 @@ export const layer = Layer.effect(
                     }
                   : undefined,
               }),
+              { executionRevision },
             )
             finalText = turn.finalText
             structured = turn.structured
@@ -503,6 +505,7 @@ export const layer = Layer.effect(
                         source: "hook",
                         provenance: { hookPhase: "post", hookIteration: gateIter, pluginNames: [], hookIDs: [] },
                       }),
+                      { executionRevision },
                     ).pipe(
                       Effect.catch(() =>
                         Effect.gen(function* () {
@@ -544,11 +547,20 @@ export const layer = Layer.effect(
                 // text + completion-gate fields AND structured when present.
                 const deliveryText =
                   structured !== undefined ? JSON.stringify(structured) : (reconciledText ?? "(no output)")
+                const settled = yield* actorReg
+                  .settleExecution(input.sessionID, input.actorID, executionRevision, "success")
+                  .pipe(Effect.orElseSucceed(() => false))
+                if (!settled) {
+                  yield* Deferred.succeed(outcome, { status: "cancelled" as const })
+                  yield* Effect.sync(() => forkContexts.delete(input.actorID))
+                  yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
+                  return
+                }
                 yield* notify("completed", {
                   result: deliveryText,
                   ...(reportedStatus ? { reportedStatus } : {}),
                   ...(parsed.summary ? { reportedSummary: parsed.summary } : {}),
-                })
+                }, executionRevision)
                 yield* Deferred.succeed(outcome, {
                   status: "success" as const,
                   ...(reconciledText !== undefined ? { finalText: reconciledText } : {}),
@@ -632,6 +644,7 @@ export const layer = Layer.effect(
                         hookIDs: postReentry.contributingHookIDs,
                       },
                     }),
+                    { executionRevision },
                   ).pipe(
                     // postStop LLM failure: log + break loop, do NOT propagate
                     Effect.catch(() =>
@@ -650,17 +663,31 @@ export const layer = Layer.effect(
                 }
 
                 yield* Effect.sync(() => forkContexts.delete(input.actorID))
+                yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
               }),
             onFailure: (cause) =>
               Effect.gen(function* () {
                 const cancelled = Cause.hasInterruptsOnly(cause)
                 const error = Cause.pretty(cause)
-                yield* notify(cancelled ? "cancelled" : "failed", cancelled ? {} : { error })
+                const status: "cancelled" | "failure" = cancelled ? "cancelled" : "failure"
+                const settled = yield* actorReg
+                  .settleExecution(
+                    input.sessionID,
+                    input.actorID,
+                    executionRevision,
+                    status,
+                    cancelled ? undefined : error,
+                  )
+                  .pipe(Effect.orElseSucceed(() => false))
+                if (settled) {
+                  yield* notify(cancelled ? "cancelled" : "failed", cancelled ? {} : { error }, executionRevision)
+                }
                 yield* Deferred.succeed(
                   outcome,
                   cancelled ? { status: "cancelled" as const } : { status: "failure" as const, error },
                 )
                 yield* Effect.sync(() => forkContexts.delete(input.actorID))
+                yield* Effect.sync(() => cancelling.delete(cancelKey(input.sessionID, input.actorID)))
               }),
           }),
         )
@@ -867,12 +894,14 @@ export const layer = Layer.effect(
       actorID: string,
       actor: Actor | undefined,
       status: "cancelled",
+      executionRevision: number,
     ) =>
       Effect.gen(function* () {
         if (!actor) return
         if (!actor.background) return
         if (actor.mode !== "peer" && actor.mode !== "subagent") return
         if (SYSTEM_SPAWNED_AGENT_TYPES.has(actor.agent)) return
+        if (!(yield* actorReg.claimTerminalNotification(sessionID, actorID, executionRevision, "cancelled"))) return
         // Resolve the parent session: a peer runs in its own child session (notify
         // its parentID); a subagent shares the parent's session.
         const parentSessionID =
@@ -905,23 +934,28 @@ export const layer = Layer.effect(
 
     const cancel: (sessionID: SessionID, actorID: string, mode: "graceful" | "forced") => Effect.Effect<void> =
       Effect.fn("Actor.cancel")(function* (sessionID: SessionID, actorID: string, mode: "graceful" | "forced") {
+        // Snapshot the actor row before cancelActor tears state down — we need
+        // its mode/agent/background/parentActorID to decide + address the notify.
+        const actor = yield* actorReg.get(sessionID, actorID)
+        if (!actor) return
+        // Cancellation is a durable CAS first. A completion/failure winner, or
+        // a second cancellation, becomes a strict no-op and cannot interrupt or
+        // overwrite the already-settled execution.
+        const settled = yield* actorReg
+          .settleExecution(sessionID, actorID, actor.executionRevision, "cancelled")
+          .pipe(Effect.orElseSucceed(() => false))
+        if (!settled) return
+        // A target whose cancellation CAS lost is a complete no-op, including
+        // its descendants. Only the winner is allowed to cascade interruption.
         const children = yield* actorReg.listByParent(sessionID, actorID)
         yield* Effect.forEach(children, (c) => cancel(sessionID, c.actorID, mode), {
           concurrency: "unbounded",
           discard: true,
         })
-        // Mark cancelling BEFORE interrupting so forkWork.notify (which fires on
-        // the interrupt-masked "success") suppresses its own emit; the single
-        // authoritative "cancelled" notification is emitted below instead.
         yield* Effect.sync(() => cancelling.add(cancelKey(sessionID, actorID)))
-        // Snapshot the actor row before cancelActor tears state down — we need
-        // its mode/agent/background/parentActorID to decide + address the notify.
-        const actor = yield* actorReg.get(sessionID, actorID)
         yield* state.cancelActor(sessionID, actorID)
-        yield* actorReg
-          .updateStatus(sessionID, actorID, { status: "idle", lastOutcome: "cancelled" })
-          .pipe(Effect.ignore)
-        yield* notifyTerminal(sessionID, actorID, actor, "cancelled")
+        yield* notifyTerminal(sessionID, actorID, actor, "cancelled", actor.executionRevision)
+        yield* Effect.sync(() => cancelling.delete(cancelKey(sessionID, actorID)))
         yield* Effect.sync(() => forkContexts.delete(actorID))
       })
 

@@ -13,3 +13,9 @@ ALTER TABLE `actor_registry` ADD COLUMN `workspace_id` text;
 ALTER TABLE `actor_registry` ADD COLUMN `cwd` text;
 --> statement-breakpoint
 ALTER TABLE `actor_registry` ADD COLUMN `goal_id` text;
+--> statement-breakpoint
+ALTER TABLE `actor_registry` ADD COLUMN `execution_revision` integer NOT NULL DEFAULT 0;
+--> statement-breakpoint
+ALTER TABLE `actor_registry` ADD COLUMN `terminal_notification_revision` integer;
+--> statement-breakpoint
+ALTER TABLE `actor_registry` ADD COLUMN `terminal_notification_outcome` text;

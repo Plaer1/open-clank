@@ -3761,14 +3761,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   sessionID,
                   agentID: lastUser.agentID,
                 })
-                yield* actorRegistry
-                  .updateStatus(sessionID, lastUser.agentID!, {
-                    status: "idle",
-                    lastOutcome: "failure",
-                    lastError: "missing fork context",
-                  })
-                  .pipe(Effect.ignore)
-                return "break" as const
+                // The enclosing Actor.runTurn/forkWork owns terminal lifecycle
+                // settlement. Failing here lets its revision-aware CAS record
+                // the outcome; a direct updateStatus would race cancellation
+                // and could overwrite a newer execution.
+                return yield* Effect.fail(new Error("missing fork context"))
               }
               const ownNew = msgs.filter(
                 (m) => m.info.id > forkCtx.watermarkMsgID && m.info.agentID === lastUser.agentID,
