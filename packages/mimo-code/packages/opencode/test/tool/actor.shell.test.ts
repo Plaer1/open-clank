@@ -172,10 +172,10 @@ describe("actor.shell.parse: send", () => {
     expect(out).toEqual([{ operation: { action: "send", to_actor_id: "explore-1", content: "ping" } }])
   })
 
-  test("send with --session and --type flags", async () => {
-    const out = await parse('actor send main "status?" --session ses_abc --type actor_notification')
+  test("send with --session flag", async () => {
+    const out = await parse('actor send main "status?" --session ses_abc')
     expect(out).toEqual([
-      { operation: { action: "send", to_actor_id: "main", content: "status?", to_session_id: "ses_abc", type: "actor_notification" } },
+      { operation: { action: "send", to_actor_id: "main", content: "status?", to_session_id: "ses_abc" } },
     ])
   })
 

@@ -21,7 +21,7 @@ export type ToolWhitelist = z.infer<typeof ToolWhitelist>
 
 // Canonical provider/model identity. Keep this structured all the way through
 // actor accounting so a provider cannot be inferred from a model ID.
-export const ActorModel = z.object({
+export const ActorModel = z.strictObject({
   providerID: z.string().min(1),
   modelID: z.string().min(1),
 })
@@ -30,8 +30,8 @@ export type ActorModel = z.infer<typeof ActorModel>
 // Host-owned continuation identity. Provider OAuth account identifiers are
 // deliberately absent: they are adapter/header metadata and must never become
 // actor identity. The binding is copied at spawn time and remains stable for a
-// sibling until that actor is explicitly resumed with a new host context.
-export const ActorHostContext = z.object({
+// child; model-facing resume cannot rebind it.
+export const ActorHostContext = z.strictObject({
   accountID: z.string().min(1).optional(),
   grantID: z.string().min(1).optional(),
   grantRevision: z.number().int().nonnegative().optional(),

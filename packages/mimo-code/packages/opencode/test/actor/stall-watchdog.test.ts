@@ -55,6 +55,7 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable } from "../../src/inbox/inbox.sql"
+import { renderInboxRow } from "../../src/inbox/render"
 import { ActorRegistryTable } from "../../src/actor/actor.sql"
 import { DEFAULT_LIVENESS_STALL_MS } from "../../src/actor/schema"
 
@@ -267,10 +268,10 @@ describe("Actor stall watchdog (T40)", () => {
         const afterFirst = yield* parentInboxRows(parent.id)
         expect(afterFirst.length).toBe(1)
         expect(afterFirst[0].type).toBe("actor_notification")
-        const body = afterFirst[0].content as { text?: string }
-        expect(body.text).toContain("<actor-notification>")
-        expect(body.text).toContain("stally peer")
-        expect(body.text).toContain("stalled")
+        const rendered = renderInboxRow(afterFirst[0])
+        expect(rendered).toContain("<actor-notification>")
+        expect(rendered).toContain("stally peer")
+        expect(rendered).toContain("stalled")
 
         // (3) Still continuously stalled — repeated scans must NOT re-notify.
         yield* actor.scanStalledOnce!()

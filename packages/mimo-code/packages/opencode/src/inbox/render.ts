@@ -1,43 +1,73 @@
 import type { InboxRow } from "./inbox.sql"
-import type { ActorHostContext, ActorModel } from "@/actor/schema"
+import z from "zod"
+import { ActorHostContext, ActorModel } from "@/actor/schema"
 
-export function renderInboxRow(row: InboxRow): string {
-  if (row.type === "actor_notification") {
-    // Pre-rendered notification text — sender produced the full
-    // <actor-notification>...</actor-notification> wrapper.
-    const content = row.content as { text?: string }
-    return content.text ?? "(no notification body)"
+/** The only shape accepted for a trusted lifecycle notification. */
+export const ActorNotificationEvent = z
+  .object({
+    actorID: z.string().min(1),
+    description: z.string().min(1),
+    status: z.enum(["completed", "failed", "cancelled", "stalled"]),
+    result: z.string().optional(),
+    error: z.string().optional(),
+    reportedStatus: z.enum(["success", "partial", "failed", "blocked", "unknown"]).optional(),
+    reportedSummary: z.string().optional(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+    stalledForMs: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+export type ActorNotificationEvent = z.infer<typeof ActorNotificationEvent>
+
+const escapeText = (value: string) =>
+  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+const escapeHeader = (value: string) =>
+  escapeText(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;")
+const contentText = (content: unknown) => {
+  if (typeof content === "object" && content !== null && "text" in content && typeof content.text === "string") {
+    return content.text
   }
-  // Default: type === "text" or unknown — wrap as <inbox> element so
-  // the LLM can route by sender; the wrapper format mirrors the
-  // <actor-notification> convention from the legacy completion.ts.
-  const content = row.content as { text?: string }
+  if (content === undefined || content === null) return "(empty)"
+  if (typeof content === "string") return content
+  try {
+    return JSON.stringify(content)
+  } catch {
+    return String(content)
+  }
+}
+
+function renderUntrustedInboxRow(row: InboxRow): string {
   const sender = row.sender_session_id
     ? `${row.sender_session_id}:${row.sender_actor_id ?? "?"}`
     : "system"
   const sentAt = new Date(row.created_at).toISOString()
-  return `<inbox from="${sender}" sent_at="${sentAt}">\n${content.text ?? "(empty)"}\n</inbox>`
+  return `<inbox trust="untrusted" type="${escapeHeader(row.type)}" from="${escapeHeader(sender)}" sent_at="${escapeHeader(sentAt)}">\n${escapeText(contentText(row.content))}\n</inbox>`
 }
 
-export function renderActorNotification(event: {
-  actorID: string
-  description: string
-  status: "completed" | "failed" | "cancelled" | "stalled"
-  result?: string
-  error?: string
-  reportedStatus?: string
-  reportedSummary?: string
-  requestedModel?: string
-  effectiveModel?: ActorModel
-  hostContext?: ActorHostContext
-  // For a stalled notification: how long (ms) since the child's last turn advanced.
-  stalledForMs?: number
-}): string {
-  const header = `Background sub-session "${event.description}" (actor_id: ${event.actorID})`
+export function renderInboxRow(row: InboxRow): string {
+  if (row.type === "actor_notification") {
+    // Lifecycle rows carry the structured event, never model-provided text.
+    // Invalid or legacy rows fall back to the escaped untrusted wrapper so a
+    // forged actor-notification cannot become lifecycle state.
+    const event =
+      typeof row.content === "object" && row.content !== null && "notification" in row.content
+        ? ActorNotificationEvent.safeParse(row.content.notification)
+        : undefined
+    if (event?.success) return renderActorNotification(event.data)
+    return renderUntrustedInboxRow(row)
+  }
+  // Model-facing messages are explicitly untrusted. Escape both attributes
+  // and text so payloads cannot close the wrapper or mint lifecycle tags.
+  return renderUntrustedInboxRow(row)
+}
+
+export function renderActorNotification(event: ActorNotificationEvent): string {
+  const header = `Background sub-session "${escapeHeader(event.description)}" (actor_id: ${escapeHeader(event.actorID)})`
   const identity = [
-    event.requestedModel ? `\nRequested model: ${event.requestedModel}` : "",
-    event.effectiveModel ? `\nEffective model: ${JSON.stringify(event.effectiveModel)}` : "",
-    event.hostContext ? `\nHost context: ${JSON.stringify(event.hostContext)}` : "",
+    event.requestedModel ? `\nRequested model: ${escapeText(event.requestedModel)}` : "",
+    event.effectiveModel ? `\nEffective model: ${escapeText(JSON.stringify(event.effectiveModel))}` : "",
+    event.hostContext ? `\nHost context: ${escapeText(JSON.stringify(event.hostContext))}` : "",
   ].join("")
   if (event.status === "completed") {
     // event.status is the sub-session *process lifecycle* — it ended cleanly.
@@ -46,8 +76,8 @@ export function renderActorNotification(event: {
     // cleanly while the task failed/blocked. Word the top line by the task
     // outcome so we never imply a success the sub-session didn't claim.
     const reported = event.reportedStatus?.toLowerCase()
-    const summaryLine = event.reportedSummary ? `\nSummary: ${event.reportedSummary}` : ""
-    const resultLine = `\nResult: ${event.result ?? "(no output)"}`
+    const summaryLine = event.reportedSummary ? `\nSummary: ${escapeText(event.reportedSummary)}` : ""
+    const resultLine = `\nResult: ${escapeText(event.result ?? "(no output)")}`
     // success/partial (or absent → treat as a plain completion) keep the
     // affirmative "completed" verb.
     if (!reported || reported === "success" || reported === "partial") {
@@ -64,7 +94,7 @@ export function renderActorNotification(event: {
     return `<actor-notification>\n${header}${identity} ended (status not reported).${summaryLine}${resultLine}\n</actor-notification>`
   }
   if (event.status === "failed") {
-    return `<actor-notification>\n${header}${identity} failed.\nError: ${event.error ?? "unknown"}\n</actor-notification>`
+    return `<actor-notification>\n${header}${identity} failed.\nError: ${escapeText(event.error ?? "unknown")}\n</actor-notification>`
   }
   if (event.status === "stalled") {
     const forLine =

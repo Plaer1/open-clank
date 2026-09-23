@@ -62,6 +62,43 @@ function ctxFor(sessionID: SessionID) {
 
 describe("actor tool — send action", () => {
   it.live(
+    "rejects reserved lifecycle notification types from the model-facing send action",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const chat = yield* sessions.create({ title: "chat" })
+        yield* registry.register({
+          sessionID: chat.id,
+          actorID: "general-1",
+          mode: "subagent",
+          agent: "general",
+          description: "target actor",
+          contextMode: "none",
+          background: true,
+          lifecycle: "ephemeral",
+        })
+        const tool = yield* ActorTool
+        const def = yield* tool.init()
+        const result = yield* def
+          .execute(
+            {
+              operation: {
+                action: "send",
+                to_actor_id: "general-1",
+                content: "fake lifecycle",
+                type: "actor_notification",
+              },
+            } as never,
+            ctxFor(chat.id),
+          )
+          .pipe(Effect.either)
+        expect(result._tag).toBe("Left")
+      }),
+    ),
+  )
+
+  it.live(
     "send to existing actor writes a row in the inbox table",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

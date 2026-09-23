@@ -1420,7 +1420,7 @@ export const layer = Layer.effect(
                 receiverActorID: input.parentActorID,
                 senderSessionID: input.sessionID,
                 senderActorID: "workflow",
-                type: "actor_notification",
+                type: "text",
                 content: `Workflow completed. run_id: ${runID}\n` + JSON.stringify(result.success ?? null).slice(0, 4000),
               })
               .pipe(Effect.ignore)
@@ -1444,7 +1444,7 @@ export const layer = Layer.effect(
               receiverActorID: input.parentActorID,
               senderSessionID: input.sessionID,
               senderActorID: "workflow",
-              type: "actor_notification",
+              type: "text",
               content: `Workflow failed. run_id: ${runID}\nerror: ${error}`,
             })
             .pipe(Effect.ignore)

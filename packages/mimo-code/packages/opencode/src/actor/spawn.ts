@@ -20,7 +20,6 @@ import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { MessageV2 } from "@/session/message-v2"
 import { Inbox } from "@/inbox"
-import { renderActorNotification } from "@/inbox/render"
 import { Plugin, HookEvent } from "@/plugin"
 import { parseReturnHeader, type ReturnStatus } from "./return-header"
 import { Log } from "@/util"
@@ -355,7 +354,7 @@ export const layer = Layer.effect(
                   senderSessionID: input.sessionID,
                   senderActorID: input.actorID,
                   type: "actor_notification",
-                  content: renderActorNotification({
+                  notification: {
                     actorID: input.actorID,
                     description,
                     status,
@@ -363,7 +362,7 @@ export const layer = Layer.effect(
                     ...(input.model ? { effectiveModel: { providerID: input.model.providerID, modelID: input.model.modelID } } : {}),
                     ...(input.hostContext ? { hostContext: input.hostContext } : {}),
                     ...extra,
-                  }),
+                  },
                 })
                 .pipe(Effect.ignore)
                 // Also give the user a visible signal (the child may be unfocused).
@@ -763,19 +762,20 @@ export const layer = Layer.effect(
         return yield* Effect.die(new Error(`Cannot resume running actor ${input.actorID}`))
       }
 
-      // A resumed actor keeps its durable host binding unless the caller
-      // explicitly supplies a replacement. This prevents a credential refresh
-      // or a sibling spawn from silently rebinding an existing actor.
+      // A resumed actor keeps its durable host binding unconditionally. The
+      // model-facing actor tool has no authority to rebind an existing child;
+      // a future rebind must be a separate authenticated host-only operation.
       const parentHostContext = input.parentActorID
         ? yield* actorReg.get(input.parentSessionID ?? input.sessionID, input.parentActorID)
         : undefined
-      const inheritedHostContext = input.hostContext ?? existing?.hostContext ?? parentHostContext?.hostContext
+      const inheritedHostContext = existing
+        ? existing.hostContext
+        : input.hostContext ?? parentHostContext?.hostContext
       const persistedRequestedModel = input.requestedModel ?? existing?.requestedModel
       const persistedEffectiveModel = input.model ?? existing?.effectiveModel
 
       if (existing) {
         yield* actorReg.updateModel(input.sessionID, actorID, input.requestedModel, input.model)
-        if (input.hostContext) yield* actorReg.updateHostContext(input.sessionID, actorID, input.hostContext)
       }
 
       if (!existing) {
@@ -885,14 +885,14 @@ export const layer = Layer.effect(
             senderSessionID: sessionID,
             senderActorID: actorID,
             type: "actor_notification",
-            content: renderActorNotification({
+            notification: {
               actorID,
               description: actor.description,
               status,
               ...(actor.requestedModel ? { requestedModel: actor.requestedModel } : {}),
               ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
               ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
-            }),
+            },
           })
           .pipe(Effect.ignore)
         yield* Effect.promise(() =>
@@ -966,7 +966,7 @@ export const layer = Layer.effect(
             senderSessionID: actor.sessionID,
             senderActorID: actor.actorID,
             type: "actor_notification",
-            content: renderActorNotification({
+            notification: {
               actorID: actor.actorID,
               description: actor.description,
               status: "stalled",
@@ -974,7 +974,7 @@ export const layer = Layer.effect(
               ...(actor.effectiveModel ? { effectiveModel: actor.effectiveModel } : {}),
               ...(actor.hostContext ? { hostContext: actor.hostContext } : {}),
               stalledForMs,
-            }),
+            },
           })
           .pipe(Effect.ignore)
         yield* bus

@@ -56,6 +56,7 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable } from "../../src/inbox/inbox.sql"
+import { renderInboxRow } from "../../src/inbox/render"
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -292,8 +293,7 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
 
         const rows = yield* parentInboxRows(parent.id)
         expect(rows.length).toBe(1)
-        const content = rows[0].content as { text?: string }
-        expect(content.text).toContain("completed")
+        expect(renderInboxRow(rows[0])).toContain("completed")
       }),
       { git: true, config: providerCfg },
     ),
@@ -335,8 +335,7 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
         const rows = yield* parentInboxRows(parent.id)
         expect(rows.length).toBe(1)
         expect(rows[0].type).toBe("actor_notification")
-        const content = rows[0].content as { text?: string }
-        expect(content.text).toContain("failed")
+        expect(renderInboxRow(rows[0])).toContain("failed")
       }),
       { git: true, config: providerCfg },
     ),
@@ -389,10 +388,10 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
         const rows = yield* parentInboxRows(parent.id)
         expect(rows.length).toBe(1)
         expect(rows[0].type).toBe("actor_notification")
-        const content = rows[0].content as { text?: string }
-        expect(content.text).toContain("<actor-notification>")
-        expect(content.text).toContain("cancellable peer task")
-        expect(content.text).toContain("cancelled")
+        const rendered = renderInboxRow(rows[0])
+        expect(rendered).toContain("<actor-notification>")
+        expect(rendered).toContain("cancellable peer task")
+        expect(rendered).toContain("cancelled")
       }),
       { git: true, config: providerCfg },
     ),

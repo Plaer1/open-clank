@@ -1,6 +1,8 @@
 import asyncio
+import copy
 import json
 import os
+import pytest
 from types import SimpleNamespace
 
 from src.openclank.acp_bridge import ACPBridge, _TurnState
@@ -11,9 +13,10 @@ class _Client:
         self.resumed = []
         self.configured = []
         self.prompted = []
+        self.callbacks = {}
 
-    def register_callback(self, *_args):
-        pass
+    def register_callback(self, method, handler):
+        self.callbacks[method] = handler
 
     def on_session_update(self, *_args):
         pass
@@ -35,6 +38,67 @@ def _bridge(tmp_path, adapter):
     return ACPBridge(_Client(), str(tmp_path), owner="alice", session_workspace_adapter=adapter)
 
 
+@pytest.fixture(autouse=True)
+def _durable_projection(monkeypatch, request):
+    """Give accepted callback tests a strict, durable projection seam."""
+    from src.openclank import transcript_projection
+
+    # The restart regression below uses the real canonical SQL projection;
+    # every other isolated bridge test gets a small per-test durable seam.
+    if request.node.name == "test_session_cwd_restores_on_bridge_restart_and_resume":
+        return
+
+    stored = {}
+
+    def save_state(session_id, state, *, owner=None):
+        stored[session_id] = dict(state)
+        return {**stored[session_id], "revision": int(state.get("revision", 0)) + 1}
+
+    def get_state(session_id, owner=None):
+        if session_id not in stored:
+            raise KeyError(session_id)
+        return dict(stored[session_id])
+
+    monkeypatch.setattr(transcript_projection, "save_mimo_state", save_state)
+    monkeypatch.setattr(transcript_projection, "get_mimo_state", get_state)
+
+
+async def _request_cwd(bridge, mimo_session_id, cwd):
+    return await bridge._handle_session_cwd_change(
+        {"sessionID": mimo_session_id, "requestedCwd": cwd}
+    )
+
+
+def test_managed_cwd_callback_is_registered_once_and_returns_canonical_ack(tmp_path):
+    async def adapter(_chat_id, cwd, _context):
+        return cwd
+
+    client = _Client()
+    bridge = ACPBridge(client, str(tmp_path), owner="alice", session_workspace_adapter=adapter)
+    bridge._session_map["chat-a"] = "mimo-a"
+    bridge._session_context["mimo-a"] = {
+        "odysseus_session_id": "chat-a",
+        "owner": "alice",
+        "workspace": str(tmp_path),
+    }
+    assert list(client.callbacks).count("_openclank/session/v1/cwd/change") == 1
+    result = asyncio.run(
+        client.callbacks["_openclank/session/v1/cwd/change"](
+            {"sessionID": "mimo-a", "requestedCwd": str(tmp_path)}
+        )
+    )
+    assert result["canonicalCwd"] == str(tmp_path)
+
+    # The residual ACP event is a read-only projection; it cannot re-apply a
+    # rejected/stale workspace transition after the callback has committed.
+    asyncio.run(
+        bridge._handle_session_update(
+            "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": "/etc"}
+        )
+    )
+    assert bridge.mapped_session_workspace("chat-a") == str(tmp_path)
+
+
 def test_session_cwd_isolated_per_chat_and_does_not_change_process_cwd(tmp_path):
     updates = []
 
@@ -54,12 +118,8 @@ def test_session_cwd_isolated_per_chat_and_does_not_change_process_cwd(tmp_path)
 
     async def run():
         await asyncio.gather(
-            bridge._handle_session_update(
-                "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": "/next/a"}
-            ),
-            bridge._handle_session_update(
-                "mimo-b", {"sessionUpdate": "_openclank_session_cwd", "cwd": "/next/b"}
-            ),
+            _request_cwd(bridge, "mimo-a", "/next/a"),
+            _request_cwd(bridge, "mimo-b", "/next/b"),
         )
 
     asyncio.run(run())
@@ -87,21 +147,33 @@ def test_session_cwd_update_is_rendered_as_a_private_turn_event(tmp_path):
 
 
 def test_session_cwd_restores_on_bridge_restart_and_resume(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from core import database
     from src.openclank import transcript_projection
 
-    persisted = {}
-
-    def save_state(_session_id, state, *, owner=None):
-        persisted.update(state)
-        return {**persisted, "revision": 1}
-
-    monkeypatch.setattr(transcript_projection, "save_mimo_state", save_state)
-    def get_state(session_id, owner=None):
-        if session_id != "chat-a":
-            raise KeyError(session_id)
-        return dict(persisted)
-
-    monkeypatch.setattr(transcript_projection, "get_mimo_state", get_state)
+    engine = create_engine(f"sqlite:///{tmp_path / 'canonical.db'}")
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(transcript_projection, "SessionLocal", sessions)
+    db = sessions()
+    db.add(
+        database.Session(
+            id="chat-a",
+            name="Chat A",
+            endpoint_url="mimo://acp",
+            model="mimo",
+            owner="alice",
+            mimo_state={
+                "workspace": "/work/a",
+                "file_policy_workspace": "/policy/a",
+                "copal_workspace": "copal-a",
+                "memory_workspace": "memory-a",
+            },
+        )
+    )
+    db.commit()
+    db.close()
 
     map_path = tmp_path / "session-map.json"
     client = _Client()
@@ -123,9 +195,7 @@ def test_session_cwd_restores_on_bridge_restart_and_resume(tmp_path, monkeypatch
     bridge._session_state["mimo-a"] = {"workspace": "/work/a"}
 
     asyncio.run(
-        bridge._handle_session_update(
-            "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": "/next/a"}
-        )
+        _request_cwd(bridge, "mimo-a", "/next/a")
     )
     map_path.write_text(json.dumps(bridge._session_map))
 
@@ -139,13 +209,47 @@ def test_session_cwd_restores_on_bridge_restart_and_resume(tmp_path, monkeypatch
     )
     assert restarted.mapped_session_workspace("chat-a") == "/next/a"
     assert restarted.mapped_session_workspace("new-chat") == str(tmp_path)
-    restarted._session_state["mimo-a"] = dict(persisted)
-    restarted._bind_canonical_session("mimo-a", "chat-a", "alice")
+    asyncio.run(restarted.ensure_session("chat-a", owner="alice"))
+    assert restarted_client.resumed[0][0:2] == ("mimo-a", "/next/a")
+    assert restarted._session_context["mimo-a"]["workspace"] == "/next/a"
+    assert restarted._session_state["mimo-a"]["workspace"] == "/next/a"
     assert restarted._session_context["mimo-a"]["file_policy_workspace"] == "/policy/a"
     assert restarted._session_context["mimo-a"]["copal_workspace"] == "copal-a"
     assert restarted._session_context["mimo-a"]["memory_workspace"] == "memory-a"
-    asyncio.run(restarted.ensure_session("chat-a", owner="alice"))
-    assert restarted_client.resumed[0][0:2] == ("mimo-a", "/next/a")
+
+
+@pytest.mark.parametrize("failure", ["missing_projection", "commit_failed"])
+def test_session_cwd_persistence_failure_rolls_back_host_state(tmp_path, monkeypatch, failure):
+    from src.openclank import transcript_projection
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+
+    def save_state(*_args, **_kwargs):
+        if failure == "missing_projection":
+            raise KeyError("projection missing")
+        raise RuntimeError("projection commit failed")
+
+    monkeypatch.setattr(transcript_projection, "save_mimo_state", save_state)
+    bridge = _bridge(tmp_path, lambda _chat_id, cwd, _context: cwd)
+    bridge._session_map["chat-a"] = "mimo-a"
+    bridge._session_context["mimo-a"] = {
+        "odysseus_session_id": "chat-a",
+        "owner": "alice",
+        "workspace": str(allowed),
+        "cwd": str(allowed),
+        "physical_cwd": str(allowed),
+    }
+    bridge._session_state["mimo-a"] = {"workspace": str(allowed), "revision": 4}
+    previous_context = copy.deepcopy(bridge._session_context["mimo-a"])
+    previous_state = copy.deepcopy(bridge._session_state["mimo-a"])
+
+    with pytest.raises(ValueError):
+        asyncio.run(_request_cwd(bridge, "mimo-a", str(tmp_path)))
+
+    assert bridge._session_context["mimo-a"] == previous_context
+    assert bridge._session_state["mimo-a"] == previous_state
+    assert bridge.mapped_session_workspace("chat-a") == str(allowed)
 
 
 def test_session_cwd_requires_mapped_owner_and_authorized_root(tmp_path):
@@ -177,15 +281,15 @@ def test_session_cwd_requires_mapped_owner_and_authorized_root(tmp_path):
     }
 
     async def run():
-        await bridge._handle_session_update(
-            "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": "/etc"}
-        )
-        await bridge._handle_session_update(
-            "unknown", {"sessionUpdate": "_openclank_session_cwd", "cwd": str(allowed)}
-        )
-        await bridge._handle_session_update(
-            "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": str(allowed)}
-        )
+        try:
+            await _request_cwd(bridge, "mimo-a", "/etc")
+        except ValueError:
+            pass
+        try:
+            await _request_cwd(bridge, "unknown", str(allowed))
+        except ValueError:
+            pass
+        await _request_cwd(bridge, "mimo-a", str(allowed))
 
     asyncio.run(run())
     assert bridge.mapped_session_workspace("chat-a") == str(allowed)
@@ -211,11 +315,10 @@ def test_session_cwd_rejects_sibling_root(tmp_path):
     bridge._session_context["mimo-a"] = {
         "odysseus_session_id": "chat-a", "owner": "alice", "workspace": str(allowed)
     }
-    asyncio.run(
-        bridge._handle_session_update(
-            "mimo-a", {"sessionUpdate": "_openclank_session_cwd", "cwd": str(sibling)}
-        )
-    )
+    try:
+        asyncio.run(_request_cwd(bridge, "mimo-a", str(sibling)))
+    except ValueError:
+        pass
     assert bridge.mapped_session_workspace("chat-a") == str(allowed)
 
 
@@ -236,12 +339,11 @@ def test_session_cwd_rejects_stale_mapping_and_foreign_owner(tmp_path):
     }
 
     async def run():
-        await bridge._handle_session_update(
-            "mimo-old", {"sessionUpdate": "_openclank_session_cwd", "cwd": str(tmp_path)}
-        )
-        await bridge._handle_session_update(
-            "mimo-new", {"sessionUpdate": "_openclank_session_cwd", "cwd": str(tmp_path)}
-        )
+        for session_id in ("mimo-old", "mimo-new"):
+            try:
+                await _request_cwd(bridge, session_id, str(tmp_path))
+            except ValueError:
+                pass
 
     asyncio.run(run())
     assert accepted == []

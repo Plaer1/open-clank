@@ -9,7 +9,6 @@ import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
 import { decideAskRouting, resolveInvalidOutputPolicy, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
-import { renderActorNotification } from "@/inbox/render"
 import { parseReturnHeader } from "@/actor/return-header"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
@@ -4320,7 +4319,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 senderSessionID: sessionID,
                 senderActorID: agentID,
                 type: "actor_notification",
-                content: renderActorNotification({
+                notification: {
                   actorID: agentID,
                   description: actor.description,
                   status,
@@ -4334,7 +4333,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                         ...(parsed.summary ? { reportedSummary: parsed.summary } : {}),
                       }
                     : { error: final.info.role === "assistant" ? sessionErrorText(final.info.error) : "unknown" }),
-                }),
+                },
               })
               .pipe(Effect.ignore)
           }

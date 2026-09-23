@@ -9,7 +9,7 @@ import { InboxArrived } from "@/actor/events"
 import type { SessionID } from "@/session/schema"
 import { Log } from "@/util"
 import { InboxTable } from "./inbox.sql"
-import { renderInboxRow } from "./render"
+import { ActorNotificationEvent, renderInboxRow } from "./render"
 import { sessionPromptRef, inboxServiceRef, defaultModelRef } from "./inbox-ref"
 import type { ProviderID, ModelID } from "@/provider/schema"
 
@@ -31,6 +31,11 @@ export class InboxReceiverNotFound extends Schema.TaggedErrorClass<InboxReceiver
     receiverSessionID: Schema.String,
     receiverActorID: Schema.String,
   },
+) {}
+
+export class InboxInvalidMessage extends Schema.TaggedErrorClass<InboxInvalidMessage>()(
+  "InboxInvalidMessage",
+  { reason: Schema.String },
 ) {}
 
 export interface DrainSeed {
@@ -109,8 +114,10 @@ export interface SendInput {
   receiverActorID: string
   senderSessionID?: SessionID
   senderActorID?: string
-  content: string
+  content?: string
   type?: string
+  /** Trusted runtime-only lifecycle input; never supplied by model-facing tools. */
+  notification?: ActorNotificationEvent
 }
 
 export interface SendResult {
@@ -118,7 +125,7 @@ export interface SendResult {
 }
 
 export interface Interface {
-  readonly send: (input: SendInput) => Effect.Effect<SendResult, InboxReceiverNotFound>
+  readonly send: (input: SendInput) => Effect.Effect<SendResult, InboxReceiverNotFound | InboxInvalidMessage>
   readonly drain: (sessionID: SessionID, actorID: string) => Effect.Effect<number>
 }
 
@@ -152,14 +159,27 @@ export const layer: Layer.Layer<
         )
       }
 
+      const type = input.type ?? "text"
+      const content =
+        type === "actor_notification"
+          ? input.notification && ActorNotificationEvent.safeParse(input.notification).success
+            ? { notification: ActorNotificationEvent.parse(input.notification) }
+            : yield* Effect.fail(
+                new InboxInvalidMessage({
+                  reason: "actor_notification requires a validated structured notification event",
+                }),
+              )
+          : typeof input.content === "string"
+            ? { text: input.content }
+            : yield* Effect.fail(new InboxInvalidMessage({ reason: "inbox message content must be text" }))
       const row = {
         id: ulid(),
         receiver_session_id: input.receiverSessionID,
         receiver_actor_id: input.receiverActorID,
         sender_session_id: input.senderSessionID ?? null,
         sender_actor_id: input.senderActorID ?? null,
-        type: input.type ?? "text",
-        content: { text: input.content },
+        type,
+        content,
         created_at: Date.now(),
       }
       yield* Effect.sync(() => Database.use((db) => db.insert(InboxTable).values(row).run()))

@@ -24,6 +24,7 @@ from src.openclank.provider_callbacks import (
     ManagedProviderCallbacks,
     ManagedProviderRouteError,
 )
+from src.openclank.generated.managed_provider_contract import SESSION_METHODS
 from src.openclank.provider_store import ProviderStore
 
 
@@ -543,3 +544,21 @@ def test_managed_supervisor_does_not_seed_auth_file_or_provider_secret_fd(monkey
         "MIMOCODE_PROVIDER_AUTH_FD",
     ):
         assert name not in child_env
+
+
+def test_session_cwd_is_a_separate_engine_to_host_callback_family(managed_callbacks):
+    callbacks, _store, _factory, _artifacts = managed_callbacks
+
+    class Client:
+        def __init__(self):
+            self.methods = []
+
+        def register_callback(self, method, handler):
+            self.methods.append((method, handler))
+
+    client = Client()
+    callbacks.register(client)
+    names = {method for method, _handler in client.methods}
+    assert "_openclank/session/v1/cwd/change" in SESSION_METHODS
+    assert "_openclank/session/v1/cwd/change" not in names
+    assert len(names) == len(client.methods)

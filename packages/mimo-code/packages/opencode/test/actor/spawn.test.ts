@@ -33,6 +33,7 @@ import { SystemPrompt } from "../../src/session/system"
 import { Snapshot } from "../../src/snapshot"
 import { ToolRegistry } from "../../src/tool"
 import { Truncate } from "../../src/tool"
+import { ActorTool } from "../../src/tool/actor"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { Actor } from "../../src/actor/spawn"
@@ -272,6 +273,112 @@ function gptProviderCfg(url: string) {
     },
   }
 }
+
+function actorToolContext(sessionID: string, messageID: MessageID, hostContext: Record<string, string>) {
+  return {
+    sessionID,
+    messageID,
+    agent: "build",
+    abort: new AbortController().signal,
+    extra: { bypassAgentCheck: true, hostContext },
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  }
+}
+
+describe("ActorTool durable host binding", () => {
+  it.live("resumes through the real Actor registry/spawn path without rebinding a child", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({
+          title: "host binding parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const messageID = MessageID.ascending()
+        yield* sessions.updateMessage({
+          id: messageID,
+          sessionID: parent.id,
+          role: "assistant",
+          time: { created: Date.now() },
+          agent: "build",
+          model: ref,
+        } as unknown as MessageV2.Info)
+
+        const tool = yield* ActorTool
+        const def = yield* tool.init()
+        const contextA = { accountID: "account-a", chatID: "chat-a", workspaceID: "workspace-a", cwd: "/workspace/a" }
+        const contextB = { accountID: "account-b", chatID: "chat-b", workspaceID: "workspace-b", cwd: "/workspace/b" }
+
+        yield* llm.text("first successful turn")
+        const first = yield* def.execute(
+          {
+            operation: {
+              action: "run",
+              subagent_type: "build",
+              description: "durable child",
+              prompt: "first prompt",
+              model: "test/test-model",
+            },
+          },
+          actorToolContext(parent.id, messageID, contextA),
+        )
+        const actorID = String(first.metadata.actorId)
+        const storedAfterFirst = yield* registry.get(parent.id, actorID)
+        expect(storedAfterFirst?.hostContext).toEqual(contextA)
+        expect(storedAfterFirst?.turnCount).toBeGreaterThanOrEqual(1)
+
+        yield* llm.text("second successful turn")
+        const second = yield* def.execute(
+          {
+            operation: {
+              action: "run",
+              subagent_type: "build",
+              description: "resume must retain A",
+              prompt: "second prompt",
+              actor_id: actorID,
+            },
+          },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        const storedAfterSecond = yield* registry.get(parent.id, actorID)
+        expect(storedAfterSecond?.hostContext).toEqual(contextA)
+        expect(storedAfterSecond?.turnCount).toBeGreaterThanOrEqual(2)
+        expect(second.metadata.hostContext).toEqual(contextA)
+
+        const status = yield* def.execute(
+          { operation: { action: "status", actor_id: actorID } },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(JSON.parse(status.output).host_context).toEqual(contextA)
+
+        const cancel = yield* def.execute(
+          { operation: { action: "cancel", actor_id: actorID } },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(JSON.parse(cancel.output).host_context).toEqual(contextA)
+
+        yield* llm.text("sibling successful turn")
+        const sibling = yield* def.execute(
+          {
+            operation: {
+              action: "spawn",
+              subagent_type: "build",
+              description: "new sibling inherits B",
+              prompt: "sibling prompt",
+            },
+          },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(sibling.metadata.hostContext).toEqual(contextB)
+      }),
+      { git: true, config: providerCfg },
+    ),
+    30000,
+  )
+})
 
 describe("Actor.spawn peer mode", () => {
   it.live("creates a new sessionID, registers actor with mode=peer", () =>

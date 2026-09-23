@@ -35,7 +35,9 @@
     { "$ref": "#/$defs/artifactDescriptor" },
     { "$ref": "#/$defs/executorInvokeRequest" },
     { "$ref": "#/$defs/operationExecuteRequest" },
-    { "$ref": "#/$defs/operationExecuteResult" }
+    { "$ref": "#/$defs/operationExecuteResult" },
+    { "$ref": "#/$defs/sessionCwdChangeRequest" },
+    { "$ref": "#/$defs/sessionCwdChangeResult" }
   ],
   "$defs": {
     "billingLane": {
@@ -143,7 +145,8 @@
         "_openclank/operations/v1/artifact/read",
         "_openclank/operations/v1/artifact/write",
         "_openclank/operations/v1/executor/invoke",
-        "_openclank/operations/v1/execute"
+        "_openclank/operations/v1/execute",
+        "_openclank/session/v1/cwd/change"
       ]
     },
     "capabilityDeclaration": {
@@ -741,6 +744,24 @@
       },
       "additionalProperties": false
     },
+    "sessionCwdChangeRequest": {
+      "type": "object",
+      "required": ["sessionID", "requestedCwd"],
+      "properties": {
+        "sessionID": { "type": "string", "minLength": 1 },
+        "requestedCwd": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "sessionCwdChangeResult": {
+      "type": "object",
+      "required": ["canonicalCwd"],
+      "properties": {
+        "canonicalCwd": { "type": "string", "minLength": 1 },
+        "workspaceRevision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "operationJournalRequest": {
       "oneOf": [
         {
@@ -1084,6 +1105,11 @@
       "direction": "host_to_engine",
       "request": "#/$defs/operationExecuteRequest",
       "result": "#/$defs/operationExecuteResult"
+    },
+    "_openclank/session/v1/cwd/change": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/sessionCwdChangeRequest",
+      "result": "#/$defs/sessionCwdChangeResult"
     }
   }
 }

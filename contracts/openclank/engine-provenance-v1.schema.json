@@ -85,7 +85,7 @@
       "properties": {
         "id": { "const": "https://openclank.dev/contracts/managed-provider/v2" },
         "version": { "const": 2 },
-        "sha256": { "const": "eb0411c7a90498ba8c2f2426e00971a49f2c4d0a643f0811cda8a5c6fb9520f8" }
+        "sha256": { "const": "e5ef3fef6dec55d7ccb1b356f71029533fc31ca441626d2d160fd7af4218e976" }
       }
     },
     "source": {

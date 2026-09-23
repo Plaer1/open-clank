@@ -6,6 +6,7 @@ import {
   OPERATIONS,
   PROVIDER_CONTROL_METHODS,
   PROVIDER_STORE_METHODS,
+  SESSION_METHODS,
   OPERATION_ROUTER_VERSION,
   PROTOCOL_VERSION,
   PROVIDER_STORE_VERSION,
@@ -39,7 +40,7 @@ export const capabilities: CapabilityDeclaration = Object.freeze({
   schemaID: SCHEMA_ID,
   schemaVersion: SCHEMA_VERSION,
   schemaHash: SCHEMA_HASH,
-  methods: [...PROVIDER_STORE_METHODS, ...PROVIDER_CONTROL_METHODS, ...OPERATION_METHODS],
+  methods: [...PROVIDER_STORE_METHODS, ...PROVIDER_CONTROL_METHODS, ...OPERATION_METHODS, ...SESSION_METHODS],
   operations: OPERATIONS,
   artifactTransfer: true,
   localExecutor: true,
@@ -437,6 +438,16 @@ export interface OperationExecuteResult {
   readonly replayed: boolean
 }
 
+export interface SessionCwdChangeRequest {
+  readonly sessionID: string
+  readonly requestedCwd: string
+}
+
+export interface SessionCwdChangeResult {
+  readonly canonicalCwd: string
+  readonly workspaceRevision?: number
+}
+
 export interface MethodRequestMap {
   "_openclank/provider-store/v1/account/bind": AccountSelection.SelectionRequest
   "_openclank/provider-store/v1/account/commit": AccountCommitRequest
@@ -451,6 +462,7 @@ export interface MethodRequestMap {
   "_openclank/operations/v1/artifact/read": ArtifactReadRequest
   "_openclank/operations/v1/artifact/write": ArtifactWriteRequest
   "_openclank/operations/v1/executor/invoke": ExecutorInvokeRequest
+  "_openclank/session/v1/cwd/change": SessionCwdChangeRequest
 }
 
 export interface MethodResultMap {
@@ -467,6 +479,7 @@ export interface MethodResultMap {
   "_openclank/operations/v1/artifact/read": ArtifactReadResult
   "_openclank/operations/v1/artifact/write": ArtifactDescriptor
   "_openclank/operations/v1/executor/invoke": ArtifactDescriptor
+  "_openclank/session/v1/cwd/change": SessionCwdChangeResult
 }
 
 export interface EngineMethodRequestMap {

@@ -62,8 +62,8 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     mapping = schema.get("x-openclank-methods")
     if not isinstance(methods, list) or not isinstance(operations, list) or not isinstance(mapping, dict):
         raise RuntimeError("managed schema is missing method or operation metadata")
-    if len(methods) != 21 or len(set(methods)) != 21:
-        raise RuntimeError(f"managed contract must contain 21 unique methods; found {len(methods)}")
+    if len(methods) != 22 or len(set(methods)) != 22:
+        raise RuntimeError(f"managed contract must contain 22 unique methods; found {len(methods)}")
     if len(operations) != 15 or len(set(operations)) != 15:
         raise RuntimeError(f"managed contract must contain 15 unique operations; found {len(operations)}")
     if set(mapping) != set(methods):
@@ -72,8 +72,9 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     provider_store = [method for method in methods if method.startswith("_openclank/provider-store/")]
     provider_control = [method for method in methods if method.startswith("_openclank/provider-control/")]
     operation_methods = [method for method in methods if method.startswith("_openclank/operations/")]
-    if (len(provider_store), len(provider_control), len(operation_methods)) != (9, 7, 5):
-        raise RuntimeError("managed method families must contain 9 store, 7 control, and 5 operation methods")
+    session_methods = [method for method in methods if method.startswith("_openclank/session/")]
+    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods)) != (9, 7, 5, 1):
+        raise RuntimeError("managed method families must contain 9 store, 7 control, 5 operation, and 1 session method")
     directions = {method: mapping[method].get("direction") for method in methods}
     if any(direction not in {"engine_to_host", "host_to_engine"} for direction in directions.values()):
         raise RuntimeError("managed method wire mappings must declare a valid callback direction")
@@ -89,6 +90,7 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
         "provider_store_methods": provider_store,
         "provider_control_methods": provider_control,
         "operation_methods": operation_methods,
+        "session_methods": session_methods,
         "engine_methods": engine_methods,
         "host_callback_methods": [method for method in methods if method not in engine_methods],
         "operations": operations,
@@ -118,6 +120,7 @@ OPERATION_ROUTER_VERSION = 1
 PROVIDER_STORE_METHODS = {tuple_literal(data["provider_store_methods"])}
 PROVIDER_CONTROL_METHODS = {tuple_literal(data["provider_control_methods"])}
 OPERATION_METHODS = {tuple_literal(data["operation_methods"])}
+SESSION_METHODS = {tuple_literal(data["session_methods"])}
 MANAGED_METHODS = frozenset({tuple_literal(data["methods"])})
 ENGINE_METHODS = frozenset({tuple_literal(data["engine_methods"])})
 HOST_CALLBACK_METHODS = frozenset({tuple_literal(data["host_callback_methods"])})
@@ -143,13 +146,15 @@ export const SCHEMA_HASH = {json.dumps(data["digest"])} as const
 export const PROVIDER_STORE_METHODS = {array(data["provider_store_methods"])}
 export const PROVIDER_CONTROL_METHODS = {array(data["provider_control_methods"])}
 export const OPERATION_METHODS = {array(data["operation_methods"])}
+export const SESSION_METHODS = {array(data["session_methods"])}
 export const OPERATIONS = {array(data["operations"])}
 export const METHOD_DIRECTIONS = {directions}
 
 export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
 export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
 export type OperationMethod = (typeof OPERATION_METHODS)[number]
-export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod
+export type SessionMethod = (typeof SESSION_METHODS)[number]
+export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod
 export type Operation = (typeof OPERATIONS)[number]
 '''
 

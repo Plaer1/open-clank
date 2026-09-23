@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import binascii
 import hashlib
 import hmac
@@ -482,6 +483,7 @@ class ACPBridge:
         self.question_handler.on_request(self._surface_question)
         self.question_handler.on_resolved(self._clear_question)
         client.register_callback("_odysseus/question", self.question_handler.handle)
+        client.register_callback("_openclank/session/v1/cwd/change", self._handle_session_cwd_change)
 
         # C1: surface permission prompts through the active turn's SSE stream
         if permission_handler is not None and hasattr(permission_handler, "on_request"):
@@ -493,10 +495,12 @@ class ACPBridge:
     def set_session_workspace_adapter(self, callback) -> None:
         """Install the host's per-chat workspace adapter.
 
-        The callback receives ``(chat_id, cwd)`` after the in-memory ACP
-        context is updated under the chat lock. It may be sync or async. This
-        keeps physical cwd, stable file-policy workspace, Copal, and memory
-        axes separate while ensuring the next turn sees one committed value.
+        The callback receives ``(chat_id, cwd)`` before the in-memory ACP
+        context is committed under the chat lock. It may be sync or async. A
+        rejection leaves both host state and the engine's local cwd unchanged;
+        this keeps physical cwd, stable file-policy workspace, Copal, and
+        memory axes separate while ensuring the next turn sees one committed
+        value.
         """
         self._session_workspace_adapter = callback
 
@@ -599,25 +603,36 @@ class ACPBridge:
                 self._session_context[mimo_session][key] = value
         self._persist_session_state(mimo_session)
 
-    def _persist_session_state(self, mimo_session: str) -> None:
+    def _persist_session_state(self, mimo_session: str, *, required: bool = False) -> bool:
         context = self._session_context.get(mimo_session)
         state = self._session_state.get(mimo_session)
         if not context or state is None:
-            return
+            if required:
+                raise RuntimeError("session state is not bound to a persistable chat")
+            return False
         try:
             from src.openclank.transcript_projection import save_mimo_state
 
+            # Prepare a detached snapshot so a failed projection commit cannot
+            # partially mutate the live in-memory state. Required callers use
+            # the return value as the authority boundary before acknowledging.
+            staged = dict(state)
             for key in ("workspace", "workspace_id", "goal_id", "file_policy_workspace", "copal_workspace", "memory_workspace"):
                 if context.get(key):
-                    state[key] = context[key]
+                    staged[key] = context[key]
             saved = save_mimo_state(
                 context["odysseus_session_id"],
-                state,
-                owner=context["owner"] or None,
+                staged,
+                owner=context.get("owner") or self._owner or None,
             )
-            state["revision"] = saved["revision"]
+            revision = saved["revision"]
+            state.update(staged)
+            state["revision"] = revision
+            return True
         except KeyError:
-            pass
+            if required:
+                raise
+            return False
 
     def negotiated_state(self, odysseus_session: str) -> dict:
         mimo_session = self._session_map.get(odysseus_session)
@@ -713,9 +728,9 @@ class ACPBridge:
 
     async def _handle_session_update(self, mimo_session_id: str, update: dict) -> None:
         """Route a session/update notification to the right session's queue."""
-        if update.get("sessionUpdate") == "_openclank_session_cwd":
-            if not await self._apply_session_cwd(mimo_session_id, update.get("cwd")):
-                return
+        # The cwd change request/ack callback is the authority boundary. This
+        # event is only a local/UI projection after that callback succeeds;
+        # stale or forged notifications must never mutate host workspace state.
         if update.get("sessionUpdate") == "available_commands_update":
             state = self._session_state.setdefault(mimo_session_id, {})
             state["commands"] = list(update.get("availableCommands") or [])
@@ -724,47 +739,78 @@ class ACPBridge:
         if q is not None:
             await q.put(update)
 
-    async def _apply_session_cwd(self, mimo_session_id: str, cwd: Any) -> bool:
+    async def _handle_session_cwd_change(self, params: dict) -> dict:
+        from src.openclank.managed_protocol import (
+            validate_managed_method_request,
+            validate_managed_method_result,
+        )
+
+        method = "_openclank/session/v1/cwd/change"
+        request = validate_managed_method_request(method, params)
+        result = await self._apply_session_cwd(request["sessionID"], request["requestedCwd"])
+        if result is None:
+            raise ValueError("session cwd change was rejected by the host workspace authority")
+        return validate_managed_method_result(method, result)
+
+    async def _apply_session_cwd(self, mimo_session_id: str, cwd: Any) -> Optional[dict]:
         value = str(cwd or "").strip()
         if not value or not os.path.isabs(value):
             logger.warning("ignoring invalid session cwd update for %s", mimo_session_id)
-            return False
+            return None
         context = self._session_context.get(mimo_session_id)
         if not context:
             logger.warning("ignoring cwd update for unknown session %s", mimo_session_id)
-            return False
+            return None
         chat_id = str(context.get("odysseus_session_id") or "").strip()
         if not chat_id or self._session_map.get(chat_id) != mimo_session_id:
             logger.warning("ignoring stale cwd update for session %s", mimo_session_id)
-            return False
+            return None
         if str(context.get("owner") or self._owner) != self._owner:
             logger.warning("ignoring cwd update from a different owner for %s", chat_id)
-            return False
+            return None
         canonical = str(Path(value).expanduser().resolve(strict=False))
         lock = self._session_context_locks.setdefault(mimo_session_id, asyncio.Lock())
         async with lock:
             callback = self._session_workspace_adapter
             if callback is None:
                 logger.warning("rejecting cwd update without a workspace authority for %s", chat_id)
-                return False
+                return None
             try:
                 result = callback(chat_id, canonical, dict(context))
                 if inspect.isawaitable(result):
                     result = await result
             except Exception as exc:
                 logger.warning("rejecting cwd update for %s: %s", chat_id, exc)
-                return False
+                return None
             approved = str(result or "").strip()
             if approved != canonical:
                 logger.warning("rejecting noncanonical workspace approval for %s", chat_id)
-                return False
+                return None
             # Approval is complete before any ACP-visible state or transcript
             # state changes. Stable policy/Copal/memory identities stay intact.
-            context.update({"workspace": canonical, "cwd": canonical, "physical_cwd": canonical})
+            previous_context = copy.deepcopy(context)
+            had_state = mimo_session_id in self._session_state
             state = self._session_state.setdefault(mimo_session_id, {})
+            previous_state = copy.deepcopy(state)
+            context.update({"workspace": canonical, "cwd": canonical, "physical_cwd": canonical})
             state["workspace"] = canonical
-            self._persist_session_state(mimo_session_id)
-            return True
+            try:
+                self._persist_session_state(mimo_session_id, required=True)
+            except Exception as exc:
+                context.clear()
+                context.update(previous_context)
+                if had_state:
+                    state.clear()
+                    state.update(previous_state)
+                else:
+                    self._session_state.pop(mimo_session_id, None)
+                logger.warning("rejecting cwd update for %s: persistence failed: %s", chat_id, exc)
+                return None
+            result = {"canonicalCwd": canonical}
+            revision = state.get("revision")
+            if isinstance(revision, int) and revision >= 0:
+                result["workspaceRevision"] = revision
+            return result
 
     async def open_session(
         self,

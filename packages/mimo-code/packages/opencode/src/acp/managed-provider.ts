@@ -1,5 +1,6 @@
 import type { AgentSideConnection } from "@agentclientprotocol/sdk"
 import { Schema } from "effect"
+import path from "node:path"
 import { Auth } from "@/auth"
 import { AccountSelection } from "@/provider/account-selection"
 import { OpenClankManagedProtocol } from "./openclank-protocol"
@@ -99,6 +100,11 @@ const RefreshLease = Schema.Struct({
   renewable: Schema.Boolean,
 })
 
+const SessionCwdChangeResult = Schema.Struct({
+  canonicalCwd: Schema.String,
+  workspaceRevision: Schema.optional(Schema.Number),
+})
+
 let host: AgentSideConnection | undefined
 
 type ActiveOperation = {
@@ -138,6 +144,22 @@ export function installHostConnection(value: AgentSideConnection): void {
     throw new ManagedProviderError("Managed provider host connection is already installed")
   }
   host = value
+}
+
+/** Ask the authenticated host to approve and persist a managed chat cwd. */
+export async function requestSessionCwdChange(
+  sessionID: string,
+  requestedCwd: string,
+): Promise<OpenClankManagedProtocol.SessionCwdChangeResult> {
+  const raw = await OpenClankManagedProtocol.callHost(connection(), "_openclank/session/v1/cwd/change", {
+    sessionID,
+    requestedCwd,
+  })
+  const result = decode(SessionCwdChangeResult, raw, "session cwd change result")
+  if (!path.isAbsolute(result.canonicalCwd)) {
+    throw new ManagedProviderError("Managed provider host returned a non-absolute session cwd")
+  }
+  return result
 }
 
 export function currentScope(sessionID: string): AccountSelection.Scope | undefined {

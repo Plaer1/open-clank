@@ -4,7 +4,7 @@ export const PROVIDER_STORE_VERSION = 1 as const
 export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = 2 as const
 export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
-export const SCHEMA_HASH = "eb0411c7a90498ba8c2f2426e00971a49f2c4d0a643f0811cda8a5c6fb9520f8" as const
+export const SCHEMA_HASH = "e5ef3fef6dec55d7ccb1b356f71029533fc31ca441626d2d160fd7af4218e976" as const
 
 export const PROVIDER_STORE_METHODS = [
   "_openclank/provider-store/v1/account/bind",
@@ -32,6 +32,9 @@ export const OPERATION_METHODS = [
   "_openclank/operations/v1/artifact/write",
   "_openclank/operations/v1/executor/invoke",
   "_openclank/operations/v1/execute",
+] as const
+export const SESSION_METHODS = [
+  "_openclank/session/v1/cwd/change",
 ] as const
 export const OPERATIONS = [
   "chat.stream",
@@ -72,10 +75,12 @@ export const METHOD_DIRECTIONS = {
   "_openclank/operations/v1/artifact/write": "engine_to_host",
   "_openclank/operations/v1/executor/invoke": "engine_to_host",
   "_openclank/operations/v1/execute": "host_to_engine",
+  "_openclank/session/v1/cwd/change": "engine_to_host",
 } as const
 
 export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
 export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
 export type OperationMethod = (typeof OPERATION_METHODS)[number]
-export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod
+export type SessionMethod = (typeof SESSION_METHODS)[number]
+export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod
 export type Operation = (typeof OPERATIONS)[number]

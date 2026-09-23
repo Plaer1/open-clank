@@ -33,6 +33,7 @@ from src.openclank.managed_protocol import (
 from src.openclank.generated.managed_provider_contract import (
     OPERATION_METHODS,
     PROVIDER_STORE_METHODS,
+    SESSION_METHODS,
 )
 from src.openclank.artifacts import ArtifactError, ArtifactStore
 from src.openclank.local_executor import LocalExecutorBroker, LocalExecutorError
@@ -48,7 +49,7 @@ _GENERATED_CALLBACK_METHODS = tuple(
     for method in (*PROVIDER_STORE_METHODS, *OPERATION_METHODS)
     if METHOD_DIRECTIONS[method] == "engine_to_host"
 )
-if frozenset(_GENERATED_CALLBACK_METHODS) != HOST_CALLBACK_METHODS:
+if frozenset(_GENERATED_CALLBACK_METHODS) != HOST_CALLBACK_METHODS - frozenset(SESSION_METHODS):
     raise RuntimeError("generated managed callback direction set is inconsistent")
 
 PROVIDER_CALLBACK_METHODS = tuple(

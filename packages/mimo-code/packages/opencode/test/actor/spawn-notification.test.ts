@@ -57,6 +57,7 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable } from "../../src/inbox/inbox.sql"
+import { renderInboxRow } from "../../src/inbox/render"
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -295,10 +296,10 @@ describe("Actor.spawn inbox notifications (Plan 3 / Task 2)", () => {
 
         expect(rows.length).toBe(1)
         expect(rows[0].type).toBe("actor_notification")
-        const content = rows[0].content as { text?: string }
-        expect(content.text).toContain("<actor-notification>")
-        expect(content.text).toContain("background build task")
-        expect(content.text).toContain("completed")
+        const rendered = renderInboxRow(rows[0])
+        expect(rendered).toContain("<actor-notification>")
+        expect(rendered).toContain("background build task")
+        expect(rendered).toContain("completed")
       }),
       { git: true, config: providerCfg },
     ),
@@ -479,8 +480,7 @@ describe("Actor.spawn inbox notifications (Plan 3 / Task 2)", () => {
           for (let i = 0; i < 600; i++) {
             const r = yield* inboxRows("main")
             if (r.length > 0) {
-              const content = r[0].content as { text?: string }
-              return { type: r[0].type, text: content.text ?? "" }
+              return { type: r[0].type, text: renderInboxRow(r[0]) }
             }
             const msgs = yield* Session.Service.use((s) => s.messages({ sessionID: parent.id, agentID: "main" })).pipe(
               Effect.catch(() => Effect.succeed([] as MessageV2.WithParts[])),

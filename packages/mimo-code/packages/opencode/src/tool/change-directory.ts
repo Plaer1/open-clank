@@ -4,6 +4,7 @@ import { Effect } from "effect"
 import { InstanceState } from "@/effect"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Bus } from "@/bus"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
 import * as Tool from "./tool"
@@ -52,15 +53,20 @@ export const ChangeDirectoryTool = Tool.define(
           const currentCwd = SessionCwd.get(ctx.sessionID)
 
           if (params.path === "~" || params.path === "") {
-            SessionCwd.clear(ctx.sessionID)
+            const approved = ManagedProvider.enabled()
+              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, ins.directory))
+              : undefined
+            const nextCwd = approved?.canonicalCwd ?? ins.directory
+            if (nextCwd === ins.directory) SessionCwd.clear(ctx.sessionID)
+            else SessionCwd.set(ctx.sessionID, nextCwd)
             yield* bus.publish(SessionCwd.Event.Changed, {
               sessionID: ctx.sessionID,
-              cwd: ins.directory,
+              cwd: nextCwd,
             })
             return {
               title: "reset",
-              metadata: { from: currentCwd, to: ins.directory },
-              output: `Working directory reset to project root: ${ins.directory}`,
+              metadata: { from: currentCwd, to: nextCwd },
+              output: `Working directory reset to project root: ${nextCwd}`,
             }
           }
 
@@ -84,16 +90,20 @@ export const ChangeDirectoryTool = Tool.define(
 
           yield* assertExternalDirectoryEffect(ctx, normalized, { kind: "directory" })
 
-          SessionCwd.set(ctx.sessionID, normalized)
+          const approved = ManagedProvider.enabled()
+            ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, normalized))
+            : undefined
+          const nextCwd = approved?.canonicalCwd ?? normalized
+          SessionCwd.set(ctx.sessionID, nextCwd)
           yield* bus.publish(SessionCwd.Event.Changed, {
             sessionID: ctx.sessionID,
-            cwd: normalized,
+            cwd: nextCwd,
           })
 
           return {
-            title: path.relative(ins.worktree, normalized) || ".",
-            metadata: { from: currentCwd, to: normalized },
-            output: `Working directory changed: ${currentCwd} → ${normalized}`,
+            title: path.relative(ins.worktree, nextCwd) || ".",
+            metadata: { from: currentCwd, to: nextCwd },
+            output: `Working directory changed: ${currentCwd} → ${nextCwd}`,
           }
         }),
     }
