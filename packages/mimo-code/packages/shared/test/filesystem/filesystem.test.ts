@@ -409,15 +409,101 @@ server.close()
         expect(yield* filesys.readFileString(first)).toBe("after")
         expect(yield* filesys.readFileString(second)).toBe("created")
         expect(frames).toHaveLength(3)
-        expect(frames.map((frame) => Object.keys(frame)[0])).toEqual(["Prepare", "RecordLive", "Complete"])
+        expect(frames.map((frame) => Object.keys(frame)[0])).toEqual(["PrepareBatch", "RecordLive", "CompleteBatch"])
         expect(frames.every((frame) => {
           const envelope = frame[Object.keys(frame)[0]!].envelope
           return envelope.auth.actor_id === "agent-1" && envelope.auth.account_id === "acct-1" && envelope.auth.token === "opaque-token" && envelope.action_id === "mimo-batch-1"
         })).toBe(true)
-        const request = frames[0].Prepare.envelope.request
+        const prepare = frames[0].PrepareBatch
+        const request = prepare.envelope.request
         expect(request.operation).toBe("replace")
         expect(request.modified_resource_ids).toHaveLength(2)
         expect(request.coverage.kind).toBe("ObservedAfterOnly")
+        expect(prepare.batch_version).toBe(1)
+        expect(prepare.entries).toHaveLength(2)
+        expect(prepare.entries[0].content).toBe(Buffer.from("before").toString("base64"))
+        expect(prepare.entries[1].content).toBeNull()
+        expect(frames[1].RecordLive.receipt.status).toBe("Committed")
+        const complete = frames[2].CompleteBatch
+        expect(complete.batch_version).toBe(1)
+        expect(complete.entries).toHaveLength(2)
+        expect(Buffer.from(complete.entries[0].content, "base64").toString()).toBe("after")
+        expect(Buffer.from(complete.entries[1].content, "base64").toString()).toBe("created")
+        expect(complete.entries.every((entry) => entry.outcome.status === "Committed")).toBe(true)
+      }),
+    )
+
+    it(
+      "reports a recoverable pending result when after-state capture fails",
+      Effect.gen(function* () {
+        if (process.platform === "darwin") return
+        const fs = yield* AppFileSystem.Service
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const first = path.join(tmp, "first.txt")
+        const socketPath = path.join("/tmp", `mimo-history-after-failure-${Date.now()}.sock`)
+        yield* filesys.writeFileString(first, "before")
+        const serverScript = `
+import socket, sys
+path = sys.argv[1]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(1)
+conn, _ = server.accept()
+body = b""
+while b"\\n" not in body:
+    chunk = conn.recv(65536)
+    if not chunk:
+        break
+    body += chunk
+conn.sendall(b"{}")
+conn.close()
+server.close()
+`
+        const historyServer = spawn("python3", ["-c", serverScript, socketPath], { stdio: ["ignore", "ignore", "pipe"] })
+        yield* Effect.promise(async () => {
+          for (let attempt = 0; attempt < 100; attempt++) {
+            if (await NFS.stat(socketPath).then(() => true).catch(() => false)) return
+            await new Promise((resolve) => setTimeout(resolve, 10))
+          }
+          throw new Error("history fixture socket did not start")
+        })
+        const history: AppFileSystem.HistoryContext = {
+          actorId: "agent-1",
+          accountId: "acct-1",
+          workspaceId: "workspace-1",
+          workspaceRoot: tmp,
+          socketPath,
+          token: "opaque-token",
+          status: { status: "paused", history_status: "paused", capture_phase: "unavailable", durable: false, coverage: "NoCapture" },
+        }
+        const originalLstat = NFS.lstat
+        let primaryReads = 0
+        const lstatSpy = spyOn(NFS, "lstat").mockImplementation(async (target) => {
+          if (String(target) === first) {
+            primaryReads += 1
+            if (primaryReads === 2) throw new Error("injected after-state read failure")
+          }
+          return originalLstat(target)
+        })
+        try {
+          const failure = yield* Effect.flip(
+            fs.atomicBatch([{ path: first, content: "after", actionId: "mimo-after-failure", history }]),
+          )
+          expect(failure).toBeInstanceOf(AppFileSystem.AtomicConflict)
+          expect(String(failure)).toContain("history reconciliation pending")
+        } finally {
+          lstatSpy.mockRestore()
+          if (historyServer.exitCode === null) historyServer.kill()
+          yield* Effect.promise(() => new Promise<void>((resolve) => {
+            if (historyServer.exitCode !== null) resolve()
+            else historyServer.once("close", () => resolve())
+          }))
+        }
+        expect(yield* filesys.readFileString(first)).toBe("after")
+        expect(history.status.status).toBe("failed")
+        expect(history.status.capture_phase).toBe("after_failed")
+        expect(history.status.error).toContain("injected after-state read failure")
       }),
     )
 

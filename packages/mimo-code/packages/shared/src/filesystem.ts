@@ -487,6 +487,7 @@ export namespace AppFileSystem {
       after = (await readHistoryTarget(canonicalTargets[0]!)).before
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
+      if (committed) throw new AtomicConflict(`history reconciliation pending after committed mutation: ${String(error)}`)
       return
     }
     if (!committed) {
