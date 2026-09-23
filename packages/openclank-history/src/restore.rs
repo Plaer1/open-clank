@@ -296,6 +296,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
             host_metadata: HostMetadata {
                 mode,
                 native_locator: Some(self.path.to_string_lossy().into_owned()),
+                modified_unix_millis: std::fs::symlink_metadata(&self.path)?.modified().ok().and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok()).map(|value| value.as_millis() as u64),
                 resource_type: Some({
                     let metadata = std::fs::symlink_metadata(&self.path)?;
                     if metadata.file_type().is_symlink() {
@@ -375,7 +376,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
                 return Err("symlink restore is unsupported on this host".into());
             }
         }
-        if host_metadata.and_then(|metadata| metadata.resource_type.as_deref()) == Some("Directory")
+    if host_metadata.and_then(|metadata| metadata.resource_type.as_deref()) == Some("Directory")
             || is_directory_manifest(content)
         {
             apply_directory_manifest(&self.path, content)
@@ -386,6 +387,9 @@ impl RestoreProvider for FilesystemRestoreProvider {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(mode))?;
                 }
+            }
+            if let Some(millis) = host_metadata.and_then(|metadata| metadata.modified_unix_millis) {
+                set_modified_millis(&self.path, millis)?;
             }
             std::fs::File::open(parent)?.sync_all()?;
             self.persist_receipt(restore_id, &digest)?;
@@ -556,6 +560,34 @@ fn apply_directory_manifest(path: &Path, content: &[u8]) -> CatalogResult<()> {
             }
         }
     }
+    for entry in entries {
+        let relative = entry.get("path").and_then(Value::as_str).ok_or("directory entry has no path")?;
+        let target = path.join(relative);
+        if let Some(millis) = entry.get("mtime_millis").and_then(Value::as_u64) {
+            set_modified_millis(&target, millis)?;
+        }
+    }
+    Ok(())
+}
+
+fn set_modified_millis(path: &Path, millis: u64) -> CatalogResult<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| "mtime path contains NUL")?;
+        let time = libc::timespec {
+            tv_sec: (millis / 1_000) as libc::time_t,
+            tv_nsec: ((millis % 1_000) * 1_000_000) as libc::c_long,
+        };
+        let times = [time, time];
+        let result = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, millis);
     Ok(())
 }
 
