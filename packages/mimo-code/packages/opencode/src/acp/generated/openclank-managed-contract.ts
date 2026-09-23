@@ -4,7 +4,7 @@ export const PROVIDER_STORE_VERSION = 1 as const
 export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = 2 as const
 export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
-export const SCHEMA_HASH = "d4fee7378cf9ecd7c519e57003484357caecde17a7b2679ddf5ae1c7152fabeb" as const
+export const SCHEMA_HASH = "eb0411c7a90498ba8c2f2426e00971a49f2c4d0a643f0811cda8a5c6fb9520f8" as const
 
 export const PROVIDER_STORE_METHODS = [
   "_openclank/provider-store/v1/account/bind",

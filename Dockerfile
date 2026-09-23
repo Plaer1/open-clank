@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir \
     typing-inspection==0.4.2
 WORKDIR /build
 COPY packages/mimo-code/ packages/mimo-code/
-COPY contracts/openclank/managed-provider-v2.schema.json contracts/openclank/managed-provider-v2.schema.json
+COPY contracts/openclank/managed-provider-v1.schema.json contracts/openclank/managed-provider-v1.schema.json
 COPY scripts/openclank_engine.py scripts/openclank_engine.py
 COPY src/constants.py src/constants.py
 COPY src/openclank/engine_build.py src/openclank/engine_build.py

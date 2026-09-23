@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openclank.dev/contracts/managed-provider/v2",
-  "title": "Open Clank Managed Provider Protocol v1",
-  "description": "Capability negotiation and secret-bearing callback envelopes exchanged between the Open Clank host and its managed model engine.",
+  "title": "Open Clank Managed Provider Protocol v2",
+  "description": "Version 2 capability negotiation and secret-bearing callback envelopes exchanged between the Open Clank host and its managed model engine.",
   "oneOf": [
     { "$ref": "#/$defs/capabilityDeclaration" },
     { "$ref": "#/$defs/accountSelectionRequest" },
