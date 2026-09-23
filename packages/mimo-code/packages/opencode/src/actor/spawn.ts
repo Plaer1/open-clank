@@ -14,7 +14,7 @@ import type { Actor, SpawnMode, ContextMode, ToolWhitelist, Lifecycle, ActorHost
 import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS } from "@/actor/schema"
 import * as ActorEvents from "@/actor/events"
 import { runTurn } from "@/actor/turn"
-import { registerBinding, spawnRef } from "@/actor/spawn-ref"
+import { registerBinding } from "@/actor/spawn-ref"
 import * as ExecutionLock from "@/actor/execution-lock"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Bus } from "@/bus"
