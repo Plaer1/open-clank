@@ -286,6 +286,47 @@ fn provider_engine_capture_matrix_covers_file_lifecycle_and_multitarget_failures
     )));
 }
 
+#[test]
+fn registry_journal_replays_move_after_provider_restart() {
+    let root = tempdir().unwrap();
+    let socket = root.path().join("history.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let destination = root.path().join("restored.txt");
+    let journal_dir = root.path().join(".openclank-registry-journal");
+    std::fs::create_dir_all(&journal_dir).unwrap();
+    std::fs::write(
+        journal_dir.join("action-replay.json"),
+        serde_json::json!({
+            "action_id": "action-replay",
+            "commit": {
+                "Move": {
+                    "source_id": "file:source",
+                    "destination_id": "file:destination",
+                    "destination": destination,
+                }
+            }
+        }).to_string(),
+    ).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = String::new();
+        BufReader::new(&mut stream).read_line(&mut bytes).unwrap();
+        let frame: serde_json::Value = serde_json::from_str(bytes.trim()).unwrap();
+        assert_eq!(frame["MoveResource"]["resource_id"], "file:source");
+        stream.write_all(b"{}\n").unwrap();
+    });
+    let _hook = HistoryServiceHook::new(
+        &socket,
+        "actor-1",
+        "account-1",
+        "workspace-1",
+        root.path(),
+        "supervisor-token",
+    ).unwrap();
+    server.join().unwrap();
+    assert!(!journal_dir.join("action-replay.json").exists());
+}
+
 fn registry_for(root: &Path) -> RootRegistry {
     let canonical = std::fs::canonicalize(root).unwrap();
     let mut registry = RootRegistry::default();
