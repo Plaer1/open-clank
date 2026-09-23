@@ -1,4 +1,4 @@
-import { Effect, Deferred, Context, Fiber, Layer, Scope, Cause, Schedule, Semaphore } from "effect"
+import { Effect, Deferred, Context, Fiber, Layer, Scope, Cause, Schedule } from "effect"
 import type { SessionID, MessageID } from "@/session/schema"
 import type { ProviderID, ModelID } from "@/provider/schema"
 import type { Tool as AITool, ModelMessage } from "ai"
@@ -14,7 +14,8 @@ import type { Actor, SpawnMode, ContextMode, ToolWhitelist, Lifecycle, ActorHost
 import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS } from "@/actor/schema"
 import * as ActorEvents from "@/actor/events"
 import { runTurn } from "@/actor/turn"
-import { spawnRef } from "@/actor/spawn-ref"
+import { registerBinding, spawnRef } from "@/actor/spawn-ref"
+import * as ExecutionLock from "@/actor/execution-lock"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
@@ -249,14 +250,9 @@ export const layer = Layer.effect(
     // registry CAS alone cannot fence the later unversioned SessionRunState
     // interrupt, so the same actor lane covers begin→park and cancel CAS→
     // inner-runner/descendant teardown.
-    const executionLocks = new Map<string, Semaphore.Semaphore>()
-    const executionLock = (key: string) => {
-      const hit = executionLocks.get(key)
-      if (hit) return hit
-      const next = Semaphore.makeUnsafe(1)
-      executionLocks.set(key, next)
-      return next
-    }
+    const executionLocks = ExecutionLock.make()
+    const withExecutionLock = <A, E, R>(key: string, effect: Effect.Effect<A, E, R>) =>
+      executionLocks.withLock(key, effect)
 
     // Process-local cancellation hint retained for diagnostics/interrupt
     // coordination. Durable begin/settle/claim CAS operations are authoritative;
@@ -361,7 +357,7 @@ export const layer = Layer.effect(
         const revision = begunRevision
         const outcome = begunOutcome
         return Effect.uninterruptible(
-          executionLock(executionKey).withPermits(1)(
+          withExecutionLock(executionKey,
             Effect.gen(function* () {
               if (installedFiber) yield* Fiber.interrupt(installedFiber).pipe(Effect.ignore)
               if (installedKey && installedRevision !== undefined) {
@@ -383,7 +379,7 @@ export const layer = Layer.effect(
           ),
         )
       }
-      const setupBody = executionLock(executionKey).withPermits(1)(
+      const setupBody = withExecutionLock(executionKey,
         Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
         const outcome = yield* Deferred.make<AgentOutcome>()
@@ -865,7 +861,7 @@ export const layer = Layer.effect(
         // Give reclaim/cancel fibers released by the callback a scheduling
         // point while the outer actor is still parked.
         yield* Effect.yieldNow
-        return yield* executionLock(executionKey).withPermits(1)(
+        return yield* withExecutionLock(executionKey,
           Effect.uninterruptibleMask((restore) =>
             Effect.gen(function* () {
               const current = yield* actorReg.get(input.sessionID, input.actorID)
@@ -1217,7 +1213,7 @@ export const layer = Layer.effect(
     const cancel: (sessionID: SessionID, actorID: string, mode: "graceful" | "forced") => Effect.Effect<void> =
       Effect.fn("Actor.cancel")(function* (sessionID: SessionID, actorID: string, mode: "graceful" | "forced") {
         const key = cancelKey(sessionID, actorID)
-        const cleanup = executionLock(key).withPermits(1)(
+        const cleanup = withExecutionLock(key,
             Effect.gen(function* () {
         // Snapshot the actor row before cancelActor tears state down — we need
         // its mode/agent/background/parentActorID to decide + address the notify.
@@ -1400,13 +1396,8 @@ export const layer = Layer.effect(
     // overlapping test runtimes, etc.) the inner scope's dispose must hand
     // control back to the outer scope's impl instead of wiping the ref to
     // `undefined` and breaking every subsequent tryStartCheckpointWriter call.
-    const prevSpawnRef = spawnRef.current
-    spawnRef.current = impl
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        if (spawnRef.current === impl) spawnRef.current = prevSpawnRef
-      }),
-    )
+    const unregisterBinding = registerBinding(impl)
+    yield* Effect.addFinalizer(() => Effect.sync(unregisterBinding))
     return impl
   }),
 )
