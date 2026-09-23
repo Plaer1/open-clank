@@ -3,7 +3,7 @@ import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorRegistryTable } from "./actor.sql"
-import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness, ActorModel } from "./schema"
+import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness, ActorModel, ActorHostContext } from "./schema"
 import { deriveLiveness } from "./schema"
 import * as Events from "./events"
 import { Log } from "@/util"
@@ -23,6 +23,20 @@ const PROCESS_INSTANCE_ID = randomUUID()
 
 type ActorRow = typeof ActorRegistryTable.$inferSelect
 
+function hostContextFromRow(row: ActorRow): ActorHostContext | undefined {
+  const hostContext = {
+    ...(row.host_account_id ? { accountID: row.host_account_id } : {}),
+    ...(row.provider_grant_id ? { grantID: row.provider_grant_id } : {}),
+    ...(row.grant_revision !== null && row.grant_revision !== undefined ? { grantRevision: row.grant_revision } : {}),
+    ...(row.credential_revision !== null && row.credential_revision !== undefined ? { credentialRevision: row.credential_revision } : {}),
+    ...(row.chat_id ? { chatID: row.chat_id } : {}),
+    ...(row.workspace_id ? { workspaceID: row.workspace_id } : {}),
+    ...(row.cwd ? { cwd: row.cwd } : {}),
+    ...(row.goal_id ? { goalID: row.goal_id } : {}),
+  }
+  return Object.keys(hostContext).length ? hostContext : undefined
+}
+
 function fromRow(row: ActorRow): Actor {
   const effectiveModel = row.effective_model
     ? (() => {
@@ -36,6 +50,7 @@ function fromRow(row: ActorRow): Actor {
         }
       })()
     : undefined
+  const hostContext = hostContextFromRow(row)
   return {
     sessionID: row.session_id,
     actorID: row.actor_id,
@@ -52,6 +67,7 @@ function fromRow(row: ActorRow): Actor {
     tools: row.tools ?? undefined,
     requestedModel: row.requested_model ?? undefined,
     effectiveModel,
+    ...(hostContext ? { hostContext } : {}),
     lastTurnTime: row.last_turn_time,
     turnCount: row.turn_count,
     lastError: row.last_error ?? undefined,
@@ -78,6 +94,7 @@ export interface Interface {
     tools?: ToolWhitelist
     requestedModel?: string
     effectiveModel?: ActorModel
+    hostContext?: ActorHostContext
   }) => Effect.Effect<Actor>
 
   readonly updateStatus: (
@@ -92,6 +109,7 @@ export interface Interface {
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
   readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
   readonly updateModel: (sessionID: SessionID, actorID: string, requestedModel?: string, effectiveModel?: ActorModel) => Effect.Effect<void>
+  readonly updateHostContext: (sessionID: SessionID, actorID: string, context: ActorHostContext) => Effect.Effect<void>
   readonly get: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
   // Derived pull-side liveness for a single actor row (progressing/stalled/
   // terminal), computed from honest registry fields. Returns undefined when the
@@ -138,6 +156,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       tools?: ToolWhitelist
       requestedModel?: string
       effectiveModel?: ActorModel
+      hostContext?: ActorHostContext
     }) {
       const now = Date.now()
       const row = {
@@ -156,6 +175,14 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         tools: input.tools ?? null,
         requested_model: input.requestedModel ?? null,
         effective_model: input.effectiveModel ? JSON.stringify(input.effectiveModel) : null,
+        host_account_id: input.hostContext?.accountID ?? null,
+        provider_grant_id: input.hostContext?.grantID ?? null,
+        grant_revision: input.hostContext?.grantRevision ?? null,
+        credential_revision: input.hostContext?.credentialRevision ?? null,
+        chat_id: input.hostContext?.chatID ?? null,
+        workspace_id: input.hostContext?.workspaceID ?? null,
+        cwd: input.hostContext?.cwd ?? null,
+        goal_id: input.hostContext?.goalID ?? null,
         last_turn_time: now,
         turn_count: 0,
         last_error: null,
@@ -173,6 +200,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         description: input.description,
         agent: input.agent,
         background: input.background,
+        ...(input.hostContext ? { hostContext: input.hostContext } : {}),
       })
       return fromRow(row)
     })
@@ -289,6 +317,52 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             .run(),
         ),
       )
+    })
+
+    const updateHostContext = Effect.fn("ActorRegistry.updateHostContext")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      context: ActorHostContext,
+    ) {
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              host_account_id: context.accountID ?? null,
+              provider_grant_id: context.grantID ?? null,
+              grant_revision: context.grantRevision ?? null,
+              credential_revision: context.credentialRevision ?? null,
+              chat_id: context.chatID ?? null,
+              workspace_id: context.workspaceID ?? null,
+              cwd: context.cwd ?? null,
+              goal_id: context.goalID ?? null,
+              time_updated: Date.now(),
+            })
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .run(),
+        ),
+      )
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .select()
+            .from(ActorRegistryTable)
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .get(),
+        ),
+      )
+      if (!row) return
+      yield* bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
     })
 
     const get = Effect.fn("ActorRegistry.get")(function* (sessionID: SessionID, actorID: string) {
@@ -514,6 +588,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       updateTurn,
       updateAgent,
       updateModel,
+      updateHostContext,
       get,
       liveness,
       listBySession,

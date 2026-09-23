@@ -21,6 +21,7 @@ import { TaskID } from "@/task/schema"
 import { SessionCheckpoint } from "@/session/checkpoint"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
 import { Effect, Deferred } from "effect"
+import type { ActorHostContext } from "@/actor/schema"
 
 export interface ActorPromptOps {
   cancel(sessionID: SessionID): void
@@ -34,6 +35,31 @@ const MODEL_PARAM_DESCRIPTION =
   "(optional) Model for this subagent: a model group name (e.g. ultra/standard/lite) or a literal provider/model (e.g. mimo-v2.5-pro). Overrides the agent's configured model; defaults to the agent's model, else the parent's. If no model_groups are configured, the tier names resolve to the default model. To discover valid provider/model values (e.g. a vision-capable model for image tasks), run `actor models` (or `actor models --vision`)."
 
 const KNOWN_ACTOR_VERBS = ["run", "spawn", "status", "wait", "cancel", "send", "models"]
+
+function hostContextFromExtra(extra: Tool.Context["extra"]): ActorHostContext | undefined {
+  const value = extra?.hostContext ?? extra?.actorHostContext
+  if (!value || typeof value !== "object") return undefined
+  const raw = value as Record<string, unknown>
+  const context: ActorHostContext = {}
+  for (const [key, type] of [
+    ["accountID", "string"],
+    ["grantID", "string"],
+    ["chatID", "string"],
+    ["workspaceID", "string"],
+    ["cwd", "string"],
+    ["goalID", "string"],
+  ] as const) {
+    if (typeof raw[key] === type && String(raw[key]).trim()) {
+      ;(context as Record<string, unknown>)[key] = String(raw[key]).trim()
+    }
+  }
+  for (const key of ["grantRevision", "credentialRevision"] as const) {
+    if (typeof raw[key] === "number" && Number.isInteger(raw[key]) && raw[key] >= 0) {
+      context[key] = raw[key]
+    }
+  }
+  return Object.keys(context).length ? context : undefined
+}
 
 function levenshteinActor(a: string, b: string): number {
   const m = a.length, n = b.length
@@ -574,6 +600,7 @@ export const ActorTool = Tool.define(
             lastTurnTime: entry.lastTurnTime,
             ...(entry.requestedModel ? { requested_model: entry.requestedModel } : {}),
             ...(entry.effectiveModel ? { effective_model: entry.effectiveModel } : {}),
+            ...(entry.hostContext ? { host_context: entry.hostContext } : {}),
             ...(entry.lastError !== undefined ? { error: entry.lastError } : {}),
             time: entry.time,
           }
@@ -753,6 +780,7 @@ export const ActorTool = Tool.define(
         // the agent loop, and sending inbox notifications on terminal — replacing
         // the legacy session.create + manual fork path that lived here pre-Task-29.
         const actor = yield* requireActor()
+        const hostContext = hostContextFromExtra(ctx.extra)
         const spawnResult = yield* actor.spawn({
           mode: "subagent",
           sessionID: ctx.sessionID,
@@ -763,6 +791,7 @@ export const ActorTool = Tool.define(
           tools: next.toolAllowlist ? [...next.toolAllowlist] : "INHERIT",
           model,
           requestedModel,
+          ...(hostContext ? { hostContext } : {}),
           ...(op.actor_id ? { actorID: op.actor_id } : {}),
           background,
           task_id: effectiveTaskId,

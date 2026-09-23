@@ -135,4 +135,14 @@ export class ACPSessionManager {
     this.sessions.set(sessionId, session)
     return session
   }
+
+  /** Update one ACP chat's physical working directory without changing the
+   * session identity. The next prompt and every callback resolve through this
+   * state; no process-wide chdir is ever performed. */
+  setCwd(sessionId: string, cwd: string) {
+    const session = this.get(sessionId)
+    session.cwd = cwd
+    this.sessions.set(sessionId, session)
+    return session
+  }
 }

@@ -20,6 +20,7 @@ export const RouteContext = Schema.Struct({
   preferredAccountID: Schema.optional(Schema.String),
   inheritedAccountID: Schema.optional(Schema.String),
   grantID: Schema.optional(Schema.String),
+  grantRevision: Schema.optional(Schema.Number),
 })
 export type RouteContext = Schema.Schema.Type<typeof RouteContext>
 

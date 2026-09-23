@@ -27,6 +27,22 @@ export const ActorModel = z.object({
 })
 export type ActorModel = z.infer<typeof ActorModel>
 
+// Host-owned continuation identity. Provider OAuth account identifiers are
+// deliberately absent: they are adapter/header metadata and must never become
+// actor identity. The binding is copied at spawn time and remains stable for a
+// sibling until that actor is explicitly resumed with a new host context.
+export const ActorHostContext = z.object({
+  accountID: z.string().min(1).optional(),
+  grantID: z.string().min(1).optional(),
+  grantRevision: z.number().int().nonnegative().optional(),
+  credentialRevision: z.number().int().nonnegative().optional(),
+  chatID: z.string().min(1).optional(),
+  workspaceID: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+  goalID: z.string().min(1).optional(),
+})
+export type ActorHostContext = z.infer<typeof ActorHostContext>
+
 export const Actor = z
   .object({
     sessionID: SessionID.zod,
@@ -44,6 +60,7 @@ export const Actor = z
     tools: ToolWhitelist.optional(),
     requestedModel: z.string().min(1).optional(),
     effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
     lastTurnTime: z.number(),
     turnCount: z.number(),
     lastError: z.string().optional(),

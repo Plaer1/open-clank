@@ -221,6 +221,27 @@ export class Agent implements ACPAgent {
   }
 
   private async handleEvent(event: Event) {
+    // SessionCwd.Event.Changed is an engine bus event carrying the one-chat
+    // physical cwd. It is bridged as a private ACP update so the host can
+    // atomically refresh its per-chat workspace projection. Cast here because
+    // the upstream SDK's generated Event union does not know Open Clank's
+    // private event yet.
+    const eventType = (event as unknown as { type?: string }).type
+    if (eventType === "session.cwd") {
+      const props = (event as unknown as { properties?: Record<string, unknown> }).properties ?? {}
+      const sessionID = String(props.sessionID ?? "")
+      const cwd = String(props.cwd ?? "")
+      if (!sessionID || !cwd || !this.sessionManager.tryGet(sessionID)) return
+      this.sessionManager.setCwd(sessionID, cwd)
+      await this.connection.sessionUpdate({
+        sessionId: sessionID,
+        update: {
+          sessionUpdate: "_openclank_session_cwd",
+          cwd,
+        } as any,
+      })
+      return
+    }
     switch (event.type) {
       case "actor.registered":
       case "actor.status": {
@@ -1638,6 +1659,30 @@ export class Agent implements ACPAgent {
         run,
       )
 
+    const managedRoute =
+      managedProvider && typeof managedProvider === "object"
+        ? (managedProvider as Record<string, unknown>)
+        : undefined
+    const hostContextForOperation = () => {
+      const scope = ManagedProvider.currentScope(sessionID)
+      return {
+        ...(scope?.accountID
+          ? { accountID: scope.accountID }
+          : typeof managedRoute?.preferredAccountID === "string" && managedRoute.preferredAccountID
+            ? { accountID: managedRoute.preferredAccountID }
+            : typeof managedRoute?.inheritedAccountID === "string" && managedRoute.inheritedAccountID
+              ? { accountID: managedRoute.inheritedAccountID }
+              : {}),
+        ...(scope?.credentialRevision !== undefined ? { credentialRevision: scope.credentialRevision } : {}),
+        ...(typeof managedRoute?.grantID === "string" && managedRoute.grantID ? { grantID: managedRoute.grantID } : {}),
+        ...(typeof managedRoute?.grantRevision === "number" && Number.isInteger(managedRoute.grantRevision) && managedRoute.grantRevision >= 0
+          ? { grantRevision: managedRoute.grantRevision }
+          : {}),
+        chatID: sessionID,
+        cwd: directory,
+      }
+    }
+
     // The server resolves session.prompt 200 even when the turn died on a
     // provider error (it lands on info.error), and the SDK reports transport
     // rejections (e.g. session busy) via response.error without throwing.
@@ -1680,7 +1725,8 @@ export class Agent implements ACPAgent {
           directory,
           tools: odysseus?.tools,
           system: hostSystem,
-        }),
+          hostContext: hostContextForOperation(),
+        } as any),
       )
       const msg = response.data?.info
 

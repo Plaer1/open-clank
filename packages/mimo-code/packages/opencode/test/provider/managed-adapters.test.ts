@@ -155,6 +155,21 @@ test("managed options keep secrets out of projection metadata and restore native
   expect(openrouter.headers["X-Title"]).toBe("Open Clank")
 })
 
+test("MiMo managed options keep the leased connection and scrub projected auth", () => {
+  const result = Provider.applyManagedAdapterOptions(
+    metadata("xiaomi", "mimo-native"),
+    { ...api(), metadata: { base_url: "https://api.xiaomimimo.com/v1" } },
+    {
+      baseURL: "https://api.xiaomimimo.com/v1",
+      headers: { Authorization: "Bearer projected-secret", "x-api-key": "projected-secret" },
+    },
+  )
+  expect(result.baseURL).toBe("https://api.xiaomimimo.com/v1")
+  expect(result.headers.Authorization).toBeUndefined()
+  expect(result.headers["x-api-key"]).toBeUndefined()
+  expect(result.headers["X-Mimo-Source"]).toBe("openclank")
+})
+
 test("managed state rejects plugin family placeholders without a host connection marker", () => {
   expect(Provider.isManagedProjectedProviderEntry("xiaomi", { options: {} })).toBe(false)
   expect(

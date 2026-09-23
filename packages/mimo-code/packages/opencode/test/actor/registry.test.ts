@@ -105,6 +105,48 @@ describe("ActorRegistry", () => {
         expect(entry.contextMode).toBe("state")
       })
     })
+
+    test("round-trips host context and preserves it through terminal status", async () => {
+      await using tmp = await tmpdir({ git: true })
+      await withRegistry(tmp.path, async (rt) => {
+        const parent = await rt.runPromise(Session.Service.use((svc) => svc.create()))
+        const taskId = SessionID.descending()
+        const hostContext = {
+          accountID: "host-account-1",
+          grantID: "grant-1",
+          grantRevision: 4,
+          credentialRevision: 8,
+          chatID: "chat-1",
+          workspaceID: "workspace-1",
+          cwd: "/tmp/chat-1",
+          goalID: "goal-1",
+        }
+        const entry = await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.register({
+              sessionID: parent.id,
+              actorID: taskId,
+              mode: "subagent",
+              agent: "explore",
+              description: "Host context test",
+              contextMode: "none",
+              background: false,
+              lifecycle: "ephemeral",
+              hostContext,
+            }),
+          ),
+        )
+
+        expect(entry.hostContext).toEqual(hostContext)
+        await rt.runPromise(
+          ActorRegistry.Service.use((svc) =>
+            svc.updateStatus(parent.id, taskId, { status: "idle", lastOutcome: "success" }),
+          ),
+        )
+        const terminal = await rt.runPromise(ActorRegistry.Service.use((svc) => svc.get(parent.id, taskId)))
+        expect(terminal?.hostContext).toEqual(hostContext)
+      })
+    })
   })
 
   describe("get", () => {

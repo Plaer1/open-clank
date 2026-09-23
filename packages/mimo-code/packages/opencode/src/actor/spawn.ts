@@ -10,7 +10,7 @@ import { TaskRegistry } from "@/task/registry"
 import { TaskGate, MAX_TASK_GATE_SUBAGENT_REACT } from "@/task/gate"
 import { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
-import type { Actor, SpawnMode, ContextMode, ToolWhitelist, Lifecycle } from "@/actor/schema"
+import type { Actor, SpawnMode, ContextMode, ToolWhitelist, Lifecycle, ActorHostContext } from "@/actor/schema"
 import { deriveLiveness, DEFAULT_LIVENESS_STALL_MS } from "@/actor/schema"
 import * as ActorEvents from "@/actor/events"
 import { runTurn } from "@/actor/turn"
@@ -146,6 +146,8 @@ export interface SpawnInput {
   model?: { providerID: ProviderID; modelID: ModelID }
   /** User/config request before resolving groups and inheritance. */
   requestedModel?: string
+  /** Host-owned account/grant/credential/workspace binding for this actor. */
+  hostContext?: ActorHostContext
   /** Existing actor ID for an explicit continuation. */
   actorID?: string
   background: boolean
@@ -663,6 +665,10 @@ export const layer = Layer.effect(
       })
 
     const spawnPeer = Effect.fn("Actor.spawnPeer")(function* (input: SpawnInput) {
+      const parentHostContext = input.parentActorID
+        ? yield* actorReg.get(input.sessionID, input.parentActorID)
+        : undefined
+      const hostContext = input.hostContext ?? parentHostContext?.hostContext
       // When the caller gives the child its own directory (e.g. a worktree the
       // session tool created), bind the child's work fiber to that directory's
       // Instance so its file tools / write boundary are isolated there. A
@@ -705,6 +711,7 @@ export const layer = Layer.effect(
         tools: input.tools,
         requestedModel: input.requestedModel,
         effectiveModel: input.model,
+        hostContext,
       })
       if (input.forkContext) {
         forkContexts.set(child.id, input.forkContext) // peer's actorID === child.id
@@ -739,8 +746,17 @@ export const layer = Layer.effect(
         return yield* Effect.die(new Error(`Cannot resume running actor ${input.actorID}`))
       }
 
+      // A resumed actor keeps its durable host binding unless the caller
+      // explicitly supplies a replacement. This prevents a credential refresh
+      // or a sibling spawn from silently rebinding an existing actor.
+      const parentHostContext = input.parentActorID
+        ? yield* actorReg.get(input.parentSessionID ?? input.sessionID, input.parentActorID)
+        : undefined
+      const inheritedHostContext = input.hostContext ?? existing?.hostContext ?? parentHostContext?.hostContext
+
       if (existing) {
         yield* actorReg.updateModel(input.sessionID, actorID, input.requestedModel, input.model)
+        if (input.hostContext) yield* actorReg.updateHostContext(input.sessionID, actorID, input.hostContext)
       }
 
       if (!existing) {
@@ -759,6 +775,7 @@ export const layer = Layer.effect(
           tools: input.tools,
           requestedModel: input.requestedModel,
           effectiveModel: input.model,
+          hostContext: inheritedHostContext,
         })
       }
 

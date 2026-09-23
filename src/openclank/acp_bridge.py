@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -414,12 +415,14 @@ class ACPBridge:
         memory_provider: Any = None,
         session_map_path: Optional[Path] = None,
         managed_provider_context: Any = None,
+        session_workspace_adapter: Any = None,
     ) -> None:
         self._client = client
         self._cwd = cwd
         self._owner = owner
         self._memory_provider = memory_provider
         self._managed_provider_context = managed_provider_context
+        self._session_workspace_adapter = session_workspace_adapter
         self._delete_session_callback = None
         # Per-session turn state (only one active turn per session at a time)
         self._turns: Dict[str, _TurnState] = {}
@@ -431,6 +434,7 @@ class ACPBridge:
         # canonical desired selection is persisted on the Open Clank session.
         self._session_state: Dict[str, dict] = {}
         self._session_context: Dict[str, dict] = {}
+        self._session_context_locks: Dict[str, asyncio.Lock] = {}
         self.question_handler = QuestionHandler()
         from src.openclank.acp_terminal import ACPTerminalManager
 
@@ -486,6 +490,16 @@ class ACPBridge:
     def set_session_delete_callback(self, callback) -> None:
         self._delete_session_callback = callback
 
+    def set_session_workspace_adapter(self, callback) -> None:
+        """Install the host's per-chat workspace adapter.
+
+        The callback receives ``(chat_id, cwd)`` after the in-memory ACP
+        context is updated under the chat lock. It may be sync or async. This
+        keeps physical cwd, stable file-policy workspace, Copal, and memory
+        axes separate while ensuring the next turn sees one committed value.
+        """
+        self._session_workspace_adapter = callback
+
     async def cleanup_session(self, mimo_session_id: str) -> None:
         await self.terminal_manager.cleanup_session(mimo_session_id)
 
@@ -526,6 +540,10 @@ class ACPBridge:
             "current": self._current_config(config_options),
             "desired": previous.get("desired", {}),
             "last_root_operation_id": previous.get("last_root_operation_id"),
+            "workspace": previous.get("workspace"),
+            "file_policy_workspace": previous.get("file_policy_workspace"),
+            "copal_workspace": previous.get("copal_workspace"),
+            "memory_workspace": previous.get("memory_workspace"),
         }
 
     def _bind_canonical_session(
@@ -538,6 +556,11 @@ class ACPBridge:
             "odysseus_session_id": odysseus_session,
             "owner": owner,
             "workspace": self._cwd,
+            "cwd": self._cwd,
+            "physical_cwd": self._cwd,
+            "file_policy_workspace": self._cwd,
+            "copal_workspace": "default",
+            "memory_workspace": chat_workspace(),
             "incognito": False,
         }
         state = self._session_state.get(mimo_session)
@@ -557,6 +580,22 @@ class ACPBridge:
             state["desired"] = dict(state.get("current") or {})
         if previous.get("commands") and not state.get("commands"):
             state["commands"] = list(previous["commands"])
+        previous_workspace = str(previous.get("workspace") or "").strip()
+        if previous_workspace:
+            state["workspace"] = previous_workspace
+            self._session_context[mimo_session].update(
+                {
+                    "workspace": previous_workspace,
+                    "cwd": previous_workspace,
+                    "physical_cwd": previous_workspace,
+                    "file_policy_workspace": previous_workspace,
+                }
+            )
+        for key in ("file_policy_workspace", "copal_workspace", "memory_workspace"):
+            value = str(previous.get(key) or "").strip()
+            if value:
+                state[key] = value
+                self._session_context[mimo_session][key] = value
         self._persist_session_state(mimo_session)
 
     def _persist_session_state(self, mimo_session: str) -> None:
@@ -567,6 +606,9 @@ class ACPBridge:
         try:
             from src.openclank.transcript_projection import save_mimo_state
 
+            for key in ("workspace", "file_policy_workspace", "copal_workspace", "memory_workspace"):
+                if context.get(key):
+                    state[key] = context[key]
             saved = save_mimo_state(
                 context["odysseus_session_id"],
                 state,
@@ -670,6 +712,8 @@ class ACPBridge:
 
     async def _handle_session_update(self, mimo_session_id: str, update: dict) -> None:
         """Route a session/update notification to the right session's queue."""
+        if update.get("sessionUpdate") == "_openclank_session_cwd":
+            await self._apply_session_cwd(mimo_session_id, update.get("cwd"))
         if update.get("sessionUpdate") == "available_commands_update":
             state = self._session_state.setdefault(mimo_session_id, {})
             state["commands"] = list(update.get("availableCommands") or [])
@@ -677,6 +721,33 @@ class ACPBridge:
         q = self._queues.get(mimo_session_id)
         if q is not None:
             await q.put(update)
+
+    async def _apply_session_cwd(self, mimo_session_id: str, cwd: Any) -> None:
+        value = str(cwd or "").strip()
+        if not value or not os.path.isabs(value):
+            logger.warning("ignoring invalid session cwd update for %s", mimo_session_id)
+            return
+        context = self._session_context.setdefault(mimo_session_id, {})
+        lock = self._session_context_locks.setdefault(mimo_session_id, asyncio.Lock())
+        async with lock:
+            chat_id = str(context.get("odysseus_session_id") or mimo_session_id)
+            # Commit all host-visible axes together. Stable workspace identity,
+            # Copal namespace, and memory workspace are intentionally retained.
+            context.update(
+                {
+                    "workspace": value,
+                    "cwd": value,
+                    "physical_cwd": value,
+                }
+            )
+            state = self._session_state.setdefault(mimo_session_id, {})
+            state["workspace"] = value
+            self._persist_session_state(mimo_session_id)
+            callback = self._session_workspace_adapter
+            if callback is not None:
+                result = callback(chat_id, value)
+                if inspect.isawaitable(result):
+                    await result
 
     async def open_session(
         self,
@@ -762,11 +833,13 @@ class ACPBridge:
             except Exception as exc:
                 logger.warning("failed to persist session map: %s", exc)
             return new_id
+        restored_workspace = self.mapped_session_workspace(odysseus_session)
+        resume_cwd = str(cwd or restored_workspace or self._cwd).strip()
         mcp_servers = [
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
-                workspace=str(cwd or "").strip(),
+                workspace=resume_cwd,
                 authority_workspace_id=authority_workspace_id,
                 memory_enabled=with_memory,
                 copal_workspace=copal_workspace,
@@ -774,7 +847,7 @@ class ACPBridge:
             *(extra_mcp_servers or []),
         ]
         try:
-            result = await self._client.resume_session(target, cwd or self._cwd, mcp_servers=mcp_servers)
+            result = await self._client.resume_session(target, resume_cwd, mcp_servers=mcp_servers)
         except RPCError as e:
             # mimo doesn't know this session (state predates the isolated
             # MIMOCODE_HOME, or its store was wiped). The full chat history
@@ -835,17 +908,18 @@ class ACPBridge:
         odysseus_session IS the mimo session id. Re-attaches the standard
         life-tools server so the session has tools and a memory scope carrier.
         """
+        workspace = self.mapped_session_workspace(odysseus_session)
         mcp_servers = [
             lifetools_mcp_descriptor(
                 owner=self._owner,
                 session_id=odysseus_session,
-                workspace="",
+                workspace=workspace,
                 authority_workspace_id=authority_workspace_id,
                 memory_enabled=with_memory,
                 copal_workspace=copal_workspace,
             ),
         ]
-        await self._client.resume_session(mimo_session_id, self._cwd, mcp_servers=mcp_servers)
+        await self._client.resume_session(mimo_session_id, workspace, mcp_servers=mcp_servers)
 
     def _match_model(self, mimo_session: str, thesius_model: str) -> str:
         """Match a thesius model name to a mimo modelId.
@@ -893,10 +967,18 @@ class ACPBridge:
 
     def mapped_session_workspace(self, odysseus_session: str) -> str:
         mimo_session = self.mapped_session_id(odysseus_session)
-        return str(
-            self._session_context.get(mimo_session, {}).get("workspace")
-            or self._cwd
-        )
+        current = str(self._session_context.get(mimo_session, {}).get("workspace") or "").strip()
+        if current:
+            return current
+        try:
+            from src.openclank.transcript_projection import get_mimo_state
+
+            restored = str(get_mimo_state(odysseus_session).get("workspace") or "").strip()
+            if restored:
+                return restored
+        except Exception:
+            pass
+        return self._cwd
 
     def mapped_sessions(self) -> dict[str, str]:
         return dict(self._session_map)
@@ -993,6 +1075,14 @@ class ACPBridge:
 
         cwd: per-chat workspace override (else the bridge's global default).
         """
+        prior_mimo_session = self._session_map.get(odysseus_session)
+        prior_context = self._session_context.get(prior_mimo_session or "", {})
+        effective_cwd = str(
+            cwd
+            or prior_context.get("workspace")
+            or prior_context.get("cwd")
+            or self.mapped_session_workspace(odysseus_session)
+        ).strip()
         if odysseus_session in self._session_map and self._delete_session_callback:
             await self._delete_session_callback(odysseus_session)
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
@@ -1019,7 +1109,7 @@ class ACPBridge:
         envelope.setdefault("disabled_tools", []).extend(mcp_disabled)
         if incognito or auxiliary:
             mimo_session = await self.open_session(
-                cwd=cwd,
+                cwd=effective_cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
                 with_agent_tools=not auxiliary,
@@ -1030,7 +1120,12 @@ class ACPBridge:
             self._session_context[mimo_session] = {
                 "odysseus_session_id": odysseus_session,
                 "owner": owner if owner is not None else self._owner,
-                "workspace": cwd or self._cwd,
+                "workspace": effective_cwd,
+                "cwd": effective_cwd,
+                "physical_cwd": effective_cwd,
+                "file_policy_workspace": effective_cwd,
+                "memory_workspace": chat_workspace(),
+                "copal_workspace": copal_workspace,
                 "authority_workspace_id": authority_workspace_id,
                 "incognito": True,
                 "auxiliary": auxiliary,
@@ -1040,7 +1135,7 @@ class ACPBridge:
         else:
             mimo_session = await self.ensure_session(
                 odysseus_session,
-                cwd=cwd,
+                cwd=effective_cwd,
                 owner=owner,
                 extra_mcp_servers=extra_mcp_servers,
                 with_memory=memory_read_allowed,
@@ -1048,7 +1143,12 @@ class ACPBridge:
                 authority_workspace_id=authority_workspace_id,
             )
             self._session_context.setdefault(mimo_session, {}).update({
-                "workspace": cwd or self._cwd,
+                "workspace": effective_cwd,
+                "cwd": effective_cwd,
+                "physical_cwd": effective_cwd,
+                "file_policy_workspace": self._session_context.get(mimo_session, {}).get(
+                    "file_policy_workspace", effective_cwd
+                ),
                 "authority_workspace_id": authority_workspace_id,
                 "incognito": False,
                 "is_admin": bool(envelope.get("is_admin")),
@@ -1100,7 +1200,7 @@ class ACPBridge:
             record_projection(
                 snapshot,
                 mimo_session_id=mimo_session,
-                workspace=cwd or self._cwd,
+                workspace=effective_cwd,
                 endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
                 model=model or "openclank-engine",
                 turn_id=turn_id,
@@ -1130,7 +1230,7 @@ class ACPBridge:
                 odysseus_session,
                 "mode",
                 desired_mode,
-                cwd=cwd,
+                cwd=effective_cwd,
                 owner=owner,
             )
         except (ValueError, RPCError) as exc:
@@ -1199,7 +1299,7 @@ class ACPBridge:
         prompt_parts = _build_prompt_parts(
             messages,
             turn_id=turn_id,
-            workspace=cwd or self._cwd,
+            workspace=effective_cwd,
             authoritative_system=str(envelope.get("system_prompt") or ""),
         )
         prompt_meta = {"odysseus": envelope}
@@ -1453,6 +1553,12 @@ class ACPBridge:
 
         elif update_type == "available_commands_update":
             sses.append(f'data: {json.dumps({"type": "commands_update", "data": _sanitize_event_value(update)})}\n\n')
+
+        elif update_type == "_openclank_session_cwd":
+            # The notification handler commits this per-chat workspace before
+            # the update reaches the turn queue. Surface it for the current
+            # client turn without ever changing the process cwd.
+            sses.append(f'data: {json.dumps({"type": "session_cwd", "data": _sanitize_event_value(update)})}\n\n')
 
         elif update_type == "current_mode_update":
             sses.append(f'data: {json.dumps({"type": "mode_update", "data": _sanitize_event_value(update)})}\n\n')
