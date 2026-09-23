@@ -1110,14 +1110,30 @@ def test_oauth_callback_is_single_flight_across_concurrent_endpoint_requests(
     callback = f"/api/v1/providers/oauth/flows/{flow_id}/callback"
     payload = {"state": control.flows[flow_id]["state"], "code": "same-code"}
 
-    def complete():
+    def complete_json():
         return client.post(callback, json=payload)
 
+    def complete_browser():
+        return client.get(
+            "/api/v1/providers/oauth/callback",
+            params={
+                "flow_id": flow_id,
+                "state": payload["state"],
+                "code": payload["code"],
+            },
+        )
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        responses = list(executor.map(lambda _item: complete(), range(2)))
+        responses = list(
+            executor.map(
+                lambda index: complete_json() if index == 0 else complete_browser(),
+                range(2),
+            )
+        )
 
     assert [response.status_code for response in responses] == [200, 200]
-    assert {response.json()["status"] for response in responses} == {"complete"}
+    assert responses[0].json()["status"] == "complete"
+    assert "connected" in responses[1].text
     assert control.callback_calls == 1
     assert len(store.list_accounts(owner="alice", connection_id=connection.id)) == 1
 
