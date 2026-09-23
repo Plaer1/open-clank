@@ -236,6 +236,7 @@ def _publish_overlay(
                 require_missing=payload is not None and before is None,
                 mode=modes.get(relative),
                 history_context=history_context,
+                require_history=history_context is not None,
             )
         )
     if changes:

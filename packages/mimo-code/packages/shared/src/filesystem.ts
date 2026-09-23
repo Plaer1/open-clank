@@ -378,6 +378,7 @@ export namespace AppFileSystem {
           record.type = "file"
           record.size = bytes.byteLength
           record.sha256 = createHash("sha256").update(bytes).digest("hex")
+          record.content = bytes.toString("base64")
         }
         entries.push(record)
       }
@@ -407,7 +408,7 @@ export namespace AppFileSystem {
         before = await NFS.readFile(target)
         resourceType = "File"
       }
-      return { path: target, resource, before, resourceType, metadata: { mode: info.mode, size: info.size, modified_millis: Math.trunc(info.mtimeMs) } }
+      return { path: target, resource, before, resourceType, metadata: { mode: info.mode, size: resourceType === "Directory" ? null : info.size, modified_millis: Math.trunc(info.mtimeMs) } }
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error
       return { path: target, resource, before: undefined, resourceType: "File", metadata: { mode: null, size: null, modified_millis: null } }
@@ -475,7 +476,7 @@ export namespace AppFileSystem {
       return { context, actionId, before, targets }
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "before_failed", durable: false, coverage: "NoCapture", error: String(error) })
-      return undefined
+      throw new AtomicConflict(`history prepare failed before live mutation: ${String(error)}`)
     }
   }
 
@@ -516,6 +517,7 @@ export namespace AppFileSystem {
       context.status = Object.assign(context.status, { status: "complete", action_id: actionId, history_status: "complete", capture_phase: "complete", durable: true })
     } catch (error) {
       context.status = Object.assign(context.status, { status: "failed", action_id: actionId, history_status: "failed", capture_phase: "after_failed", durable: false, error: String(error) })
+      throw new AtomicConflict(`history reconciliation pending after committed mutation: ${String(error)}`)
     }
   }
 

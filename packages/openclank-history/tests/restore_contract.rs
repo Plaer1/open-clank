@@ -338,6 +338,32 @@ fn host_file_adapter_round_trips_mode_and_reconciles_after_reopen() {
 }
 
 #[test]
+fn directory_manifest_restores_recursive_files_and_links() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("tree");
+    std::fs::create_dir_all(path.join("nested")).unwrap();
+    std::fs::write(path.join("nested/data.bin"), b"directory-bytes").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("nested/data.bin", path.join("alias")).unwrap();
+    let receipt_root = root.path().join("receipts");
+    let mut provider = openclank_history::restore::FilesystemRestoreProvider::new_with_receipt_root(&path, &receipt_root);
+    let captured = provider.capture_current().unwrap();
+    assert_eq!(captured.host_metadata.resource_type.as_deref(), Some("Directory"));
+    std::fs::remove_dir_all(&path).unwrap();
+    provider
+        .apply_if_revision_idempotent_with_metadata(
+            "restore-directory",
+            None,
+            &captured.content,
+            Some(&captured.host_metadata),
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(path.join("nested/data.bin")).unwrap(), b"directory-bytes");
+    #[cfg(unix)]
+    assert_eq!(std::fs::read_link(path.join("alias")).unwrap().to_string_lossy(), "nested/data.bin");
+}
+
+#[test]
 fn host_receipts_are_hidden_and_collision_free_for_similar_extensions() {
     let root = tempdir().unwrap();
     let markdown = root.path().join("note.md");

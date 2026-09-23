@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 bytes = "1.11.1"
+base64 = "0.22.1"
 blake3 = "1.8.2"
 libc = "0.2"
 sha2 = "0.10"

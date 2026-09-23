@@ -405,6 +405,12 @@ async fn coordinator_faults_leave_durable_phase_markers_without_replaying_live_w
     assert_eq!(receipt.phase, ActionState::AfterCaptureFailed);
     assert_eq!(receipt.history_status, ActionState::Applied);
     assert_eq!(receipt.live_outcome, Some(LiveStatus::Committed));
+    let reused = begin(
+        reopened.catalog(),
+        request("after-fault-reuse", "replace", "actor"),
+    )
+    .unwrap();
+    assert!(matches!(reused, BeginResult::New(_)));
     let mut resolver_calls = 0;
     let reconciled = reopened
         .reconcile(|action| {

@@ -135,7 +135,7 @@ impl HistoryServiceHook {
                 kind: "recursive_directory".into(),
             }],
         };
-        Ok(Arc::new(Self {
+        let hook = Arc::new(Self {
             socket_path: socket_path.into(),
             actor_id,
             account_id,
@@ -146,7 +146,9 @@ impl HistoryServiceHook {
             statuses: Arc::new(Mutex::new(HashMap::new())),
             sequence: Arc::new(Mutex::new(0)),
             last_action: Arc::new(Mutex::new(None)),
-        }))
+        });
+        hook.reconcile_registry_journal();
+        Ok(hook)
     }
 
     fn next_action_id(&self) -> String {
@@ -459,9 +461,68 @@ impl HistoryServiceHook {
         }))?;
         Ok(())
     }
+
+    fn registry_journal_dir(&self) -> Option<PathBuf> {
+        self.authorized_roots
+            .first()
+            .map(|root| root.canonical_path.join(".openclank-registry-journal"))
+    }
+
+    fn write_registry_journal(&self, action_id: &str, commit: &RegistryCommit) -> Result<PathBuf, String> {
+        let directory = self
+            .registry_journal_dir()
+            .ok_or_else(|| "no authorized root for registry journal".to_owned())?;
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let path = directory.join(format!("{action_id}.json"));
+        let temporary = directory.join(format!(".{action_id}.tmp-{}", std::process::id()));
+        let payload = serde_json::to_vec(&RegistryJournal {
+            action_id: action_id.to_owned(),
+            commit: commit.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+        fs::write(&temporary, payload).map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
+        if let Ok(directory) = fs::File::open(&directory) {
+            let _ = directory.sync_all();
+        }
+        Ok(path)
+    }
+
+    fn apply_registry_commit(&self, commit: &RegistryCommit) -> Result<(), String> {
+        match commit {
+            RegistryCommit::Move {
+                source_id,
+                destination_id,
+                destination,
+            } => self.move_resource(
+                source_id,
+                (destination_id != source_id).then_some(destination_id.as_str()),
+                destination,
+            ),
+            RegistryCommit::Revoke { resource_id } => {
+                self.revoke_resource(resource_id, "resource deleted")
+            }
+        }
+    }
+
+    fn reconcile_registry_journal(&self) {
+        let Some(directory) = self.registry_journal_dir() else { return };
+        let Ok(entries) = fs::read_dir(directory) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(payload) = fs::read(&path) else { continue };
+            let Ok(journal) = serde_json::from_slice::<RegistryJournal>(&payload) else { continue };
+            if self.apply_registry_commit(&journal.commit).is_ok() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 enum RegistryCommit {
     Move {
         source_id: String,
@@ -471,6 +532,12 @@ enum RegistryCommit {
     Revoke {
         resource_id: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RegistryJournal {
+    action_id: String,
+    commit: RegistryCommit,
 }
 
 impl MutationCaptureHook for HistoryServiceHook {
@@ -632,6 +699,10 @@ impl MutationCaptureHook for HistoryServiceHook {
             created_resource_ids,
             registry_commit,
             resource_ids,
+            physical_paths: targets
+                .iter()
+                .map(|target| target.resource_id.clone())
+                .collect(),
         }))
     }
 
@@ -650,6 +721,7 @@ struct ServiceTicket {
     created_resource_ids: Vec<String>,
     registry_commit: Option<RegistryCommit>,
     resource_ids: Vec<String>,
+    physical_paths: Vec<PathBuf>,
 }
 
 impl MutationCaptureTicket for ServiceTicket {
@@ -688,16 +760,20 @@ impl MutationCaptureTicket for ServiceTicket {
         }
         let mut complete_entries = Vec::with_capacity(after.len());
         let mut staged_uploads = Vec::new();
-        for (item, resource_id) in after.iter().zip(self.resource_ids.iter()) {
+        for ((item, resource_id), physical_path) in after
+            .iter()
+            .zip(self.resource_ids.iter())
+            .zip(self.physical_paths.iter())
+        {
             let fingerprint = HistoryServiceHook::fingerprint(item.after.as_deref());
-            let (resource_type, metadata) = match fs::symlink_metadata(resource_id) {
+            let (resource_type, metadata) = match fs::symlink_metadata(physical_path) {
                 Ok(stat) if stat.file_type().is_symlink() => (
                     "Symlink",
-                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": {"target": fs::read_link(resource_id).ok().map(|target| target.to_string_lossy().into_owned())}}),
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": {"target": fs::read_link(physical_path).ok().map(|target| target.to_string_lossy().into_owned())}}),
                 ),
                 Ok(stat) if stat.is_dir() => (
                     "Directory",
-                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": {"manifest_digest": item.after.as_deref().map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))}}),
+                    json!({"mode": mode(&stat), "size": null, "modified_millis": modified_millis(&stat), "opaque": {"manifest_digest": item.after.as_deref().map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))}}),
                 ),
                 Ok(stat) => (
                     "File",
@@ -711,7 +787,7 @@ impl MutationCaptureTicket for ServiceTicket {
                 .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
             let mut entry = json!({
                 "resource_key": {"account_id": self.hook.account_id, "workspace_id": self.hook.workspace_id, "provider": "odysseus-files", "resource_id": resource_id},
-                "locator": {"display_name": Path::new(resource_id).file_name().map(|name| name.to_string_lossy()).unwrap_or_default(), "location_label": resource_id, "opaque_ref": resource_id},
+                "locator": {"display_name": physical_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(), "location_label": physical_path.to_string_lossy(), "opaque_ref": resource_id},
                 "existence": if item.after.is_some() { "Present" } else { "Absent" },
                 "resource_type": resource_type,
                 "metadata": metadata,
@@ -739,20 +815,14 @@ impl MutationCaptureTicket for ServiceTicket {
         }
         if result.is_ok() {
             if let Some(commit) = self.registry_commit.as_ref() {
-                let registry_result = match commit {
-                    RegistryCommit::Move {
-                        source_id,
-                        destination_id,
-                        destination,
-                    } => self.hook.move_resource(
-                        source_id,
-                        (destination_id != source_id).then_some(destination_id.as_str()),
-                        destination,
-                    ),
-                    RegistryCommit::Revoke { resource_id } => {
-                        self.hook.revoke_resource(resource_id, "resource deleted")
-                    }
-                };
+                let registry_result = self
+                    .hook
+                    .write_registry_journal(&self.action_id, commit)
+                    .and_then(|journal| {
+                        self.hook
+                            .apply_registry_commit(commit)
+                            .and_then(|_| fs::remove_file(journal).map_err(|error| error.to_string()))
+                    });
                 if let Err(error) = registry_result {
                     self.hook.set_status(
                         &self.action_id,
@@ -877,6 +947,7 @@ pub(crate) fn directory_manifest(path: &Path) -> Result<Vec<u8>, String> {
                 record["type"] = json!("file");
                 record["size"] = json!(bytes.len());
                 record["sha256"] = json!(format!("sha256:{}", encode_hex(&Sha256::digest(&bytes))));
+                record["content"] = json!(encode_base64(&bytes));
             }
             entries.push(record);
         }

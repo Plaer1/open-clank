@@ -502,7 +502,8 @@ class BashTool:
                         "kind": "DeclaredRootsBaseline",
                         "before": baseline_before,
                         "after": None,
-                        "honest_limit": "running process has no atomic after baseline yet",
+                        "capture_gate": "S03_command_mutation_capture_required",
+                        "honest_limit": "informational root baseline; arbitrary direct writes are not captured",
                     },
                 }
             await asyncio.sleep(0 if not frame["eof"] else 0.1)
@@ -521,7 +522,8 @@ class BashTool:
                     "kind": "DeclaredRootsBaseline",
                     "before": baseline_before,
                     "after": _declared_root_receipt(workspace),
-                    "honest_limit": "baseline cannot reconstruct writes by concurrent external writers",
+                    "capture_gate": "S03_command_mutation_capture_required",
+                    "honest_limit": "informational root baseline; arbitrary direct writes are not captured",
                 },
             }
         return {
@@ -536,7 +538,8 @@ class BashTool:
                 "kind": "DeclaredRootsBaseline",
                 "before": baseline_before,
                 "after": _declared_root_receipt(workspace),
-                "honest_limit": "baseline cannot reconstruct writes by concurrent external writers",
+                "capture_gate": "S03_command_mutation_capture_required",
+                "honest_limit": "informational root baseline; arbitrary direct writes are not captured",
             },
         }
 
@@ -593,7 +596,8 @@ class PythonTool:
                     "kind": "DeclaredRootsBaseline",
                     "before": baseline_before,
                     "after": _declared_root_receipt(cwd),
-                    "honest_limit": "baseline cannot reconstruct writes by concurrent external writers",
+                    "capture_gate": "S03_command_mutation_capture_required",
+                    "honest_limit": "informational root baseline; arbitrary direct writes are not captured",
                 },
             }
         output = stdout.rstrip()
@@ -610,6 +614,7 @@ class PythonTool:
                 "kind": "DeclaredRootsBaseline",
                 "before": baseline_before,
                 "after": _declared_root_receipt(cwd),
-                "honest_limit": "baseline cannot reconstruct writes by concurrent external writers",
+                "capture_gate": "S03_command_mutation_capture_required",
+                "honest_limit": "informational root baseline; arbitrary direct writes are not captured",
             },
         }

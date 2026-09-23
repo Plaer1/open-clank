@@ -241,6 +241,7 @@ class AtomicFileChange(NamedTuple):
     mode: Optional[int] = None
     action_id: Optional[str] = None
     history_context: Optional[HistoryContext] = None
+    require_history: bool = False
 
 
 def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
@@ -279,6 +280,11 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
         recoverability_requested = any(
             change.history_context is not None for change in changes
         ) and len(changes) > 1
+        history_required = any(change.require_history for change in changes)
+        if history_required and (history is None or not history.available):
+            raise AtomicWriteConflict(
+                "history_prepare_required: this mutation cannot publish without durable history"
+            )
         if recoverability_requested and (history is None or not history.available):
             raise AtomicWriteConflict(
                 "history_prepare_required: recoverable multi-resource mutation was not durably prepared"

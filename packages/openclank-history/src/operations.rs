@@ -1209,6 +1209,7 @@ impl HistoryCoordinator {
                 ActionState::CapturingAfter,
                 ActionState::AfterCaptureFailed,
             );
+            self.release_after_failure(action_id, &lease);
             return Err("injected failure after CapturingAfter marker".into());
         }
         #[cfg(feature = "test_faults")]
@@ -1310,6 +1311,15 @@ impl HistoryCoordinator {
         if supplied != declared || supplied.len() != entries.len() {
             return Err("after-state batch does not match prepared resources".into());
         }
+        if let Some(live_fingerprint) = action.live.as_ref().and_then(|live| live.fingerprint.as_deref()) {
+            let primary = entries
+                .iter()
+                .find(|entry| entry.resource_key == action.resource_key)
+                .ok_or("after-state batch is missing the primary resource")?;
+            if primary.fingerprint != live_fingerprint {
+                return Err("primary live fingerprint does not match submitted after-state".into());
+            }
+        }
         let prepared = action
             .mutation_batch
             .as_ref()
@@ -1337,6 +1347,62 @@ impl HistoryCoordinator {
                     entry.resource_key.resource_id
                 )
                 .into());
+            }
+            let expected_fingerprint = entry
+                .content
+                .as_ref()
+                .map(|content| format!("sha256:{:x}:{}", Sha256::digest(content), content.len()))
+                .unwrap_or_else(|| "missing".into());
+            if entry.fingerprint != expected_fingerprint {
+                return Err(format!(
+                    "after-state fingerprint does not match exact payload for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            let outcome_revision = entry.outcome.revision.as_ref().ok_or_else(|| {
+                format!("after-state outcome is missing a revision for {}", entry.resource_key.resource_id)
+            })?;
+            let revision_matches = match outcome_revision {
+                Revision::Opaque { value, .. } if value == &entry.fingerprint => true,
+                Revision::Opaque { value, .. } => prepared
+                    .as_ref()
+                    .and_then(|resources| resources.get(&entry.resource_key))
+                    .and_then(|resource| resource.expected_revision.as_ref())
+                    .is_some_and(|expected| matches!(expected, Revision::Opaque { value: expected_value, .. } if expected_value == value)),
+            };
+            if !revision_matches {
+                return Err(format!(
+                    "after-state outcome revision is not bound to the payload or expected revision for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present {
+                match entry.resource_type {
+                    ResourceType::File | ResourceType::Symlink => {
+                        if entry.metadata.size != entry.content.as_ref().map(|content| content.len() as u64) {
+                            return Err(format!(
+                                "after-state file metadata size is invalid for {}",
+                                entry.resource_key.resource_id
+                            ).into());
+                        }
+                    }
+                    ResourceType::Directory => {
+                        if entry.metadata.size.is_some() {
+                            return Err(format!(
+                                "after-state directory metadata size is not a file size for {}",
+                                entry.resource_key.resource_id
+                            ).into());
+                        }
+                    }
+                    ResourceType::Other => {
+                        return Err(format!(
+                            "after-state resource type is unsupported for {}",
+                            entry.resource_key.resource_id
+                        ).into());
+                    }
+                }
             }
             if let Some(content_digest) = entry.coverage.content_digest.as_deref() {
                 let content = entry.content.as_ref().ok_or_else(|| {
