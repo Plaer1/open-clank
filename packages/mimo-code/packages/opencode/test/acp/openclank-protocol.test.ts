@@ -171,11 +171,15 @@ test("managed catalog adds only uniform safe models.dev API families", async () 
       url: "",
       settings: {},
     },
+    accountID: "account-anthropic",
+    credentialRevision: 1,
     authMethod: "api_key",
     credential: { type: "api", key: "alpha-key" },
   })
   expect(account.authClass).toBe("metered")
   expect(account.modelRoutes.map((route) => route.modelID)).toEqual(["alpha"])
+  expect(account.modelRoutes).toEqual(account.discovery.models)
+  expect(account.discovery).toMatchObject({ status: "complete", authoritative: true, freshness: "fresh" })
 
   await expect(
     control.connectionValidate({
@@ -186,6 +190,48 @@ test("managed catalog adds only uniform safe models.dev API families", async () 
       settings: {},
     }),
   ).rejects.toThrow("provider adapter is not supported")
+})
+
+test("Copilot enterprise discovery uses the normalized trusted host", async () => {
+  let requested = ""
+  const fetcher = (async (input: URL | RequestInfo) => {
+    requested = String(input)
+    return new Response(JSON.stringify({ data: [] }))
+  }) as unknown as typeof fetch
+  const request = subscriptionRequest("github-copilot", "copilot-chat")
+  request.connection.settings = { enterpriseUrl: "https://ghe.example.com/" }
+  request.credential = { ...request.credential, enterpriseUrl: "ghe.example.com" } as typeof request.credential
+  await new ControlPlane(emptyAuth, () => 1_700_000_000_008, fetcher).accountValidate(request)
+  expect(requested).toBe("https://copilot-api.ghe.example.com/models")
+  await expect(
+    new ControlPlane(emptyAuth, () => 1_700_000_000_009, fetcher).accountValidate({
+      ...request,
+      connection: { ...request.connection, settings: { enterpriseUrl: "https://ghe.example.com/path" } },
+    }),
+  ).rejects.toThrow("must contain only a host")
+  await expect(
+    new ControlPlane(emptyAuth, () => 1_700_000_000_010, fetcher).accountValidate({
+      ...request,
+      connection: { ...request.connection, settings: { enterpriseUrl: "other.example.com" } },
+    }),
+  ).rejects.toThrow("does not match the OAuth credential")
+})
+
+test("hostile Copilot enterprise hosts are rejected before credentialed fetch", async () => {
+  let calls = 0
+  let authorization = ""
+  const fetcher = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    calls++
+    authorization = new Headers(init?.headers).get("Authorization") ?? ""
+    return new Response(JSON.stringify({ data: [] }))
+  }) as unknown as typeof fetch
+  const request = subscriptionRequest("github-copilot", "copilot-chat")
+  request.connection.settings = { enterpriseUrl: "https://169.254.169.254" }
+  await expect(new ControlPlane(emptyAuth, () => 1_700_000_000_011, fetcher).accountValidate(request)).rejects.toThrow(
+    "reserved or unsafe",
+  )
+  expect(calls).toBe(0)
+  expect(authorization).toBe("")
 })
 
 test("provider model discovery rejects literal metadata and link-local destinations", () => {
@@ -299,6 +345,8 @@ test("migrated DeepSeek and Xiaomi API lanes are canonical managed families", as
       billingLane: "metered_api",
       settings: {},
     },
+    accountID: "account-xiaomi",
+    credentialRevision: 1,
     authMethod: "api_key",
     credential: { type: "api", key: "migrated-xiaomi-key" },
   })
@@ -325,6 +373,8 @@ test("protected local account discovery uses an authorization header", async () 
       url: "http://127.0.0.1:8080",
       settings: {},
     },
+    accountID: "account-local",
+    credentialRevision: 1,
     authMethod: "api_key",
     credential: { type: "api", key: secret },
   })
@@ -332,4 +382,183 @@ test("protected local account discovery uses an authorization header", async () 
   expect(observedAuthorization).toBe(`Bearer ${secret}`)
   expect(result.authClass).toBe("local")
   expect(result.modelRoutes.map((item) => item.modelID)).toEqual(["private-model"])
+})
+
+function oauthCredential() {
+  return {
+    type: "oauth" as const,
+    refresh: "refresh-secret",
+    access: "access-secret",
+    expires: Date.now() + 60_000,
+    accountId: "provider-account-a",
+  }
+}
+
+function subscriptionRequest(familyID: string, adapterID: string, url?: string) {
+  return {
+    connection: {
+      familyID,
+      adapterID,
+      kind: "subscription",
+      billingLane: "subscription",
+      ...(url === undefined ? {} : { url }),
+      settings: {},
+    },
+    authMethod: "oauth",
+    credential: oauthCredential(),
+    accountID: "host-account-a",
+    credentialRevision: 7,
+  }
+}
+
+test("subscription discovery is credential-aware, excludes hidden rows, and accepts new Codex IDs", async () => {
+  let authorization = ""
+  let accountHeader = ""
+  const fetcher = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("Authorization") ?? ""
+    accountHeader = new Headers(init?.headers).get("ChatGPT-Account-Id") ?? ""
+    return new Response(
+      JSON.stringify({
+        models: [
+          { slug: "account-model-a", visibility: "show" },
+          { slug: "hidden-model", visibility: "hidden" },
+          { slug: "new-account-model" },
+        ],
+      }),
+    )
+  }) as unknown as typeof fetch
+  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_000, fetcher)
+
+  const result = await control.accountValidate(subscriptionRequest("openai", "openai-responses"))
+
+  expect(authorization).toBe("Bearer access-secret")
+  expect(accountHeader).toBe("provider-account-a")
+  expect(result.accountID).toBe("host-account-a")
+  expect(result.credentialRevision).toBe(7)
+  expect(result.discovery).toMatchObject({
+    status: "complete",
+    accountID: "host-account-a",
+    credentialRevision: 7,
+    authoritative: true,
+    freshness: "fresh",
+    provenance: { source: "codex-account-models", observedAt: 1_700_000_000_000 },
+  })
+  expect(result.modelRoutes.map((item) => item.modelID)).toEqual(["account-model-a", "new-account-model"])
+})
+
+test("subscription discovery marks malformed mixed Copilot rows partial and uses refresh auth", async () => {
+  let authorization = ""
+  const fetcher = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("Authorization") ?? ""
+    return new Response(
+      JSON.stringify({
+        data: [
+          { id: "copilot-new", name: "Copilot New", capabilities: {} },
+          { id: 42 },
+          { id: "hidden", model_picker_enabled: false, capabilities: {} },
+        ],
+      }),
+    )
+  }) as unknown as typeof fetch
+  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_001, fetcher)
+
+  const result = await control.accountValidate(subscriptionRequest("github-copilot", "copilot-chat"))
+
+  expect(authorization).toBe("Bearer refresh-secret")
+  expect(result.discovery).toMatchObject({ status: "partial", errorCode: "discovery_partial", authoritative: false })
+  expect(result.discovery.models.map((item) => item.modelID)).toEqual(["copilot-new"])
+})
+
+test("a valid empty subscription inventory is authoritative and distinct from failure", async () => {
+  const fetcher = (async () => new Response(JSON.stringify({ data: [] }))) as unknown as typeof fetch
+  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_002, fetcher)
+
+  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+
+  expect(result.discovery).toMatchObject({ status: "complete", authoritative: true, models: [] })
+  expect("errorCode" in result.discovery).toBe(false)
+  expect(result.modelRoutes).toEqual([])
+})
+
+test("subscription discovery never falls back to the frozen global catalog", async () => {
+  const fetcher = (async () => new Response(JSON.stringify({ data: [] }), { status: 503 })) as unknown as typeof fetch
+  const control = new ControlPlane(
+    {
+      ...emptyAuth,
+      modelCatalog: async () => ({
+        xai: {
+          id: "xai",
+          name: "xAI",
+          env: [],
+          models: { frozen: catalogModel("frozen") },
+        },
+      }),
+    },
+    () => 1_700_000_000_003,
+    fetcher,
+  )
+
+  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+
+  expect(result.discovery.status).toBe("unavailable")
+  expect(result.discovery.errorCode).toBe("discovery_unavailable")
+  expect(result.modelRoutes).toEqual([])
+})
+
+test("discovery classifies malformed JSON, auth failure, throttling and oversized inventories without echoing secrets", async () => {
+  const cases = [
+    { status: 200, body: "not-json", expected: "discovery_unavailable" },
+    { status: 401, body: "access-secret", expected: "reauth_required" },
+    { status: 403, body: "refresh-secret", expected: "reauth_required" },
+    { status: 429, body: "access-secret", expected: "discovery_unavailable" },
+  ] as const
+  for (const item of cases) {
+    const fetcher = (async () => new Response(item.body, { status: item.status })) as unknown as typeof fetch
+    const control = new ControlPlane(emptyAuth, () => 1_700_000_000_004, fetcher)
+    const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+    expect(result.discovery.status === "reauth_required" ? "reauth_required" : result.discovery.errorCode).toBe(item.expected)
+    expect(JSON.stringify(result.discovery)).not.toContain("secret")
+  }
+})
+
+test("discovery caps account model inventories at 4096 routes", async () => {
+  const models = Array.from({ length: 4_097 }, (_, index) => ({ id: `new-model-${index}` }))
+  const fetcher = (async () => new Response(JSON.stringify({ data: models }))) as unknown as typeof fetch
+  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_005, fetcher)
+
+  const result = await control.accountValidate(subscriptionRequest("xai", "xai-responses", "https://xai.example"))
+
+  expect(result.discovery.status).toBe("partial")
+  expect(result.discovery.errorCode).toBe("discovery_partial")
+  expect(result.discovery.models).toHaveLength(4_096)
+})
+
+test("discovery timeout and bounded response bodies are unavailable without secrets", async () => {
+  let aborted = false
+  const timeoutFetcher = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+    return await new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      signal?.addEventListener(
+        "abort",
+        () => {
+          aborted = true
+          reject(new DOMException("timed out", "TimeoutError"))
+        },
+        { once: true },
+      )
+    })
+  }) as unknown as typeof fetch
+  const timedOut = await new ControlPlane(emptyAuth, () => 1_700_000_000_006, timeoutFetcher, 1).accountValidate(
+    subscriptionRequest("xai", "xai-responses", "https://xai.example"),
+  )
+  expect(aborted).toBe(true)
+  expect(timedOut.discovery).toMatchObject({ status: "unavailable", errorCode: "discovery_unavailable", freshness: "unknown" })
+  expect(JSON.stringify(timedOut.discovery)).not.toContain("secret")
+
+  const oversized = "{" + "x".repeat(2 * 1024 * 1024) + "}"
+  const bodyFetcher = (async () => new Response(oversized)) as unknown as typeof fetch
+  const tooLarge = await new ControlPlane(emptyAuth, () => 1_700_000_000_007, bodyFetcher).accountValidate(
+    subscriptionRequest("xai", "xai-responses", "https://xai.example"),
+  )
+  expect(tooLarge.discovery).toMatchObject({ status: "unavailable", errorCode: "discovery_unavailable" })
 })

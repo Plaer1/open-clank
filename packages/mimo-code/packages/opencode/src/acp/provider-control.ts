@@ -6,6 +6,7 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { ModelsDev, Provider, ProviderAuth } from "@/provider"
 import { ProviderID } from "@/provider/schema"
 import type { OpenClankManagedProtocol } from "./openclank-protocol"
+import { parseCodexCatalog, parseCopilotCatalog, parseGenericCatalog, type ParsedDiscovery } from "./provider-discovery"
 
 const FLOW_TTL_MS = 10 * 60 * 1000
 const DISCOVERY_TIMEOUT_MS = 5_000
@@ -173,6 +174,8 @@ const services: AuthServices = {
 
 type ProviderModelRoute = OpenClankManagedProtocol.ConnectionValidationResult["modelRoutes"][number]
 type Fetcher = typeof globalThis.fetch
+type DiscoveryStatus = "complete" | "unavailable" | "partial" | "reauth_required"
+type DiscoveryFreshness = "fresh" | "stale" | "unknown"
 
 type OAuthMode = "add" | "reauth"
 type OAuthState = "pending" | "running" | "complete" | "failed" | "cancelled" | "expired"
@@ -305,6 +308,18 @@ function normalizedURL(value: unknown, kind: ConnectionKind, allowEmpty = false)
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "")
   return parsed.toString().replace(/\/$/, "")
+}
+
+function normalizedEnterpriseHost(value: unknown): string {
+  const raw = text(value, "provider enterprise URL", 2048)
+  const candidate = raw.includes("://") ? raw : `https://${raw}`
+  const normalized = normalizedURL(candidate, "official")
+  if (!normalized) throw new ProviderControlError("provider enterprise URL is invalid")
+  const parsed = new URL(normalized)
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash || parsed.username || parsed.password) {
+    throw new ProviderControlError("provider enterprise URL must contain only a host")
+  }
+  return parsed.host
 }
 
 function localCatalogHost(value: string): boolean {
@@ -479,32 +494,14 @@ async function boundedJSON(response: Response): Promise<unknown> {
   return JSON.parse(source)
 }
 
-function discoveredModelIDs(value: unknown): string[] {
-  const payload = object(value, "provider model catalog")
-  const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []
-  const result: string[] = []
-  const seen = new Set<string>()
-  for (const raw of rows) {
-    if (result.length >= MAX_DISCOVERED_MODELS) break
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue
-    const row = raw as Record<string, unknown>
-    const candidate = row.id ?? row.name ?? row.model
-    if (typeof candidate !== "string") continue
-    const id = candidate.trim()
-    if (!id || id.length > 256 || /[\s\0]/u.test(id) || seen.has(id)) continue
-    seen.add(id)
-    result.push(id)
-  }
-  return result
-}
-
 async function liveModelRoutes(
   connection: ReturnType<typeof validateConnection>,
   credential: Auth.Info | undefined,
   fetcher: Fetcher,
 ): Promise<ProviderModelRoute[]> {
   const headers = new Headers({ Accept: "application/json" })
-  const token = credentialToken(credential)
+  const token =
+    credentialToken(credential)
   if (token) headers.set("Authorization", `Bearer ${token}`)
   for (const url of discoveryURLs(connection)) {
     try {
@@ -514,25 +511,145 @@ async function liveModelRoutes(
         signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
       })
       if (!response.ok) continue
-      const ids = discoveredModelIDs(await boundedJSON(response))
-      if (ids.length === 0) continue
-      return ids.map((modelID) => ({
-        modelID,
-        displayName: modelID,
-        operations: ["chat.stream", "chat.complete"],
-        capabilities: { family: connection.familyID },
-        provenance: {
-          authority: "managed-engine",
-          catalog: "provider-model-list",
-          familyID: connection.familyID,
-        },
-      }))
+      const parsed = parseGenericCatalog(await boundedJSON(response))
+      if (parsed.models.length === 0) continue
+      return parsed.models.slice(0, MAX_DISCOVERED_MODELS).map((model) => ({
+        ...model,
+        capabilities: { ...model.capabilities, family: connection.familyID },
+        provenance: { ...model.provenance, familyID: connection.familyID },
+      })) as ProviderModelRoute[]
     } catch {
       // Connection creation remains possible while a local server is stopped
       // or while a protected endpoint still needs its optional account.
     }
   }
   return []
+}
+
+function subscriptionDiscoveryURLs(connection: ReturnType<typeof validateConnection>, credential: Auth.Info): string[] {
+  if (connection.familyID === "openai" && connection.adapterID === "openai-responses") {
+    return ["https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"]
+  }
+  if (connection.familyID === "github-copilot" && connection.adapterID === "copilot-chat") {
+    const enterprise = credential.type === "oauth" ? credential.enterpriseUrl : undefined
+    if (enterprise) {
+      const domain = normalizedEnterpriseHost(enterprise)
+      return [`https://copilot-api.${domain}/models`]
+    }
+    return ["https://api.githubcopilot.com/models"]
+  }
+  if (connection.familyID === "xai" && connection.adapterID === "xai-responses") {
+    return ["https://api.x.ai/v1/models"]
+  }
+  if (connection.familyID === "anthropic" && connection.adapterID === "anthropic-messages") {
+    return ["https://api.anthropic.com/v1/models"]
+  }
+  return []
+}
+
+function parseAccountCatalog(
+  connection: ReturnType<typeof validateConnection>,
+  value: unknown,
+): ParsedDiscovery {
+  if (connection.familyID === "openai" && connection.adapterID === "openai-responses") return parseCodexCatalog(value)
+  if (connection.familyID === "github-copilot" && connection.adapterID === "copilot-chat") return parseCopilotCatalog(value)
+  return parseGenericCatalog(value)
+}
+
+function discoverySource(connection: ReturnType<typeof validateConnection>): string {
+  if (connection.familyID === "openai" && connection.adapterID === "openai-responses") return "codex-account-models"
+  if (connection.familyID === "github-copilot" && connection.adapterID === "copilot-chat") return "copilot-account-models"
+  return "provider-account-models"
+}
+
+function discoveryResult(
+  accountID: string,
+  credentialRevision: number,
+  status: DiscoveryStatus,
+  source: string,
+  observedAt: number,
+  models: ProviderModelRoute[] = [],
+  freshness: DiscoveryFreshness = "unknown",
+  errorCode?: "discovery_unavailable" | "discovery_partial" | "reauth_required",
+) {
+  return {
+    status,
+    accountID,
+    credentialRevision,
+    models,
+    authoritative: status === "complete",
+    provenance: { source, observedAt },
+    freshness,
+    ...(errorCode ? { errorCode } : {}),
+  }
+}
+
+async function accountDiscovery(
+  connection: ReturnType<typeof validateConnection>,
+  credential: Auth.Info,
+  accountID: string,
+  credentialRevision: number,
+  fetcher: Fetcher,
+  now: () => number,
+  timeoutMs: number,
+): Promise<ReturnType<typeof discoveryResult>> {
+  const source = discoverySource(connection)
+  const urls = connection.kind === "subscription" ? subscriptionDiscoveryURLs(connection, credential) : discoveryURLs(connection)
+  if (urls.length === 0) {
+    return discoveryResult(accountID, credentialRevision, "unavailable", source, now(), [], "unknown", "discovery_unavailable")
+  }
+
+  const headers = new Headers({ Accept: "application/json" })
+  const token =
+    connection.familyID === "github-copilot" && credential.type === "oauth"
+      ? credential.refresh
+      : credentialToken(credential)
+  if (token) headers.set("Authorization", `Bearer ${token}`)
+  if (connection.familyID === "openai" && connection.kind === "subscription") {
+    headers.set("Origin", "https://chatgpt.com")
+    headers.set("Referer", "https://chatgpt.com/codex")
+    if (credential.type === "oauth" && credential.accountId) {
+      headers.set("ChatGPT-Account-Id", credential.accountId)
+    }
+  }
+
+  let sawResponse = false
+  for (const url of urls) {
+    try {
+      const response = await fetcher(url, {
+        headers,
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      sawResponse = true
+      if (response.status === 401 || response.status === 403) {
+        return discoveryResult(accountID, credentialRevision, "reauth_required", source, now(), [], "fresh", "reauth_required")
+      }
+      if (response.status === 429 || !response.ok) continue
+      const parsed = parseAccountCatalog(connection, await boundedJSON(response))
+      const overflow = parsed.models.length > MAX_DISCOVERED_MODELS
+      const models = parsed.models.slice(0, MAX_DISCOVERED_MODELS).map((model) => ({
+        ...model,
+        provenance: { ...model.provenance, familyID: connection.familyID },
+      })) as ProviderModelRoute[]
+      if (parsed.invalidRows > 0 || overflow) {
+        return discoveryResult(accountID, credentialRevision, "partial", source, now(), models, "fresh", "discovery_partial")
+      }
+      return discoveryResult(accountID, credentialRevision, "complete", source, now(), models, "fresh")
+    } catch {
+      // The caller retains S06's last-good inventory on transport or parse failure.
+    }
+  }
+  return discoveryResult(
+    accountID,
+    credentialRevision,
+    "unavailable",
+    source,
+    now(),
+    [],
+    sawResponse ? "stale" : "unknown",
+    "discovery_unavailable",
+  )
 }
 
 function validateConnectionWithFamilies(value: unknown, families: ReadonlyMap<string, FamilyDefinition>) {
@@ -555,6 +672,9 @@ function validateConnectionWithFamilies(value: unknown, families: ReadonlyMap<st
   }
   const settings = input.settings === undefined ? {} : object(input.settings, "provider settings")
   assertNoSecretSettings(settings)
+  if (familyID === "github-copilot" && settings.enterpriseUrl !== undefined) {
+    normalizedEnterpriseHost(settings.enterpriseUrl)
+  }
   const isLocalExecutor = familyID === "local-executor" && adapterID === "openclank-local-executor"
   const requestedURL = input.url === "" ? undefined : input.url
   const url = normalizedURL(requestedURL ?? family.defaultURL, kind, isLocalExecutor)
@@ -658,33 +778,74 @@ function validateAccountWithFamilies(value: unknown, families: ReadonlyMap<strin
   const connection = validateConnectionWithFamilies(input.connection, families)
   const authMethod = text(input.authMethod, "provider auth method", 32)
   const credential = object(input.credential, "provider credential")
+  const accountID = text(input.accountID, "provider account ID", 256)
+  const credentialRevision = integer(input.credentialRevision, "provider credential revision", 1)
   const family = families.get(connection.familyID)!
-  if (authMethod !== "api_key" || !family.apiKey) {
-    throw new ProviderControlError("this provider connection does not accept API-key accounts")
+  if (authMethod === "api_key") {
+    if (!family.apiKey) throw new ProviderControlError("this provider connection does not accept API-key accounts")
+    if (connection.billingLane === "subscription") {
+      throw new ProviderControlError("API keys cannot use the subscription billing lane")
+    }
+    if (credential.type !== "api") throw new ProviderControlError("provider credential type is not supported")
+    const key = text(credential.key, "provider API key", 131_072)
+    const metadata = credential.metadata
+    if (metadata !== undefined) {
+      const values = object(metadata, "provider credential metadata")
+      for (const [name, item] of Object.entries(values)) {
+        text(name, "provider credential metadata name", 128)
+        text(item, "provider credential metadata value", 2048)
+      }
+    }
+    const normalizedCredential: Auth.Info = {
+      type: "api",
+      key,
+      ...(metadata === undefined ? {} : { metadata: metadata as Record<string, string> }),
+    }
+    return {
+      authMethod: "api_key" as const,
+      authClass: authClass(connection.billingLane),
+      credential: normalizedCredential,
+      accountID,
+      credentialRevision,
+      safeIdentity: safeIdentity(normalizedCredential),
+      modelRoutes: [],
+      connection,
+    }
   }
-  if (connection.billingLane === "subscription") {
-    throw new ProviderControlError("API keys cannot use the subscription billing lane")
+  if (authMethod !== "oauth") throw new ProviderControlError("provider auth method is not supported")
+  if (connection.billingLane !== "subscription" || credential.type !== "oauth") {
+    throw new ProviderControlError("OAuth accounts require a subscription connection")
   }
-  if (credential.type !== "api") throw new ProviderControlError("provider credential type is not supported")
-  const key = text(credential.key, "provider API key", 131_072)
-  const metadata = credential.metadata
-  if (metadata !== undefined) {
-    const values = object(metadata, "provider credential metadata")
-    for (const [name, item] of Object.entries(values)) {
-      text(name, "provider credential metadata name", 128)
-      text(item, "provider credential metadata value", 2048)
+  const refresh = text(credential.refresh, "provider OAuth refresh token", 131_072)
+  const access = text(credential.access, "provider OAuth access token", 131_072)
+  if (typeof credential.expires !== "number" || !Number.isFinite(credential.expires)) {
+    throw new ProviderControlError("provider OAuth expiry is invalid")
+  }
+  const normalizedCredential: Auth.Info = {
+    type: "oauth",
+    refresh,
+    access,
+    expires: credential.expires,
+    ...(credential.accountId === undefined ? {} : { accountId: text(credential.accountId, "provider OAuth account", 256) }),
+    ...(credential.enterpriseUrl === undefined
+      ? {}
+      : { enterpriseUrl: normalizedEnterpriseHost(credential.enterpriseUrl) }),
+  }
+  if (connection.familyID === "github-copilot" && connection.settings.enterpriseUrl !== undefined) {
+    const configuredEnterprise = normalizedEnterpriseHost(connection.settings.enterpriseUrl)
+    if (configuredEnterprise !== normalizedCredential.enterpriseUrl) {
+      throw new ProviderControlError("provider enterprise URL does not match the OAuth credential")
     }
   }
   return {
-    authMethod: "api_key" as const,
+    authMethod: "oauth" as const,
     authClass: authClass(connection.billingLane),
-    credential: {
-      type: "api" as const,
-      key,
-      ...(metadata === undefined ? {} : { metadata: metadata as Record<string, string> }),
-    },
-    safeIdentity: {},
+    credential: normalizedCredential,
+    accountID,
+    credentialRevision,
+    safeIdentity: safeIdentity(normalizedCredential),
     modelRoutes: [],
+    connection,
   }
 }
 
@@ -768,6 +929,7 @@ export class ControlPlane {
     private readonly auth: AuthServices = services,
     private readonly now = () => Date.now(),
     private readonly fetcher: Fetcher = globalThis.fetch,
+    private readonly discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS,
   ) {}
 
   private async models(
@@ -781,8 +943,7 @@ export class ControlPlane {
       connection.familyID === "openai-compatible" ||
       connection.kind === "custom_gateway"
     if (live) {
-      const discovered = await liveModelRoutes(connection, credential, this.fetcher)
-      if (discovered.length > 0) return discovered
+      return liveModelRoutes(connection, credential, this.fetcher)
     }
     const catalog: Record<string, ModelsDev.Provider> =
       modelCatalog ?? (await this.auth.modelCatalog().catch(() => ({})))
@@ -800,10 +961,40 @@ export class ControlPlane {
     const modelCatalog = await this.auth.modelCatalog().catch(() => ({}))
     const families = familyMap(modelCatalog)
     const account = validateAccountWithFamilies(input, families)
-    const connection = validateConnectionWithFamilies(input.connection, families)
+    const connection = account.connection
+    const live =
+      connection.familyID === "ollama" ||
+      connection.familyID === "openai-compatible" ||
+      connection.kind === "custom_gateway"
+    const discovery =
+      connection.kind === "subscription" || live
+        ? await accountDiscovery(
+            connection,
+            account.credential,
+            account.accountID,
+            account.credentialRevision,
+            this.fetcher,
+            this.now,
+            this.discoveryTimeoutMs,
+          )
+        : discoveryResult(
+            account.accountID,
+            account.credentialRevision,
+            "complete",
+            "managed-static-catalog",
+            this.now(),
+            await this.models(connection, account.credential, modelCatalog),
+            "fresh",
+          )
     return {
-      ...account,
-      modelRoutes: await this.models(connection, account.credential, modelCatalog),
+      authMethod: account.authMethod,
+      authClass: account.authClass,
+      credential: account.credential,
+      accountID: account.accountID,
+      credentialRevision: account.credentialRevision,
+      safeIdentity: account.safeIdentity,
+      modelRoutes: discovery.models,
+      discovery,
     }
   }
 
