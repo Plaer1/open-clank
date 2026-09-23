@@ -35,6 +35,7 @@ from src.openclank.acp_bridge import (
 )
 from src.openclank.agent_supervisor import AgentSupervisorAdmissionError
 from src.memory_scope import chat_workspace
+from src.openclank.filesystem_registry import FilesystemRootRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,38 @@ class MimoSupervisor:
         # this to resolve permission prompts from the UI.
         self.permission_handler = permission_handler
 
+    def _validate_session_workspace(self, chat_id: str, cwd: str, context: dict) -> str:
+        """Approve a mapped chat cwd against the owner filesystem authority."""
+        if str(context.get("owner") or "") != str(self._owner):
+            raise ValueError("session owner does not match the active host owner")
+        if str(context.get("odysseus_session_id") or "") != str(chat_id):
+            raise ValueError("session chat identity does not match the host mapping")
+        candidate = Path(cwd).expanduser().resolve(strict=False)
+        if not candidate.is_dir():
+            raise ValueError("session workspace must be an existing directory")
+        policy_root = str(
+            context.get("file_policy_root") or context.get("file_policy_workspace") or ""
+        ).strip()
+        if not policy_root or not os.path.isabs(policy_root):
+            raise ValueError("session has no stable file-policy workspace binding")
+        registry = FilesystemRootRegistry()
+        scope = registry.agent_scope(
+            self._owner,
+            active_workspace=policy_root,
+            app_visibility=context.get("app_visibility"),
+        )
+        active = scope.get("active_folder") or {}
+        approved_root = str(active.get("canonical_path") or "")
+        if not approved_root:
+            raise ValueError("session workspace is outside the owner filesystem policy")
+        try:
+            candidate.relative_to(Path(approved_root))
+        except ValueError as exc:
+            raise ValueError("session workspace is outside its stable file-policy workspace") from exc
+        if "read" not in (active.get("capabilities") or []):
+            raise ValueError("session workspace lacks file-policy read capability")
+        return str(candidate)
+
     async def start(self) -> None:
         """Spawn the child, perform ACP handshake, set up bridge."""
         await self._spawn_and_init()
@@ -579,6 +612,7 @@ class MimoSupervisor:
             permission_handler=perm_handler,
             memory_provider=self._memory_provider,
             managed_provider_context=self._managed_callbacks.resolve_route_context,
+            session_workspace_adapter=self._validate_session_workspace,
             session_map_path=(
                 self._runtime_home / "session-map.json"
                 if self._runtime_home is not None

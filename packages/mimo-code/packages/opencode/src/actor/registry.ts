@@ -37,19 +37,18 @@ function hostContextFromRow(row: ActorRow): ActorHostContext | undefined {
   return Object.keys(hostContext).length ? hostContext : undefined
 }
 
+function effectiveModelFromRow(row: ActorRow): ActorModel | undefined {
+  if (!row.effective_model) return undefined
+  try {
+    const parsed = JSON.parse(row.effective_model) as Partial<ActorModel>
+    return parsed.providerID && parsed.modelID ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function fromRow(row: ActorRow): Actor {
-  const effectiveModel = row.effective_model
-    ? (() => {
-        try {
-          const parsed = JSON.parse(row.effective_model) as Partial<ActorModel>
-          return parsed.providerID && parsed.modelID
-            ? { providerID: parsed.providerID, modelID: parsed.modelID }
-            : undefined
-        } catch {
-          return undefined
-        }
-      })()
-    : undefined
+  const effectiveModel = effectiveModelFromRow(row)
   const hostContext = hostContextFromRow(row)
   return {
     sessionID: row.session_id,
@@ -200,6 +199,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         description: input.description,
         agent: input.agent,
         background: input.background,
+        ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
+        ...(input.effectiveModel ? { effectiveModel: input.effectiveModel } : {}),
         ...(input.hostContext ? { hostContext: input.hostContext } : {}),
       })
       return fromRow(row)
@@ -258,6 +259,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         turnCount: row.turn_count,
         lastTurnTime: row.last_turn_time,
         ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
       })
     })
 
@@ -275,7 +279,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             .where(
               and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)),
             )
-            .run(),
+          .run(),
         ),
       )
     })
@@ -317,6 +321,28 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             .run(),
         ),
       )
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .select()
+            .from(ActorRegistryTable)
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .get(),
+        ),
+      )
+      if (!row) return
+      yield* bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
     })
 
     const updateHostContext = Effect.fn("ActorRegistry.updateHostContext")(function* (
@@ -361,6 +387,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         turnCount: row.turn_count,
         lastTurnTime: row.last_turn_time,
         ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
         ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
       })
     })

@@ -65,6 +65,9 @@ describe("actor.status event payload", () => {
               contextWatermark: undefined,
               background: false,
               lifecycle: "ephemeral",
+              requestedModel: "requested-model",
+              effectiveModel: { providerID: "mimo", modelID: "gpt-5.6-luna" },
+              hostContext: { accountID: "account-1", chatID: "chat-1", workspaceID: "workspace-1" },
             }),
           ),
         )
@@ -90,6 +93,9 @@ describe("actor.status event payload", () => {
         expect(running.lastOutcome).toBeUndefined()
         expect(running.turnCount).toBe(0)
         expect(typeof running.lastTurnTime).toBe("number")
+        expect(running.requestedModel).toBe("requested-model")
+        expect(running.effectiveModel).toEqual({ providerID: "mimo", modelID: "gpt-5.6-luna" })
+        expect(running.hostContext).toEqual({ accountID: "account-1", chatID: "chat-1", workspaceID: "workspace-1" })
 
         expect(idle.status).toBe("idle")
         expect(idle.lastOutcome).toBe("success")

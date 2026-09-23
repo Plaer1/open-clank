@@ -947,7 +947,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       messages: MessageV2.WithParts[]
       agentID?: string
       task_id?: string
-      hostContext?: ActorHostContext
+      trustedHostContext?: ActorHostContext
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -1028,8 +1028,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           bypassAgentCheck: input.bypassAgentCheck,
           promptOps,
           ...(whitelist ? { toolWhitelist: [...whitelist] } : {}),
-          ...(input.hostContext
-            ? { hostContext: input.hostContext }
+          ...(input.trustedHostContext
+            ? { hostContext: input.trustedHostContext }
             : askActor?.hostContext
               ? { hostContext: askActor.hostContext }
               : {}),
@@ -3691,7 +3691,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               messages: msgs,
               agentID: lastUser.agentID,
               task_id,
-              hostContext: input.hostContext,
+              trustedHostContext: input.trustedHostContext,
             })
             const tools = resolvedTools.tools
             const activeTools = resolvedTools.activeTools
@@ -4716,18 +4716,6 @@ export const PromptInput = z.object({
     .describe(
       "If the spawning caller bound this prompt to a specific user-task (T4 etc), pass its TID. Propagates to Tool.Context.taskId so memory-path-guard allows writes to tasks/<task_id>/*.md.",
     ),
-  hostContext: z
-    .object({
-      accountID: z.string().min(1).optional(),
-      grantID: z.string().min(1).optional(),
-      grantRevision: z.number().int().nonnegative().optional(),
-      credentialRevision: z.number().int().nonnegative().optional(),
-      chatID: z.string().min(1).optional(),
-      workspaceID: z.string().min(1).optional(),
-      cwd: z.string().min(1).optional(),
-      goalID: z.string().min(1).optional(),
-    })
-    .optional(),
   source: z.enum(["user", "spawn", "hook"]).optional(),
   provenance: MessageV2.Provenance.optional(),
   noReply: z.boolean().optional(),
@@ -4785,8 +4773,11 @@ export const PromptInput = z.object({
       ]),
     )
     .min(1, "parts must contain at least one element"),
-})
-export type PromptInput = z.infer<typeof PromptInput>
+}).strict()
+export type PromptInput = z.infer<typeof PromptInput> & {
+  /** Host-injected identity; never accepted by the public prompt schema. */
+  readonly trustedHostContext?: ActorHostContext
+}
 
 export const LoopInput = z.object({
   sessionID: SessionID.zod,

@@ -541,6 +541,8 @@ class ACPBridge:
             "desired": previous.get("desired", {}),
             "last_root_operation_id": previous.get("last_root_operation_id"),
             "workspace": previous.get("workspace"),
+            "workspace_id": previous.get("workspace_id"),
+            "goal_id": previous.get("goal_id"),
             "file_policy_workspace": previous.get("file_policy_workspace"),
             "copal_workspace": previous.get("copal_workspace"),
             "memory_workspace": previous.get("memory_workspace"),
@@ -588,10 +590,9 @@ class ACPBridge:
                     "workspace": previous_workspace,
                     "cwd": previous_workspace,
                     "physical_cwd": previous_workspace,
-                    "file_policy_workspace": previous_workspace,
                 }
             )
-        for key in ("file_policy_workspace", "copal_workspace", "memory_workspace"):
+        for key in ("workspace_id", "goal_id", "file_policy_workspace", "copal_workspace", "memory_workspace"):
             value = str(previous.get(key) or "").strip()
             if value:
                 state[key] = value
@@ -606,7 +607,7 @@ class ACPBridge:
         try:
             from src.openclank.transcript_projection import save_mimo_state
 
-            for key in ("workspace", "file_policy_workspace", "copal_workspace", "memory_workspace"):
+            for key in ("workspace", "workspace_id", "goal_id", "file_policy_workspace", "copal_workspace", "memory_workspace"):
                 if context.get(key):
                     state[key] = context[key]
             saved = save_mimo_state(
@@ -713,7 +714,8 @@ class ACPBridge:
     async def _handle_session_update(self, mimo_session_id: str, update: dict) -> None:
         """Route a session/update notification to the right session's queue."""
         if update.get("sessionUpdate") == "_openclank_session_cwd":
-            await self._apply_session_cwd(mimo_session_id, update.get("cwd"))
+            if not await self._apply_session_cwd(mimo_session_id, update.get("cwd")):
+                return
         if update.get("sessionUpdate") == "available_commands_update":
             state = self._session_state.setdefault(mimo_session_id, {})
             state["commands"] = list(update.get("availableCommands") or [])
@@ -722,32 +724,47 @@ class ACPBridge:
         if q is not None:
             await q.put(update)
 
-    async def _apply_session_cwd(self, mimo_session_id: str, cwd: Any) -> None:
+    async def _apply_session_cwd(self, mimo_session_id: str, cwd: Any) -> bool:
         value = str(cwd or "").strip()
         if not value or not os.path.isabs(value):
             logger.warning("ignoring invalid session cwd update for %s", mimo_session_id)
-            return
-        context = self._session_context.setdefault(mimo_session_id, {})
+            return False
+        context = self._session_context.get(mimo_session_id)
+        if not context:
+            logger.warning("ignoring cwd update for unknown session %s", mimo_session_id)
+            return False
+        chat_id = str(context.get("odysseus_session_id") or "").strip()
+        if not chat_id or self._session_map.get(chat_id) != mimo_session_id:
+            logger.warning("ignoring stale cwd update for session %s", mimo_session_id)
+            return False
+        if str(context.get("owner") or self._owner) != self._owner:
+            logger.warning("ignoring cwd update from a different owner for %s", chat_id)
+            return False
+        canonical = str(Path(value).expanduser().resolve(strict=False))
         lock = self._session_context_locks.setdefault(mimo_session_id, asyncio.Lock())
         async with lock:
-            chat_id = str(context.get("odysseus_session_id") or mimo_session_id)
-            # Commit all host-visible axes together. Stable workspace identity,
-            # Copal namespace, and memory workspace are intentionally retained.
-            context.update(
-                {
-                    "workspace": value,
-                    "cwd": value,
-                    "physical_cwd": value,
-                }
-            )
-            state = self._session_state.setdefault(mimo_session_id, {})
-            state["workspace"] = value
-            self._persist_session_state(mimo_session_id)
             callback = self._session_workspace_adapter
-            if callback is not None:
-                result = callback(chat_id, value)
+            if callback is None:
+                logger.warning("rejecting cwd update without a workspace authority for %s", chat_id)
+                return False
+            try:
+                result = callback(chat_id, canonical, dict(context))
                 if inspect.isawaitable(result):
-                    await result
+                    result = await result
+            except Exception as exc:
+                logger.warning("rejecting cwd update for %s: %s", chat_id, exc)
+                return False
+            approved = str(result or "").strip()
+            if approved != canonical:
+                logger.warning("rejecting noncanonical workspace approval for %s", chat_id)
+                return False
+            # Approval is complete before any ACP-visible state or transcript
+            # state changes. Stable policy/Copal/memory identities stay intact.
+            context.update({"workspace": canonical, "cwd": canonical, "physical_cwd": canonical})
+            state = self._session_state.setdefault(mimo_session_id, {})
+            state["workspace"] = canonical
+            self._persist_session_state(mimo_session_id)
+            return True
 
     async def open_session(
         self,
@@ -834,7 +851,9 @@ class ACPBridge:
                 logger.warning("failed to persist session map: %s", exc)
             return new_id
         restored_workspace = self.mapped_session_workspace(odysseus_session)
-        resume_cwd = str(cwd or restored_workspace or self._cwd).strip()
+        # A mapped chat is host-owned state. A caller's cwd can seed only a new
+        # chat; it must not revert a persisted engine workspace on reconnect.
+        resume_cwd = str(restored_workspace or cwd or self._cwd).strip()
         mcp_servers = [
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
@@ -857,7 +876,7 @@ class ACPBridge:
                 "mimo resume failed for %s (%s) — opening a fresh mimo session", target, e
             )
             new_id = await self.open_session(
-                cwd=cwd,
+                cwd=resume_cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
@@ -1077,15 +1096,20 @@ class ACPBridge:
         """
         prior_mimo_session = self._session_map.get(odysseus_session)
         prior_context = self._session_context.get(prior_mimo_session or "", {})
+        mapped_workspace = self.mapped_session_workspace(odysseus_session)
         effective_cwd = str(
-            cwd
-            or prior_context.get("workspace")
-            or prior_context.get("cwd")
-            or self.mapped_session_workspace(odysseus_session)
+            (prior_context.get("workspace") or prior_context.get("cwd") or mapped_workspace)
+            if prior_mimo_session is not None
+            else (cwd or mapped_workspace)
         ).strip()
         if odysseus_session in self._session_map and self._delete_session_callback:
             await self._delete_session_callback(odysseus_session)
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
+        # These are host-authenticated routing fields. Never infer them from
+        # the provider session id or accept model/user payload identity.
+        envelope["chat_id"] = odysseus_session
+        if prior_context.get("workspace_id"):
+            envelope["workspace_id"] = prior_context["workspace_id"]
         authority_workspace_id = str(
             envelope.get("authority_workspace_id") or ""
         ).strip()
@@ -1095,6 +1119,8 @@ class ACPBridge:
             yield f"event: error\ndata: {json.dumps({'code': 'INVALID_AUTHORITY_WORKSPACE', 'error': 'The Workspace authority identity is invalid', 'status': 409, 'retryable': False})}\n\n"
             yield "data: [DONE]\n\n"
             return
+        if authority_workspace_id:
+            envelope["workspace_id"] = authority_workspace_id
         copal_workspace = str(envelope.get("copal_workspace") or "default").strip()
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", copal_workspace):
             yield f"event: error\ndata: {json.dumps({'code': 'INVALID_COPAL_WORKSPACE', 'error': 'Copal workspace is invalid', 'status': 400, 'retryable': False})}\n\n"
@@ -1127,6 +1153,7 @@ class ACPBridge:
                 "memory_workspace": chat_workspace(),
                 "copal_workspace": copal_workspace,
                 "authority_workspace_id": authority_workspace_id,
+                "workspace_id": authority_workspace_id,
                 "incognito": True,
                 "auxiliary": auxiliary,
                 "is_admin": bool(envelope.get("is_admin")),
@@ -1142,6 +1169,7 @@ class ACPBridge:
                 copal_workspace=copal_workspace,
                 authority_workspace_id=authority_workspace_id,
             )
+            existing_context = self._session_context.get(mimo_session, {})
             self._session_context.setdefault(mimo_session, {}).update({
                 "workspace": effective_cwd,
                 "cwd": effective_cwd,
@@ -1150,6 +1178,8 @@ class ACPBridge:
                     "file_policy_workspace", effective_cwd
                 ),
                 "authority_workspace_id": authority_workspace_id,
+                "workspace_id": authority_workspace_id or existing_context.get("workspace_id"),
+                "goal_id": envelope.get("goal_id") or existing_context.get("goal_id"),
                 "incognito": False,
                 "is_admin": bool(envelope.get("is_admin")),
                 "interaction_policy": envelope.get("interaction_policy", "interactive"),

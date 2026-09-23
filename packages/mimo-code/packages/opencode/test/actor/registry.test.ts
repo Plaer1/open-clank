@@ -132,12 +132,16 @@ describe("ActorRegistry", () => {
               contextMode: "none",
               background: false,
               lifecycle: "ephemeral",
+              requestedModel: "requested-model",
+              effectiveModel: { providerID: "mimo", modelID: "gpt-5.6-luna" },
               hostContext,
             }),
           ),
         )
 
         expect(entry.hostContext).toEqual(hostContext)
+        expect(entry.requestedModel).toBe("requested-model")
+        expect(entry.effectiveModel).toEqual({ providerID: "mimo", modelID: "gpt-5.6-luna" })
         await rt.runPromise(
           ActorRegistry.Service.use((svc) =>
             svc.updateStatus(parent.id, taskId, { status: "idle", lastOutcome: "success" }),

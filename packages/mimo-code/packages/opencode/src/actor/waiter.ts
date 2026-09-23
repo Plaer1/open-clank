@@ -19,6 +19,9 @@ export interface WaitResult {
   structured?: unknown
   error?: string
   lastOutcome?: Actor["lastOutcome"]
+  requestedModel?: Actor["requestedModel"]
+  effectiveModel?: Actor["effectiveModel"]
+  hostContext?: Actor["hostContext"]
   // Best-effort parse of the subagent's **Status**/**Summary** header. Used by
   // the `wait` polling path; the blocking `run` path reads the authoritative
   // reconciled status from the spawn outcome Deferred instead.
@@ -90,6 +93,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service | ActorRegistry.Serv
           turnCount: entry.turnCount,
           lastTurnTime: entry.lastTurnTime,
           lastOutcome: entry.lastOutcome,
+          ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+          ...(entry.effectiveModel ? { effectiveModel: entry.effectiveModel } : {}),
+          ...(entry.hostContext ? { hostContext: entry.hostContext } : {}),
           ...(entry.lastError !== undefined ? { error: entry.lastError } : {}),
           ...(extracted.result !== undefined ? { result: extracted.result } : {}),
           ...(extracted.structured !== undefined ? { structured: extracted.structured } : {}),

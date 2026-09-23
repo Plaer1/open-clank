@@ -643,6 +643,9 @@ export const ActorTool = Tool.define(
               description: entry.description,
               agent: entry.agent,
               background: entry.background,
+              ...(entry.requestedModel ? { requested_model: entry.requestedModel } : {}),
+              ...(entry.effectiveModel ? { effective_model: entry.effectiveModel } : {}),
+              ...(entry.hostContext ? { host_context: entry.hostContext } : {}),
             }
             return {
               title: `Actor cancel: ${entry.status}`,
@@ -661,6 +664,9 @@ export const ActorTool = Tool.define(
             description: entry.description,
             agent: entry.agent,
             background: entry.background,
+            ...(entry.requestedModel ? { requested_model: entry.requestedModel } : {}),
+            ...(entry.effectiveModel ? { effective_model: entry.effectiveModel } : {}),
+            ...(entry.hostContext ? { host_context: entry.hostContext } : {}),
           }
           return {
             title: `Actor cancel: cancelled`,

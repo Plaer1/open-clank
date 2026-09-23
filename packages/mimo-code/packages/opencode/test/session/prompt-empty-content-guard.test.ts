@@ -41,6 +41,15 @@ describe("PromptInput.parts schema", () => {
     })
     expect(result.success).toBe(true)
   })
+
+  test("rejects caller-minted host identity", () => {
+    const result = PromptInput.safeParse({
+      ...base,
+      hostContext: { accountID: "spoofed-account", chatID: "spoofed-chat" },
+      parts: [{ type: "text", text: "hello" }],
+    })
+    expect(result.success).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

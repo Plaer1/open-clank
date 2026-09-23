@@ -1,6 +1,6 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID } from "@/session/schema"
-import { ActorStatus, ActorOutcome, SpawnMode, ActorHostContext } from "./schema"
+import { ActorStatus, ActorOutcome, SpawnMode, ActorHostContext, ActorModel } from "./schema"
 import z from "zod"
 
 export const ActorRegistered = BusEvent.define(
@@ -13,6 +13,8 @@ export const ActorRegistered = BusEvent.define(
     description: z.string(),
     agent: z.string(),
     background: z.boolean(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
     hostContext: ActorHostContext.optional(),
   }),
 )
@@ -27,6 +29,8 @@ export const ActorStatusChanged = BusEvent.define(
     turnCount: z.number(),
     lastTurnTime: z.number(),
     error: z.string().optional(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
     hostContext: ActorHostContext.optional(),
   }),
 )

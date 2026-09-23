@@ -1516,6 +1516,10 @@ export class Agent implements ACPAgent {
           mode?: string
           lane?: string
           root_turn_id?: string
+          chat_id?: string
+          workspace_id?: string
+          goal_id?: string
+          requested_model?: string
         }
         openclankProvider?: unknown
       }
@@ -1678,7 +1682,15 @@ export class Agent implements ACPAgent {
         ...(typeof managedRoute?.grantRevision === "number" && Number.isInteger(managedRoute.grantRevision) && managedRoute.grantRevision >= 0
           ? { grantRevision: managedRoute.grantRevision }
           : {}),
-        chatID: sessionID,
+        ...(typeof odysseus?.chat_id === "string" && odysseus.chat_id
+          ? { chatID: odysseus.chat_id }
+          : {}),
+        ...(typeof odysseus?.workspace_id === "string" && odysseus.workspace_id
+          ? { workspaceID: odysseus.workspace_id }
+          : {}),
+        ...(typeof odysseus?.goal_id === "string" && odysseus.goal_id
+          ? { goalID: odysseus.goal_id }
+          : {}),
         cwd: directory,
       }
     }
@@ -1725,7 +1737,7 @@ export class Agent implements ACPAgent {
           directory,
           tools: odysseus?.tools,
           system: hostSystem,
-          hostContext: hostContextForOperation(),
+          trustedHostContext: hostContextForOperation(),
         } as any),
       )
       const msg = response.data?.info

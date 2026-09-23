@@ -67,7 +67,7 @@
     "contract_version": 1,
     "source_date_epoch": 1785240447,
     "source_hash_algorithm": "openclank-tree-sha256-v1",
-    "source_sha256": "a7e7478a65cb3edf4769cc246a19149fad8037afc5aa6af88dbfcb940b188233",
+    "source_sha256": "e2a26f25a0d2fb23be2979c2efe4ec58a4b05d8a87a23c6ff57df45e2988b5ce",
     "tier_1_targets": [
       "linux-x64",
       "linux-arm64",
