@@ -523,12 +523,6 @@ impl MutationCaptureHook for HistoryServiceHook {
             }),
             _ => None,
         };
-        // A move/restore has one physical identity.  The destination binding
-        // is provisional until the live rename succeeds; using the source id
-        // in both modified keys keeps chronology continuous through the move.
-        if matches!(operation, "move" | "rename" | "restore") && resource_ids.len() > 1 {
-            resource_ids[1] = resource_ids[0].clone();
-        }
         let modified = targets
             .iter()
             .zip(resource_ids.iter())
@@ -556,37 +550,83 @@ impl MutationCaptureHook for HistoryServiceHook {
             "coverage": {"metadata": {"coverage_kind": if targets.len() > 1 { "Partial" } else { "KnownMutationHooks" }, "roots": self.authorized_roots.iter().map(|root| format!("root:{}", root.root_id)).collect::<Vec<_>>(), "exclusions": if targets.len() > 1 { vec!["non-primary targets use resource outcomes"] } else { Vec::<&str>::new() }}},
             "per_resource_outcomes": targets.iter().zip(resource_ids.iter()).map(|(target, resource_id)| json!({"resource_id": resource_id, "coverage": if target.resource_id == first.resource_id { "ExactBeforeOnly" } else { "ObservedAfterOnly" }, "before_fingerprint": Self::fingerprint(target.before.as_deref())})).collect::<Vec<_>>(),
         });
-        let content = first.before.as_deref();
         let envelope = json!({
             "protocol_version": 1,
             "auth": self.auth(),
             "claimed_digest": "",
             "request": request,
         });
-        let fingerprint = Self::fingerprint(content);
-        let prepared = if let Some(content) =
-            content.filter(|bytes| bytes.len() > INLINE_CONTENT_BYTES)
-        {
-            let upload_id = self.stage_content(&action_id, content, &fingerprint)?;
-            let result = self.request(json!({
-                "PrepareStaged": {
-                    "envelope": envelope,
-                    "upload_id": upload_id,
-                    "fingerprint": fingerprint,
+        let mut wire_entries = Vec::with_capacity(targets.len());
+        let mut staged_uploads = Vec::new();
+        let mut inline_bytes = 0usize;
+        for (target, resource_id) in targets.iter().zip(resource_ids.iter()) {
+            let fingerprint = Self::fingerprint(target.before.as_deref());
+            let (resource_type, metadata) = match fs::symlink_metadata(&target.resource_id) {
+                Ok(stat) if stat.file_type().is_symlink() => (
+                    "Symlink",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": null}),
+                ),
+                Ok(stat) if stat.is_dir() => (
+                    "Directory",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": null}),
+                ),
+                Ok(stat) => (
+                    "File",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": null}),
+                ),
+                Err(_) => ("File", json!({"mode": null, "size": null, "modified_millis": null, "opaque": null})),
+            };
+            let mut entry = json!({
+                "resource_key": {
+                    "account_id": self.account_id,
+                    "workspace_id": self.workspace_id,
+                    "provider": "odysseus-files",
+                    "resource_id": resource_id,
+                },
+                "old_locator": {"display_name": target.resource_id.file_name().map(|v| v.to_string_lossy()).unwrap_or_default(), "location_label": target.resource_id.to_string_lossy(), "opaque_ref": resource_id},
+                "new_locator": {"display_name": target.resource_id.file_name().map(|v| v.to_string_lossy()).unwrap_or_default(), "location_label": target.resource_id.to_string_lossy(), "opaque_ref": resource_id},
+                "expected_revision": {"Opaque": {"kind": "fingerprint", "value": fingerprint}},
+                "existence": if target.before.is_some() { "Present" } else { "Absent" },
+                "resource_type": resource_type,
+                "metadata": metadata,
+                "content": target.before.as_deref().map(encode_base64),
+                "staged_upload_id": null,
+                "fingerprint": fingerprint,
+                "coverage": {"byte_len": target.before.as_ref().map_or(0, |bytes| bytes.len()), "metadata": {"exact_preimage": true}},
+            });
+            if resource_type == "Directory" {
+                if let Some(content) = target.before.as_deref() {
+                    let manifest_digest = format!("sha256:{:x}", Sha256::digest(content));
+                    entry["metadata"]["opaque"] = json!({"manifest_digest": manifest_digest});
+                    entry["coverage"]["content_digest"] = json!(manifest_digest);
                 }
-            }));
-            if result.is_err() {
-                let _ = self.request(json!({
-                    "StageAbort": {
-                        "envelope": {"protocol_version": 1, "auth": self.auth(), "action_id": action_id},
-                        "upload_id": upload_id,
-                    }
-                }));
             }
-            result
+            if let Some(content) = target.before.as_deref() {
+                if content.len() > INLINE_CONTENT_BYTES || inline_bytes.saturating_add(content.len()) > STAGE_CHUNK_BYTES {
+                    let upload_id = self.stage_content(&action_id, content, &fingerprint)?;
+                    entry["content"] = Value::Null;
+                    entry["staged_upload_id"] = Value::String(upload_id.clone());
+                    staged_uploads.push(upload_id);
+                } else {
+                    inline_bytes = inline_bytes.saturating_add(content.len());
+                }
+            }
+            wire_entries.push(entry);
+        }
+        let prepared = if targets.len() == 1 {
+            if let Some(upload_id) = staged_uploads.first() {
+                self.request(json!({"PrepareStaged": {"envelope": envelope, "upload_id": upload_id, "fingerprint": Self::fingerprint(targets[0].before.as_deref())}}))
+            } else {
+                self.request(json!({"Prepare": {"envelope": envelope, "content": targets[0].before.as_deref().map(encode_base64), "fingerprint": Self::fingerprint(targets[0].before.as_deref())}}))
+            }
         } else {
-            self.request(json!({"Prepare": {"envelope": envelope, "content": content.map(encode_base64), "fingerprint": fingerprint}}))
+            self.request(json!({"PrepareBatch": {"envelope": envelope, "batch_version": 1, "entries": wire_entries}}))
         };
+        if prepared.is_err() {
+            for upload_id in &staged_uploads {
+                let _ = self.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.auth(), "action_id": action_id}, "upload_id": upload_id}}));
+            }
+        }
         if let Err(error) = prepared {
             for resource_id in &created_resource_ids {
                 let _ = self.revoke_resource(resource_id, "history prepare failed");
@@ -599,6 +639,7 @@ impl MutationCaptureHook for HistoryServiceHook {
             action_id,
             created_resource_ids,
             registry_commit,
+            resource_ids,
         }))
     }
 
@@ -616,6 +657,7 @@ struct ServiceTicket {
     action_id: String,
     created_resource_ids: Vec<String>,
     registry_commit: Option<RegistryCommit>,
+    resource_ids: Vec<String>,
 }
 
 impl MutationCaptureTicket for ServiceTicket {
@@ -624,10 +666,10 @@ impl MutationCaptureTicket for ServiceTicket {
     }
 
     fn complete(self: Box<Self>, after: Vec<CaptureAfter>) -> Result<(), String> {
-        let first = after.first();
-        let content = first.and_then(|target| target.after.as_deref());
         let auth = self.hook.auth();
         let control = json!({"protocol_version": 1, "auth": auth, "action_id": self.action_id});
+        let first = after.first();
+        let content = first.and_then(|target| target.after.as_deref());
         let live = json!({"action_id": self.action_id, "status": "Committed", "fingerprint": HistoryServiceHook::fingerprint(content)});
         // The physical mutation has already committed. Move the service-owned
         // identity first, then publish the live receipt. If the registry is
@@ -667,32 +709,57 @@ impl MutationCaptureTicket for ServiceTicket {
                 .set_status(&self.action_id, "failed", "live", Some(error.clone()));
             return Err(error);
         }
-        let fingerprint = HistoryServiceHook::fingerprint(content);
-        let result = if let Some(content) =
-            content.filter(|bytes| bytes.len() > INLINE_CONTENT_BYTES)
-        {
-            let upload_id = self
-                .hook
-                .stage_content(&self.action_id, content, &fingerprint)?;
-            let result = self.hook.request(json!({
-                "CompleteStaged": {
-                    "envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id},
-                    "upload_id": upload_id,
-                    "fingerprint": fingerprint,
+        if self.resource_ids.len() == 1 {
+            let fingerprint = HistoryServiceHook::fingerprint(content);
+            let result = if let Some(content) = content.filter(|bytes| bytes.len() > INLINE_CONTENT_BYTES) {
+                let upload_id = self.hook.stage_content(&self.action_id, content, &fingerprint)?;
+                let result = self.hook.request(json!({"CompleteStaged": {"envelope": control, "upload_id": upload_id, "fingerprint": fingerprint}}));
+                if result.is_err() {
+                    let _ = self.hook.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "upload_id": upload_id}}));
                 }
-            }));
+                result
+            } else {
+                self.hook.request(json!({"Complete": {"envelope": control, "content": content.map(encode_base64), "fingerprint": fingerprint}}))
+            };
             if result.is_err() {
-                let _ = self.hook.request(json!({
-                    "StageAbort": {
-                        "envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id},
-                        "upload_id": upload_id,
-                    }
-                }));
+                self.hook.set_status(&self.action_id, "failed", "after", Some(result.as_ref().err().cloned().unwrap_or_default()));
+            } else {
+                self.hook.set_status(&self.action_id, "complete", "complete", None);
             }
-            result
-        } else {
-            self.hook.request(json!({"Complete": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "content": content.map(encode_base64), "fingerprint": fingerprint}}))
-        };
+            return result.map(|_| ()).map_err(|error| error.to_string());
+        }
+        let mut complete_entries = Vec::with_capacity(after.len());
+        let mut staged_uploads = Vec::new();
+        for (item, resource_id) in after.iter().zip(self.resource_ids.iter()) {
+            let fingerprint = HistoryServiceHook::fingerprint(item.after.as_deref());
+            let mut entry = json!({
+                "resource_key": {"account_id": self.hook.account_id, "workspace_id": self.hook.workspace_id, "provider": "odysseus-files", "resource_id": resource_id},
+                "locator": null,
+                "existence": if item.after.is_some() { "Present" } else { "Absent" },
+                "resource_type": "File",
+                "metadata": {"mode": null, "size": item.after.as_ref().map(|bytes| bytes.len()), "modified_millis": null, "opaque": null},
+                "content": item.after.as_deref().map(encode_base64),
+                "staged_upload_id": null,
+                "fingerprint": fingerprint,
+                "coverage": {"byte_len": item.after.as_ref().map_or(0, |bytes| bytes.len()), "metadata": {"exact_after": true}},
+                "outcome": {"resource_id": resource_id, "status": "Committed", "revision": {"Opaque": {"kind": "fingerprint", "value": fingerprint}}},
+            });
+            if let Some(content) = item.after.as_deref() {
+                if content.len() > INLINE_CONTENT_BYTES {
+                    let upload_id = self.hook.stage_content(&self.action_id, content, &fingerprint)?;
+                    entry["content"] = Value::Null;
+                    entry["staged_upload_id"] = Value::String(upload_id.clone());
+                    staged_uploads.push(upload_id);
+                }
+            }
+            complete_entries.push(entry);
+        }
+        let result = self.hook.request(json!({"CompleteBatch": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "batch_version": 1, "entries": complete_entries}}));
+        if result.is_err() {
+            for upload_id in &staged_uploads {
+                let _ = self.hook.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "upload_id": upload_id}}));
+            }
+        }
         match result {
             Ok(_) if registry_error.is_some() => self.hook.set_status(
                 &self.action_id,
@@ -747,6 +814,71 @@ fn encode_base64(bytes: &[u8]) -> String {
         });
     }
     output
+}
+
+fn mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+fn modified_millis(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_millis() as u64)
+}
+
+/// Exact recursive directory payload shared by all mutation owners. The
+/// payload is opaque to the history worker but content-bound by its digest.
+pub(crate) fn directory_manifest(path: &Path) -> Result<Vec<u8>, String> {
+    let root = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let mut entries = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(current) = stack.pop() {
+        let mut children = fs::read_dir(&current)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children.into_iter().rev() {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&root)
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            let mut record = json!({
+                "path": relative,
+                "mode": mode(&metadata),
+                "mtime_millis": modified_millis(&metadata),
+            });
+            if metadata.file_type().is_symlink() {
+                record["type"] = json!("symlink");
+                record["target"] = json!(fs::read_link(&path).map_err(|error| error.to_string())?.to_string_lossy());
+            } else if metadata.is_dir() {
+                record["type"] = json!("directory");
+                stack.push(path);
+            } else {
+                let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+                record["type"] = json!("file");
+                record["size"] = json!(bytes.len());
+                record["sha256"] = json!(format!("sha256:{}", encode_hex(&Sha256::digest(&bytes))));
+            }
+            entries.push(record);
+        }
+    }
+    serde_json::to_vec(&json!({"version": 1, "root_type": "directory", "entries": entries}))
+        .map_err(|error| error.to_string())
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

@@ -1758,9 +1758,35 @@ impl FileEngine {
         if path.exists() {
             return Err(EngineError::DestinationExists);
         }
+        let ticket = self.prepare_capture(
+            "mkdir",
+            vec![CaptureTarget {
+                resource_id: path.to_path_buf(),
+                before: None,
+            }],
+        );
         fs::create_dir(path)?;
         self.clear_sorted_snapshot_cache();
+        match (ticket, crate::history_capture::directory_manifest(path)) {
+            (Some(ticket), Ok(after)) => Self::finish_capture(
+                Some(ticket),
+                vec![CaptureAfter {
+                    resource_id: path.to_path_buf(),
+                    after: Some(after),
+                }],
+            ),
+            (Some(ticket), Err(_)) => ticket.abort(),
+            (None, _) => {}
+        }
         Ok(path.to_path_buf())
+    }
+
+    fn history_payload(path: &Path) -> io::Result<Vec<u8>> {
+        if path.is_dir() && !path.is_symlink() {
+            crate::history_capture::directory_manifest(path).map_err(io::Error::other)
+        } else {
+            fs::read(path)
+        }
     }
 
     fn replace_if_fingerprint_resolved(
@@ -1786,7 +1812,7 @@ impl FileEngine {
             },
             vec![CaptureTarget {
                 resource_id: path.to_path_buf(),
-                before: current.as_ref().map(|_| fs::read(path)).transpose()?,
+                before: current.as_ref().map(|_| Self::history_payload(path)).transpose()?,
             }],
         );
         let parent = path
@@ -1822,7 +1848,7 @@ impl FileEngine {
         }
         let fingerprint = fingerprint_file(path)?;
         self.clear_sorted_snapshot_cache();
-        match (ticket, fs::read(path)) {
+        match (ticket, Self::history_payload(path)) {
             (Some(ticket), Ok(after)) => Self::finish_capture(
                 Some(ticket),
                 vec![CaptureAfter {
@@ -1900,7 +1926,7 @@ impl FileEngine {
             vec![
                 CaptureTarget {
                     resource_id: source.to_path_buf(),
-                    before: Some(fs::read(source)?),
+                    before: Some(Self::history_payload(source)?),
                 },
                 CaptureTarget {
                     resource_id: destination.to_path_buf(),
@@ -1939,8 +1965,8 @@ impl FileEngine {
         self.clear_sorted_snapshot_cache();
         match (
             ticket,
-            fs::read(source).and_then(|source_after| {
-                fs::read(destination).map(|destination_after| (source_after, destination_after))
+            Self::history_payload(source).and_then(|source_after| {
+                Self::history_payload(destination).map(|destination_after| (source_after, destination_after))
             }),
         ) {
             (Some(ticket), Ok((source_after, destination_after))) => Self::finish_capture(
@@ -2081,7 +2107,7 @@ impl FileEngine {
             vec![
                 CaptureTarget {
                     resource_id: source.to_path_buf(),
-                    before: Some(fs::read(source)?),
+                    before: Some(Self::history_payload(source)?),
                 },
                 CaptureTarget {
                     resource_id: destination.to_path_buf(),
@@ -2103,7 +2129,7 @@ impl FileEngine {
             return Err(error);
         }
         self.clear_sorted_snapshot_cache();
-        match (ticket, fs::read(destination)) {
+        match (ticket, Self::history_payload(destination)) {
             (Some(ticket), Ok(destination_after)) => Self::finish_capture(
                 Some(ticket),
                 vec![
@@ -2188,7 +2214,7 @@ impl FileEngine {
             vec![
                 CaptureTarget {
                     resource_id: entry.trashed_path.clone(),
-                    before: Some(fs::read(&entry.trashed_path)?),
+                    before: Some(Self::history_payload(&entry.trashed_path)?),
                 },
                 CaptureTarget {
                     resource_id: entry.original_path.clone(),
@@ -2203,7 +2229,7 @@ impl FileEngine {
             return Err(error.into());
         }
         self.clear_sorted_snapshot_cache();
-        match (ticket, fs::read(&entry.original_path)) {
+        match (ticket, Self::history_payload(&entry.original_path)) {
             (Some(ticket), Ok(after)) => Self::finish_capture(
                 Some(ticket),
                 vec![
@@ -2285,7 +2311,7 @@ impl FileEngine {
             "trash",
             vec![CaptureTarget {
                 resource_id: resolved.to_path_buf(),
-                before: Some(fs::read(resolved)?),
+                before: Some(Self::history_payload(resolved)?),
             }],
         );
         if let Err(error) = fs::rename(resolved, &trashed_path).map_err(EngineError::Io) {
@@ -2385,7 +2411,7 @@ impl FileEngine {
             vec![
                 CaptureTarget {
                     resource_id: entry.trashed_path.clone(),
-                    before: Some(fs::read(&entry.trashed_path)?),
+                    before: Some(Self::history_payload(&entry.trashed_path)?),
                 },
                 CaptureTarget {
                     resource_id: entry.original_path.clone(),
@@ -2400,7 +2426,7 @@ impl FileEngine {
             return Err(error.into());
         }
         self.clear_sorted_snapshot_cache();
-        match (ticket, fs::read(&entry.original_path)) {
+        match (ticket, Self::history_payload(&entry.original_path)) {
             (Some(ticket), Ok(after)) => Self::finish_capture(
                 Some(ticket),
                 vec![

@@ -1,8 +1,8 @@
 //! Versioned authenticated local protocol types for the history service.
 
 use crate::catalog::{
-    CaptureManifest, Locator, ResourceExistence, ResourceKey, ResourceMetadata, ResourceType,
-    Revision,
+    CaptureManifest, Locator, ResourceExistence, ResourceKey, ResourceMetadata, ResourceOutcome,
+    ResourceType, Revision,
 };
 use crate::operations::{request_digest, ActionRequest};
 use crate::restore::{HostMetadata, RestoreRequest};
@@ -66,6 +66,22 @@ pub struct BatchPrepareEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchCompleteEntry {
+    pub resource_key: ResourceKey,
+    pub locator: Option<Locator>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    #[serde(with = "base64_content")]
+    pub content: Option<Vec<u8>>,
+    #[serde(default)]
+    pub staged_upload_id: Option<String>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+    pub outcome: ResourceOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceRequest {
     Prepare {
         envelope: RequestEnvelope,
@@ -88,6 +104,12 @@ pub enum ServiceRequest {
         #[serde(with = "base64_content")]
         content: Option<Vec<u8>>,
         fingerprint: String,
+    },
+    CompleteBatch {
+        envelope: ControlEnvelope,
+        #[serde(default = "default_batch_version")]
+        batch_version: u32,
+        entries: Vec<BatchCompleteEntry>,
     },
     /// Bind a create action to the provider's real document identity after
     /// the provider has allocated it, before the live receipt is recorded.

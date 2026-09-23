@@ -343,6 +343,47 @@ def _envelope(
     }
 
 
+def _directory_manifest(path: str) -> bytes:
+    """Return a deterministic recursive directory preimage.
+
+    Directory metadata alone cannot restore a deleted tree. The manifest binds
+    every relative entry, type, mode, link target, size, and file digest to the
+    captured bytes, while keeping the provider locator out of the payload.
+    """
+    root = os.path.realpath(path)
+    entries: list[dict[str, Any]] = []
+    for current, dirs, files in os.walk(root, followlinks=False):
+        dirs.sort()
+        files.sort()
+        for name in [*dirs, *files]:
+            item = os.path.join(current, name)
+            relative = os.path.relpath(item, root).replace(os.sep, "/")
+            stat = os.lstat(item)
+            record: dict[str, Any] = {
+                "path": relative,
+                "mode": stat.st_mode & 0o7777,
+                "mtime_millis": int(stat.st_mtime_ns // 1_000_000),
+            }
+            if os.path.islink(item):
+                record.update({"type": "symlink", "target": os.readlink(item)})
+            elif os.path.isdir(item):
+                record["type"] = "directory"
+            else:
+                content = pathlib.Path(item).read_bytes()
+                record.update({
+                    "type": "file",
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                })
+            entries.append(record)
+    return json.dumps(
+        {"version": 1, "root_type": "directory", "entries": entries},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
 def _batch_entries(
     *,
     path: str,
@@ -377,8 +418,8 @@ def _batch_entries(
                 exact = True
             elif os.path.isdir(target):
                 resource_type = "Directory"
-                before = None
-                exact = False
+                before = _directory_manifest(target)
+                exact = True
             else:
                 resource_type = "File"
                 before = pathlib.Path(target).read_bytes()
@@ -393,6 +434,7 @@ def _batch_entries(
         coverage = {
             "metadata": {"exact_preimage": exact},
             "byte_len": len(before) if before is not None else 0,
+            "content_digest": f"sha256:{hashlib.sha256(before).hexdigest()}:{len(before)}" if before is not None else None,
         }
         entries.append(
             {
@@ -412,11 +454,11 @@ def _batch_entries(
                 },
                 "existence": existence,
                 "resource_type": resource_type,
-                "metadata": {
+                    "metadata": {
                     "mode": mode,
                     "size": size,
                     "modified_millis": modified,
-                    "opaque": None,
+                    "opaque": {"manifest_digest": coverage["content_digest"]} if resource_type == "Directory" else None,
                 },
                 "content": before,
                 "fingerprint": _fingerprint(before),
@@ -436,6 +478,8 @@ class CaptureHandle:
     error: str | None = None
     receipt: dict[str, Any] | None = None
     _token: contextvars.Token[str | None] | None = field(default=None, repr=False)
+    batch_entries: list[dict[str, Any]] | None = None
+    paths: tuple[str, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -490,9 +534,45 @@ class CaptureHandle:
                 }
                 _set_status(self.context, **result)
                 return result
-            self.receipt = self.client.complete(
-                self.action_id, content=after, fingerprint=_fingerprint(after)
-            )
+            if self.batch_entries is not None and callable(getattr(self.client, "complete_batch", None)):
+                after_entries: list[dict[str, Any]] = []
+                all_targets = (self.paths[0] if self.paths else "", *self.paths[1:])
+                for index, before_entry in enumerate(self.batch_entries):
+                    target = all_targets[index] if index < len(all_targets) else ""
+                    if index == 0:
+                        target_after = after
+                    else:
+                        try:
+                            if os.path.isdir(target) and not os.path.islink(target):
+                                target_after = _directory_manifest(target)
+                            else:
+                                target_after = pathlib.Path(target).read_bytes()
+                        except FileNotFoundError:
+                            target_after = None
+                    item = dict(before_entry)
+                    item.pop("old_locator", None)
+                    item["locator"] = before_entry.get("new_locator")
+                    item["content"] = target_after
+                    item["existence"] = "Present" if target_after is not None else "Absent"
+                    item["fingerprint"] = _fingerprint(target_after)
+                    item["outcome"] = {
+                        "resource_id": before_entry["resource_key"]["resource_id"],
+                        "status": "Committed",
+                        "revision": {"Opaque": {"kind": "fingerprint", "value": item["fingerprint"]}},
+                    }
+                    coverage = dict(before_entry.get("coverage") or {})
+                    coverage["byte_len"] = len(target_after) if target_after is not None else 0
+                    coverage["content_digest"] = (
+                        f"sha256:{hashlib.sha256(target_after).hexdigest()}:{len(target_after)}"
+                        if target_after is not None else None
+                    )
+                    item["coverage"] = coverage
+                    after_entries.append(item)
+                self.receipt = self.client.complete_batch(self.action_id, after_entries)
+            else:
+                self.receipt = self.client.complete(
+                    self.action_id, content=after, fingerprint=_fingerprint(after)
+                )
             result = {
                 "action_id": self.action_id,
                 "history_status": "complete",
@@ -559,7 +639,12 @@ def begin_file_capture(
         _set_status(context, action_id=action_id, history_status="paused", capture_phase="excluded", error=reason)
         return handle
     try:
-        before = pathlib.Path(path).read_bytes()
+        if os.path.isdir(path) and not os.path.islink(path):
+            before = _directory_manifest(path)
+        elif os.path.islink(path):
+            before = os.readlink(path).encode("utf-8", "surrogateescape")
+        else:
+            before = pathlib.Path(path).read_bytes()
     except FileNotFoundError:
         before = None
     except OSError as exc:
@@ -584,7 +669,7 @@ def begin_file_capture(
             client=client,
         )
         batch_prepare = getattr(client, "prepare_batch", None)
-        if len(all_paths) > 1 and callable(batch_prepare):
+        if callable(batch_prepare):
             envelope["coverage"]["kind"] = "KnownMutationHooks"
             envelope["coverage"]["exclusions"] = []
             entries, before = _batch_entries(
@@ -594,8 +679,10 @@ def begin_file_capture(
                 context=context,
             )
             batch_prepare(envelope, entries)
+            batch_entries = entries
         else:
             client.prepare(envelope, content=before, fingerprint=_fingerprint(before))
+            batch_entries = None
     except Exception as exc:
         paused = "history_paused_budget" in str(exc)
         status = "paused" if paused else "failed"
@@ -604,7 +691,18 @@ def begin_file_capture(
         _set_status(context, action_id=action_id, history_status=status, capture_phase=phase, error=str(exc))
         return handle
     token = _ACTIVE_ACTION.set(action_id)
-    handle = CaptureHandle(action_id, client, envelope, before, context, "prepared", "before_durable", _token=token)
+    handle = CaptureHandle(
+        action_id,
+        client,
+        envelope,
+        before,
+        context,
+        "prepared",
+        "before_durable",
+        _token=token,
+        batch_entries=batch_entries,
+        paths=tuple(all_paths),
+    )
     _set_status(context, action_id=action_id, history_status="prepared", capture_phase="before_durable")
     return handle
 

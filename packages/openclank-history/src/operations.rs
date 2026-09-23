@@ -1,7 +1,7 @@
 //! Internal typed operation DTOs and Lore reference construction.
 
 use crate::catalog::{
-    ActionRecord, ActionState, CaptureManifest, Catalog, CatalogConflict, CatalogResult,
+    ActionRecord, ActionState, AfterResource, CaptureManifest, Catalog, CatalogConflict, CatalogResult,
     LiveReceipt, LiveStatus, Locator, MutationBatch, MutationResource, PrepareReceipt,
     ResourceExistence, ResourceKey, ResourceMetadata, ResourceOutcome, ResourceType, Revision,
     VersionContent, VersionReceipt,
@@ -13,6 +13,7 @@ use crate::usage::{
 use crate::{Context, HistoryStore, Partition};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -118,6 +119,20 @@ pub struct BatchCaptureInput {
     pub coverage: CaptureManifest,
 }
 
+/// One exact after-state supplied once a live owner has committed a batch.
+#[derive(Debug, Clone)]
+pub struct BatchAfterInput {
+    pub resource_key: ResourceKey,
+    pub locator: Option<Locator>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub content: Option<Bytes>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+    pub outcome: ResourceOutcome,
+}
+
 fn default_schema_version() -> u32 {
     1
 }
@@ -153,6 +168,7 @@ pub fn new_action_record(request: ActionRequest) -> ActionRecord {
         before_resources: Vec::new(),
         mutation_batch: None,
         after: None,
+        after_resources: Vec::new(),
         live: None,
         before_capture_digest: None,
         after_capture_digest: None,
@@ -1001,8 +1017,11 @@ impl HistoryCoordinator {
                     .as_ref()
                     .expect("present content checked above");
                 let content_digest = blake3::hash(content).to_hex().to_string();
+                let sha256_digest = format!("sha256:{:x}", Sha256::digest(content));
                 let digest_bound =
-                    entry.coverage.content_digest.as_deref() == Some(content_digest.as_str());
+                    entry.coverage.content_digest.as_deref() == Some(content_digest.as_str())
+                        || entry.coverage.content_digest.as_deref()
+                            == Some(sha256_digest.as_str());
                 let opaque_manifest = entry
                     .metadata
                     .opaque
@@ -1010,7 +1029,9 @@ impl HistoryCoordinator {
                     .and_then(serde_json::Value::as_object)
                     .and_then(|value| value.get("manifest_digest"))
                     .and_then(serde_json::Value::as_str)
-                    == Some(content_digest.as_str());
+                    .is_some_and(|digest| {
+                        digest == content_digest || digest == sha256_digest
+                    });
                 if !digest_bound && !opaque_manifest {
                     return Err(format!(
                         "history_prepare_inexact_preimage: {} directory requires a content-bound manifest or opaque payload",
@@ -1230,6 +1251,137 @@ impl HistoryCoordinator {
         result
     }
 
+    /// Persist every resource's after-state after a committed multi-resource
+    /// mutation. Each content receipt is written before the catalog advances
+    /// to `AfterDurable`; a retry therefore reuses the durable phase instead
+    /// of replaying the live owner.
+    pub async fn capture_after_batch(
+        &self,
+        action_id: &str,
+        entries: Vec<BatchAfterInput>,
+    ) -> CatalogResult<ActionRecord> {
+        if entries.is_empty() {
+            return Err("after-state batch cannot be empty".into());
+        }
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if !matches!(
+            action.live.as_ref().map(|receipt| &receipt.status),
+            Some(LiveStatus::Committed)
+        ) {
+            return Err(CatalogConflict::InvalidTransition.into());
+        }
+        let declared = action
+            .mutation_batch
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .resources
+                    .iter()
+                    .map(|resource| resource.resource_key.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_else(|| {
+                action
+                    .modified_resource_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            });
+        let supplied = entries
+            .iter()
+            .map(|entry| entry.resource_key.clone())
+            .collect::<BTreeSet<_>>();
+        if supplied != declared || supplied.len() != entries.len() {
+            return Err("after-state batch does not match prepared resources".into());
+        }
+        let start_state = if action.state == ActionState::AfterCaptureFailed {
+            ActionState::AfterCaptureFailed
+        } else {
+            ActionState::Applied
+        };
+        let lease = lease_ids(&action);
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) = self
+            .catalog
+            .transition(action_id, start_state, ActionState::CapturingAfter)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        self.held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .insert(action_id.to_owned(), lease.clone());
+        let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
+                .ok_or("after-state byte size overflow")
+        })?;
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "after", logical_bytes)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let mut after_resources = Vec::with_capacity(entries.len());
+        let mut outcomes = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.into_iter().enumerate() {
+            let receipt = match self
+                .capture(
+                    action_id,
+                    &action.resource_key.account_id,
+                    entry.content,
+                    entry.fingerprint.clone(),
+                    &format!("batch-after-{index}-{}", entry.resource_key.resource_id),
+                )
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let _ = self.catalog.transition(
+                        action_id,
+                        ActionState::CapturingAfter,
+                        ActionState::AfterCaptureFailed,
+                    );
+                    let _ = self.release_capture_reservation(&reservation_id);
+                    return Err(format!("history_after_failed: {error}").into());
+                }
+            };
+            outcomes.push(entry.outcome);
+            after_resources.push(AfterResource {
+                resource_key: entry.resource_key,
+                locator: entry.locator,
+                existence: entry.existence,
+                resource_type: entry.resource_type,
+                metadata: entry.metadata,
+                after: receipt,
+                fingerprint: entry.fingerprint,
+                coverage: entry.coverage,
+            });
+        }
+        let digest = batch_after_capture_digest(&after_resources);
+        let result = self.catalog.record_after_batch(
+            action_id,
+            after_resources,
+            outcomes,
+            digest,
+            scope_id,
+            logical_bytes,
+        );
+        let _ = self.release_capture_reservation(&reservation_id);
+        result
+    }
+
     pub fn complete(&self, action_id: &str) -> CatalogResult<ActionRecord> {
         let result = self.catalog.complete(action_id);
         if result.is_ok() {
@@ -1289,6 +1441,10 @@ impl HistoryCoordinator {
                 .after
                 .as_ref()
                 .is_some_and(|stored| stored == receipt)
+            && !action
+                .after_resources
+                .iter()
+                .any(|resource| resource.after == *receipt)
         {
             return Err("version receipt is not recorded for action".into());
         }
@@ -1435,6 +1591,34 @@ pub fn batch_capture_digest(entries: &[BatchCaptureInput]) -> String {
             append_digest_frame(&mut input, b"content", &content_frame);
         } else {
             append_digest_frame(&mut input, b"content-absent", &[]);
+        }
+    }
+    blake3::hash(&input).to_hex().to_string()
+}
+
+fn batch_after_capture_digest(entries: &[AfterResource]) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"openclank-mutation-after-batch-digest-v1");
+    for (index, entry) in entries.iter().enumerate() {
+        let metadata = serde_json::to_vec(&(
+            index,
+            &entry.resource_key,
+            &entry.locator,
+            &entry.existence,
+            &entry.resource_type,
+            &entry.metadata,
+            &entry.coverage,
+            &entry.fingerprint,
+            &entry.after.version_id,
+        ))
+        .expect("batch after metadata is serializable");
+        append_digest_frame(&mut input, b"entry", &metadata);
+        match &entry.after.content {
+            VersionContent::Bytes(reference) => {
+                append_digest_frame(&mut input, b"content-ref", reference.hash_hex.as_bytes())
+            }
+            VersionContent::Empty => append_digest_frame(&mut input, b"empty", &[]),
+            VersionContent::Tombstone => append_digest_frame(&mut input, b"tombstone", &[]),
         }
     }
     blake3::hash(&input).to_hex().to_string()

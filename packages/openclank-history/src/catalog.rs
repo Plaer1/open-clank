@@ -20,7 +20,7 @@ const RESTORES: TableDefinition<&str, &[u8]> = TableDefinition::new("history_res
 
 pub type CatalogResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceKey {
     pub account_id: String,
     pub workspace_id: String,
@@ -159,6 +159,21 @@ pub struct MutationResource {
     pub coverage: CaptureManifest,
 }
 
+/// Durable state observed after one resource owner reports its live commit.
+/// This keeps the before locator and identity separate from the resulting state
+/// of a move, overwrite, deletion, or creation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AfterResource {
+    pub resource_key: ResourceKey,
+    pub locator: Option<Locator>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub after: VersionReceipt,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
 /// Versioned parent mutation batch.  Content is referenced by Lore receipts
 /// so large preimages continue to use the existing chunk/content-addressed
 /// path instead of growing the catalog row or IPC frame.
@@ -279,6 +294,9 @@ pub struct ActionRecord {
     #[serde(default)]
     pub mutation_batch: Option<MutationBatch>,
     pub after: Option<VersionReceipt>,
+    /// Exact after-state receipts for every resource in a committed batch.
+    #[serde(default)]
+    pub after_resources: Vec<AfterResource>,
     pub live: Option<LiveReceipt>,
     #[serde(default)]
     pub before_capture_digest: Option<String>,
@@ -315,6 +333,8 @@ pub struct ActionReceipt {
     pub before_resources: Vec<MutationResource>,
     #[serde(default)]
     pub mutation_batch: Option<MutationBatch>,
+    #[serde(default)]
+    pub after_resources: Vec<AfterResource>,
 }
 
 impl ActionRecord {
@@ -342,6 +362,7 @@ impl ActionRecord {
             after: self.after.clone(),
             before_resources: self.before_resources.clone(),
             mutation_batch: self.mutation_batch.clone(),
+            after_resources: self.after_resources.clone(),
         }
     }
 }
@@ -1036,6 +1057,38 @@ impl Catalog {
                 return Err(CatalogConflict::InvalidTransition.into());
             }
             record.after = Some(receipt);
+            record.after_capture_digest = Some(capture_digest);
+            record.after_scope_id = Some(scope_id);
+            record.after_logical_bytes = logical_bytes;
+            record.state = ActionState::AfterDurable;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn record_after_batch(
+        &self,
+        action_id: &str,
+        after_resources: Vec<AfterResource>,
+        outcomes: Vec<ResourceOutcome>,
+        capture_digest: String,
+        scope_id: String,
+        logical_bytes: u64,
+    ) -> CatalogResult<ActionRecord> {
+        if after_resources.is_empty() || after_resources.len() != outcomes.len() {
+            return Err("after-state batch must contain one outcome per resource".into());
+        }
+        self.update(action_id, |record| {
+            if record.state != ActionState::CapturingAfter
+                || !matches!(
+                    record.live.as_ref().map(|r| &r.status),
+                    Some(LiveStatus::Committed)
+                )
+            {
+                return Err(CatalogConflict::InvalidTransition.into());
+            }
+            record.after = after_resources.first().map(|resource| resource.after.clone());
+            record.after_resources = after_resources;
+            record.per_resource_outcomes = Some(outcomes);
             record.after_capture_digest = Some(capture_digest);
             record.after_scope_id = Some(scope_id);
             record.after_logical_bytes = logical_bytes;

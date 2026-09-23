@@ -588,6 +588,47 @@ class HistoryClient:
                 raise
         return self._call({"Complete": {"envelope": self._control_envelope(action_id), "content": self._wire_content(content), "fingerprint": fingerprint}})
 
+    def complete_batch(
+        self,
+        action_id: str,
+        entries: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Persist every after-state and outcome for one committed mutation batch."""
+        wire_entries: list[dict[str, Any]] = []
+        staged: list[str] = []
+        try:
+            for entry in entries:
+                item = dict(entry)
+                content = item.get("content")
+                item["staged_upload_id"] = None
+                if content is not None:
+                    if not isinstance(content, (bytes, bytearray)):
+                        raise HistoryClientError("batch after content must be bytes")
+                    content = bytes(content)
+                    self._check_content(content)
+                    fingerprint = str(item.get("fingerprint") or "missing")
+                    fingerprint = self._canonical_staged_fingerprint(content, fingerprint)
+                    if len(content) > _INLINE_CONTENT_BYTES:
+                        upload_id = self._stage_content(action_id, content, fingerprint)
+                        staged.append(upload_id)
+                        item["staged_upload_id"] = upload_id
+                        item["content"] = None
+                        item["fingerprint"] = fingerprint
+                    else:
+                        item["content"] = self._wire_content(content)
+                wire_entries.append(item)
+            return self._call({
+                "CompleteBatch": {
+                    "envelope": self._control_envelope(action_id),
+                    "batch_version": 1,
+                    "entries": wire_entries,
+                }
+            })
+        except Exception:
+            for upload_id in staged:
+                self._abort_staged(action_id, upload_id)
+            raise
+
     def abort(self, action_id: str) -> dict[str, Any]:
         return self._call({"Abort": {"envelope": self._control_envelope(action_id)}})
 

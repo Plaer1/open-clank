@@ -494,6 +494,12 @@ pub async fn prepare_restore_authorized(
             .into_iter()
             .flatten()
             .any(|receipt| receipt.version_id == request.source_version_id && receipt == source)
+            && !action
+                .before_resources
+                .iter()
+                .filter_map(|resource| resource.before.as_ref())
+                .chain(action.after_resources.iter().map(|resource| &resource.after))
+                .any(|receipt| receipt.version_id == request.source_version_id && receipt == source)
     {
         return Err(RestoreOutcome::Unauthorized);
     }

@@ -4,7 +4,8 @@
 use openclank_history::catalog::{ActionRecord, ActionState, BeginResult};
 #[cfg(unix)]
 use openclank_history::operations::{
-    batch_capture_digest, begin, capture_input_digest, BatchCaptureInput, HistoryCoordinator,
+    batch_capture_digest, begin, capture_input_digest, BatchAfterInput, BatchCaptureInput,
+    HistoryCoordinator,
 };
 #[cfg(unix)]
 use openclank_history::protocol::{
@@ -1372,6 +1373,36 @@ fn request_resources_allowed(
 }
 
 #[cfg(unix)]
+fn trusted_registry_aliases(
+    request: &openclank_history::operations::ActionRequest,
+    resource_map: &std::path::Path,
+) -> Vec<String> {
+    let Ok(registry) = ResourceRegistry::load(resource_map) else {
+        return Vec::new();
+    };
+    request
+        .guard_resource_ids
+        .iter()
+        .chain(request.modified_resource_ids.iter())
+        .filter_map(|resource| {
+            registry.entries.get(&resource.resource_id).filter(|entry| {
+                entry.active
+                    && entry.account_id == resource.account_id
+                    && entry.workspace_id == resource.workspace_id
+            })
+        })
+        .map(|entry| {
+            format!(
+                "registry:{}:{}:{}:{}",
+                entry.account_id, entry.workspace_id, entry.root_id, entry.relative_path
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+#[cfg(unix)]
 fn authorize(
     coordinator: &HistoryCoordinator,
     envelope: &ControlEnvelope,
@@ -2032,7 +2063,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }) {
                             Ok(()) => {
-                                match begin(coordinator.catalog(), envelope.request.clone()) {
+                                let mut trusted_request = envelope.request.clone();
+                                trusted_request.physical_lease_keys =
+                                    trusted_registry_aliases(&trusted_request, &resource_map);
+                                match begin(coordinator.catalog(), trusted_request) {
                                     Ok(BeginResult::Existing(record))
                                         if !matches!(
                                             record.state,
@@ -2317,10 +2351,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             .await;
                                             ServiceResponse::Error { code: error }
                                         } else {
-                                            match begin(
-                                                coordinator.catalog(),
-                                                envelope.request.clone(),
-                                            ) {
+                                            let mut trusted_request = envelope.request.clone();
+                                            trusted_request.physical_lease_keys =
+                                                trusted_registry_aliases(&trusted_request, &resource_map);
+                                            match begin(coordinator.catalog(), trusted_request) {
                                                 Ok(BeginResult::Existing(record))
                                                     if !matches!(
                                                         record.state,
@@ -2978,6 +3012,118 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     code: error.to_string(),
                                 },
                             },
+                            Err(error) => ServiceResponse::Error { code: error },
+                        },
+                        Ok(ServiceRequest::CompleteBatch {
+                            envelope,
+                            batch_version,
+                            entries,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "capture")
+                            .map_err(|error| format!("{error:?}"))
+                            .and_then(|_| {
+                                authorize(
+                                    &coordinator,
+                                    &envelope,
+                                    &envelope.auth.account_id,
+                                    &grants,
+                                )
+                            }) {
+                            Ok(_record) if batch_version != 1 => ServiceResponse::Error {
+                                code: format!("unsupported mutation batch version: {batch_version}"),
+                            },
+                            Ok(record) if record.state == ActionState::Complete => {
+                                ServiceResponse::Action(record)
+                            }
+                            Ok(_) if entries.is_empty() || entries.len() > MAX_BATCH_RESOURCES => {
+                                ServiceResponse::Error {
+                                    code: "after-state batch resource count is invalid".into(),
+                                }
+                            }
+                            Ok(_) => {
+                                let mut inputs = Vec::with_capacity(entries.len());
+                                let mut error = None;
+                                for entry in entries {
+                                    if entry.content.is_some() && entry.staged_upload_id.is_some() {
+                                        error = Some("batch after entry must use inline content or staged content, not both".to_owned());
+                                        break;
+                                    }
+                                    let content = if let Some(upload_id) = entry.staged_upload_id.as_ref() {
+                                        let staged = {
+                                            let uploads = staged_uploads.lock().await;
+                                            uploads.get(upload_id).cloned()
+                                        };
+                                        match staged {
+                                            Some(staged)
+                                                if staged.account_id == envelope.auth.account_id
+                                                    && staged.actor_id == envelope.auth.actor_id
+                                                    && staged.action_id == envelope.action_id
+                                                    && staged.finished
+                                                    && staged.fingerprint == entry.fingerprint => {
+                                                match verify_staged_upload(&staged)
+                                                    .and_then(|_| std::fs::read(&staged.path).map_err(|e| e.to_string()))
+                                                {
+                                                    Ok(bytes) => {
+                                                        let mut uploads = staged_uploads.lock().await;
+                                                        if let Some(removed) = uploads.remove(upload_id) {
+                                                            remove_staged_upload(&removed, &staged_bytes);
+                                                        }
+                                                        Some(Bytes::from(bytes))
+                                                    }
+                                                    Err(reason) => {
+                                                        error = Some(reason);
+                                                        None
+                                                    }
+                                                }
+                                            }
+                                            Some(_) => {
+                                                error = Some("staged after upload identity or fingerprint mismatch".into());
+                                                None
+                                            }
+                                            None => {
+                                                error = Some("staged after upload is unknown".into());
+                                                None
+                                            }
+                                        }
+                                    } else {
+                                        entry.content.map(Bytes::from)
+                                    };
+                                    if error.is_some() {
+                                        break;
+                                    }
+                                    if let Some(expected) = entry.coverage.byte_len {
+                                        if expected != content.as_ref().map_or(0, |bytes| bytes.len()) as u64 {
+                                            error = Some("after-state coverage byte length does not match content".into());
+                                            break;
+                                        }
+                                    }
+                                    inputs.push(BatchAfterInput {
+                                        resource_key: entry.resource_key,
+                                        locator: entry.locator,
+                                        existence: entry.existence,
+                                        resource_type: entry.resource_type,
+                                        metadata: entry.metadata,
+                                        content,
+                                        fingerprint: entry.fingerprint,
+                                        coverage: entry.coverage,
+                                        outcome: entry.outcome,
+                                    });
+                                }
+                                if let Some(reason) = error {
+                                    ServiceResponse::Error { code: reason }
+                                } else {
+                                    let result = coordinator
+                                        .capture_after_batch(&envelope.action_id, inputs)
+                                        .await
+                                        .and_then(|_| coordinator.complete(&envelope.action_id));
+                                    match result {
+                                        Ok(record) => ServiceResponse::Action(record),
+                                        Err(error) => ServiceResponse::Error {
+                                            code: error.to_string(),
+                                        },
+                                    }
+                                }
+                            }
                             Err(error) => ServiceResponse::Error { code: error },
                         },
                         Ok(ServiceRequest::Abort { envelope }) => {
